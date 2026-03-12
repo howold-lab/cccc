@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 from ...contracts.v1 import AutomationRule, AutomationRuleSet, SystemNotifyData
 from ...kernel.actors import list_actors, find_foreman
-from ...kernel.group import Group, load_group, get_group_state
+from ...kernel.group import Group, load_group, get_group_state, set_group_state
 from ...kernel.inbox import iter_events, is_message_for_actor, get_cursor, get_obligation_status_batch
 from ...kernel.ledger import append_event
 from ...kernel.terminal_transcript import get_terminal_transcript_settings
@@ -84,7 +84,7 @@ def _cfg(group: Group) -> AutomationConfig:
         actor_idle_timeout_seconds=_int("actor_idle_timeout_seconds", 600),
         keepalive_delay_seconds=_int("keepalive_delay_seconds", 120),
         keepalive_max_per_actor=_int("keepalive_max_per_actor", 3),
-        silence_timeout_seconds=_int("silence_timeout_seconds", 600),
+        silence_timeout_seconds=_int("silence_timeout_seconds", 0),
         # Level 3
         help_nudge_interval_seconds=_int("help_nudge_interval_seconds", 600),
         help_nudge_min_messages=_int("help_nudge_min_messages", 10),
@@ -417,15 +417,86 @@ def build_automation_status(group: Group, *, now: Optional[datetime] = None) -> 
 
 
 def _get_last_group_activity(group: Group) -> Optional[datetime]:
-    """Get timestamp of last activity in the group (any event)."""
+    """Get timestamp of last real group activity.
+
+    Silence detection should only consider business chat activity. Internal
+    automation notifications, and replies that only acknowledge those
+    notifications, must not keep the group artificially "active".
+    """
+    automated_notify_meta: Dict[str, Tuple[str, str]] = {}
     last_ts: Optional[datetime] = None
     for ev in iter_events(group.ledger_path):
+        notify_meta = _get_automation_activity_notify_meta(ev)
+        if notify_meta is not None:
+            event_id = str(ev.get("id") or "").strip()
+            if event_id:
+                automated_notify_meta[event_id] = notify_meta
+            continue
+        if not _is_group_activity_event(ev, automated_notify_meta=automated_notify_meta):
+            continue
         ts_str = str(ev.get("ts") or "")
-        if ts_str:
-            dt = parse_utc_iso(ts_str)
-            if dt is not None:
-                last_ts = dt
+        if not ts_str:
+            continue
+        dt = parse_utc_iso(ts_str)
+        if dt is not None:
+            last_ts = dt
     return last_ts
+
+
+_AUTOMATION_ACTIVITY_NOTIFY_KINDS = frozenset(
+    {
+        "nudge",
+        "keepalive",
+        "help_nudge",
+        "actor_idle",
+        "silence_check",
+        "auto_idle",
+        "automation",
+    }
+)
+
+_NON_ACTIVITY_REPLY_NOTIFY_KINDS = frozenset({"silence_check", "auto_idle"})
+
+
+def _get_automation_activity_notify_meta(ev: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Return `(notify_kind, target_actor_id)` for automation notifications ignored by silence detection."""
+    if str(ev.get("kind") or "") != "system.notify":
+        return None
+    data = ev.get("data")
+    if not isinstance(data, dict):
+        return None
+    notify_kind = str(data.get("kind") or "").strip()
+    if notify_kind in _AUTOMATION_ACTIVITY_NOTIFY_KINDS:
+        return (notify_kind, str(data.get("target_actor_id") or "").strip())
+    # Defensive fallback for future notify kind namespaces.
+    if notify_kind.startswith("automation.") or notify_kind.startswith("system."):
+        return (notify_kind, str(data.get("target_actor_id") or "").strip())
+    return None
+
+
+def _is_group_activity_event(
+    ev: Dict[str, Any],
+    *,
+    automated_notify_meta: Dict[str, Tuple[str, str]],
+) -> bool:
+    """Return True only for business chat activity that should reset silence detection."""
+    if str(ev.get("kind") or "") != "chat.message":
+        return False
+    by = str(ev.get("by") or "").strip()
+    if not by or by == "system":
+        return False
+    data = ev.get("data")
+    if not isinstance(data, dict):
+        return False
+    reply_to = str(data.get("reply_to") or "").strip()
+    if reply_to:
+        notify_meta = automated_notify_meta.get(reply_to)
+        if notify_meta is not None:
+            notify_kind, target_actor_id = notify_meta
+            # Only suppress the pure "system ping -> target actor ack" chain used by silence auto-idle.
+            if notify_kind in _NON_ACTIVITY_REPLY_NOTIFY_KINDS and by and by == target_actor_id:
+                return False
+    return True
 
 
 def _get_last_actor_activity(group: Group, actor_id: str) -> Optional[datetime]:
@@ -610,6 +681,7 @@ class AutomationManager:
             state = _load_state(group)
             state["resume_at"] = now
             state["last_silence_notify_at"] = now
+            state["consecutive_silence_count"] = 0
             try:
                 state["help_ledger_pos"] = int(group.ledger_path.stat().st_size)
             except Exception:
@@ -1155,7 +1227,13 @@ class AutomationManager:
             _queue_notify_to_pty(group, actor_id=aid, runner_kind=runner_kind, ev=ev, notify=notify_data)
 
     def _check_silence(self, group: Group, cfg: AutomationConfig, now: datetime) -> None:
-        """Check if group has been silent and notify foreman."""
+        """Check if group has been silent and notify foreman.
+
+        Also tracks consecutive silence periods.  When the group has been
+        silent for two consecutive check periods (~2× silence_timeout), it
+        is automatically transitioned to *idle* so that internal automation
+        (Level 1-3) is muted and actors stop receiving nudges.
+        """
         if cfg.silence_timeout_seconds <= 0:
             return
 
@@ -1170,6 +1248,12 @@ class AutomationManager:
 
         silence_seconds = (now - last_activity).total_seconds()
         if silence_seconds < float(cfg.silence_timeout_seconds):
+            # Group is active — reset consecutive silence counter.
+            with self._lock:
+                state = _load_state(group)
+                if state.get("consecutive_silence_count", 0) != 0:
+                    state["consecutive_silence_count"] = 0
+                    _save_state(group, state)
             return
 
         with self._lock:
@@ -1181,9 +1265,38 @@ class AutomationManager:
                     # Don't notify again within the timeout period
                     if (now - last_notify_dt).total_seconds() < float(cfg.silence_timeout_seconds):
                         return
-            
+
+            # Increment consecutive silence counter
+            count = int(state.get("consecutive_silence_count") or 0) + 1
+            state["consecutive_silence_count"] = count
             state["last_silence_notify_at"] = utc_now_iso()
             _save_state(group, state)
+
+        # Auto-idle: two consecutive silence periods without activity → idle
+        if count >= 2:
+            try:
+                set_group_state(group, state="idle")
+            except Exception:
+                pass
+            notify_data = SystemNotifyData(
+                kind="auto_idle",
+                priority="normal",
+                title="Group set to idle",
+                message=f"No activity for {int(silence_seconds)}s (2 consecutive silence checks). Group automatically set to idle. Send a message to wake it up.",
+                target_actor_id=foreman_id,
+                requires_ack=False,
+            )
+            ev = append_event(
+                group.ledger_path,
+                kind="system.notify",
+                group_id=group.group_id,
+                scope_key="",
+                by="system",
+                data=notify_data.model_dump(),
+            )
+            foreman_runner_kind = str(foreman.get("runner") or "pty").strip()
+            _queue_notify_to_pty(group, actor_id=foreman_id, runner_kind=foreman_runner_kind, ev=ev, notify=notify_data)
+            return
 
         msg = f"No activity for {int(silence_seconds)}s. Check if work is complete or if anyone needs help."
 
@@ -1770,8 +1883,8 @@ class AutomationManager:
                 priority="normal",
                 title="Refresh collaboration rules",
                 message=(
-                    "Run `cccc_help` now to refresh collaboration rules; then update your agent state "
-                    "(`cccc_agent_state`: focus/next_action/what_changed)."
+                    "Run `cccc_help` now, then refresh `cccc_agent_state` "
+                    "(focus/next_action/what_changed)."
                 ),
                 target_actor_id=aid,
                 requires_ack=False,

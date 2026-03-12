@@ -12,8 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...contracts.v1.actor import ActorSubmit, AgentRuntime, RunnerKind
 from ...contracts.v1.automation import AutomationRule
-from ...kernel.settings import get_remote_access_settings
-from ...kernel.web_tokens import list_tokens, lookup_token
+from ...kernel.access_tokens import list_access_tokens, lookup_access_token
 
 
 def _default_runner_kind() -> str:
@@ -40,6 +39,7 @@ class SendRequest(BaseModel):
     reply_required: bool = False
     src_group_id: str = Field(default="")
     src_event_id: str = Field(default="")
+    client_id: str = Field(default="")
 
 
 class SendCrossGroupRequest(BaseModel):
@@ -58,6 +58,7 @@ class ReplyRequest(BaseModel):
     reply_to: str
     priority: Literal["normal", "attention"] = "normal"
     reply_required: bool = False
+    client_id: str = Field(default="")
 
 
 class DebugClearLogsRequest(BaseModel):
@@ -89,6 +90,8 @@ class ActorCreateRequest(BaseModel):
     # Values are never returned by the daemon; only keys can be listed via the dedicated endpoints.
     env_private: Optional[Dict[str, str]] = None
     profile_id: Optional[str] = None
+    profile_scope: Optional[Literal["global", "user"]] = None
+    profile_owner: Optional[str] = None
     default_scope_key: str = Field(default="")
     submit: ActorSubmit = Field(default="enter")
     by: str = Field(default="user")
@@ -107,6 +110,8 @@ class ActorUpdateRequest(BaseModel):
     runtime: Optional[AgentRuntime] = None
     enabled: Optional[bool] = None
     profile_id: Optional[str] = None
+    profile_scope: Optional[Literal["global", "user"]] = None
+    profile_owner: Optional[str] = None
     profile_action: Optional[Literal["convert_to_custom"]] = None
 
 
@@ -133,6 +138,8 @@ class ProjectMdUpdateRequest(BaseModel):
 class RepoPromptUpdateRequest(BaseModel):
     content: str = Field(default="")
     by: str = Field(default="user")
+    editor_mode: Optional[Literal["structured", "raw"]] = None
+    changed_blocks: list[str] = Field(default_factory=list)
 
 
 class GroupUpdateRequest(BaseModel):
@@ -234,17 +241,16 @@ class RemoteAccessConfigureRequest(BaseModel):
     by: str = Field(default="user")
     provider: Optional[Literal["off", "manual", "tailscale"]] = None
     mode: Optional[str] = None
-    enforce_web_token: Optional[bool] = None
+    require_access_token: Optional[bool] = None
     web_host: Optional[str] = None
     web_port: Optional[int] = None
     web_public_url: Optional[str] = None
-    web_token: Optional[str] = None
-    clear_web_token: bool = False
 
 
 class GroupSpaceBindRequest(BaseModel):
     by: str = Field(default="user")
     provider: Optional[str] = Field(default="notebooklm")
+    lane: Literal["work", "memory"]
     action: Literal["bind", "unbind"] = "bind"
     remote_space_id: str = Field(default="")
 
@@ -252,6 +258,7 @@ class GroupSpaceBindRequest(BaseModel):
 class GroupSpaceIngestRequest(BaseModel):
     by: str = Field(default="user")
     provider: Optional[str] = Field(default="notebooklm")
+    lane: Literal["work", "memory"]
     kind: Literal["context_sync", "resource_ingest"] = "context_sync"
     payload: Dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str = Field(default="")
@@ -260,6 +267,7 @@ class GroupSpaceIngestRequest(BaseModel):
 class GroupSpaceQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider: Optional[str] = Field(default="notebooklm")
+    lane: Literal["work", "memory"]
     query: str = Field(default="")
     options: Dict[str, Any] = Field(default_factory=dict)
 
@@ -267,6 +275,7 @@ class GroupSpaceQueryRequest(BaseModel):
 class GroupSpaceSourceActionRequest(BaseModel):
     by: str = Field(default="user")
     provider: Optional[str] = Field(default="notebooklm")
+    lane: Literal["work", "memory"]
     action: Literal["delete", "rename", "refresh"]
     source_id: str = Field(default="")
     new_title: str = Field(default="")
@@ -275,6 +284,7 @@ class GroupSpaceSourceActionRequest(BaseModel):
 class GroupSpaceArtifactActionRequest(BaseModel):
     by: str = Field(default="user")
     provider: Optional[str] = Field(default="notebooklm")
+    lane: Literal["work", "memory"]
     action: Literal["generate", "download"] = "generate"
     kind: str = Field(default="")
     options: Dict[str, Any] = Field(default_factory=dict)
@@ -291,6 +301,7 @@ class GroupSpaceArtifactActionRequest(BaseModel):
 class GroupSpaceJobActionRequest(BaseModel):
     by: str = Field(default="user")
     provider: Optional[str] = Field(default="notebooklm")
+    lane: Literal["work", "memory"]
     action: Literal["retry", "cancel"]
     job_id: str = Field(default="")
 
@@ -298,6 +309,7 @@ class GroupSpaceJobActionRequest(BaseModel):
 class GroupSpaceSyncRequest(BaseModel):
     by: str = Field(default="user")
     provider: Optional[str] = Field(default="notebooklm")
+    lane: Literal["work", "memory"]
     action: Literal["status", "run"] = "run"
     force: bool = False
 
@@ -372,19 +384,6 @@ class RouteContext:
     daemon: Callable[..., Awaitable[Dict[str, Any]]]
     cached_json: Callable[..., Awaitable[Dict[str, Any]]]
     apply_web_logging: Callable[..., None]
-    configured_web_token: Callable[[], str]
-
-
-def _configured_web_token() -> str:
-    """从 settings 优先读取旧 Web Token，再回退到环境变量。"""
-    try:
-        cfg = get_remote_access_settings()
-        token = str(cfg.get("web_token") or "").strip() if isinstance(cfg, dict) else ""
-        if token:
-            return token
-    except Exception:
-        pass
-    return str(os.environ.get("CCCC_WEB_TOKEN") or "").strip()
 
 
 def _anonymous_principal() -> Any:
@@ -392,7 +391,7 @@ def _anonymous_principal() -> Any:
 
 
 def _tokens_enabled() -> bool:
-    return bool(list_tokens()) or bool(_configured_web_token())
+    return bool(list_access_tokens())
 
 
 def _principal_kind(principal: Any) -> str:
@@ -440,13 +439,25 @@ def check_group(conn: Request | WebSocket, group_id: str) -> Any:
     allowed_groups = _principal_allowed_groups(principal)
     if _principal_kind(principal) != "user":
         raise HTTPException(status_code=403, detail={"code": "permission_denied", "message": "group access required", "details": {"group_id": gid}})
-    if _principal_is_admin(principal) or not allowed_groups or gid in allowed_groups:
+    if _principal_is_admin(principal):
+        return principal
+    if gid and gid in allowed_groups:
         return principal
     raise HTTPException(status_code=403, detail={"code": "permission_denied", "message": "group access denied", "details": {"group_id": gid}})
 
 
 def require_admin(request: Request) -> Any:
     return check_admin(request)
+
+
+def require_user(request: Request) -> Any:
+    """Allow any authenticated user (admin or non-admin). Reject non-user principals."""
+    principal = get_principal(request)
+    if not _tokens_enabled():
+        return principal
+    if _principal_kind(principal) == "user":
+        return principal
+    raise HTTPException(status_code=403, detail={"code": "permission_denied", "message": "authentication required", "details": {}})
 
 
 def require_group(request: Request, group_id: str = FastApiPath(...)) -> Any:
@@ -461,7 +472,7 @@ def filter_groups_for_principal(conn: Request | WebSocket, groups: list[dict[str
         return []
     allowed_groups = _principal_allowed_groups(principal)
     if not allowed_groups:
-        return groups
+        return []
     allowed = set(allowed_groups)
     return [item for item in groups if _extract_group_item_id(item) in allowed]
 
@@ -481,7 +492,7 @@ def resolve_websocket_principal(websocket: WebSocket) -> Any:
     if not token:
         try:
             cookies = getattr(websocket, "cookies", None) or {}
-            token = str(cookies.get("cccc_web_token") or "").strip()
+            token = str(cookies.get("cccc_access_token") or "").strip()
         except Exception:
             token = ""
     if not token:
@@ -491,9 +502,7 @@ def resolve_websocket_principal(websocket: WebSocket) -> Any:
             token = ""
     if not token:
         return _anonymous_principal()
-    entry = lookup_token(token)
-    if not isinstance(entry, dict) and token == _configured_web_token():
-        return SimpleNamespace(kind="user", user_id="admin", allowed_groups=(), is_admin=True)
+    entry = lookup_access_token(token)
     if not isinstance(entry, dict):
         return _anonymous_principal()
     return SimpleNamespace(
@@ -505,5 +514,5 @@ def resolve_websocket_principal(websocket: WebSocket) -> Any:
 
 
 def websocket_tokens_active() -> bool:
-    """Check if token auth is actually configured (new tokens or legacy)."""
+    """Check if access-token auth is active for WebSocket flows."""
     return _tokens_enabled()

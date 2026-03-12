@@ -26,13 +26,12 @@ const CROWN_MAT = new THREE.MeshStandardMaterial({ color: "#fbbf24" });
 const RUNTIME_BODY_COLORS: Record<string, string> = {
   claude:   "#38bdf8", // sky blue
   gemini:   "#34d399", // emerald
+  kimi:     "#84cc16", // lime
   codex:    "#22d3ee", // cyan
-  grok:     "#f87171", // red
-  copilot:  "#94a3b8", // slate
-  aider:    "#a78bfa", // violet
-  roo:      "#e879f9", // fuchsia
   neovate:  "#d946ef", // fuchsia-deep
-  opencode: "#06b6d4", // cyan-deep
+  droid:    "#8b5cf6", // violet
+  amp:      "#fb7185", // rose
+  auggie:   "#14b8a6", // teal
   custom:   "#fb923c", // orange
 };
 
@@ -40,13 +39,12 @@ const RUNTIME_BODY_COLORS: Record<string, string> = {
 const RUNTIME_FACE: Record<string, string> = {
   claude:   "C",
   gemini:   "G",
+  kimi:     "K",
   codex:    "Cx",
-  grok:     "Gk",
-  copilot:  "Cp",
-  aider:    "A",
-  roo:      "R",
   neovate:  "N",
-  opencode: "O",
+  droid:    "D",
+  amp:      "Am",
+  auggie:   "Au",
   custom:   "?",
 };
 
@@ -145,6 +143,58 @@ const OFFLINE_MAT = new THREE.MeshStandardMaterial({
   color: "#6b7280", flatShading: true, transparent: true, opacity: 0.55,
 });
 
+type BehaviorVisual = "offline" | "blocked" | "working" | "thinking" | "idle";
+
+function ActionGlyph({ visual, isForeman }: { visual: BehaviorVisual; isForeman: boolean }) {
+  if (visual === "idle" || visual === "offline") return null;
+
+  if (isForeman) {
+    return (
+      <group position={[0.24, 0.82, 0.08]} rotation={[-0.28, 0.12, -0.18]}>
+        <mesh>
+          <boxGeometry args={[0.16, 0.18, 0.03]} />
+          <meshStandardMaterial color="#e2e8f0" emissive="#60a5fa" emissiveIntensity={0.12} />
+        </mesh>
+      </group>
+    );
+  }
+
+  if (visual === "blocked") {
+    return (
+      <group position={[0.24, 0.76, 0.02]} rotation={[0, 0.1, 0.4]}>
+        <mesh>
+          <boxGeometry args={[0.07, 0.07, 0.24]} />
+          <meshStandardMaterial color="#f59e0b" emissive="#f59e0b" emissiveIntensity={0.14} />
+        </mesh>
+      </group>
+    );
+  }
+
+  if (visual === "thinking") {
+    return (
+      <group position={[0.22, 0.84, 0.04]} rotation={[0.1, -0.2, -0.15]}>
+        <mesh>
+          <boxGeometry args={[0.12, 0.14, 0.03]} />
+          <meshStandardMaterial color="#cbd5e1" emissive="#94a3b8" emissiveIntensity={0.08} />
+        </mesh>
+      </group>
+    );
+  }
+
+  return (
+    <group position={[0.24, 0.8, 0.04]} rotation={[0.08, 0.18, -0.24]}>
+      <mesh>
+        <boxGeometry args={[0.08, 0.08, 0.22]} />
+        <meshStandardMaterial color="#60a5fa" emissive="#60a5fa" emissiveIntensity={0.1} />
+      </mesh>
+      <mesh position={[0, 0.03, 0.09]}>
+        <boxGeometry args={[0.04, 0.04, 0.08]} />
+        <meshStandardMaterial color="#c084fc" />
+      </mesh>
+    </group>
+  );
+}
+
 function getBodyMaterial(color: string, offline: boolean): THREE.MeshStandardMaterial {
   if (offline) return OFFLINE_MAT;
   let mat = BODY_MAT_CACHE.get(color);
@@ -178,12 +228,9 @@ export const ActorCharacter = React.forwardRef<THREE.Group, ActorCharacterProps>
     const isForeman = role === "foreman";
     const isOffline = isRunning === false;
 
-    // Cache rotation tuple to prevent R3F re-applying on re-render
-    // (which would fight useFrame-driven rotation, e.g. sleeping face-up)
-    const rotationTuple = useMemo(
-      () => [0, rotationY, 0] as [number, number, number],
-      [rotationY],
-    );
+    // 角色的位姿在挂载后交给 useCharacterAnimation 接管，避免每次 render 把新目标位硬灌进去造成闪现。
+    const initialPositionRef = useRef(position);
+    const initialRotationTupleRef = useRef([0, rotationY, 0] as [number, number, number]);
 
     // Shared cached material (body color; gray + semi-transparent when offline)
     const mat = getBodyMaterial(color, isOffline);
@@ -213,6 +260,7 @@ export const ActorCharacter = React.forwardRef<THREE.Group, ActorCharacterProps>
     const lastActivityAt = idleSeconds != null ? Date.now() - idleSeconds * 1000 : undefined;
     const animState = deriveAnimState(agent, isRunning, lastActivityAt, taskStatus);
     const statusLabel = deriveStatusLabel(animState, !!agent.hot?.active_task_id, isForeman);
+    const behaviorVisual: BehaviorVisual = isOffline ? "offline" : animState;
 
     // Pre-truncate long text before bubble key to avoid unnecessary texture rebuilds
     const MAX_TASK = 35;
@@ -425,8 +473,8 @@ export const ActorCharacter = React.forwardRef<THREE.Group, ActorCharacterProps>
     return (
       <group
         ref={ref}
-        position={position}
-        rotation={rotationTuple}
+        position={initialPositionRef.current}
+        rotation={initialRotationTupleRef.current}
         onClick={(e) => { e.stopPropagation(); onCharacterClick?.(); }}
         onPointerOver={() => { document.body.style.cursor = "pointer"; }}
         onPointerOut={() => { document.body.style.cursor = "auto"; }}
@@ -438,6 +486,8 @@ export const ActorCharacter = React.forwardRef<THREE.Group, ActorCharacterProps>
         <mesh name="rightArm" position={[0.25, 0.75, 0]} castShadow geometry={ARM_GEO} material={mat} />
         <mesh name="leftLeg" position={[-0.1, 0.30, 0]} castShadow geometry={LEG_GEO} material={mat} />
         <mesh name="rightLeg" position={[0.1, 0.30, 0]} castShadow geometry={LEG_GEO} material={mat} />
+
+        <ActionGlyph visual={behaviorVisual} isForeman={isForeman} />
 
         {/* Status ring at character's feet (after body parts to preserve PART_INDEX) */}
         <mesh ref={ringMeshRef} position={[0, 0.02, 0]} geometry={RING_GEO} material={RING_MAT_IDLE} visible={false} />

@@ -9,6 +9,7 @@ from ...kernel.actors import find_actor
 from ...kernel.ledger import append_event
 from ...runners import headless as headless_runner
 from ...runners import pty as pty_runner
+from ...runners.platform_support import pty_support_error_message
 
 
 def start_actor_process(
@@ -20,6 +21,8 @@ def start_actor_process(
     runner: str,
     runtime: str,
     by: str,
+    caller_id: str = "",
+    is_admin: bool = False,
     find_scope_url: Callable[[Any, str], str],
     effective_runner_kind: Callable[[str], str],
     merge_actor_env_with_private: Callable[[str, str, Dict[str, Any]], Dict[str, Any]],
@@ -44,7 +47,12 @@ def start_actor_process(
         return {"success": False, "error": f"actor not found: {actor_id}"}
     if callable(resolve_linked_actor_before_start):
         try:
-            actor = resolve_linked_actor_before_start(group, actor_id)
+            actor = resolve_linked_actor_before_start(
+                group,
+                actor_id,
+                caller_id=str(caller_id or "").strip(),
+                is_admin=bool(is_admin),
+            )
             command = actor.get("command") if isinstance(actor.get("command"), list) else command
             env = actor.get("env") if isinstance(actor.get("env"), dict) else env
             runner = str(actor.get("runner") or runner).strip() or runner
@@ -90,6 +98,9 @@ def start_actor_process(
             except Exception:
                 pass
         else:
+            if not bool(getattr(pty_runner, "PTY_SUPPORTED", False)):
+                error_message = pty_support_error_message() or "PTY runner is not supported in this environment."
+                return {"success": False, "error": error_message}
             session = pty_runner.SUPERVISOR.start_actor(
                 group_id=group.group_id,
                 actor_id=actor_id,

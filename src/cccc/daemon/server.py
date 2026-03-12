@@ -26,6 +26,7 @@ from ..runners import pty as pty_runner
 from ..runners import headless as headless_runner
 from ..util.conv import coerce_bool
 from ..util.obslog import setup_root_json_logging
+from ..util.process import best_effort_signal_pid, pid_is_alive
 from ..util.fs import atomic_write_json, atomic_write_text, read_json
 from ..util.file_lock import acquire_lockfile, release_lockfile, LockUnavailableError
 from ..util.time import utc_now_iso
@@ -79,7 +80,6 @@ from .messaging.delivery import (
     pty_submit_text,
     render_delivery_text,
     deliver_message_with_preamble,
-    queue_system_notify,
     flush_pending_messages,
     tick_delivery,
     clear_preamble_sent,
@@ -101,6 +101,7 @@ from .serve_ops import (
     start_bootstrap_thread,
     cleanup_after_stop,
 )
+from .space.group_space_memory_sync import process_due_memory_space_syncs
 from .space.group_space_runtime import process_due_space_jobs
 from .space.group_space_sync import process_due_space_syncs
 from .space.group_space_store import get_space_provider_state
@@ -207,17 +208,14 @@ SUPPORTED_RUNTIMES = (
     "auggie",
     "claude",
     "codex",
-    "cursor",
     "droid",
     "gemini",
-    "kilocode",
+    "kimi",
     "neovate",
-    "opencode",
-    "copilot",
     "custom",
 )
 
-AUTO_MCP_RUNTIMES = ("claude", "codex", "droid", "amp", "auggie", "neovate", "gemini")
+AUTO_MCP_RUNTIMES = ("claude", "codex", "droid", "amp", "auggie", "neovate", "gemini", "kimi")
 
 
 def _normalize_runtime_command(runtime: str, command: list[str]) -> list[str]:
@@ -291,6 +289,7 @@ def _inject_actor_context_env(env: Dict[str, Any], *, group_id: str, actor_id: s
     This is runtime-only (not persisted to group docs).
     """
     out: Dict[str, Any] = dict(env or {})
+    out["CCCC_HOME"] = str(ensure_home())
     out["CCCC_GROUP_ID"] = str(group_id or "").strip()
     out["CCCC_ACTOR_ID"] = str(actor_id or "").strip()
     return out
@@ -298,7 +297,7 @@ def _inject_actor_context_env(env: Dict[str, Any], *, group_id: str, actor_id: s
 
 AUTOMATION = AutomationManager()
 
-_AUTOMATION_RESET_NOTIFY_KINDS = {"nudge", "keepalive", "help_nudge", "actor_idle", "silence_check", "automation"}
+_AUTOMATION_RESET_NOTIFY_KINDS = {"nudge", "keepalive", "help_nudge", "actor_idle", "silence_check", "auto_idle", "automation"}
 
 
 def _foreman_id(group: Any) -> str:
@@ -490,25 +489,11 @@ def _write_pid(pid_path: Path) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return False
+    return pid_is_alive(pid)
 
 
 def _best_effort_killpg(pid: int, sig: signal.Signals) -> None:
-    if pid <= 0:
-        return
-    try:
-        os.killpg(pid, sig)
-    except Exception:
-        try:
-            os.kill(pid, sig)
-        except Exception:
-            pass
+    best_effort_signal_pid(pid, sig, include_group=True)
 
 
 def _maybe_autostart_enabled_im_bridges() -> None:
@@ -537,12 +522,14 @@ def _maybe_autostart_running_groups() -> None:
         throttle_reset_actor=lambda gid, aid: THROTTLE.reset_actor(gid, aid, keep_pending=True),
         automation_on_resume=AUTOMATION.on_resume,
         get_group_state=get_group_state,
-        resolve_linked_actor_before_start=lambda grp, aid: _resolve_linked_actor_before_start(
+        resolve_linked_actor_before_start=lambda grp, aid, caller_id="", is_admin=False: _resolve_linked_actor_before_start(
             grp,
             aid,
             get_actor_profile=_get_actor_profile,
             load_actor_profile_secrets=_load_actor_profile_secrets,
             update_actor_private_env=_update_actor_private_env,
+            caller_id=caller_id,
+            is_admin=is_admin,
         ),
     )
 
@@ -605,6 +592,8 @@ def _start_actor_process(
     runner: str,
     runtime: str,
     by: str,
+    caller_id: str = "",
+    is_admin: bool = False,
 ) -> Dict[str, Any]:
     return runtime_start_actor_process(
         group,
@@ -614,6 +603,8 @@ def _start_actor_process(
         runner=runner,
         runtime=runtime,
         by=by,
+        caller_id=caller_id,
+        is_admin=is_admin,
         find_scope_url=_find_scope_url,
         effective_runner_kind=_effective_runner_kind,
         merge_actor_env_with_private=_merge_actor_env_with_private,
@@ -627,12 +618,14 @@ def _start_actor_process(
         clear_preamble_sent=clear_preamble_sent,
         throttle_reset_actor=lambda gid, aid: THROTTLE.reset_actor(gid, aid, keep_pending=True),
         supported_runtimes=SUPPORTED_RUNTIMES,
-        resolve_linked_actor_before_start=lambda grp, aid: _resolve_linked_actor_before_start(
+        resolve_linked_actor_before_start=lambda grp, aid, caller_id="", is_admin=False: _resolve_linked_actor_before_start(
             grp,
             aid,
             get_actor_profile=_get_actor_profile,
             load_actor_profile_secrets=_load_actor_profile_secrets,
             update_actor_private_env=_update_actor_private_env,
+            caller_id=caller_id,
+            is_admin=is_admin,
         ),
     )
 
@@ -689,7 +682,7 @@ def _request_dispatch_deps() -> RequestDispatchDeps:
         automation_on_resume=AUTOMATION.on_resume,
         clear_pending_system_notifies=lambda group_id: THROTTLE.clear_pending_system_notifies(
             group_id,
-            notify_kinds={"nudge", "keepalive", "help_nudge", "actor_idle", "silence_check", "automation"},
+            notify_kinds={"nudge", "keepalive", "help_nudge", "actor_idle", "silence_check", "auto_idle", "automation"},
         ),
         load_actor_private_env=_load_actor_private_env,
         validate_private_env_key=_validate_private_env_key,
@@ -729,7 +722,6 @@ def _request_dispatch_deps() -> RequestDispatchDeps:
             group_id,
             notify_kinds=notify_kinds,
         ),
-        queue_system_notify=queue_system_notify,
         error_factory=_error,
     )
     return _REQUEST_DISPATCH_DEPS
@@ -852,8 +844,11 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
 
     def _tick_space_sync() -> None:
         result = process_due_space_syncs(provider="notebooklm", limit=20)
+        memory_result = process_due_memory_space_syncs(provider="notebooklm", limit=20)
         if int(result.get("processed") or 0) > 0:
             logger.debug("group_space_sync_processed=%s", int(result.get("processed") or 0))
+        if int(memory_result.get("queued") or 0) > 0:
+            logger.debug("group_space_memory_sync_queued=%s", int(memory_result.get("queued") or 0))
 
     start_space_sync_thread(
         stop_event=stop_event,

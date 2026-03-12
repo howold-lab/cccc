@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { ActorProfile, ActorProfileUsage, RUNTIME_INFO, SUPPORTED_RUNTIMES } from "../../../types";
 import * as api from "../../../services/api";
@@ -11,6 +12,7 @@ import { CapabilityPicker } from "../../CapabilityPicker";
 interface ActorProfilesTabProps {
   isDark: boolean;
   isActive: boolean;
+  scope: "global" | "my";
 }
 
 type EditorState = {
@@ -36,13 +38,10 @@ const RUNTIME_DEFAULT_COMMANDS: Record<string, string> = {
   auggie: "auggie",
   claude: "claude --dangerously-skip-permissions",
   codex: "codex -c shell_environment_policy.inherit=all --dangerously-bypass-approvals-and-sandbox --search",
-  cursor: "cursor-agent",
   droid: "droid --auto high",
   gemini: "gemini --yolo",
-  kilocode: "kilocode",
+  kimi: "kimi",
   neovate: "neovate",
-  opencode: "opencode",
-  copilot: "copilot --allow-all-tools --allow-all-paths",
   custom: "",
 };
 
@@ -82,7 +81,7 @@ function buildEditor(profile?: ActorProfile | null): EditorState {
   };
 }
 
-export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
+export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabProps) {
   const { t } = useTranslation("settings");
   const groups = useGroupStore((s) => s.groups);
   const refreshGroups = useGroupStore((s) => s.refreshGroups);
@@ -103,6 +102,17 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
   const [secretUnsetText, setSecretUnsetText] = useState("");
   const [secretClear, setSecretClear] = useState(false);
   const [duplicateSourceProfileId, setDuplicateSourceProfileId] = useState("");
+  const [sessionUserId, setSessionUserId] = useState("");
+
+  const isMyScope = scope === "my";
+  const profileScope: api.ProfileScope = isMyScope ? "user" : "global";
+  const profileLookup = useMemo(
+    () => ({
+      scope: profileScope,
+      ownerId: isMyScope ? sessionUserId.trim() : "",
+    }),
+    [isMyScope, profileScope, sessionUserId]
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -132,15 +142,284 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
     [editor.runtime]
   );
 
+  const ensureSessionContext = async () => {
+    try {
+      const resp = await api.fetchWebAccessSession();
+      if (!resp.ok) {
+        setSessionUserId("");
+        return null;
+      }
+      const session = resp.result?.web_access_session ?? null;
+      const userId = String(session?.user_id || "").trim();
+      const signedIn = Boolean(session?.current_browser_signed_in);
+      setSessionUserId(userId);
+      return { userId, signedIn };
+    } catch {
+      setSessionUserId("");
+      return null;
+    }
+  };
+
+  const scopeRequestError = (code: string | undefined, fallback: string) => {
+    const normalized = String(code || "").trim();
+    if (isMyScope && (normalized === "unauthorized" || normalized === "permission_denied")) {
+      return t("actorProfiles.myProfilesLoginRequired");
+    }
+    return fallback;
+  };
+
+  const closeEditor = () => {
+    setDuplicateSourceProfileId("");
+    setEditorOpen(false);
+  };
+
+  const editorModal = editorOpen ? (
+    <div
+      className="fixed inset-0 z-[1000] flex items-stretch justify-center bg-black/50 p-3 sm:items-center"
+      role="dialog"
+      aria-modal="true"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          closeEditor();
+        }
+      }}
+    >
+      <div className="flex h-full w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--color-bg-primary)] shadow-2xl sm:h-auto sm:max-h-[calc(100dvh-2rem)]">
+        <div className="shrink-0 px-5 py-4 border-b border-[var(--glass-border-subtle)] bg-[var(--color-bg-primary)]">
+          <div className="text-base font-semibold text-[var(--color-text-primary)]">
+            {editor.id ? t("actorProfiles.editTitle") : t("actorProfiles.newTitle")}
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-5 space-y-4">
+          {editorErr ? (
+            <div className="rounded-lg border px-3 py-2 text-sm border-rose-500/30 bg-rose-500/10 text-rose-400">
+              {editorErr}
+            </div>
+          ) : null}
+
+          <div>
+            <label className={labelClass()}>{t("actorProfiles.name")}</label>
+            <input
+              value={editor.name}
+              onChange={(e) => setEditor((prev) => ({ ...prev, name: e.target.value }))}
+              className={inputClass()}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass()}>{t("actorProfiles.runtime")}</label>
+              <select
+                value={editor.runtime}
+                onChange={(e) => {
+                  const nextRuntime = String(e.target.value || "");
+                  setEditor((prev) => {
+                    const supportsDefault = supportsRuntimeDefaultCommand(nextRuntime);
+                    return {
+                      ...prev,
+                      runtime: nextRuntime,
+                      useDefaultCommand: supportsDefault ? prev.useDefaultCommand : false,
+                      command: supportsDefault && prev.useDefaultCommand ? "" : prev.command,
+                    };
+                  });
+                }}
+                className={inputClass()}
+              >
+                {SUPPORTED_RUNTIMES.map((rt) => (
+                  <option key={rt} value={rt}>{RUNTIME_INFO[rt]?.label || rt}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className={labelClass()}>{t("actorProfiles.commandOverrideOptional")}</label>
+            {editorSupportsDefaultCommand ? (
+              <label className="inline-flex items-center gap-2 text-xs mb-2 text-[var(--color-text-secondary)]">
+                <input
+                  type="checkbox"
+                  checked={editor.useDefaultCommand}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setEditor((prev) => ({
+                      ...prev,
+                      useDefaultCommand: checked,
+                      command: checked ? "" : prev.command,
+                    }));
+                  }}
+                />
+                {t("actorProfiles.useRuntimeDefaultCommand")}
+              </label>
+            ) : null}
+            {!editorSupportsDefaultCommand || !editor.useDefaultCommand ? (
+              <input
+                value={editor.command}
+                onChange={(e) => setEditor((prev) => ({ ...prev, command: e.target.value }))}
+                className={`${inputClass()} font-mono`}
+                placeholder={editorDefaultCommand || "codex"}
+              />
+            ) : null}
+            {editorSupportsDefaultCommand && editorDefaultCommand ? (
+              <div className="text-[10px] mt-1 text-[var(--color-text-muted)]">
+                {editor.useDefaultCommand ? t("actorProfiles.usingRuntimeDefaultCommand") : t("actorProfiles.default")}{" "}
+                <code className="px-1 rounded bg-[var(--color-bg-secondary)]">{editorDefaultCommand}</code>
+              </div>
+            ) : null}
+          </div>
+
+          <div>
+            <label className={labelClass()}>{t("actorProfiles.submit")}</label>
+            <select
+              value={editor.submit}
+              onChange={(e) => setEditor((prev) => ({ ...prev, submit: (e.target.value as "enter" | "newline" | "none") }))}
+              className={inputClass()}
+            >
+              <option value="enter">Enter</option>
+              <option value="newline">Newline</option>
+              <option value="none">None</option>
+            </select>
+          </div>
+
+          <div className={cardClass()}>
+            <div className="text-sm font-semibold text-[var(--color-text-primary)]">
+              {t("actorProfiles.capabilityDefaults")}
+            </div>
+            <div className="text-xs mt-1 text-[var(--color-text-muted)]">
+              {t("actorProfiles.capabilityDefaultsHint")}
+            </div>
+            <div className="mt-3">
+              <CapabilityPicker
+                isDark={isDark}
+                value={parseCapabilityIdInput(editor.capabilityAutoloadText)}
+                onChange={(next) =>
+                  setEditor((prev) => ({
+                    ...prev,
+                    capabilityAutoloadText: formatCapabilityIdInput(next),
+                  }))
+                }
+                disabled={editorBusy}
+                label={t("actorProfiles.autoloadCapabilities")}
+              />
+            </div>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass()}>{t("actorProfiles.autoloadScope")}</label>
+                <select
+                  value={editor.capabilityDefaultScope}
+                  onChange={(e) =>
+                    setEditor((prev) => ({
+                      ...prev,
+                      capabilityDefaultScope: e.target.value === "session" ? "session" : "actor",
+                    }))
+                  }
+                  className={inputClass()}
+                >
+                  <option value="actor">{t("actorProfiles.autoloadScopeActor")}</option>
+                  <option value="session">{t("actorProfiles.autoloadScopeSession")}</option>
+                </select>
+              </div>
+              <div>
+                <label className={labelClass()}>{t("actorProfiles.sessionTtlSeconds")}</label>
+                <input
+                  type="number"
+                  min={60}
+                  step={60}
+                  value={String(editor.capabilitySessionTtlSeconds || 3600)}
+                  onChange={(e) =>
+                    setEditor((prev) => ({
+                      ...prev,
+                      capabilitySessionTtlSeconds: Math.max(60, Number(e.target.value || 3600)),
+                    }))
+                  }
+                  className={inputClass()}
+                  disabled={editor.capabilityDefaultScope !== "session"}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className={cardClass()}>
+            <div className="text-sm font-semibold text-[var(--color-text-primary)]">{t("actorProfiles.env")}</div>
+            <div className="text-xs mt-1 text-[var(--color-text-muted)]">{t("actorProfiles.envHint")}</div>
+            {duplicateSourceProfileId ? (
+              <div className="text-xs mt-1 text-[var(--color-text-tertiary)]">
+                {t("actorProfiles.duplicateSecretsHint", { source: duplicateSourceLabel })}
+              </div>
+            ) : null}
+            {secretKeys.length ? (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {secretKeys.map((key) => (
+                  <span
+                    key={key}
+                    title={secretMasks[key] ? `${key}=${secretMasks[key]}` : key}
+                    className="px-2 py-0.5 rounded text-[11px] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
+                  >
+                    {key}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-2 text-xs text-[var(--color-text-muted)]">{t("actorProfiles.noSecrets")}</div>
+            )}
+
+            <div className="mt-3">
+              <label className={labelClass()}>{t("actorProfiles.setSecrets")}</label>
+              <textarea
+                value={secretSetText}
+                onChange={(e) => setSecretSetText(e.target.value)}
+                className={`${inputClass()} min-h-[90px] font-mono`}
+                placeholder={t("actorProfiles.setSecretsPlaceholder")}
+              />
+            </div>
+            <div className="mt-3">
+              <label className={labelClass()}>{t("actorProfiles.unsetSecrets")}</label>
+              <textarea
+                value={secretUnsetText}
+                onChange={(e) => setSecretUnsetText(e.target.value)}
+                className={`${inputClass()} min-h-[70px] font-mono`}
+                placeholder={t("actorProfiles.unsetSecretsPlaceholder")}
+              />
+            </div>
+            <label className="mt-3 inline-flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+              <input type="checkbox" checked={secretClear} onChange={(e) => setSecretClear(e.target.checked)} />
+              {t("actorProfiles.clearSecrets")}
+            </label>
+          </div>
+        </div>
+        <div className="safe-area-inset-bottom shrink-0 px-5 py-4 border-t flex justify-end gap-2 border-[var(--glass-border-subtle)] bg-[var(--color-bg-primary)]">
+          <button
+            onClick={closeEditor}
+            className="glass-btn text-[var(--color-text-secondary)] px-3 py-2 rounded-lg text-sm min-h-[44px]"
+          >
+            {t("common:cancel")}
+          </button>
+          <button
+            onClick={() => void handleSave()}
+            disabled={editorBusy}
+            className={primaryButtonClass(editorBusy)}
+          >
+            {editorBusy ? t("common:saving") : t("common:save")}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   const loadProfiles = async () => {
     setBusy(true);
     setErr("");
     try {
-      const resp = await api.listActorProfiles();
+      const session = await ensureSessionContext();
+      if (isMyScope && !(session?.signedIn && session.userId)) {
+        setProfiles([]);
+        setErr(t("actorProfiles.myProfilesLoginRequired"));
+        return;
+      }
+      const resp = await api.listProfiles(isMyScope ? "my" : "global");
       if (resp.ok) {
         setProfiles(Array.isArray(resp.result?.profiles) ? resp.result.profiles : []);
       } else {
-        setErr(resp.error?.message || t("actorProfiles.loadFailed"));
+        setErr(scopeRequestError(resp.error?.code, resp.error?.message || t("actorProfiles.loadFailed")));
       }
     } catch (e) {
       console.error("Failed to load actor profiles:", e);
@@ -177,7 +456,12 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
       setSecretMasks({});
       return;
     }
-    const resp = await api.fetchActorProfilePrivateEnvKeys(profileId);
+    if (isMyScope && !profileLookup.ownerId) {
+      setSecretKeys([]);
+      setSecretMasks({});
+      return;
+    }
+    const resp = await api.fetchProfilePrivateEnvKeys(profileId, profileLookup);
     if (!resp.ok) {
       setEditorErr(resp.error?.message || t("actorProfiles.loadSecretsFailed"));
       setSecretKeys([]);
@@ -243,10 +527,18 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
 
   const handleDelete = async (profile: ActorProfile) => {
     if (!window.confirm(t("actorProfiles.deleteConfirm", { name: profile.name || profile.id }))) return;
+    const ownerId = isMyScope ? sessionUserId.trim() : "";
+    if (isMyScope && !ownerId) {
+      setErr(t("actorProfiles.myProfilesLoginRequired"));
+      return;
+    }
     setBusy(true);
     setErr("");
     try {
-      const resp = await api.deleteActorProfile(profile.id);
+      const resp = await api.deleteProfile(String(profile.id || ""), {
+        scope: profileScope,
+        ownerId,
+      });
       if (!resp.ok) {
         const code = String(resp.error?.code || "").trim();
         if (code === "profile_in_use") {
@@ -274,16 +566,20 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
             )}`
           );
           if (!forceConfirm) return;
-          const forceResp = await api.deleteActorProfile(profile.id, { forceDetach: true });
+          const forceResp = await api.deleteProfile(String(profile.id || ""), {
+            scope: profileScope,
+            ownerId,
+            forceDetach: true,
+          });
           if (!forceResp.ok) {
-            setErr(forceResp.error?.message || t("actorProfiles.deleteFailed"));
+            setErr(scopeRequestError(forceResp.error?.code, forceResp.error?.message || t("actorProfiles.deleteFailed")));
             return;
           }
           await loadProfiles();
           await refreshAllGroupsActors();
           return;
         }
-        setErr(resp.error?.message || t("actorProfiles.deleteFailed"));
+        setErr(scopeRequestError(resp.error?.code, resp.error?.message || t("actorProfiles.deleteFailed")));
         return;
       }
       await loadProfiles();
@@ -301,9 +597,12 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
     setUsageBusyProfileId(profileId);
     setErr("");
     try {
-      const resp = await api.getActorProfile(profileId);
+      const resp = await api.getProfile(profileId, {
+        scope: profileScope,
+        ownerId: isMyScope ? sessionUserId.trim() : "",
+      });
       if (!resp.ok) {
-        setErr(resp.error?.message || t("actorProfiles.usageLoadFailed"));
+        setErr(scopeRequestError(resp.error?.code, resp.error?.message || t("actorProfiles.usageLoadFailed")));
         return;
       }
       const usage = Array.isArray(resp.result?.usage) ? resp.result.usage : [];
@@ -340,6 +639,11 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
       setEditorErr(t("actorProfiles.nameRequired"));
       return;
     }
+    const ownerId = isMyScope ? sessionUserId.trim() : "";
+    if (isMyScope && !ownerId) {
+      setEditorErr(t("actorProfiles.myProfilesLoginRequired"));
+      return;
+    }
     setEditorBusy(true);
     setEditorErr("");
     try {
@@ -357,6 +661,8 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
       const payload: Record<string, unknown> = {
         id: editor.id || undefined,
         name,
+        scope: profileScope,
+        owner_id: ownerId,
         runtime: editor.runtime,
         runner: "pty",
         command: editorSupportsDefaultCommand && editor.useDefaultCommand ? "" : editor.command.trim(),
@@ -383,10 +689,12 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
         setEditorErr(t("actorProfiles.customRuntimeCommandRequired"));
         return;
       }
+      const copyFromProfileId = duplicateSourceProfileId.trim();
+      const hasSecretOps = secretClear || Object.keys(setParsed.setVars).length > 0 || unsetParsed.unsetKeys.length > 0;
       const expectedRevision = editor.id ? editor.revision : undefined;
-      const upsertResp = await api.upsertActorProfile(payload, expectedRevision);
+      const upsertResp = await api.saveProfile(payload, expectedRevision);
       if (!upsertResp.ok) {
-        setEditorErr(upsertResp.error?.message || t("actorProfiles.saveFailed"));
+        setEditorErr(scopeRequestError(upsertResp.error?.code, upsertResp.error?.message || t("actorProfiles.saveFailed")));
         return;
       }
       const profile = upsertResp.result?.profile;
@@ -396,18 +704,22 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
         return;
       }
 
-      const copyFromProfileId = duplicateSourceProfileId.trim();
       if (copyFromProfileId && copyFromProfileId !== profileId) {
-        const copyResp = await api.copyActorProfilePrivateEnvFromProfile(profileId, copyFromProfileId);
+        const copyResp = await api.copyProfilePrivateEnvFromProfile(profileId, copyFromProfileId, profileLookup);
         if (!copyResp.ok) {
           setEditorErr(copyResp.error?.message || t("actorProfiles.saveSecretsFailed"));
           return;
         }
       }
 
-      const hasSecretOps = secretClear || Object.keys(setParsed.setVars).length > 0 || unsetParsed.unsetKeys.length > 0;
       if (hasSecretOps) {
-        const secretResp = await api.updateActorProfilePrivateEnv(profileId, setParsed.setVars, unsetParsed.unsetKeys, secretClear);
+        const secretResp = await api.updateProfilePrivateEnv(
+          profileId,
+          setParsed.setVars,
+          unsetParsed.unsetKeys,
+          secretClear,
+          profileLookup
+        );
         if (!secretResp.ok) {
           setEditorErr(secretResp.error?.message || t("actorProfiles.saveSecretsFailed"));
           return;
@@ -430,15 +742,13 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={t("actorProfiles.searchPlaceholder")}
-          className={`${inputClass(isDark)} max-w-sm`}
+          className={`${inputClass()} max-w-sm`}
         />
         <button className={primaryButtonClass(false)} onClick={openNew}>
           {t("actorProfiles.newProfile")}
         </button>
         <button
-          className={`px-3 py-2 rounded-lg text-sm min-h-[44px] font-medium transition-colors ${
-            isDark ? "bg-slate-800 hover:bg-slate-700 text-slate-200" : "bg-white hover:bg-gray-50 text-gray-800 border border-gray-200"
-          }`}
+          className="glass-btn text-[var(--color-text-secondary)] px-3 py-2 rounded-lg text-sm min-h-[44px] font-medium transition-colors"
           onClick={() => void loadProfiles()}
           disabled={busy}
         >
@@ -447,49 +757,49 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
       </div>
 
       {err ? (
-        <div className={`rounded-lg border px-3 py-2 text-sm ${isDark ? "border-rose-500/30 bg-rose-500/10 text-rose-300" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
+        <div className="rounded-lg border px-3 py-2 text-sm border-rose-500/30 bg-rose-500/10 text-rose-400">
           {err}
         </div>
       ) : null}
 
       <div className="space-y-2">
         {filtered.map((profile) => (
-          <div key={profile.id} className={cardClass(isDark)}>
+          <div key={profile.id} className={cardClass()}>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
-                <div className={`text-sm font-semibold truncate ${isDark ? "text-slate-200" : "text-gray-800"}`}>
+              <div className="text-sm font-semibold truncate text-[var(--color-text-primary)]">
                   {profile.name || profile.id}
                 </div>
-                <div className={`mt-0.5 text-xs ${isDark ? "text-slate-400" : "text-gray-600"}`}>
+                <div className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
                   <code>{profile.id}</code> · {RUNTIME_INFO[String(profile.runtime)]?.label || profile.runtime}
                 </div>
-                <div className={`mt-0.5 text-[11px] ${isDark ? "text-slate-500" : "text-gray-500"}`}>
+                <div className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">
                   {t("actorProfiles.usageCount", { count: Number(profile.usage_count || 0) })} · {t("actorProfiles.revision", { revision: Number(profile.revision || 0) })}
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => void openEdit(profile)}
-                  className={`px-3 py-2 rounded-lg text-sm min-h-[40px] ${isDark ? "bg-slate-800 hover:bg-slate-700 text-slate-200" : "bg-white hover:bg-gray-50 text-gray-700 border border-gray-200"}`}
+                  className="glass-btn text-[var(--color-text-secondary)] px-3 py-2 rounded-lg text-sm min-h-[40px]"
                 >
                   {t("common:edit")}
                 </button>
                 <button
                   onClick={() => void openDuplicate(profile)}
-                  className={`px-3 py-2 rounded-lg text-sm min-h-[40px] ${isDark ? "bg-slate-800 hover:bg-slate-700 text-slate-200" : "bg-white hover:bg-gray-50 text-gray-700 border border-gray-200"}`}
+                  className="glass-btn text-[var(--color-text-secondary)] px-3 py-2 rounded-lg text-sm min-h-[40px]"
                 >
                   {t("actorProfiles.duplicate")}
                 </button>
                 <button
                   onClick={() => void handleShowUsage(profile)}
                   disabled={usageBusyProfileId === String(profile.id || "")}
-                  className={`px-3 py-2 rounded-lg text-sm min-h-[40px] ${isDark ? "bg-slate-800 hover:bg-slate-700 text-slate-200" : "bg-white hover:bg-gray-50 text-gray-700 border border-gray-200"} disabled:opacity-60`}
+                  className="glass-btn text-[var(--color-text-secondary)] px-3 py-2 rounded-lg text-sm min-h-[40px] disabled:opacity-60"
                 >
                   {usageBusyProfileId === String(profile.id || "") ? t("common:loading") : t("actorProfiles.viewUsage")}
                 </button>
                 <button
                   onClick={() => void handleDelete(profile)}
-                  className={`px-3 py-2 rounded-lg text-sm min-h-[40px] ${isDark ? "bg-rose-900/40 hover:bg-rose-900/60 text-rose-200" : "bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200"}`}
+                  className="px-3 py-2 rounded-lg text-sm min-h-[40px] bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30 hover:bg-rose-500/25 transition-colors"
                 >
                   {t("common:delete")}
                 </button>
@@ -498,235 +808,11 @@ export function ActorProfilesTab({ isDark, isActive }: ActorProfilesTabProps) {
           </div>
         ))}
         {!busy && filtered.length === 0 ? (
-          <div className={`text-sm ${isDark ? "text-slate-500" : "text-gray-500"}`}>{t("actorProfiles.empty")}</div>
+          <div className="text-sm text-[var(--color-text-muted)]">{t("actorProfiles.empty")}</div>
         ) : null}
       </div>
 
-      {editorOpen ? (
-        <div className={`fixed inset-0 z-[70] flex items-center justify-center p-3 ${isDark ? "bg-black/60" : "bg-black/40"}`}>
-          <div className={`w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl border shadow-2xl ${isDark ? "border-slate-700 bg-slate-900" : "border-gray-200 bg-white"}`}>
-            <div className={`sticky top-0 px-5 py-4 border-b ${isDark ? "border-slate-700 bg-slate-900" : "border-gray-200 bg-white"}`}>
-              <div className={`text-base font-semibold ${isDark ? "text-slate-100" : "text-gray-900"}`}>
-                {editor.id ? t("actorProfiles.editTitle") : t("actorProfiles.newTitle")}
-              </div>
-            </div>
-            <div className="p-5 space-y-4">
-              {editorErr ? (
-                <div className={`rounded-lg border px-3 py-2 text-sm ${isDark ? "border-rose-500/30 bg-rose-500/10 text-rose-300" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
-                  {editorErr}
-                </div>
-              ) : null}
-
-              <div>
-                <label className={labelClass(isDark)}>{t("actorProfiles.name")}</label>
-                <input
-                  value={editor.name}
-                  onChange={(e) => setEditor((prev) => ({ ...prev, name: e.target.value }))}
-                  className={inputClass(isDark)}
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className={labelClass(isDark)}>{t("actorProfiles.runtime")}</label>
-                  <select
-                    value={editor.runtime}
-                    onChange={(e) => {
-                      const nextRuntime = String(e.target.value || "");
-                      setEditor((prev) => {
-                        const supportsDefault = supportsRuntimeDefaultCommand(nextRuntime);
-                        return {
-                          ...prev,
-                          runtime: nextRuntime,
-                          useDefaultCommand: supportsDefault ? prev.useDefaultCommand : false,
-                          command: supportsDefault && prev.useDefaultCommand ? "" : prev.command,
-                        };
-                      });
-                    }}
-                    className={inputClass(isDark)}
-                  >
-                    {SUPPORTED_RUNTIMES.map((rt) => (
-                      <option key={rt} value={rt}>{RUNTIME_INFO[rt]?.label || rt}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className={labelClass(isDark)}>{t("actorProfiles.commandOverrideOptional")}</label>
-                {editorSupportsDefaultCommand ? (
-                  <label className={`inline-flex items-center gap-2 text-xs mb-2 ${isDark ? "text-slate-300" : "text-gray-700"}`}>
-                    <input
-                      type="checkbox"
-                      checked={editor.useDefaultCommand}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setEditor((prev) => ({
-                          ...prev,
-                          useDefaultCommand: checked,
-                          command: checked ? "" : prev.command,
-                        }));
-                      }}
-                    />
-                    {t("actorProfiles.useRuntimeDefaultCommand")}
-                  </label>
-                ) : null}
-                {!editorSupportsDefaultCommand || !editor.useDefaultCommand ? (
-                  <input
-                    value={editor.command}
-                    onChange={(e) => setEditor((prev) => ({ ...prev, command: e.target.value }))}
-                    className={`${inputClass(isDark)} font-mono`}
-                    placeholder={editorDefaultCommand || "codex"}
-                  />
-                ) : null}
-                {editorSupportsDefaultCommand && editorDefaultCommand ? (
-                  <div className={`text-[10px] mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
-                    {editor.useDefaultCommand ? t("actorProfiles.usingRuntimeDefaultCommand") : t("actorProfiles.default")}{" "}
-                    <code className={`px-1 rounded ${isDark ? "bg-slate-800" : "bg-gray-100"}`}>{editorDefaultCommand}</code>
-                  </div>
-                ) : null}
-              </div>
-
-              <div>
-                <label className={labelClass(isDark)}>{t("actorProfiles.submit")}</label>
-                <select
-                  value={editor.submit}
-                  onChange={(e) => setEditor((prev) => ({ ...prev, submit: (e.target.value as "enter" | "newline" | "none") }))}
-                  className={inputClass(isDark)}
-                >
-                  <option value="enter">Enter</option>
-                  <option value="newline">Newline</option>
-                  <option value="none">None</option>
-                </select>
-              </div>
-
-              <div className={cardClass(isDark)}>
-                <div className={`text-sm font-semibold ${isDark ? "text-slate-200" : "text-gray-800"}`}>
-                  {t("actorProfiles.capabilityDefaults")}
-                </div>
-                <div className={`text-xs mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
-                  {t("actorProfiles.capabilityDefaultsHint")}
-                </div>
-                <div className="mt-3">
-                  <CapabilityPicker
-                    isDark={isDark}
-                    value={parseCapabilityIdInput(editor.capabilityAutoloadText)}
-                    onChange={(next) =>
-                      setEditor((prev) => ({
-                        ...prev,
-                        capabilityAutoloadText: formatCapabilityIdInput(next),
-                      }))
-                    }
-                    disabled={editorBusy}
-                    label={t("actorProfiles.autoloadCapabilities")}
-                  />
-                </div>
-                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className={labelClass(isDark)}>{t("actorProfiles.autoloadScope")}</label>
-                    <select
-                      value={editor.capabilityDefaultScope}
-                      onChange={(e) =>
-                        setEditor((prev) => ({
-                          ...prev,
-                          capabilityDefaultScope: e.target.value === "session" ? "session" : "actor",
-                        }))
-                      }
-                      className={inputClass(isDark)}
-                    >
-                      <option value="actor">{t("actorProfiles.autoloadScopeActor")}</option>
-                      <option value="session">{t("actorProfiles.autoloadScopeSession")}</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className={labelClass(isDark)}>{t("actorProfiles.sessionTtlSeconds")}</label>
-                    <input
-                      type="number"
-                      min={60}
-                      step={60}
-                      value={String(editor.capabilitySessionTtlSeconds || 3600)}
-                      onChange={(e) =>
-                        setEditor((prev) => ({
-                          ...prev,
-                          capabilitySessionTtlSeconds: Math.max(60, Number(e.target.value || 3600)),
-                        }))
-                      }
-                      className={inputClass(isDark)}
-                      disabled={editor.capabilityDefaultScope !== "session"}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className={cardClass(isDark)}>
-                <div className={`text-sm font-semibold ${isDark ? "text-slate-200" : "text-gray-800"}`}>{t("actorProfiles.env")}</div>
-                <div className={`text-xs mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>{t("actorProfiles.envHint")}</div>
-                {duplicateSourceProfileId ? (
-                  <div className={`text-xs mt-1 ${isDark ? "text-slate-400" : "text-gray-600"}`}>
-                    {t("actorProfiles.duplicateSecretsHint", { source: duplicateSourceLabel })}
-                  </div>
-                ) : null}
-                {secretKeys.length ? (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {secretKeys.map((key) => (
-                      <span
-                        key={key}
-                        title={secretMasks[key] ? `${key}=${secretMasks[key]}` : key}
-                        className={`px-2 py-0.5 rounded text-[11px] ${isDark ? "bg-slate-800 text-slate-200" : "bg-gray-100 text-gray-700"}`}
-                      >
-                        {key}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <div className={`mt-2 text-xs ${isDark ? "text-slate-500" : "text-gray-500"}`}>{t("actorProfiles.noSecrets")}</div>
-                )}
-
-                <div className="mt-3">
-                  <label className={labelClass(isDark)}>{t("actorProfiles.setSecrets")}</label>
-                  <textarea
-                    value={secretSetText}
-                    onChange={(e) => setSecretSetText(e.target.value)}
-                    className={`${inputClass(isDark)} min-h-[90px] font-mono`}
-                    placeholder={t("actorProfiles.setSecretsPlaceholder")}
-                  />
-                </div>
-                <div className="mt-3">
-                  <label className={labelClass(isDark)}>{t("actorProfiles.unsetSecrets")}</label>
-                  <textarea
-                    value={secretUnsetText}
-                    onChange={(e) => setSecretUnsetText(e.target.value)}
-                    className={`${inputClass(isDark)} min-h-[70px] font-mono`}
-                    placeholder={t("actorProfiles.unsetSecretsPlaceholder")}
-                  />
-                </div>
-                <label className={`mt-3 inline-flex items-center gap-2 text-sm ${isDark ? "text-slate-300" : "text-gray-700"}`}>
-                  <input type="checkbox" checked={secretClear} onChange={(e) => setSecretClear(e.target.checked)} />
-                  {t("actorProfiles.clearSecrets")}
-                </label>
-              </div>
-            </div>
-            <div className={`sticky bottom-0 px-5 py-4 border-t flex justify-end gap-2 ${isDark ? "border-slate-700 bg-slate-900" : "border-gray-200 bg-white"}`}>
-              <button
-                onClick={() => {
-                  setDuplicateSourceProfileId("");
-                  setEditorOpen(false);
-                }}
-                className={`px-3 py-2 rounded-lg text-sm min-h-[44px] ${isDark ? "bg-slate-800 hover:bg-slate-700 text-slate-200" : "bg-white hover:bg-gray-50 text-gray-700 border border-gray-200"}`}
-              >
-                {t("common:cancel")}
-              </button>
-              <button
-                onClick={() => void handleSave()}
-                disabled={editorBusy}
-                className={primaryButtonClass(editorBusy)}
-              >
-                {editorBusy ? t("common:saving") : t("common:save")}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      {editorModal && typeof document !== "undefined" ? createPortal(editorModal, document.body) : editorModal}
     </div>
   );
 }

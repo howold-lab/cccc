@@ -35,7 +35,11 @@ export interface VirtualMessageListProps {
   onLoadMore?: () => void;
 }
 
-export const VirtualMessageList = memo(function VirtualMessageList({
+type VirtualMessageListInnerProps = VirtualMessageListProps & {
+  resetKey: string;
+};
+
+const VirtualMessageListInner = function VirtualMessageListInner({
   messages,
   actors,
   agentStates,
@@ -43,7 +47,7 @@ export const VirtualMessageList = memo(function VirtualMessageList({
   readOnly,
   groupId,
   groupLabelById,
-  viewKey,
+  viewKey: _viewKey,
   initialScrollTargetId,
   initialScrollAnchorId,
   initialScrollAnchorOffsetPx,
@@ -62,7 +66,8 @@ export const VirtualMessageList = memo(function VirtualMessageList({
   isLoadingHistory = false,
   hasMoreHistory = true,
   onLoadMore,
-}: VirtualMessageListProps) {
+  resetKey,
+}: VirtualMessageListInnerProps) {
   const parentRef = useRef<HTMLDivElement | null>(null);
 
   const agentStateById = useMemo(() => {
@@ -82,11 +87,13 @@ export const VirtualMessageList = memo(function VirtualMessageList({
   const followupScrollTimeoutRef = useRef<number | null>(null);
   const scrollTokenRef = useRef(0);
   const scrollRafScheduledRef = useRef(false);
-  const resetKey = viewKey ?? groupId;
-
+  const snapshotFlushTimerRef = useRef<number | null>(null);
   // For history loading scroll position preservation (prepend older messages)
   const topLoadArmedRef = useRef(true);
   const pendingRestoreRef = useRef(false);
+  const pendingRestoreSeqRef = useRef<number | null>(null);
+  const lastScrollEventAtRef = useRef(0);
+  const scrollEventSeqRef = useRef(0);
   const anchorMessageIdRef = useRef<string>("");
   const anchorOffsetRef = useRef(0);
 
@@ -158,22 +165,15 @@ export const VirtualMessageList = memo(function VirtualMessageList({
     getScrollElement: () => parentRef.current,
     getItemKey: (index) => messages[index]?.id ?? index,
     estimateSize: getEstimatedSize,
-    overscan: 5,
+    overscan: 10,
     paddingStart: 72,
   });
 
 
-  const measureElement = useCallback(
-    (node: HTMLDivElement | null) => {
-      if (!node) return;
-      if (typeof queueMicrotask === "function") {
-        queueMicrotask(() => virtualizer.measureElement(node));
-      } else {
-        Promise.resolve().then(() => virtualizer.measureElement(node));
-      }
-    },
-    [virtualizer]
-  );
+  // Direct ref — synchronous measurement eliminates the jitter caused by
+  // the old queueMicrotask wrapper (which deferred measurement by one frame,
+  // making the first paint use the stale estimate height).
+  const measureElement = virtualizer.measureElement;
 
   const checkIsAtBottom = useCallback(() => {
     const el = parentRef.current;
@@ -295,14 +295,23 @@ export const VirtualMessageList = memo(function VirtualMessageList({
     const el = parentRef.current;
     if (!el) return;
 
+    scrollEventSeqRef.current += 1;
+    lastScrollEventAtRef.current = performance.now();
     const curTop = el.scrollTop;
 
     const atBottom = checkIsAtBottom();
+    // Only notify parent when atBottom state actually changes (not on every scroll event)
+    // to avoid triggering store updates and re-renders during inertia scrolling.
+    const wasAtBottom = isAtBottomRef.current;
     isAtBottomRef.current = atBottom;
-    onScrollChange?.(atBottom);
+    if (atBottom !== wasAtBottom) {
+      onScrollChange?.(atBottom);
+    }
 
     // Capture a stable "anchor" (first visible message id + offset into that row)
     // so the parent can restore scroll position when switching groups.
+    // Save to ref only during scroll; flush to store via debounce (not every frame)
+    // to prevent zustand state churn that kills browser scroll inertia.
     const vItems = virtualizer.getVirtualItems();
     if (vItems.length > 0) {
       const anchorItem =
@@ -313,7 +322,14 @@ export const VirtualMessageList = memo(function VirtualMessageList({
         const offsetPx = Math.max(0, curTop - anchorItem.start);
         const snap = { atBottom, anchorId, offsetPx };
         latestSnapshotRef.current = snap;
-        onScrollSnapshot?.(snap);
+        // Debounced flush to store — only after 300ms idle
+        if (snapshotFlushTimerRef.current) window.clearTimeout(snapshotFlushTimerRef.current);
+        snapshotFlushTimerRef.current = window.setTimeout(() => {
+          snapshotFlushTimerRef.current = null;
+          if (latestSnapshotRef.current) {
+            onScrollSnapshot?.(latestSnapshotRef.current);
+          }
+        }, 300);
       }
     }
 
@@ -330,6 +346,7 @@ export const VirtualMessageList = memo(function VirtualMessageList({
     if (atTop && topLoadArmedRef.current && hasMoreHistory && !isLoadingHistory && onLoadMore) {
       topLoadArmedRef.current = false;
       pendingRestoreRef.current = true;
+      pendingRestoreSeqRef.current = scrollEventSeqRef.current;
 
       const first = vItems[0];
       const firstMsg = first ? messages[first.index] : null;
@@ -372,20 +389,31 @@ export const VirtualMessageList = memo(function VirtualMessageList({
     didInitialScrollRef.current = false;
     topLoadArmedRef.current = true;
     cancelScheduledScroll();
+    if (snapshotFlushTimerRef.current) {
+      window.clearTimeout(snapshotFlushTimerRef.current);
+      snapshotFlushTimerRef.current = null;
+    }
     pendingRestoreRef.current = false;
+    pendingRestoreSeqRef.current = null;
     anchorMessageIdRef.current = "";
     anchorOffsetRef.current = 0;
-  }, [resetKey, cancelScheduledScroll, onScrollSnapshot]);
+
+    // Without key-based remount, the virtualizer keeps stale measurement
+    // caches from the previous group. Force a full re-measure so item
+    // sizes are recalculated for the new messages.
+    virtualizer.measure();
+  }, [resetKey, cancelScheduledScroll, onScrollSnapshot, virtualizer]);
 
   useEffect(() => {
-    const prevCount = prevMessageCountRef.current;
-    const newCount = messages.length;
-    prevMessageCountRef.current = newCount;
+    prevMessageCountRef.current = messages.length;
 
-    if (newCount > prevCount && isAtBottomRef.current) {
+    // Scroll to bottom on any messages change while at bottom.
+    // Watches `messages` reference (not just length) so that loadGroup replacements
+    // with the same count still trigger re-positioning.
+    if (messages.length > 0 && isAtBottomRef.current) {
       scheduleScrollToBottom({ requireAtBottom: true });
     }
-  }, [messages.length, scheduleScrollToBottom]);
+  }, [messages, scheduleScrollToBottom]);
 
   useEffect(() => {
     if (didInitialScrollRef.current) return;
@@ -414,14 +442,51 @@ export const VirtualMessageList = memo(function VirtualMessageList({
 
   useEffect(() => cancelScheduledScroll, [cancelScheduledScroll]);
 
-  // Restore scroll position after loading older messages
   useEffect(() => {
+    return () => {
+      // Cancel pending debounced flush
+      if (snapshotFlushTimerRef.current) {
+        window.clearTimeout(snapshotFlushTimerRef.current);
+        snapshotFlushTimerRef.current = null;
+      }
+      // Immediate flush on unmount
+      if (latestSnapshotRef.current) {
+        const currentGroupId = resetKey.split(":")[0];
+        if (currentGroupId) {
+          onScrollSnapshot?.(latestSnapshotRef.current, currentGroupId);
+        }
+      }
+      if (scrollRef) {
+        scrollRef.current = null;
+      }
+    };
+  }, [onScrollSnapshot, resetKey, scrollRef]);
+
+  // Restore scroll position after loading older messages (prepend).
+  //
+  // The old implementation used a scrollEventSeq check to detect "user scrolled
+  // away during loading, so skip restore". But layout-triggered scroll events
+  // from the virtualizer (Loading indicator appearing, row re-measurement, etc.)
+  // also increment the seq, causing the restore to be falsely skipped — leaving
+  // scrollTop near 0 and immediately re-triggering onLoadMore in a loop.
+  //
+  // The arm/disarm gate (topLoadArmedRef) already prevents duplicate loads, so
+  // the seq check is unnecessary. Removed.
+  const restorePendingAnchor = useCallback(() => {
     if (isLoadingHistory) return;
     if (!pendingRestoreRef.current) return;
     const el = parentRef.current;
     if (!el) return;
 
+    const idleMs = performance.now() - lastScrollEventAtRef.current;
+    if (idleMs < 120) {
+      const remaining = Math.max(20, 120 - idleMs);
+      window.setTimeout(() => restorePendingAnchor(), remaining);
+      return;
+    }
+
     pendingRestoreRef.current = false;
+    pendingRestoreSeqRef.current = null;
 
     const anchorId = anchorMessageIdRef.current;
     const offsetInRow = anchorOffsetRef.current;
@@ -431,6 +496,10 @@ export const VirtualMessageList = memo(function VirtualMessageList({
     if (anchorId) {
       const idx = messages.findIndex((m) => String(m.id || "") === anchorId);
       if (idx >= 0) {
+        // Keep topLoad disarmed so the restored position (which may still be
+        // near the top) doesn't immediately re-trigger another load.
+        topLoadArmedRef.current = false;
+
         const offsetInfo = virtualizer.getOffsetForIndex(idx, "start");
         if (offsetInfo) {
           virtualizer.scrollToOffset(offsetInfo[0] + offsetInRow, { align: "start", behavior: "auto" });
@@ -440,6 +509,12 @@ export const VirtualMessageList = memo(function VirtualMessageList({
       }
     }
   }, [isLoadingHistory, messages, virtualizer]);
+
+  useEffect(() => {
+    if (isLoadingHistory) return;
+    if (!pendingRestoreRef.current) return;
+    restorePendingAnchor();
+  }, [isLoadingHistory, restorePendingAnchor]);
 
   return (
     <div
@@ -454,7 +529,7 @@ export const VirtualMessageList = memo(function VirtualMessageList({
       aria-label="Chat messages"
     >
       {messages.length === 0 ? (
-        isLoadingHistory ? (
+        (isLoadingHistory || hasMoreHistory) ? (
           <div className="flex flex-col items-center justify-center h-full text-center pb-20">
             <div
               className={`flex items-center gap-2 px-3 py-1.5 rounded-full shadow-md ${isDark ? "bg-slate-800 text-slate-300" : "bg-white text-gray-600"
@@ -501,7 +576,7 @@ export const VirtualMessageList = memo(function VirtualMessageList({
               height: `${virtualizer.getTotalSize()}px`,
               width: "100%",
               position: "relative",
-              contain: "strict",
+              contain: "layout paint",
             }}
           >
             {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -575,4 +650,12 @@ export const VirtualMessageList = memo(function VirtualMessageList({
       )}
     </div>
   );
+};
+
+export const VirtualMessageList = memo(function VirtualMessageList(props: VirtualMessageListProps) {
+  const resetKey = props.viewKey ?? props.groupId;
+  // No `key` prop — avoid full unmount/remount on group switch which causes
+  // a visible flash (virtualizer needs 1-2 frames to measure after mount).
+  // Internal state is reset via the resetKey useEffect instead.
+  return <VirtualMessageListInner {...props} resetKey={resetKey} />;
 });

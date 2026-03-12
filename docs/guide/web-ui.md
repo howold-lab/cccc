@@ -114,7 +114,7 @@ Access via the gear icon:
   - `Set Group Status` (operational, one-time only)
   - `Control Actor Runtimes` (operational, one-time only)
 - **One-time behavior**: One-time rules auto-complete after firing, then can be cleaned up from completed list.
-- **Engine Policies**: Configure built-in nudges (reply-required, attention ACK, unread), actor idle, keepalive, silence, and help nudges.
+- **Engine Policies**: Configure built-in nudges (reply-required, attention ACK, unread), actor idle, keepalive, quiet review, and help nudges.
 
 ### IM Bridge
 
@@ -165,15 +165,10 @@ CCCC_WEB_HOST=$(tailscale ip -4) cccc
 
 ### Security
 
-Always set `CCCC_WEB_TOKEN` when exposing the Web UI:
-
-```bash
-export CCCC_WEB_TOKEN="your-secret-token"
-cccc
-```
+Before exposing the Web UI beyond localhost, first create an **Admin Access Token** in **Settings > Web Access**.
 
 Then authenticate once to bootstrap the session cookie:
 
-- Open `http://YOUR_HOST:8848/?token=your-secret-token` (or `.../ui/?token=...`)
+- Open `http://YOUR_HOST:8848/?token=<access-token>` (or `.../ui/?token=...`) using an Access Token created in Web Access.
 
 After that, you can use the Web UI normally without `?token=...`.

@@ -12,7 +12,7 @@ import re
 import threading
 from typing import Any, Deque, Dict, Optional, Tuple
 
-from ...contracts.v1 import DaemonError, DaemonResponse, SpaceBinding
+from ...contracts.v1 import DaemonError, DaemonResponse, SpaceBinding, SpaceLane, SystemNotifyData
 from ...kernel.group import load_group
 from ...kernel.ledger import append_event
 from ...kernel.permissions import require_group_permission
@@ -32,10 +32,16 @@ from .group_space_provider import (
 )
 from ...providers.notebooklm.errors import NotebookLMProviderError
 from ...providers.notebooklm.health import notebooklm_health_check, parse_notebooklm_auth_json
+from ..messaging.delivery import emit_system_notify
 from .notebooklm_auth_flow import (
     cancel_notebooklm_auth_flow,
     get_notebooklm_auth_flow_status,
     start_notebooklm_auth_flow,
+)
+from .group_space_memory_sync import (
+    read_memory_notebooklm_sync_state,
+    summarize_memory_notebooklm_sync,
+    sync_memory_daily_files,
 )
 from .group_space_sync import group_space_local_file_policy, read_group_space_sync_state, sync_group_space_files
 from .group_space_projection import sync_group_space_projection
@@ -45,6 +51,7 @@ from .group_space_store import (
     describe_space_provider_credential_state,
     enqueue_space_job,
     get_space_binding,
+    get_space_bindings,
     get_space_job,
     get_space_provider_state,
     list_space_bindings,
@@ -52,13 +59,15 @@ from .group_space_store import (
     load_space_provider_secrets,
     set_space_binding_unbound,
     set_space_provider_state,
+    space_queue_summaries,
     space_queue_summary,
     update_space_provider_secrets,
     upsert_space_binding,
 )
 
 _SPACE_PROVIDER_IDS = {"notebooklm"}
-_SPACE_JOB_KINDS = {"context_sync", "resource_ingest"}
+_SPACE_LANES = {"work", "memory"}
+_SPACE_JOB_KINDS = {"context_sync", "resource_ingest", "memory_daily_sync"}
 _SPACE_JOB_STATES = {"pending", "running", "succeeded", "failed", "canceled"}
 _SPACE_JOB_ACTIONS = {"list", "retry", "cancel"}
 _SPACE_SYNC_ACTIONS = {"status", "run"}
@@ -109,6 +118,29 @@ _GENERATE_LANES: Dict[str, "_GenerateLaneState"] = {}
 _GENERATE_LANES_LOCK = threading.Lock()
 _DEFAULT_QUERY_RETRY_AFTER_SECONDS = 2
 _DEFAULT_GENERATE_RETRY_AFTER_SECONDS = 5
+
+
+def _artifact_wait_guidance_text() -> str:
+    return (
+        "Do not poll in a loop. Wait for system.notify, continue other work or standby, "
+        "and only set one one-shot reminder if this result blocks delivery and nothing else can proceed."
+    )
+
+
+def _artifact_notify_recommended_action(*, ok: bool, output_path: str) -> str:
+    if ok:
+        if str(output_path or "").strip():
+            return "use_output_path"
+        return "download_or_list_artifact"
+    return "report_failure_or_fallback"
+
+
+def _artifact_completion_guidance(*, ok: bool, output_path: str) -> str:
+    if ok:
+        if str(output_path or "").strip():
+            return "Artifact is ready. Use output_path from this notify context directly and do not poll again."
+        return "Artifact is ready. If you still need the file, do one direct fetch step and do not poll again."
+    return "Artifact generation failed. Stop polling, switch to a fallback path, or report the failure clearly."
 _DEFAULT_ASYNC_GENERATE_WAIT_TIMEOUT_SECONDS = 7200.0
 
 
@@ -145,6 +177,15 @@ def _provider_or_error(raw: Any) -> str:
     if provider not in _SPACE_PROVIDER_IDS:
         raise ValueError(f"unsupported provider: {provider}")
     return provider
+
+
+def _lane_or_error(raw: Any, *, required: bool = False) -> str:
+    lane = str(raw or "").strip().lower()
+    if not lane:
+        return "work" if required else ""
+    if lane not in _SPACE_LANES:
+        raise ValueError(f"invalid lane: {lane}")
+    return lane
 
 
 def _kind_or_error(raw: Any) -> str:
@@ -393,7 +434,7 @@ def _require_group(group_id: str):
     return group
 
 
-def _auto_notebook_title_for_group(group: Any) -> str:
+def _auto_notebook_title_for_group(group: Any, *, lane: str) -> str:
     group_title = ""
     try:
         group_title = str(group.doc.get("title") or "").strip()
@@ -401,14 +442,16 @@ def _auto_notebook_title_for_group(group: Any) -> str:
         group_title = ""
     if not group_title:
         group_title = str(getattr(group, "group_id", "") or "").strip() or "Group"
-    # NotebookLM title length is not strictly documented; keep a conservative cap.
+    if lane == "memory":
+        return f"CCCC · {group_title[:80]} · Memory"
     return f"CCCC · {group_title[:96]}"
 
 
-def _default_binding(group_id: str, provider: str) -> Dict[str, Any]:
+def _default_binding(group_id: str, provider: str, lane: str) -> Dict[str, Any]:
     return SpaceBinding(
         group_id=str(group_id or "").strip(),
         provider=provider,
+        lane=str(lane or "work"),
         remote_space_id="",
         bound_by="",
         status="unbound",
@@ -489,11 +532,12 @@ def _async_generate_wait_timeout_seconds(request_timeout: float) -> float:
     return max(float(request_timeout or 0.0), float(floor))
 
 
-def _space_lane_key(*, group_id: str, provider: str, remote_space_id: str) -> str:
+def _space_lane_key(*, group_id: str, provider: str, lane: str, remote_space_id: str) -> str:
     gid = str(group_id or "").strip()
     pid = str(provider or "notebooklm").strip() or "notebooklm"
+    lid = str(lane or "work").strip() or "work"
     rid = str(remote_space_id or "").strip()
-    return f"{gid}:{pid}:{rid}"
+    return f"{gid}:{pid}:{lid}:{rid}"
 
 
 def _query_lane_snapshot(*, active: int, limit: int) -> Dict[str, Any]:
@@ -524,6 +568,129 @@ def _release_query_slot(*, lane_key: str) -> None:
             _QUERY_ACTIVE_BY_LANE.pop(lane_key, None)
             return
         _QUERY_ACTIVE_BY_LANE[lane_key] = active - 1
+
+
+def _latest_context_sync_at(*, group_id: str, provider: str) -> str:
+    fallback = ""
+    for item in list_space_jobs(group_id=group_id, provider=provider, lane="work", state="", limit=20):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "").strip() != "context_sync":
+            continue
+        updated_at = str(item.get("updated_at") or "").strip()
+        if not updated_at:
+            continue
+        if not fallback:
+            fallback = updated_at
+        if str(item.get("state") or "").strip() == "succeeded":
+            return updated_at
+    return fallback
+
+
+def _requested_query_source_ids(options: Any) -> List[str]:
+    if not isinstance(options, dict):
+        return []
+    raw = options.get("source_ids")
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for item in raw:
+        sid = str(item or "").strip()
+        if sid and sid not in out:
+            out.append(sid)
+    return out
+
+
+def _referenced_query_source_ids(references: Any) -> List[str]:
+    refs = references if isinstance(references, list) else []
+    out: List[str] = []
+    for item in refs:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("source_id") or "").strip()
+        if sid and sid not in out:
+            out.append(sid)
+    return out
+
+
+def _explicit_source_basis_hint(*, requested_source_ids: List[str], referenced_source_ids: List[str]) -> str:
+    if requested_source_ids and referenced_source_ids:
+        requested = set(requested_source_ids)
+        referenced = set(referenced_source_ids)
+        return "requested_sources_hit" if referenced.issubset(requested) else "requested_sources_mixed"
+    if requested_source_ids:
+        return "requested_sources_only"
+    if referenced_source_ids:
+        return "referenced_sources_present"
+    return ""
+
+
+def _build_space_query_diagnostics(
+    *,
+    group_id: str,
+    provider: str,
+    lane: str,
+    binding: Dict[str, Any],
+    references: Any,
+    options: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    refs = list(references) if isinstance(references, list) else []
+    requested_source_ids = _requested_query_source_ids(options)
+    referenced_source_ids = _referenced_query_source_ids(refs)
+    out: Dict[str, Any] = {
+        "binding_status": str(binding.get("status") or ""),
+        "reference_count": len(refs),
+    }
+    if requested_source_ids:
+        out["requested_source_ids"] = requested_source_ids
+    if referenced_source_ids:
+        out["referenced_source_ids"] = referenced_source_ids
+    if requested_source_ids and referenced_source_ids:
+        out["references_match_requested"] = set(referenced_source_ids).issubset(set(requested_source_ids))
+    explicit_hint = _explicit_source_basis_hint(
+        requested_source_ids=requested_source_ids,
+        referenced_source_ids=referenced_source_ids,
+    )
+    if lane == "work":
+        latest_context_sync_at = _latest_context_sync_at(group_id=group_id, provider=provider)
+        sync_state = read_group_space_sync_state(group_id)
+        has_sync_state = bool(sync_state.get("available")) or any(
+            key in sync_state for key in ("remote_sources", "materialized_sources")
+        )
+        materialized_sources = None
+        if has_sync_state:
+            out["remote_sources"] = int(sync_state.get("remote_sources") or 0)
+            materialized_sources = int(sync_state.get("materialized_sources") or 0)
+            out["materialized_sources"] = materialized_sources
+        if latest_context_sync_at:
+            out["latest_context_sync_at"] = latest_context_sync_at
+        if explicit_hint:
+            out["source_basis_hint"] = explicit_hint
+        elif materialized_sources is not None and materialized_sources > 0 and latest_context_sync_at:
+            out["source_basis_hint"] = "mixed"
+        elif materialized_sources is not None and materialized_sources > 0:
+            out["source_basis_hint"] = "materialized_sources_present"
+        elif latest_context_sync_at:
+            out["source_basis_hint"] = "context_sync_only"
+        else:
+            out["source_basis_hint"] = "unknown"
+        return out
+
+    remote_space_id = str(binding.get("remote_space_id") or "")
+    memory_sync = summarize_memory_notebooklm_sync(group_id, remote_space_id=remote_space_id)
+    last_success_at = str(memory_sync.get("last_success_at") or "").strip()
+    pending_files = int(memory_sync.get("pending_files") or 0)
+    failed_files = int(memory_sync.get("failed_files") or 0)
+    running_files = int(memory_sync.get("running_files") or 0)
+    blocked_files = int(memory_sync.get("blocked_files") or 0)
+    if last_success_at:
+        out["memory_last_success_at"] = last_success_at
+    out["memory_pending_files"] = pending_files
+    out["memory_failed_files"] = failed_files
+    out["source_basis_hint"] = explicit_hint or (
+        "memory_manifest_only" if (last_success_at or pending_files or failed_files or running_files or blocked_files) else "unknown"
+    )
+    return out
 
 
 def _generate_lane_snapshot(
@@ -608,10 +775,18 @@ def _emit_artifact_async_notify(
         if group is None:
             return
         title = "Group Space artifact ready" if ok else "Group Space artifact failed"
+        recommended_next_action = _artifact_notify_recommended_action(ok=ok, output_path=output_path)
+        completion_guidance = _artifact_completion_guidance(ok=ok, output_path=output_path)
         if ok:
-            message = f"{kind} generation completed."
+            if str(output_path or "").strip():
+                message = f"{kind} generation completed. Use output_path from context; no extra polling is needed."
+            else:
+                message = f"{kind} generation completed. No extra polling is needed."
         else:
-            message = f"{kind} generation failed: {error_message or error_code or 'unknown error'}"
+            message = (
+                f"{kind} generation failed: {error_message or error_code or 'unknown error'}. "
+                "Stop polling and switch to a fallback or report the failure."
+            )
         context = {
             "group_id": str(group_id or ""),
             "provider": str(provider or "notebooklm"),
@@ -619,24 +794,22 @@ def _emit_artifact_async_notify(
             "task_id": str(task_id or ""),
             "status": str(status or ""),
             "output_path": str(output_path or ""),
+            "completion_signal": "system.notify",
+            "polling_discouraged": True,
+            "recommended_next_action": recommended_next_action,
+            "completion_guidance": completion_guidance,
             "error": {"code": str(error_code or ""), "message": str(error_message or "")},
         }
-        _ = append_event(
-            group.ledger_path,
-            kind="system.notify",
-            group_id=group.group_id,
-            scope_key="",
-            by="system",
-            data={
-                "kind": ("info" if ok else "error"),
-                "priority": ("normal" if ok else "high"),
-                "title": title,
-                "message": message,
-                "target_actor_id": _notify_target_from_by(by),
-                "requires_ack": False,
-                "context": context,
-            },
+        notify = SystemNotifyData(
+            kind=("info" if ok else "error"),
+            priority=("normal" if ok else "high"),
+            title=title,
+            message=message,
+            target_actor_id=_notify_target_from_by(by),
+            requires_ack=False,
+            context=context,
         )
+        emit_system_notify(group, by="system", notify=notify)
     except Exception as e:
         _LOG.warning("group-space async artifact notify failed group=%s: %s", group_id, e)
 
@@ -1019,17 +1192,22 @@ def handle_group_space_status(args: Dict[str, Any]) -> DaemonResponse:
         provider = _provider_or_error(provider_raw)
         provider_state = get_space_provider_state(provider)
         provider_state.update(_provider_runtime_readiness(provider))
-        binding = get_space_binding(group.group_id, provider=provider) or _default_binding(group.group_id, provider)
-        summary = space_queue_summary(group_id=group.group_id, provider=provider)
+        bindings = get_space_bindings(group.group_id, provider=provider)
+        summary = space_queue_summaries(group_id=group.group_id, provider=provider)
         sync_state = read_group_space_sync_state(group.group_id)
+        memory_binding = bindings.get("memory") if isinstance(bindings.get("memory"), dict) else {}
         return DaemonResponse(
             ok=True,
             result={
                 "group_id": group.group_id,
                 "provider": provider_state,
-                "binding": binding,
+                "bindings": bindings,
                 "queue_summary": summary,
                 "sync": sync_state,
+                "memory_sync": summarize_memory_notebooklm_sync(
+                    group.group_id,
+                    remote_space_id=str(memory_binding.get("remote_space_id") or ""),
+                ),
             },
         )
     except LookupError as e:
@@ -1053,7 +1231,7 @@ def handle_group_space_spaces(args: Dict[str, Any]) -> DaemonResponse:
         provider = _provider_or_error(provider_raw)
         spaces_result = provider_list_spaces(provider)
         spaces = spaces_result.get("spaces") if isinstance(spaces_result.get("spaces"), list) else []
-        binding = get_space_binding(group.group_id, provider=provider) or _default_binding(group.group_id, provider)
+        bindings = get_space_bindings(group.group_id, provider=provider)
         provider_state = get_space_provider_state(provider)
         provider_state.update(_provider_runtime_readiness(provider))
         return DaemonResponse(
@@ -1062,7 +1240,7 @@ def handle_group_space_spaces(args: Dict[str, Any]) -> DaemonResponse:
                 "group_id": group.group_id,
                 "provider": provider,
                 "provider_state": provider_state,
-                "binding": binding,
+                "bindings": bindings,
                 "spaces": spaces,
             },
         )
@@ -1083,6 +1261,7 @@ def handle_group_space_bind(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     by = str(args.get("by") or "user").strip() or "user"
     provider_raw = args.get("provider")
+    lane_raw = args.get("lane")
     action = str(args.get("action") or "bind").strip().lower() or "bind"
     remote_space_id = str(args.get("remote_space_id") or "").strip()
     if action not in {"bind", "unbind"}:
@@ -1091,13 +1270,14 @@ def handle_group_space_bind(args: Dict[str, Any]) -> DaemonResponse:
         group = _require_group(group_id)
         _assert_write_permission(group, by=by)
         provider = _provider_or_error(provider_raw)
+        lane = _lane_or_error(lane_raw, required=True)
         sync_result: Optional[Dict[str, Any]] = None
         if action == "bind":
             if not remote_space_id:
                 try:
                     created = provider_create_space(
                         provider,
-                        title=_auto_notebook_title_for_group(group),
+                        title=_auto_notebook_title_for_group(group, lane=lane),
                     )
                     remote_space_id = str(created.get("remote_space_id") or "").strip()
                     if not remote_space_id:
@@ -1107,6 +1287,7 @@ def handle_group_space_bind(args: Dict[str, Any]) -> DaemonResponse:
             binding = upsert_space_binding(
                 group.group_id,
                 provider=provider,
+                lane=lane,
                 remote_space_id=remote_space_id,
                 by=by,
                 status="bound",
@@ -1115,11 +1296,14 @@ def handle_group_space_bind(args: Dict[str, Any]) -> DaemonResponse:
                 provider,
                 enabled=True,
                 mode="degraded",
-                last_error="synchronizing group space after bind",
+                last_error=f"binding {lane} lane",
                 touch_health=True,
             )
             try:
-                sync_result = sync_group_space_files(group.group_id, provider=provider, force=True, by=by)
+                if lane == "work":
+                    sync_result = sync_group_space_files(group.group_id, provider=provider, force=True, by=by)
+                else:
+                    sync_result = sync_memory_daily_files(group.group_id, provider=provider, force=False, by=by)
             except Exception as e:
                 sync_result = {"ok": False, "code": "space_sync_failed", "message": str(e)}
             if isinstance(sync_result, dict) and bool(sync_result.get("ok")):
@@ -1131,7 +1315,7 @@ def handle_group_space_bind(args: Dict[str, Any]) -> DaemonResponse:
                     touch_health=True,
                 )
             else:
-                last_error = str((sync_result or {}).get("message") or "group space sync failed")
+                last_error = str((sync_result or {}).get("message") or f"{lane} lane sync failed")
                 provider_state = set_space_provider_state(
                     provider,
                     enabled=True,
@@ -1140,7 +1324,7 @@ def handle_group_space_bind(args: Dict[str, Any]) -> DaemonResponse:
                     touch_health=True,
                 )
         else:
-            binding = set_space_binding_unbound(group.group_id, provider=provider, by=by)
+            binding = set_space_binding_unbound(group.group_id, provider=provider, lane=lane, by=by)
             has_any_bound = any(
                 str(item.get("status") or "") == "bound" and str(item.get("remote_space_id") or "").strip()
                 for item in list_space_bindings(provider)
@@ -1155,17 +1339,24 @@ def handle_group_space_bind(args: Dict[str, Any]) -> DaemonResponse:
                     last_error="",
                     touch_health=True,
                 )
-        summary = space_queue_summary(group_id=group.group_id, provider=provider)
+        bindings = get_space_bindings(group.group_id, provider=provider)
+        summary = space_queue_summaries(group_id=group.group_id, provider=provider)
         _sync_projection_best_effort(group.group_id, provider)
         sync_state = read_group_space_sync_state(group.group_id)
+        memory_binding = bindings.get("memory") if isinstance(bindings.get("memory"), dict) else {}
         return DaemonResponse(
             ok=True,
             result={
                 "group_id": group.group_id,
+                "lane": lane,
                 "provider": provider_state,
-                "binding": binding,
+                "bindings": bindings,
                 "queue_summary": summary,
                 "sync": sync_state,
+                "memory_sync": summarize_memory_notebooklm_sync(
+                    group.group_id,
+                    remote_space_id=str(memory_binding.get("remote_space_id") or ""),
+                ),
                 "sync_result": sync_result if isinstance(sync_result, dict) else {},
             },
         )
@@ -1188,6 +1379,7 @@ def handle_group_space_ingest(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     by = str(args.get("by") or "user").strip() or "user"
     provider_raw = args.get("provider")
+    lane_raw = args.get("lane")
     kind_raw = args.get("kind")
     payload_raw = args.get("payload")
     idempotency_key = str(args.get("idempotency_key") or "").strip()
@@ -1195,9 +1387,12 @@ def handle_group_space_ingest(args: Dict[str, Any]) -> DaemonResponse:
         group = _require_group(group_id)
         _assert_write_permission(group, by=by)
         provider = _provider_or_error(provider_raw)
+        lane = _lane_or_error(lane_raw, required=True)
+        if lane != "work":
+            return _error("space_lane_unsupported", "group_space_ingest is supported only for lane=work")
         kind = _kind_or_error(kind_raw)
         payload = payload_raw if isinstance(payload_raw, dict) else {}
-        binding = get_space_binding(group.group_id, provider=provider)
+        binding = get_space_binding(group.group_id, provider=provider, lane=lane)
         if not isinstance(binding, dict):
             return _error("space_binding_missing", "group is not bound to provider")
         if str(binding.get("status") or "") != "bound":
@@ -1211,6 +1406,7 @@ def handle_group_space_ingest(args: Dict[str, Any]) -> DaemonResponse:
         job, deduped = enqueue_space_job(
             group_id=group.group_id,
             provider=provider,
+            lane=lane,
             remote_space_id=remote_space_id,
             kind=kind,
             payload=payload,
@@ -1220,17 +1416,30 @@ def handle_group_space_ingest(args: Dict[str, Any]) -> DaemonResponse:
         if not deduped:
             final_job = execute_space_job(str(job.get("job_id") or ""))
         _sync_projection_best_effort(group.group_id, provider)
+        ingest_result = final_job.get("result") if isinstance(final_job.get("result"), dict) else {}
+        source_id = str(ingest_result.get("source_id") or "").strip()
+        source_ids = ingest_result.get("source_ids") if isinstance(ingest_result.get("source_ids"), list) else []
+        normalized_source_ids = [str(item or "").strip() for item in source_ids if str(item or "").strip()]
+        if source_id and source_id not in normalized_source_ids:
+            normalized_source_ids = [source_id, *normalized_source_ids]
+        response_payload = {
+            "group_id": group.group_id,
+            "lane": lane,
+            "job_id": str(final_job.get("job_id") or ""),
+            "accepted": True,
+            "deduped": bool(deduped),
+            "job": final_job,
+            "ingest_result": ingest_result,
+            "queue_summary": space_queue_summary(group_id=group.group_id, provider=provider, lane=lane),
+            "provider_mode": str(get_space_provider_state(provider).get("mode") or "disabled"),
+        }
+        if source_id:
+            response_payload["source_id"] = source_id
+        if normalized_source_ids:
+            response_payload["source_ids"] = normalized_source_ids
         return DaemonResponse(
             ok=True,
-            result={
-                "group_id": group.group_id,
-                "job_id": str(final_job.get("job_id") or ""),
-                "accepted": True,
-                "deduped": bool(deduped),
-                "job": final_job,
-                "queue_summary": space_queue_summary(group_id=group.group_id, provider=provider),
-                "provider_mode": str(get_space_provider_state(provider).get("mode") or "disabled"),
-            },
+            result=response_payload,
         )
     except LookupError as e:
         return _error("group_not_found", str(e))
@@ -1248,6 +1457,7 @@ def handle_group_space_ingest(args: Dict[str, Any]) -> DaemonResponse:
 def handle_group_space_query(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     provider_raw = args.get("provider")
+    lane_raw = args.get("lane")
     query_text = str(args.get("query") or "").strip()
     options_raw = args.get("options")
     if not query_text:
@@ -1258,7 +1468,8 @@ def handle_group_space_query(args: Dict[str, Any]) -> DaemonResponse:
         options = _normalize_query_options(options_raw)
         group = _require_group(group_id)
         provider = _provider_or_error(provider_raw)
-        binding = get_space_binding(group.group_id, provider=provider)
+        lane = _lane_or_error(lane_raw, required=True)
+        binding = get_space_binding(group.group_id, provider=provider, lane=lane)
         if not isinstance(binding, dict):
             return _error("space_binding_missing", "group is not bound to provider")
         remote_space_id = str(binding.get("remote_space_id") or "").strip()
@@ -1267,22 +1478,33 @@ def handle_group_space_query(args: Dict[str, Any]) -> DaemonResponse:
         provider_state = get_space_provider_state(provider)
         mode = str(provider_state.get("mode") or "disabled")
         enabled = bool(provider_state.get("enabled"))
+        disabled_diag = _build_space_query_diagnostics(
+            group_id=group.group_id,
+            provider=provider,
+            lane=lane,
+            binding=binding,
+            references=[],
+            options=options,
+        )
         if (not enabled) or mode == "disabled":
             return DaemonResponse(
                 ok=True,
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": lane,
                     "provider_mode": "disabled",
                     "degraded": True,
                     "answer": "",
                     "references": [],
+                    **disabled_diag,
                     "error": {"code": "space_provider_disabled", "message": "provider is disabled"},
                 },
             )
         query_lane_key = _space_lane_key(
             group_id=group.group_id,
             provider=provider,
+            lane=lane,
             remote_space_id=remote_space_id,
         )
         query_ok, query_lane = _acquire_query_slot(lane_key=query_lane_key)
@@ -1299,16 +1521,27 @@ def handle_group_space_query(args: Dict[str, Any]) -> DaemonResponse:
             query=query_text,
             options=dict(options),
         )
+        references = list(result.get("references") or [])
+        query_diag = _build_space_query_diagnostics(
+            group_id=group.group_id,
+            provider=provider,
+            lane=lane,
+            binding=binding,
+            references=references,
+            options=options,
+        )
         provider_after = get_space_provider_state(provider)
         return DaemonResponse(
             ok=True,
             result={
                 "group_id": group.group_id,
                 "provider": provider,
+                "lane": lane,
                 "provider_mode": str(provider_after.get("mode") or mode),
                 "degraded": bool(result.get("degraded")),
                 "answer": str(result.get("answer") or ""),
-                "references": list(result.get("references") or []),
+                "references": references,
+                **query_diag,
                 "error": result.get("error"),
             },
         )
@@ -1330,14 +1563,16 @@ def handle_group_space_sources(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     by = str(args.get("by") or "user").strip() or "user"
     provider_raw = args.get("provider")
+    lane_raw = args.get("lane")
     action_raw = args.get("action")
     source_id = str(args.get("source_id") or "").strip()
     new_title = str(args.get("new_title") or "").strip()
     try:
         group = _require_group(group_id)
         provider = _provider_or_error(provider_raw)
+        lane = _lane_or_error(lane_raw, required=True)
         action = _source_action_or_error(action_raw)
-        binding = get_space_binding(group.group_id, provider=provider)
+        binding = get_space_binding(group.group_id, provider=provider, lane=lane)
         if not isinstance(binding, dict):
             return _error("space_binding_missing", "group is not bound to provider")
         remote_space_id = str(binding.get("remote_space_id") or "").strip()
@@ -1357,6 +1592,7 @@ def handle_group_space_sources(args: Dict[str, Any]) -> DaemonResponse:
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": lane,
                     "provider_mode": provider_mode,
                     "binding": binding,
                     "action": action,
@@ -1380,6 +1616,7 @@ def handle_group_space_sources(args: Dict[str, Any]) -> DaemonResponse:
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": lane,
                     "provider_mode": str(get_space_provider_state(provider).get("mode") or provider_mode),
                     "binding": binding,
                     "action": action,
@@ -1402,6 +1639,7 @@ def handle_group_space_sources(args: Dict[str, Any]) -> DaemonResponse:
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": lane,
                     "provider_mode": str(get_space_provider_state(provider).get("mode") or provider_mode),
                     "binding": binding,
                     "action": action,
@@ -1420,6 +1658,7 @@ def handle_group_space_sources(args: Dict[str, Any]) -> DaemonResponse:
             result={
                 "group_id": group.group_id,
                 "provider": provider,
+                "lane": lane,
                 "provider_mode": str(get_space_provider_state(provider).get("mode") or provider_mode),
                 "binding": binding,
                 "action": action,
@@ -1448,6 +1687,7 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     by = str(args.get("by") or "user").strip() or "user"
     provider_raw = args.get("provider")
+    lane_raw = args.get("lane")
     action_raw = args.get("action")
     kind_raw = args.get("kind")
     options_raw = args.get("options")
@@ -1466,8 +1706,11 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
     try:
         group = _require_group(group_id)
         provider = _provider_or_error(provider_raw)
+        space_lane = _lane_or_error(lane_raw, required=True)
+        if space_lane != "work":
+            return _error("space_lane_unsupported", "group_space_artifact is supported only for lane=work")
         action = _artifact_action_or_error(action_raw)
-        binding = get_space_binding(group.group_id, provider=provider)
+        binding = get_space_binding(group.group_id, provider=provider, lane=space_lane)
         if not isinstance(binding, dict):
             return _error("space_binding_missing", "group is not bound to provider")
         remote_space_id = str(binding.get("remote_space_id") or "").strip()
@@ -1488,6 +1731,7 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": space_lane,
                     "provider_mode": provider_mode,
                     "binding": binding,
                     "action": action,
@@ -1527,6 +1771,7 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": space_lane,
                     "provider_mode": str(get_space_provider_state(provider).get("mode") or provider_mode),
                     "binding": binding,
                     "action": action,
@@ -1541,6 +1786,7 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
         lane_key = _space_lane_key(
             group_id=group.group_id,
             provider=provider,
+            lane=space_lane,
             remote_space_id=remote_space_id,
         )
         gen_req = _GenerateRequest(
@@ -1572,6 +1818,7 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": space_lane,
                     "provider_mode": str(get_space_provider_state(provider).get("mode") or provider_mode),
                     "binding": binding,
                     "action": action,
@@ -1581,6 +1828,11 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
                     "wait": False,
                     "queued": True,
                     "accepted": True,
+                    "background": True,
+                    "completion_signal": "system.notify",
+                    "recommended_next_action": "wait_for_notify",
+                    "polling_discouraged": True,
+                    "wait_guidance": _artifact_wait_guidance_text(),
                     "saved_to_space": False,
                     "output_path": "",
                     "generate_result": {},
@@ -1598,6 +1850,7 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": space_lane,
                     "provider_mode": str(get_space_provider_state(provider).get("mode") or provider_mode),
                     "binding": binding,
                     "action": action,
@@ -1607,6 +1860,11 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
                     "wait": False,
                     "queued": False,
                     "accepted": True,
+                    "background": True,
+                    "completion_signal": "system.notify",
+                    "recommended_next_action": "wait_for_notify",
+                    "polling_discouraged": True,
+                    "wait_guidance": _artifact_wait_guidance_text(),
                     "saved_to_space": False,
                     "output_path": "",
                     "generate_result": {},
@@ -1690,6 +1948,7 @@ def handle_group_space_artifact(args: Dict[str, Any]) -> DaemonResponse:
             result={
                 "group_id": group.group_id,
                 "provider": provider,
+                "lane": space_lane,
                 "provider_mode": str(get_space_provider_state(provider).get("mode") or provider_mode),
                 "binding": binding,
                 "action": action,
@@ -1733,11 +1992,13 @@ def handle_group_space_jobs(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     by = str(args.get("by") or "user").strip() or "user"
     provider_raw = args.get("provider")
+    lane_raw = args.get("lane")
     action_raw = args.get("action")
     state_filter = str(args.get("state") or "").strip()
     try:
         group = _require_group(group_id)
         provider = _provider_or_error(provider_raw)
+        lane = _lane_or_error(lane_raw, required=True)
         action = _action_or_error(action_raw)
         if action == "list":
             if state_filter and state_filter not in _SPACE_JOB_STATES:
@@ -1746,6 +2007,7 @@ def handle_group_space_jobs(args: Dict[str, Any]) -> DaemonResponse:
             jobs = list_space_jobs(
                 group_id=group.group_id,
                 provider=provider,
+                lane=lane,
                 state=state_filter,
                 limit=limit,
             )
@@ -1754,8 +2016,9 @@ def handle_group_space_jobs(args: Dict[str, Any]) -> DaemonResponse:
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
+                    "lane": lane,
                     "jobs": jobs,
-                    "queue_summary": space_queue_summary(group_id=group.group_id, provider=provider),
+                    "queue_summary": space_queue_summary(group_id=group.group_id, provider=provider, lane=lane),
                 },
             )
 
@@ -1769,6 +2032,8 @@ def handle_group_space_jobs(args: Dict[str, Any]) -> DaemonResponse:
         if str(job.get("group_id") or "") != group.group_id:
             return _error("space_job_not_found", f"job not found: {job_id}")
         if str(job.get("provider") or "") != provider:
+            return _error("space_job_not_found", f"job not found: {job_id}")
+        if str(job.get("lane") or "") != lane:
             return _error("space_job_not_found", f"job not found: {job_id}")
 
         if action == "retry":
@@ -1784,8 +2049,9 @@ def handle_group_space_jobs(args: Dict[str, Any]) -> DaemonResponse:
             result={
                 "group_id": group.group_id,
                 "provider": provider,
+                "lane": lane,
                 "job": updated,
-                "queue_summary": space_queue_summary(group_id=group.group_id, provider=provider),
+                "queue_summary": space_queue_summary(group_id=group.group_id, provider=provider, lane=lane),
             },
         )
     except LookupError as e:
@@ -1813,23 +2079,47 @@ def handle_group_space_sync(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     by = str(args.get("by") or "user").strip() or "user"
     provider_raw = args.get("provider")
+    lane_raw = args.get("lane")
     action_raw = args.get("action")
     force = bool(args.get("force") is True)
     try:
         group = _require_group(group_id)
         provider = _provider_or_error(provider_raw)
+        lane = _lane_or_error(lane_raw, required=True)
         action = _sync_action_or_error(action_raw)
         if action == "status":
+            if lane == "work":
+                return DaemonResponse(
+                    ok=True,
+                    result={
+                        "group_id": group.group_id,
+                        "provider": provider,
+                        "lane": lane,
+                        "sync": read_group_space_sync_state(group.group_id),
+                    },
+                )
+            binding = get_space_binding(group.group_id, provider=provider, lane="memory") or {}
             return DaemonResponse(
                 ok=True,
                 result={
                     "group_id": group.group_id,
                     "provider": provider,
-                    "sync": read_group_space_sync_state(group.group_id),
+                    "lane": lane,
+                    "sync": read_memory_notebooklm_sync_state(
+                        group.group_id,
+                        remote_space_id=str(binding.get("remote_space_id") or ""),
+                    ),
+                    "summary": summarize_memory_notebooklm_sync(
+                        group.group_id,
+                        remote_space_id=str(binding.get("remote_space_id") or ""),
+                    ),
                 },
             )
         _assert_write_permission(group, by=by)
-        result = sync_group_space_files(group.group_id, provider=provider, force=force, by=by)
+        if lane == "work":
+            result = sync_group_space_files(group.group_id, provider=provider, force=force, by=by)
+        else:
+            result = sync_memory_daily_files(group.group_id, provider=provider, force=force, by=by)
         _sync_projection_best_effort(group.group_id, provider)
         if not bool(result.get("ok")):
             return _error(
@@ -1837,12 +2127,18 @@ def handle_group_space_sync(args: Dict[str, Any]) -> DaemonResponse:
                 str(result.get("message") or "group space sync failed"),
                 details=result,
             )
+        binding = get_space_binding(group.group_id, provider=provider, lane="memory") or {}
+        sync_payload = read_group_space_sync_state(group.group_id) if lane == "work" else read_memory_notebooklm_sync_state(
+            group.group_id,
+            remote_space_id=str(binding.get("remote_space_id") or ""),
+        )
         return DaemonResponse(
             ok=True,
             result={
                 "group_id": group.group_id,
                 "provider": provider,
-                "sync": read_group_space_sync_state(group.group_id),
+                "lane": lane,
+                "sync": sync_payload,
                 "sync_result": result,
             },
         )

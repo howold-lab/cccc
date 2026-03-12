@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import { Actor, GroupDoc, Theme } from "../../types";
-import { getGroupStatus, getGroupStatusLight } from "../../utils/groupStatus";
+import { getGroupStatusUnified } from "../../utils/groupStatus";
 import { classNames } from "../../utils/classNames";
 import { ThemeToggleCompact } from "../ThemeToggle";
 import { LanguageSwitcher } from "../LanguageSwitcher";
@@ -28,13 +28,8 @@ export interface AppHeaderProps {
   actors: Actor[];
   sseStatus: "connected" | "connecting" | "disconnected";
   busy: string;
-  errorMsg: string;
-  notice: { message: string; actionLabel?: string; actionId?: string } | null;
-  onDismissError: () => void;
-  onNoticeAction: (actionId: string) => void;
-  onDismissNotice: () => void;
   onOpenSidebar: () => void;
-  onOpenGroupEdit: () => void;
+  onOpenGroupEdit?: () => void;
   onOpenSearch: () => void;
   onOpenContext: () => void;
   onStartGroup: () => void;
@@ -54,11 +49,6 @@ export function AppHeader({
   selectedGroupRunning,
   actors,
   busy,
-  errorMsg,
-  notice,
-  onDismissError,
-  onNoticeAction,
-  onDismissNotice,
   onOpenSidebar,
   onOpenGroupEdit,
   onOpenSearch,
@@ -79,7 +69,7 @@ export function AppHeader({
         <button
           className={classNames(
             "md:hidden p-2 -ml-2 rounded-xl transition-all glass-btn",
-            isDark ? "text-slate-400 hover:text-white" : "text-gray-500 hover:text-gray-900"
+            "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
           )}
           onClick={onOpenSidebar}
           aria-label={t('openSidebar')}
@@ -89,7 +79,7 @@ export function AppHeader({
 
         <div className="min-w-0 flex flex-col">
           <div className="flex items-center gap-2">
-            <h1 className={`text-sm font-semibold truncate ${isDark ? "text-slate-100" : "text-gray-900"}`}>
+            <h1 className="text-sm font-semibold truncate text-[var(--color-text-primary)]">
               {groupDoc?.title || (selectedGroupId ? selectedGroupId : t('selectGroup'))}
             </h1>
             {selectedGroupId && sseStatus !== "connected" && (
@@ -104,15 +94,13 @@ export function AppHeader({
             {selectedGroupId &&
               groupDoc &&
               (() => {
-                const status = isDark
-                  ? getGroupStatus(selectedGroupRunning, groupDoc.state)
-                  : getGroupStatusLight(selectedGroupRunning, groupDoc.state);
+                const status = getGroupStatusUnified(selectedGroupRunning, groupDoc.state);
                 return (
                   <span
                     className={classNames(
                       "w-2 h-2 rounded-full ring-2",
                       status.dotClass,
-                      isDark ? "ring-white/10" : "ring-black/10"
+                      "ring-black/10 dark:ring-white/10"
                     )}
                     title={status.label}
                   />
@@ -121,11 +109,11 @@ export function AppHeader({
           </div>
         </div>
 
-        {selectedGroupId && !webReadOnly && (
+        {selectedGroupId && !webReadOnly && onOpenGroupEdit && (
           <button
             className={classNames(
               "hidden md:inline-flex items-center justify-center gap-1 text-xs px-2.5 py-1.5 rounded-xl transition-all glass-btn",
-              isDark ? "text-slate-200" : "text-gray-700"
+              "text-[var(--color-text-secondary)]"
             )}
             onClick={onOpenGroupEdit}
             title={t('editGroup')}
@@ -147,7 +135,7 @@ export function AppHeader({
                 disabled={!selectedGroupId}
                 className={classNames(
                   "p-2 rounded-xl transition-all glass-btn",
-                  isDark ? "text-slate-400 hover:text-white" : "text-gray-400 hover:text-gray-900"
+                  "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
                 )}
                 title={t('searchMessages')}
               >
@@ -160,7 +148,7 @@ export function AppHeader({
                 disabled={!selectedGroupId}
                 className={classNames(
                   "p-2 rounded-xl transition-all glass-btn",
-                  isDark ? "text-slate-400 hover:text-white" : "text-gray-400 hover:text-gray-900"
+                  "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
                 )}
                 title={t('context')}
               >
@@ -168,21 +156,20 @@ export function AppHeader({
                 <ClipboardIcon size={18} />
               </button>
 
-              <div className={`w-px h-4 mx-1 ${isDark ? "bg-white/10" : "bg-black/10"}`} />
+              <div className="w-px h-4 mx-1 bg-black/10 dark:bg-white/10" />
 
               <button
                 onClick={onStartGroup}
                 disabled={!selectedGroupId || busy === "group-start" || actors.length === 0}
                 className={classNames(
-                  "p-2 rounded-xl transition-all",
-                  isDark
-                    ? "text-emerald-400 hover:bg-emerald-500/15 glass-btn"
-                    : "text-emerald-600 hover:bg-emerald-50/80 glass-btn"
+                  "p-2 rounded-xl transition-all glass-btn border shadow-sm hover:-translate-y-px active:translate-y-0",
+                  "border-emerald-200/70 bg-emerald-50/75 text-emerald-700 shadow-emerald-100/80 hover:bg-emerald-100/80 hover:shadow-emerald-200/70",
+                  "dark:border-emerald-400/15 dark:bg-emerald-500/12 dark:text-emerald-300 dark:shadow-[0_8px_24px_-16px_rgba(16,185,129,0.45)] dark:hover:bg-emerald-500/18"
                 )}
                 title={t('launchAllAgents')}
               >
                 <span className="sr-only">{t('launchAllAgents')}</span>
-                <RocketIcon size={18} />
+                <RocketIcon size={18} className="drop-shadow-[0_1px_3px_rgba(16,185,129,0.22)]" />
               </button>
 
               {groupDoc?.state === "paused" ? (
@@ -191,7 +178,7 @@ export function AppHeader({
                   disabled={!selectedGroupId || busy === "group-state"}
                   className={classNames(
                     "p-2 rounded-xl transition-all glass-btn",
-                    isDark ? "text-amber-400" : "text-amber-600"
+                    "text-amber-600 dark:text-amber-400"
                   )}
                   title={t('resumeDelivery')}
                 >
@@ -204,7 +191,7 @@ export function AppHeader({
                   disabled={!selectedGroupId || busy === "group-state"}
                   className={classNames(
                     "p-2 rounded-xl transition-all glass-btn",
-                    isDark ? "text-slate-400 hover:text-amber-300" : "text-gray-400 hover:text-amber-600"
+                    "text-gray-400 hover:text-amber-600 dark:text-slate-400 dark:hover:text-amber-300"
                   )}
                   title={t('pauseDelivery')}
                 >
@@ -218,7 +205,7 @@ export function AppHeader({
                 disabled={!selectedGroupId || busy === "group-stop"}
                 className={classNames(
                   "p-2 rounded-xl transition-all glass-btn",
-                  isDark ? "text-slate-400 hover:text-rose-400" : "text-gray-400 hover:text-rose-600"
+                  "text-gray-400 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400"
                 )}
                 title={t('stopAllAgents')}
               >
@@ -236,14 +223,14 @@ export function AppHeader({
               disabled={!selectedGroupId}
               className={classNames(
                 "hidden md:flex p-2 rounded-xl transition-all glass-btn",
-                isDark ? "text-slate-400 hover:text-slate-200" : "text-gray-400 hover:text-gray-600"
+                "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
               )}
               title={t('settings')}
             >
               <SettingsIcon size={18} />
             </button>
 
-            <div className={`hidden md:block w-px h-4 ${isDark ? "bg-white/10" : "bg-black/10"}`} />
+            <div className="hidden md:block w-px h-4 bg-black/10 dark:bg-white/10" />
             <div className="hidden md:block">
               <LanguageSwitcher isDark={isDark} />
             </div>
@@ -251,7 +238,7 @@ export function AppHeader({
             <button
               className={classNames(
                 "md:hidden flex items-center justify-center w-11 h-11 rounded-xl transition-all glass-btn",
-                isDark ? "text-slate-400" : "text-gray-400"
+                "text-[var(--color-text-muted)]"
               )}
               onClick={onOpenMobileMenu}
               title={t('menu')}
@@ -262,68 +249,6 @@ export function AppHeader({
         )}
       </div>
 
-      {/* Error Toast - Floating below header now */}
-      {errorMsg && !webReadOnly && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 animate-slide-up">
-          <div
-            className={classNames(
-              "rounded-2xl px-4 py-2.5 text-sm flex items-center gap-3 glass-modal",
-              isDark
-                ? "border-rose-500/20 text-rose-300"
-                : "border-rose-200/50 text-rose-700"
-            )}
-            role="alert"
-          >
-            <span>{errorMsg}</span>
-            <button 
-              className={classNames(
-                "p-2 min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg transition-all glass-btn",
-                isDark ? "text-rose-400" : "text-rose-600"
-              )} 
-              onClick={onDismissError}
-              aria-label={t('dismissError')}
-            >
-              ×
-            </button>
-          </div>
-        </div>
-      )}
-
-      {notice && !webReadOnly && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-40 animate-slide-up">
-          <div
-            className={classNames(
-              "rounded-2xl px-4 py-2.5 text-sm flex items-center gap-3 glass-modal",
-              isDark ? "border-white/10 text-slate-200" : "border-black/10 text-gray-800"
-            )}
-            role="status"
-          >
-            <span className="min-w-0 truncate">{notice.message}</span>
-            {notice.actionId && notice.actionLabel && (
-              <button
-                type="button"
-                className={classNames(
-                  "px-2 py-1 rounded-xl text-xs transition-all glass-btn",
-                  isDark ? "text-slate-100" : "text-gray-900"
-                )}
-                onClick={() => onNoticeAction(notice.actionId!)}
-              >
-                {notice.actionLabel}
-              </button>
-            )}
-            <button
-              className={classNames(
-                "p-2 min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg transition-all glass-btn",
-                isDark ? "text-slate-300" : "text-gray-600"
-              )}
-              onClick={onDismissNotice}
-              aria-label={t('common:dismiss')}
-            >
-              ×
-            </button>
-          </div>
-        </div>
-      )}
     </header>
   );
 }

@@ -88,6 +88,8 @@ export type Actor = {
   runtime?: string;
   submit?: "enter" | "newline" | "none";
   profile_id?: string;
+  profile_scope?: "global" | "user";
+  profile_owner?: string;
   profile_revision_applied?: number;
   updated_at?: string;
   unread_count?: number;
@@ -96,6 +98,8 @@ export type Actor = {
 export type ActorProfile = {
   id: string;
   name: string;
+  scope?: "global" | "user";
+  owner_id?: string;
   runtime: SupportedRuntime | string;
   runner: "pty" | "headless";
   command: string[];
@@ -401,14 +405,15 @@ export type GroupSettings = {
 export type RemoteAccessState = {
   provider: "off" | "manual" | "tailscale" | string;
   mode: string;
-  enforce_web_token: boolean;
+  require_access_token: boolean;
   enabled: boolean;
   status: "stopped" | "running" | "not_installed" | "not_authenticated" | "misconfigured" | "error" | string;
   endpoint?: string | null;
   updated_at?: string | null;
   diagnostics?: {
-    web_token_present?: boolean;
-    web_token_source?: "settings" | "env" | "none" | string;
+    access_token_present?: boolean;
+    access_token_source?: "store" | "none" | string;
+    access_token_count?: number;
     web_host?: string;
     web_host_source?: "settings" | "env" | "default" | string;
     web_port?: number;
@@ -425,10 +430,22 @@ export type RemoteAccessState = {
     web_host?: string;
     web_port?: number;
     web_public_url?: string | null;
-    web_token_configured?: boolean;
-    web_token_source?: "settings" | "env" | "none" | string;
+    access_token_configured?: boolean;
+    access_token_count?: number;
+    access_token_source?: "store" | "none" | string;
   } | null;
   next_steps?: string[] | null;
+};
+
+export type WebAccessSession = {
+  login_active: boolean;
+  current_browser_signed_in: boolean;
+  principal_kind?: string;
+  user_id?: string | null;
+  is_admin?: boolean;
+  allowed_groups?: string[];
+  access_token_count?: number;
+  can_access_global_settings?: boolean;
 };
 
 export type GroupSpaceProviderState = {
@@ -476,9 +493,12 @@ export type GroupSpaceProviderAuthStatus = {
   error?: { code?: string; message?: string } | null;
 };
 
+export type GroupSpaceLane = "work" | "memory" | string;
+
 export type GroupSpaceBinding = {
   group_id: string;
   provider: "notebooklm" | string;
+  lane?: GroupSpaceLane;
   remote_space_id?: string;
   bound_by?: string;
   bound_at?: string;
@@ -515,6 +535,17 @@ export type GroupSpaceQueueSummary = {
   failed: number;
 };
 
+export type GroupSpaceMemorySyncSummary = {
+  lane: "memory" | string;
+  manifest_path: string;
+  last_scan_at?: string | null;
+  last_success_at?: string | null;
+  pending_files: number;
+  running_files: number;
+  failed_files: number;
+  blocked_files: number;
+};
+
 export type GroupSpaceJobError = {
   code?: string;
   message?: string;
@@ -524,6 +555,7 @@ export type GroupSpaceJob = {
   job_id: string;
   group_id: string;
   provider: "notebooklm" | string;
+  lane?: GroupSpaceLane;
   remote_space_id: string;
   kind: "context_sync" | "resource_ingest" | string;
   payload: Record<string, unknown>;
@@ -541,10 +573,11 @@ export type GroupSpaceJob = {
 export type GroupSpaceStatus = {
   group_id: string;
   provider: GroupSpaceProviderState;
-  binding: GroupSpaceBinding;
-  queue_summary: GroupSpaceQueueSummary;
+  bindings: Record<string, GroupSpaceBinding>;
+  queue_summary: Record<string, GroupSpaceQueueSummary>;
   sync?: GroupSpaceSyncState;
-  sync_result?: GroupSpaceSyncResult;
+  memory_sync?: GroupSpaceMemorySyncSummary;
+  sync_result?: GroupSpaceSyncResult | Record<string, unknown>;
 };
 
 export type GroupSpaceSyncState = {
@@ -703,10 +736,7 @@ export const SUPPORTED_RUNTIMES = [
   "auggie",
   "neovate",
   "gemini",
-  "cursor",
-  "kilocode",
-  "opencode",
-  "copilot",
+  "kimi",
   "custom",
 ] as const;
 
@@ -717,13 +747,10 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   auggie: { label: "Auggie (Augment)", desc: "" },
   claude: { label: "Claude Code", desc: "" },
   codex: { label: "Codex CLI", desc: "" },
-  cursor: { label: "Cursor CLI", desc: "Manual MCP installation needed" },
   droid: { label: "Droid", desc: "" },
   gemini: { label: "Gemini CLI", desc: "" },
-  kilocode: { label: "Kilo Code", desc: "Manual MCP installation needed" },
+  kimi: { label: "Kimi CLI", desc: "" },
   neovate: { label: "Neovate Code", desc: "" },
-  opencode: { label: "OpenCode", desc: "Manual MCP installation needed" },
-  copilot: { label: "GitHub Copilot", desc: "Manual MCP installation needed" },
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
 };
 
@@ -758,10 +785,6 @@ export const RUNTIME_COLORS: Record<string, {
     bg: "bg-emerald-900/30", text: "text-emerald-300", border: "border-emerald-600/50", dot: "bg-emerald-400",
     bgLight: "bg-emerald-50", textLight: "text-emerald-700", borderLight: "border-emerald-300", dotLight: "bg-emerald-500"
   },
-  cursor: {
-    bg: "bg-indigo-900/30", text: "text-indigo-300", border: "border-indigo-600/50", dot: "bg-indigo-400",
-    bgLight: "bg-indigo-50", textLight: "text-indigo-700", borderLight: "border-indigo-300", dotLight: "bg-indigo-500"
-  },
   droid: { 
     bg: "bg-violet-900/30", text: "text-violet-300", border: "border-violet-600/50", dot: "bg-violet-400",
     bgLight: "bg-violet-50", textLight: "text-violet-700", borderLight: "border-violet-300", dotLight: "bg-violet-500"
@@ -770,21 +793,13 @@ export const RUNTIME_COLORS: Record<string, {
     bg: "bg-yellow-900/30", text: "text-yellow-300", border: "border-yellow-600/50", dot: "bg-yellow-400",
     bgLight: "bg-yellow-50", textLight: "text-yellow-700", borderLight: "border-yellow-300", dotLight: "bg-yellow-500"
   },
-  kilocode: {
-    bg: "bg-pink-900/30", text: "text-pink-300", border: "border-pink-600/50", dot: "bg-pink-400",
-    bgLight: "bg-pink-50", textLight: "text-pink-700", borderLight: "border-pink-300", dotLight: "bg-pink-500"
+  kimi: {
+    bg: "bg-lime-900/30", text: "text-lime-300", border: "border-lime-600/50", dot: "bg-lime-400",
+    bgLight: "bg-lime-50", textLight: "text-lime-700", borderLight: "border-lime-300", dotLight: "bg-lime-500"
   },
   neovate: {
     bg: "bg-fuchsia-900/30", text: "text-fuchsia-300", border: "border-fuchsia-600/50", dot: "bg-fuchsia-400",
     bgLight: "bg-fuchsia-50", textLight: "text-fuchsia-700", borderLight: "border-fuchsia-300", dotLight: "bg-fuchsia-500"
-  },
-  opencode: { 
-    bg: "bg-cyan-900/30", text: "text-cyan-300", border: "border-cyan-600/50", dot: "bg-cyan-400",
-    bgLight: "bg-cyan-50", textLight: "text-cyan-700", borderLight: "border-cyan-300", dotLight: "bg-cyan-500"
-  },
-  copilot: { 
-    bg: "bg-slate-800/50", text: "text-slate-300", border: "border-slate-500/50", dot: "bg-slate-400",
-    bgLight: "bg-gray-100", textLight: "text-gray-700", borderLight: "border-gray-300", dotLight: "bg-gray-500"
   },
   custom: {
     bg: "bg-zinc-800/50", text: "text-zinc-300", border: "border-zinc-500/50", dot: "bg-zinc-400",

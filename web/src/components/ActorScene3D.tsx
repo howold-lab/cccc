@@ -1,6 +1,7 @@
-import { Suspense, useMemo, useRef, useState, useEffect, useCallback } from "react";
+import { Suspense, useMemo, useRef, useState, useEffect, useCallback, type ComponentProps } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
+import { useTranslation } from "react-i18next";
 import { ActorCharacter } from "./ActorCharacter";
 import { SemanticMap } from "./SemanticMap";
 import { PanoramaRoom } from "./PanoramaRoom";
@@ -18,6 +19,7 @@ interface ActorScene3DProps {
   tasksSummary?: GroupContext["tasks_summary"];
   projectStatus?: string | null;
   isDark: boolean;
+  isSmallScreen?: boolean;
   groupId?: string;
   className?: string;
 }
@@ -48,13 +50,14 @@ interface SceneProps {
   tasksSummary?: GroupContext["tasks_summary"];
   projectStatus?: string | null;
   isDark: boolean;
+  isSmallScreen?: boolean;
   groupId?: string;
   camZ: number;
   followTarget: string | null;
   onCharacterClick: (agentId: string) => void;
 }
 
-function Scene({ agents, actors, tasks, tasksSummary: _tasksSummary, projectStatus, isDark, groupId: _groupId, camZ, followTarget, onCharacterClick }: SceneProps) {
+function Scene({ agents, actors, tasks, tasksSummary: _tasksSummary, projectStatus, isDark, isSmallScreen = false, groupId: _groupId, camZ, followTarget, onCharacterClick }: SceneProps) {
   const characterRefs = useRef<Map<string, THREE.Group>>(new Map());
 
   const actorMap = useMemo(() => {
@@ -123,7 +126,12 @@ function Scene({ agents, actors, tasks, tasksSummary: _tasksSummary, projectStat
 
       <PanoramaRoom zones={semanticMap.zones} />
 
-      <SemanticMap zones={semanticMap.zones} isDark={isDark} projectStatus={projectStatus} />
+      <SemanticMap
+        zones={semanticMap.zones}
+        isDark={isDark}
+        compact={isSmallScreen}
+        projectStatus={projectStatus}
+      />
 
       <InstancedBeds beds={bedInstances} />
 
@@ -180,7 +188,70 @@ function Scene({ agents, actors, tasks, tasksSummary: _tasksSummary, projectStat
 
 type RenderMode = "loading" | "webgpu" | "webgl";
 
-export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatus, isDark, groupId, className }: ActorScene3DProps) {
+type WebGPUCanvas = HTMLCanvasElement | OffscreenCanvas;
+
+type WebGPURendererLike = THREE.WebGLRenderer & {
+  init: () => Promise<void>;
+};
+
+interface WebGPUModuleLike {
+  WebGPURenderer: new (params: {
+    canvas: HTMLCanvasElement;
+    antialias: boolean;
+    alpha: boolean;
+  }) => WebGPURendererLike;
+}
+
+type CanvasGlFactory = (canvas: WebGPUCanvas) => THREE.WebGLRenderer;
+type HudStatusKey = "blocked" | "active" | "thinking" | "waiting";
+
+function buildHudSummary(agents: AgentState[], actors?: Actor[]) {
+  const actorMap = new Map((actors || []).map((actor) => [actor.id, actor]));
+  const totalAgents = agents.length;
+  let activeAgents = 0;
+  let blockedAgents = 0;
+  let waitingAgents = 0;
+  const items: Array<{
+    id: string;
+    title: string;
+    statusKey: HudStatusKey;
+    focus: string;
+    next: string;
+    blocked: boolean;
+    active: boolean;
+  }> = [];
+
+  for (const agent of agents) {
+    const actor = actorMap.get(agent.id);
+    const hasTask = !!String(agent.hot?.active_task_id || "").trim();
+    const blockers = Array.isArray(agent.hot?.blockers) ? agent.hot.blockers : [];
+    const focus = String(agent.hot?.focus || "").trim();
+    const next = String(agent.hot?.next_action || "").trim();
+    const statusKey: HudStatusKey =
+      blockers.length > 0 ? "blocked" : hasTask ? "active" : focus || next ? "thinking" : "waiting";
+
+    if (hasTask) activeAgents += 1;
+    if (blockers.length > 0) blockedAgents += 1;
+    if (!hasTask && blockers.length === 0 && !focus && !next) waitingAgents += 1;
+
+    items.push({
+      id: agent.id,
+      title: actor?.title || agent.id,
+      statusKey,
+      focus: focus.slice(0, 28),
+      next: next.slice(0, 28),
+      blocked: blockers.length > 0,
+      active: hasTask,
+    });
+  }
+
+  items.sort((a, b) => Number(b.blocked) - Number(a.blocked) || Number(b.active) - Number(a.active) || a.title.localeCompare(b.title));
+  return { totalAgents, activeAgents, blockedAgents, waitingAgents, items: items.slice(0, 6) };
+}
+
+
+export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatus, isDark, isSmallScreen = false, groupId, className }: ActorScene3DProps) {
+  const { t } = useTranslation("layout");
   const [followTarget, setFollowTarget] = useState<string | null>(null);
 
   const handleCharacterClick = useCallback((agentId: string) => {
@@ -191,9 +262,19 @@ export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatu
     return Math.max(5, SEMANTIC_MAP_SCENE_EXTENT * 2 + 1);
   }, []);
 
+  const hudSummary = useMemo(() => buildHudSummary(agents, actors), [agents, actors]);
+  const hudBadges = useMemo(
+    () => [
+      { key: "active", label: t("panoramaHudActive", "Active"), value: hudSummary.activeAgents, tint: "text-sky-600 bg-sky-500/10 border-sky-500/20 dark:text-sky-300" },
+      { key: "blocked", label: t("panoramaHudBlocked", "Blocked"), value: hudSummary.blockedAgents, tint: "text-rose-600 bg-rose-500/10 border-rose-500/20 dark:text-rose-300" },
+      { key: "waiting", label: t("panoramaHudWaiting", "Waiting"), value: hudSummary.waitingAgents, tint: "text-emerald-700 bg-emerald-500/10 border-emerald-500/20 dark:text-emerald-300" },
+    ],
+    [hudSummary.activeAgents, hudSummary.blockedAgents, hudSummary.waitingAgents, t]
+  );
+
   // Phase 1: detect WebGPU + dynamically load three/webgpu module
   const [renderMode, setRenderMode] = useState<RenderMode>("loading");
-  const gpuModRef = useRef<any>(null);
+  const gpuModRef = useRef<WebGPUModuleLike | null>(null);
 
   useEffect(() => {
     // WebGPU is opt-in via ?webgpu URL param (R3F v8 has limited WebGPU compat)
@@ -210,7 +291,7 @@ export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatu
     import("three/webgpu")
       .then((mod) => {
         if (cancelled) return;
-        gpuModRef.current = mod;
+        gpuModRef.current = mod as unknown as WebGPUModuleLike;
         setRenderMode("webgpu");
       })
       .catch(() => {
@@ -223,10 +304,13 @@ export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatu
   // Stable gl factory for WebGPU -- avoids re-creation on every render.
   // Uses a render-guard so R3F can keep frameloop="always" (required for
   // OrbitControls) while WebGPURenderer.init() resolves asynchronously.
-  const createWebGPURenderer = useCallback((canvas: HTMLCanvasElement) => {
+  const createWebGPURenderer = useCallback<CanvasGlFactory>((canvas) => {
     const GPU = gpuModRef.current;
+    if (!GPU) {
+      throw new Error("WebGPU module not loaded");
+    }
     const renderer = new GPU.WebGPURenderer({
-      canvas,
+      canvas: canvas as HTMLCanvasElement,
       antialias: true,
       alpha: false,
     });
@@ -234,8 +318,8 @@ export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatu
     renderer.shadowMap.type = THREE.PCFShadowMap;
 
     // XR stub -- prevents R3F v8 "xr.addEventListener is not a function" error
-    if (!(renderer as any).xr) {
-      (renderer as any).xr = {
+    if (!renderer.xr) {
+      const xrStub = {
         addEventListener: () => {},
         removeEventListener: () => {},
         getSession: () => null,
@@ -247,7 +331,8 @@ export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatu
         getCamera: () => new THREE.PerspectiveCamera(),
         setAnimationLoop: () => {},
         dispose: () => {},
-      };
+      } as unknown as THREE.WebXRManager;
+      Object.assign(renderer, { xr: xrStub });
     }
 
     // Guard: R3F calls gl.render() every frame via its rAF loop.
@@ -298,12 +383,94 @@ export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatu
     background: isDark ? "#0f172a" : "#dbe4ee",
   };
 
-  const glProp = renderMode === "webgpu"
-    ? (createWebGPURenderer as any)
+  const glProp: ComponentProps<typeof Canvas>["gl"] = renderMode === "webgpu"
+    ? createWebGPURenderer
     : { antialias: true, alpha: false };
 
   return (
-    <div className={className} style={{ minHeight: 280 }}>
+    <div className={className} style={{ minHeight: 280, position: "relative" }}>
+      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-[2] flex justify-center sm:inset-x-4 sm:bottom-4">
+        <section
+          aria-label={t("panoramaHudTitle", "Agent State")}
+          className={`w-full max-w-4xl rounded-2xl border px-3 py-3 shadow-xl backdrop-blur-md sm:px-4 ${
+            isDark
+              ? "border-slate-700/60 bg-slate-950/82 text-slate-100 shadow-black/40"
+              : "border-slate-300/70 bg-white/90 text-slate-900 shadow-slate-300/40"
+          }`}
+        >
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold sm:text-base">
+                {t("panoramaHudTitle", "Agent State")}
+              </div>
+              <div className={`mt-1 text-[11px] sm:text-xs ${isDark ? "text-slate-100" : "text-slate-700"}`}>
+                {t("panoramaHudHint", "Quick snapshot of who is active, blocked, or waiting in the panorama scene.")}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {hudBadges.map((badge) => (
+                <span
+                  key={badge.key}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold sm:text-xs ${badge.tint}`}
+                >
+                  <span>{badge.label}</span>
+                  <span>{badge.value}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {hudSummary.items.map((item) => {
+              const statusTone =
+                item.statusKey === "blocked"
+                  ? "text-rose-600 bg-rose-500/10 border-rose-500/20 dark:text-rose-300"
+                  : item.statusKey === "active"
+                    ? "text-sky-600 bg-sky-500/10 border-sky-500/20 dark:text-sky-300"
+                    : item.statusKey === "thinking"
+                      ? "text-violet-600 bg-violet-500/10 border-violet-500/20 dark:text-violet-300"
+                      : "text-emerald-700 bg-emerald-500/10 border-emerald-500/20 dark:text-emerald-300";
+              const statusLabel =
+                item.statusKey === "blocked"
+                  ? t("panoramaHudBlocked", "Blocked")
+                  : item.statusKey === "active"
+                    ? t("panoramaHudActive", "Active")
+                    : item.statusKey === "thinking"
+                      ? t("panoramaHudThinking", "Thinking")
+                      : t("panoramaHudWaiting", "Waiting");
+
+              return (
+                <article
+                  key={item.id}
+                  className={`rounded-xl border px-3 py-2.5 ${
+                    isDark ? "border-slate-800/80 bg-white/[0.06]" : "border-slate-200 bg-slate-50/80"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold">{item.title}</div>
+                      <div className={`mt-1 text-[11px] ${isDark ? "text-slate-200" : "text-slate-600"}`}>ID: {item.id}</div>
+                    </div>
+                    <span className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold sm:text-[11px] ${statusTone}`}>
+                      {statusLabel}
+                    </span>
+                  </div>
+                  <div className={`mt-3 space-y-1.5 text-[11px] sm:text-xs ${isDark ? "text-slate-100" : "text-slate-800"}`}>
+                    <div className="truncate">
+                      <span className={isDark ? "text-slate-300" : "text-slate-600"}>{t("panoramaHudFocus", "Focus")}:</span>{" "}
+                      {item.focus || t("panoramaHudNoFocus", "None yet")}
+                    </div>
+                    <div className="truncate">
+                      <span className={isDark ? "text-slate-300" : "text-slate-600"}>{t("panoramaHudNext", "Next")}:</span>{" "}
+                      {item.next || t("panoramaHudNoNextAction", "None yet")}
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      </div>
       <Canvas
         key={renderMode}
         frameloop="always"
@@ -314,7 +481,7 @@ export function ActorScene3D({ agents, actors, tasks, tasksSummary, projectStatu
         onPointerMissed={() => setFollowTarget(null)}
       >
         <Suspense fallback={null}>
-          <Scene agents={agents} actors={actors} tasks={tasks} tasksSummary={tasksSummary} projectStatus={projectStatus} isDark={isDark} groupId={groupId} camZ={camZ} followTarget={followTarget} onCharacterClick={handleCharacterClick} />
+          <Scene agents={agents} actors={actors} tasks={tasks} tasksSummary={tasksSummary} projectStatus={projectStatus} isDark={isDark} isSmallScreen={isSmallScreen} groupId={groupId} camZ={camZ} followTarget={followTarget} onCharacterClick={handleCharacterClick} />
         </Suspense>
       </Canvas>
     </div>

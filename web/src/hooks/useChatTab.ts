@@ -8,7 +8,10 @@ import {
   useComposerStore,
   useModalStore,
   useFormStore,
+  selectChatBucketState,
 } from "../stores";
+import { getChatSession } from "../stores/useUIStore";
+import { useChatOutboxStore, selectOutboxEntries } from "../stores/chatOutboxStore";
 import type { Actor, LedgerEvent, ChatMessageData } from "../types";
 import * as api from "../services/api";
 
@@ -23,10 +26,6 @@ interface UseChatTabOptions {
   fileInputRef?: React.RefObject<HTMLInputElement>;
   /** Chat at bottom ref for scroll state */
   chatAtBottomRef?: React.MutableRefObject<boolean>;
-  /** Scroll memory ref for restoring positions */
-  chatScrollMemoryRef?: React.MutableRefObject<
-    Record<string, { atBottom: boolean; anchorId: string; offsetPx: number }>
-  >;
   /** Scroll container ref for programmatic scrolling (e.g. after send) */
   scrollRef?: React.MutableRefObject<HTMLDivElement | null>;
 }
@@ -39,36 +38,35 @@ export function useChatTab({
   composerRef,
   fileInputRef,
   chatAtBottomRef,
-  chatScrollMemoryRef,
   scrollRef,
 }: UseChatTabOptions) {
   // ============ Stores ============
-  const {
-    events,
-    chatWindow,
-    groupDoc,
-    groupContext,
-    groupSettings,
-    hasMoreHistory,
-    isLoadingHistory,
-    isChatWindowLoading,
-    closeChatWindow,
-    openChatWindow,
-    loadMoreHistory,
-  } = useGroupStore();
+  const { events, chatWindow, hasMoreHistory, isLoadingHistory, isChatWindowLoading } = useGroupStore(
+    useCallback((state) => selectChatBucketState(state, selectedGroupId), [selectedGroupId])
+  );
+  const appendEvent = useGroupStore((state) => state.appendEvent);
+  const groupDoc = useGroupStore((state) => state.groupDoc);
+  const groupContext = useGroupStore((state) => state.groupContext);
+  const groupSettings = useGroupStore((state) => state.groupSettings);
+  const closeChatWindow = useGroupStore((state) => state.closeChatWindow);
+  const openChatWindow = useGroupStore((state) => state.openChatWindow);
+  const loadMoreHistory = useGroupStore((state) => state.loadMoreHistory);
 
-  const {
-    busy,
-    chatFilter,
-    showScrollButton,
-    chatUnreadCount,
-    setBusy,
-    setChatFilter,
-    setShowScrollButton,
-    setChatUnreadCount,
-    showError,
-    showNotice,
-  } = useUIStore();
+  const busy = useUIStore((s) => s.busy);
+  const chatSessions = useUIStore((s) => s.chatSessions);
+  const setBusy = useUIStore((s) => s.setBusy);
+  const setChatFilter = useUIStore((s) => s.setChatFilter);
+  const setShowScrollButton = useUIStore((s) => s.setShowScrollButton);
+  const setChatUnreadCount = useUIStore((s) => s.setChatUnreadCount);
+  const setChatScrollSnapshot = useUIStore((s) => s.setChatScrollSnapshot);
+  const showError = useUIStore((s) => s.showError);
+  const showNotice = useUIStore((s) => s.showNotice);
+
+  const chatSession = useMemo(
+    () => getChatSession(selectedGroupId, chatSessions),
+    [selectedGroupId, chatSessions]
+  );
+  const { chatFilter, showScrollButton, chatUnreadCount, scrollSnapshot } = chatSession;
 
   const {
     composerText,
@@ -90,6 +88,13 @@ export function useChatTab({
 
   const { setRecipientsModal, setRelayModal, openModal } = useModalStore();
   const { setNewActorRole } = useFormStore();
+
+  // Outbox (optimistic pending messages) — stable selector, no new array allocation
+  const outboxEntries = useChatOutboxStore(
+    useCallback((s) => selectOutboxEntries(s, selectedGroupId), [selectedGroupId])
+  );
+  const enqueueOutbox = useChatOutboxStore((s) => s.enqueue);
+  const removeOutbox = useChatOutboxStore((s) => s.remove);
 
   // ============ Computed Values ============
 
@@ -164,23 +169,30 @@ export function useChatTab({
     return !!chatWindow && String(chatWindow.groupId || "") === String(selectedGroupId || "");
   }, [chatWindow, selectedGroupId]);
 
-  // Filtered live chat messages
+  // Filtered live chat messages (canonical + outbox pending merged)
   const liveChatMessages = useMemo(() => {
     const all = events.filter((ev) => ev.kind === "chat.message");
+
+    // Merge outbox pending messages at the end (they are optimistic, not yet confirmed)
+    const pendingEvents = outboxEntries
+      .filter((e) => e.status === "pending")
+      .map((e) => e.event);
+    const merged = pendingEvents.length > 0 ? [...all, ...pendingEvents] : all;
+
     if (chatFilter === "attention") {
-      return all.filter((ev) => {
+      return merged.filter((ev) => {
         const d = ev.data as ChatMessageData | undefined;
         return String(d?.priority || "normal") === "attention";
       });
     }
     if (chatFilter === "task") {
-      return all.filter((ev) => {
+      return merged.filter((ev) => {
         const d = ev.data as ChatMessageData | undefined;
         return !!d?.reply_required;
       });
     }
     if (chatFilter === "to_user") {
-      return all.filter((ev) => {
+      return merged.filter((ev) => {
         const d = ev.data as ChatMessageData | undefined;
         const dst = typeof d?.dst_group_id === "string" ? String(d.dst_group_id || "").trim() : "";
         if (dst) return false;
@@ -188,8 +200,8 @@ export function useChatTab({
         return to.includes("user") || to.includes("@user");
       });
     }
-    return all;
-  }, [events, chatFilter]);
+    return merged;
+  }, [events, chatFilter, outboxEntries]);
 
   // Chat messages (window or live)
   const chatMessages = useMemo(() => {
@@ -198,8 +210,8 @@ export function useChatTab({
   }, [chatWindow, inChatWindow, liveChatMessages]);
 
   const hasAnyChatMessages = useMemo(
-    () => events.some((ev) => ev.kind === "chat.message"),
-    [events]
+    () => events.some((ev) => ev.kind === "chat.message") || outboxEntries.length > 0,
+    [events, outboxEntries]
   );
 
   // Chat view key for VirtualMessageList
@@ -209,6 +221,18 @@ export function useChatTab({
     }
     return `${selectedGroupId}:live`;
   }, [inChatWindow, chatWindow, selectedGroupId]);
+
+  const chatInitialScrollAnchorId = useMemo(() => {
+    if (inChatWindow) return undefined;
+    if (!scrollSnapshot || scrollSnapshot.atBottom || !scrollSnapshot.anchorId) return undefined;
+    return scrollSnapshot.anchorId;
+  }, [inChatWindow, scrollSnapshot]);
+
+  const chatInitialScrollAnchorOffsetPx = useMemo(() => {
+    if (inChatWindow) return undefined;
+    if (!scrollSnapshot || scrollSnapshot.atBottom || !scrollSnapshot.anchorId) return undefined;
+    return Number(scrollSnapshot.offsetPx || 0);
+  }, [inChatWindow, scrollSnapshot]);
 
   // Chat window props (for jump-to mode)
   const chatWindowProps = useMemo(() => {
@@ -231,6 +255,14 @@ export function useChatTab({
     if (inChatWindow && chatWindow) return chatWindow.centerEventId;
     return undefined;
   }, [inChatWindow, chatWindow]);
+
+  const updateChatFilter = useCallback(
+    (nextFilter: ReturnType<typeof getChatSession>["chatFilter"]) => {
+      if (!selectedGroupId) return;
+      setChatFilter(selectedGroupId, nextFilter);
+    },
+    [selectedGroupId, setChatFilter]
+  );
 
   // Agent state snapshot
   const agentStates = useMemo(
@@ -273,6 +305,7 @@ export function useChatTab({
   );
 
   const sendMessage = useCallback(async () => {
+    if (busy === "send") return; // re-entrancy guard (keyboard shortcut can bypass disabled button)
     const txt = composerText.trim();
     if (!selectedGroupId) return;
     if (!txt && composerFiles.length === 0) return;
@@ -285,6 +318,10 @@ export function useChatTab({
     const composerFilesSnapshot = composerFiles.slice();
     const prioritySnapshot = priority;
     const replyRequiredSnapshot = replyRequired;
+    const toTextSnapshot = toText;
+
+    // Generate a local ID for outbox tracking
+    const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     const restoreComposerState = () => {
       setComposerText(txt);
@@ -292,17 +329,20 @@ export function useChatTab({
       setReplyTarget(replyTargetSnapshot);
       setPriority(prioritySnapshot);
       setReplyRequired(replyRequiredSnapshot);
+      setToText(toTextSnapshot);
     };
 
     const applyImmediateComposerFeedback = () => {
-      // 立即给输入区反馈，避免等待网络返回时卡住在原状态。
       setComposerText("");
       setComposerFiles([]);
       setReplyTarget(null);
       setPriority("normal");
       setReplyRequired(false);
+      setToText("");
       if (chatAtBottomRef) chatAtBottomRef.current = true;
-      setShowScrollButton(false);
+      if (selectedGroupId) {
+        setShowScrollButton(selectedGroupId, false);
+      }
       const scrollEl = scrollRef?.current;
       if (scrollEl) {
         requestAnimationFrame(() => {
@@ -311,19 +351,45 @@ export function useChatTab({
       }
     };
 
+    // Local validations that must pass before clearing the composer
+    if (replyTargetSnapshot && isCrossGroup) {
+      showError("Cross-group send does not support replies.");
+      setDestGroupId(selectedGroupId);
+      return;
+    }
+    if (!replyTargetSnapshot && isCrossGroup && composerFilesSnapshot.length > 0) {
+      showError("Cross-group send does not support attachments yet.");
+      return;
+    }
+
+    // Optimistic: enqueue to outbox immediately for same-group sends
+    if (!isCrossGroup) {
+      const optimisticEvent: LedgerEvent = {
+        id: localId,
+        kind: "chat.message",
+        ts: new Date().toISOString(),
+        by: "user",
+        group_id: selectedGroupId,
+        data: {
+          text: txt,
+          to: toTokens,
+          priority: prio,
+          reply_required: replyRequired,
+          reply_to: replyTargetSnapshot?.eventId || null,
+          format: "plain",
+          attachments: [],
+          _optimistic: true,
+        } as LedgerEvent["data"],
+      };
+      enqueueOutbox(selectedGroupId, localId, optimisticEvent);
+    }
+
+    applyImmediateComposerFeedback();
     setBusy("send");
     try {
       const to = toTokens;
       let resp;
       if (replyTargetSnapshot) {
-        if (isCrossGroup) {
-          showError("Cross-group send does not support replies.");
-          setDestGroupId(selectedGroupId);
-          return;
-        }
-
-        applyImmediateComposerFeedback();
-
         resp = await api.replyMessage(
           selectedGroupId,
           txt,
@@ -335,18 +401,8 @@ export function useChatTab({
         );
       } else {
         if (isCrossGroup) {
-          if (composerFilesSnapshot.length > 0) {
-            showError("Cross-group send does not support attachments yet.");
-            return;
-          }
-
-          applyImmediateComposerFeedback();
-
-          resp = await api.sendCrossGroupMessage(selectedGroupId, dstGroup, txt, to, prio, replyRequired);
+          resp = await api.sendCrossGroupMessage(selectedGroupId, dstGroup, txt, to, prio, replyRequiredSnapshot);
         } else {
-
-          applyImmediateComposerFeedback();
-
           resp = await api.sendMessage(
             selectedGroupId,
             txt,
@@ -358,9 +414,16 @@ export function useChatTab({
         }
       }
       if (!resp.ok) {
+        // Remove optimistic entry and restore composer
+        removeOutbox(selectedGroupId, localId);
         restoreComposerState();
         showError(`${resp.error.code}: ${resp.error.message}`);
         return;
+      }
+      // HTTP success: remove optimistic entry, append canonical server event
+      removeOutbox(selectedGroupId, localId);
+      if (!isCrossGroup && resp.result && typeof resp.result === "object" && "event" in resp.result && resp.result.event) {
+        appendEvent(resp.result.event as LedgerEvent, selectedGroupId);
       }
       setDestGroupId(selectedGroupId);
       clearDraft(selectedGroupId);
@@ -372,26 +435,33 @@ export function useChatTab({
         url.searchParams.delete("tab");
         window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
       }
-      // After sending, scroll to bottom so the user sees their new message
-      setChatUnreadCount(0);
+      if (selectedGroupId) {
+        setChatUnreadCount(selectedGroupId, 0);
+      }
       onMessageSent?.();
     } catch (error) {
-      restoreComposerState();
       const message = error instanceof Error ? error.message : "send failed";
+      removeOutbox(selectedGroupId, localId);
+      restoreComposerState();
       showError(message);
     } finally {
       setBusy("");
     }
   }, [
+    busy,
     composerText,
     composerFiles,
     selectedGroupId,
     sendGroupId,
     priority,
     replyRequired,
+    toText,
     toTokens,
     replyTarget,
     inChatWindow,
+    appendEvent,
+    enqueueOutbox,
+    removeOutbox,
     setBusy,
     showError,
     setComposerText,
@@ -399,6 +469,7 @@ export function useChatTab({
     setReplyTarget,
     setPriority,
     setReplyRequired,
+    setToText,
     setDestGroupId,
     clearDraft,
     closeChatWindow,
@@ -524,45 +595,51 @@ export function useChatTab({
   );
 
   const exitChatWindow = useCallback(() => {
-    closeChatWindow();
+    closeChatWindow(selectedGroupId);
     const url = new URL(window.location.href);
     url.searchParams.delete("event");
     url.searchParams.delete("tab");
     window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
-  }, [closeChatWindow]);
+  }, [closeChatWindow, selectedGroupId]);
 
   const handleScrollButtonClick = useCallback(() => {
     if (chatAtBottomRef) chatAtBottomRef.current = true;
-    setShowScrollButton(false);
-    setChatUnreadCount(0);
-    if (selectedGroupId && chatScrollMemoryRef) {
-      chatScrollMemoryRef.current[selectedGroupId] = { atBottom: true, anchorId: "", offsetPx: 0 };
+    if (selectedGroupId) {
+      setShowScrollButton(selectedGroupId, false);
+      setChatUnreadCount(selectedGroupId, 0);
+      setChatScrollSnapshot(selectedGroupId, { atBottom: true, anchorId: "", offsetPx: 0 });
     }
-  }, [selectedGroupId, chatAtBottomRef, chatScrollMemoryRef, setShowScrollButton, setChatUnreadCount]);
+  }, [selectedGroupId, chatAtBottomRef, setShowScrollButton, setChatUnreadCount, setChatScrollSnapshot]);
 
   const handleScrollChange = useCallback(
     (isAtBottom: boolean) => {
       if (chatAtBottomRef) chatAtBottomRef.current = isAtBottom;
-      setShowScrollButton(!isAtBottom);
-      if (isAtBottom) setChatUnreadCount(0);
+      if (!selectedGroupId) return;
+      setShowScrollButton(selectedGroupId, !isAtBottom);
+      if (isAtBottom) setChatUnreadCount(selectedGroupId, 0);
     },
-    [chatAtBottomRef, setShowScrollButton, setChatUnreadCount]
+    [chatAtBottomRef, selectedGroupId, setShowScrollButton, setChatUnreadCount]
   );
 
   const handleScrollSnapshot = useCallback(
     (snap: { atBottom: boolean; anchorId: string; offsetPx: number }, overrideGroupId?: string) => {
       if (inChatWindow && !overrideGroupId) return;
       const gid = String(overrideGroupId || selectedGroupId || "").trim();
-      if (!gid || !chatScrollMemoryRef) return;
-      chatScrollMemoryRef.current[gid] = snap;
+      if (!gid) return;
+      setChatScrollSnapshot(gid, snap);
     },
-    [inChatWindow, selectedGroupId, chatScrollMemoryRef]
+    [inChatWindow, selectedGroupId, setChatScrollSnapshot]
   );
 
   const addAgent = useCallback(() => {
     setNewActorRole(hasForeman ? "peer" : "foreman");
     openModal("addActor");
   }, [hasForeman, openModal, setNewActorRole]);
+
+  const loadCurrentGroupHistory = useCallback(() => {
+    if (!selectedGroupId) return Promise.resolve();
+    return loadMoreHistory(selectedGroupId);
+  }, [selectedGroupId, loadMoreHistory]);
 
   // ============ Return ============
 
@@ -571,15 +648,17 @@ export function useChatTab({
     chatMessages,
     hasAnyChatMessages,
     chatFilter,
-    setChatFilter,
+    setChatFilter: updateChatFilter,
     chatViewKey,
     chatWindowProps,
     chatInitialScrollTargetId,
+    chatInitialScrollAnchorId,
+    chatInitialScrollAnchorOffsetPx,
     chatHighlightEventId,
     inChatWindow,
     isLoadingHistory: inChatWindow ? isChatWindowLoading : isLoadingHistory,
     hasMoreHistory: inChatWindow ? false : hasMoreHistory,
-    loadMoreHistory: inChatWindow ? undefined : loadMoreHistory,
+    loadMoreHistory: inChatWindow ? undefined : loadCurrentGroupHistory,
 
     // UI state
     busy,

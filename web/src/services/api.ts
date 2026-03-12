@@ -20,6 +20,7 @@ import type {
   IMStatus,
   IMPlatform,
   RemoteAccessState,
+  WebAccessSession,
   GroupSpaceStatus,
   GroupSpaceRemoteSpace,
   GroupSpaceSource,
@@ -37,10 +38,11 @@ import type {
   TaskChecklistItem,
 } from "../types";
 
-// ============ Token management ============
+// ============ Access token auth ============
 
 // Extract and cache token from URL for dev mode (Vite doesn't proxy /ui/ to backend)
 let cachedToken: string | null = null;
+const FORCE_LOGIN_KEY = "cccc_force_token_login";
 
 // Global callback for 401 unauthorized responses
 let _authRequiredHandler: (() => void) | null = null;
@@ -64,6 +66,30 @@ export function clearAuthToken(): void {
     sessionStorage.removeItem("cccc_dev_token");
   } catch {
     void 0;
+  }
+}
+
+export function setForceTokenLogin(): void {
+  try {
+    sessionStorage.setItem(FORCE_LOGIN_KEY, "1");
+  } catch {
+    void 0;
+  }
+}
+
+export function clearForceTokenLogin(): void {
+  try {
+    sessionStorage.removeItem(FORCE_LOGIN_KEY);
+  } catch {
+    void 0;
+  }
+}
+
+export function shouldForceTokenLogin(): boolean {
+  try {
+    return sessionStorage.getItem(FORCE_LOGIN_KEY) === "1";
+  } catch {
+    return false;
   }
 }
 
@@ -602,6 +628,53 @@ export async function searchChatMessages(
 
 // ============ Actors ============
 
+export type GroupPromptKind = "preamble" | "help";
+
+export type GroupPromptInfo = {
+  kind: GroupPromptKind;
+  source: "home" | "builtin";
+  filename: string;
+  path?: string | null;
+  content: string;
+};
+
+export type GroupPromptsResponse = {
+  preamble: GroupPromptInfo;
+  help: GroupPromptInfo;
+};
+
+export type PromptUpdateOptions = {
+  editorMode?: "structured" | "raw";
+  changedBlocks?: string[];
+};
+
+export async function fetchGroupPrompts(groupId: string) {
+  return apiJson<GroupPromptsResponse>(`/api/v1/groups/${encodeURIComponent(groupId)}/prompts`);
+}
+
+export async function updateGroupPrompt(
+  groupId: string,
+  kind: GroupPromptKind,
+  content: string,
+  opts?: PromptUpdateOptions
+) {
+  const body: Record<string, unknown> = { content, by: "user" };
+  if (opts?.editorMode) body.editor_mode = opts.editorMode;
+  if (Array.isArray(opts?.changedBlocks)) body.changed_blocks = opts.changedBlocks;
+  return apiJson<GroupPromptInfo>(`/api/v1/groups/${encodeURIComponent(groupId)}/prompts/${kind}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function resetGroupPrompt(groupId: string, kind: GroupPromptKind) {
+  return apiJson<GroupPromptInfo>(`/api/v1/groups/${encodeURIComponent(groupId)}/prompts/${kind}?confirm=${encodeURIComponent(kind)}`, {
+    method: "DELETE",
+  });
+}
+
+// ============ Actors ============
+
 export async function fetchActors(groupId: string, includeUnread = true) {
   const url = includeUnread
     ? `/api/v1/groups/${encodeURIComponent(groupId)}/actors?include_unread=true`
@@ -618,6 +691,8 @@ export async function addActor(
   envPrivate?: Record<string, string>,
   options?: {
     profileId?: string;
+    profileScope?: ProfileScope;
+    profileOwner?: string;
     title?: string;
     capabilityAutoload?: string[];
   }
@@ -633,6 +708,8 @@ export async function addActor(
       env: {},
       env_private: envPrivate && Object.keys(envPrivate).length ? envPrivate : undefined,
       profile_id: options?.profileId || undefined,
+      profile_scope: options?.profileScope || undefined,
+      profile_owner: options?.profileOwner || undefined,
       capability_autoload: Array.isArray(options?.capabilityAutoload)
         ? options?.capabilityAutoload
         : [],
@@ -651,6 +728,8 @@ export async function updateActor(
   title?: string,
   opts?: {
     profileId?: string;
+    profileScope?: ProfileScope;
+    profileOwner?: string;
     profileAction?: "convert_to_custom";
     enabled?: boolean;
     capabilityAutoload?: string[];
@@ -661,6 +740,8 @@ export async function updateActor(
   if (command !== undefined) body.command = command.trim();
   if (title !== undefined) body.title = title.trim();
   if (opts?.profileId !== undefined) body.profile_id = String(opts.profileId || "");
+  if (opts?.profileScope !== undefined) body.profile_scope = String(opts.profileScope || "");
+  if (opts?.profileOwner !== undefined) body.profile_owner = String(opts.profileOwner || "");
   if (opts?.profileAction) body.profile_action = opts.profileAction;
   if (typeof opts?.enabled === "boolean") body.enabled = opts.enabled;
   if (Array.isArray(opts?.capabilityAutoload)) body.capability_autoload = opts.capabilityAutoload;
@@ -673,12 +754,17 @@ export async function updateActor(
   );
 }
 
-export async function attachActorProfile(groupId: string, actorId: string, profileId: string) {
+export async function attachActorProfile(groupId: string, actorId: string, profileId: string, opts?: ProfileLookupOptions) {
   return apiJson<{ actor: Actor }>(
     `/api/v1/groups/${encodeURIComponent(groupId)}/actors/${encodeURIComponent(actorId)}`,
     {
       method: "POST",
-      body: JSON.stringify({ by: "user", profile_id: profileId }),
+      body: JSON.stringify({
+        by: "user",
+        profile_id: profileId,
+        profile_scope: opts?.scope || undefined,
+        profile_owner: opts?.ownerId || undefined,
+      }),
     }
   );
 }
@@ -743,40 +829,98 @@ export async function updateActorPrivateEnv(
   );
 }
 
-export async function listActorProfiles() {
-  return apiJson<{ profiles: ActorProfile[] }>(`/api/v1/actor_profiles?by=user`);
+export type ProfileView = "global" | "my" | "all";
+export type ProfileScope = "global" | "user";
+
+type ProfileLookupOptions = {
+  scope?: ProfileScope;
+  ownerId?: string;
+};
+
+type ProfileDeleteOptions = ProfileLookupOptions & {
+  forceDetach?: boolean;
+};
+
+function buildProfileQuery(opts?: ProfileLookupOptions): string {
+  const params = new URLSearchParams();
+  if (opts?.scope) params.set("scope", String(opts.scope));
+  if (opts?.ownerId) params.set("owner_id", String(opts.ownerId));
+  const query = params.toString();
+  return query ? `?${query}` : "";
 }
 
-export async function getActorProfile(profileId: string) {
+function buildProfileDeleteQuery(opts?: ProfileDeleteOptions): string {
+  const params = new URLSearchParams();
+  params.set("by", "user");
+  if (opts?.scope) params.set("scope", String(opts.scope));
+  if (opts?.ownerId) params.set("owner_id", String(opts.ownerId));
+  if (opts?.forceDetach) params.set("force_detach", "true");
+  return params.toString();
+}
+
+export async function listProfiles(view: ProfileView = "global") {
+  return apiJson<{ profiles: ActorProfile[] }>(`/api/v1/profiles?view=${encodeURIComponent(view)}`);
+}
+
+export async function getProfile(profileId: string, opts?: ProfileLookupOptions) {
   return apiJson<{ profile: ActorProfile; usage: ActorProfileUsage[] }>(
-    `/api/v1/actor_profiles/${encodeURIComponent(profileId)}?by=user`
+    `/api/v1/profiles/${encodeURIComponent(profileId)}${buildProfileQuery(opts)}`
   );
 }
 
-export async function upsertActorProfile(profile: Record<string, unknown>, expectedRevision?: number) {
-  const body: Record<string, unknown> = { by: "user", profile };
+export async function saveProfile(profile: Record<string, unknown>, expectedRevision?: number) {
+  const profileId = String(profile.id || "").trim();
+  if (!profileId) {
+    const body: Record<string, unknown> = { by: "user", profile };
+    if (typeof expectedRevision === "number") {
+      body.expected_revision = Math.trunc(expectedRevision);
+    }
+    return apiJson<{ profile: ActorProfile }>(`/api/v1/actor_profiles`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  const body: Record<string, unknown> = { ...profile, by: "user" };
   if (typeof expectedRevision === "number") {
     body.expected_revision = Math.trunc(expectedRevision);
   }
-  return apiJson<{ profile: ActorProfile }>(`/api/v1/actor_profiles`, {
-    method: "POST",
+  return apiJson<{ profile: ActorProfile }>(`/api/v1/profiles/${encodeURIComponent(profileId)}`, {
+    method: "PUT",
     body: JSON.stringify(body),
   });
 }
 
-export async function deleteActorProfile(profileId: string, opts?: { forceDetach?: boolean }) {
-  const params = new URLSearchParams();
-  params.set("by", "user");
-  if (opts?.forceDetach) params.set("force_detach", "true");
+export async function deleteProfile(profileId: string, opts?: ProfileDeleteOptions) {
   return apiJson<{ deleted: boolean; profile_id: string; detached_count?: number; detached?: ActorProfileUsage[] }>(
-    `/api/v1/actor_profiles/${encodeURIComponent(profileId)}?${params.toString()}`,
+    `/api/v1/profiles/${encodeURIComponent(profileId)}?${buildProfileDeleteQuery(opts)}`,
     { method: "DELETE" }
   );
 }
 
-export async function fetchActorProfilePrivateEnvKeys(profileId: string) {
+export async function listActorProfiles() {
+  return listProfiles("global");
+}
+
+export async function getActorProfile(profileId: string) {
+  return getProfile(profileId, { scope: "global" });
+}
+
+export async function upsertActorProfile(profile: Record<string, unknown>, expectedRevision?: number) {
+  return saveProfile({ ...profile, scope: "global", owner_id: "" }, expectedRevision);
+}
+
+export async function deleteActorProfile(profileId: string, opts?: { forceDetach?: boolean }) {
+  return deleteProfile(profileId, { scope: "global", forceDetach: opts?.forceDetach });
+}
+
+export async function fetchActorProfilePrivateEnvKeys(profileId: string, opts?: ProfileLookupOptions) {
+  return fetchProfilePrivateEnvKeys(profileId, opts ?? { scope: "global" });
+}
+
+export async function fetchProfilePrivateEnvKeys(profileId: string, opts?: ProfileLookupOptions) {
   return apiJson<{ profile_id: string; keys: string[]; masked_values?: Record<string, string> }>(
-    `/api/v1/actor_profiles/${encodeURIComponent(profileId)}/env_private?by=user`
+    `/api/v1/profiles/${encodeURIComponent(profileId)}/env_private${buildProfileQuery(opts)}${buildProfileQuery(opts) ? "&" : "?"}by=user`
   );
 }
 
@@ -786,31 +930,87 @@ export async function updateActorProfilePrivateEnv(
   unsetKeys: string[],
   clear: boolean
 ) {
+  return updateProfilePrivateEnv(profileId, setVars, unsetKeys, clear, { scope: "global" });
+}
+
+export async function updateProfilePrivateEnv(
+  profileId: string,
+  setVars: Record<string, string>,
+  unsetKeys: string[],
+  clear: boolean,
+  opts?: ProfileLookupOptions
+) {
   return apiJson<{ profile_id: string; keys: string[] }>(
-    `/api/v1/actor_profiles/${encodeURIComponent(profileId)}/env_private`,
+    `/api/v1/profiles/${encodeURIComponent(profileId)}/env_private`,
     {
       method: "POST",
-      body: JSON.stringify({ by: "user", set: setVars, unset: unsetKeys, clear }),
+      body: JSON.stringify({
+        by: "user",
+        scope: opts?.scope,
+        owner_id: opts?.ownerId,
+        set: setVars,
+        unset: unsetKeys,
+        clear,
+      }),
     }
   );
 }
 
-export async function copyActorPrivateEnvToProfile(profileId: string, groupId: string, actorId: string) {
+export async function copyActorPrivateEnvToProfile(
+  profileId: string,
+  groupId: string,
+  actorId: string,
+  opts?: ProfileLookupOptions
+) {
   return apiJson<{ profile_id: string; group_id: string; actor_id: string; keys: string[] }>(
     `/api/v1/actor_profiles/${encodeURIComponent(profileId)}/copy_actor_secrets`,
     {
       method: "POST",
-      body: JSON.stringify({ by: "user", group_id: groupId, actor_id: actorId }),
+      body: JSON.stringify({
+        by: "user",
+        scope: opts?.scope,
+        owner_id: opts?.ownerId,
+        group_id: groupId,
+        actor_id: actorId,
+      }),
     }
   );
 }
 
-export async function copyActorProfilePrivateEnvFromProfile(profileId: string, sourceProfileId: string) {
+export async function copyActorProfilePrivateEnvFromProfile(
+  profileId: string,
+  sourceProfileId: string,
+  opts?: ProfileLookupOptions & {
+    sourceScope?: ProfileScope;
+    sourceOwnerId?: string;
+  }
+) {
+  return copyProfilePrivateEnvFromProfile(profileId, sourceProfileId, {
+    scope: "global",
+    ...opts,
+  });
+}
+
+export async function copyProfilePrivateEnvFromProfile(
+  profileId: string,
+  sourceProfileId: string,
+  opts?: ProfileLookupOptions & {
+    sourceScope?: ProfileScope;
+    sourceOwnerId?: string;
+  }
+) {
   return apiJson<{ profile_id: string; source_profile_id: string; keys: string[] }>(
-    `/api/v1/actor_profiles/${encodeURIComponent(profileId)}/copy_profile_secrets`,
+    `/api/v1/profiles/${encodeURIComponent(profileId)}/copy_profile_secrets`,
     {
       method: "POST",
-      body: JSON.stringify({ by: "user", source_profile_id: sourceProfileId }),
+      body: JSON.stringify({
+        by: "user",
+        scope: opts?.scope,
+        owner_id: opts?.ownerId,
+        source_profile_id: sourceProfileId,
+        source_scope: opts?.sourceScope ?? opts?.scope,
+        source_owner_id: opts?.sourceOwnerId ?? opts?.ownerId,
+      }),
     }
   );
 }
@@ -1385,15 +1585,23 @@ export async function fetchRemoteAccessState() {
   return apiJson<{ remote_access: RemoteAccessState }>("/api/v1/remote_access");
 }
 
+export async function fetchWebAccessSession() {
+  return apiJson<{ web_access_session: WebAccessSession }>("/api/v1/web_access/session");
+}
+
+export async function logoutWebAccess() {
+  return apiJson<{ signed_out: boolean }>("/api/v1/web_access/logout", {
+    method: "POST",
+  });
+}
+
 export async function updateRemoteAccessConfig(args: {
   provider?: "off" | "manual" | "tailscale";
   mode?: string;
-  enforceWebToken?: boolean;
+  requireAccessToken?: boolean;
   webHost?: string;
   webPort?: number;
   webPublicUrl?: string;
-  webToken?: string;
-  clearWebToken?: boolean;
 }) {
   return apiJson<{ remote_access: RemoteAccessState }>("/api/v1/remote_access", {
     method: "PUT",
@@ -1401,12 +1609,10 @@ export async function updateRemoteAccessConfig(args: {
       by: "user",
       provider: args.provider,
       mode: args.mode,
-      enforce_web_token: args.enforceWebToken,
+      require_access_token: args.requireAccessToken,
       web_host: args.webHost,
       web_port: args.webPort,
       web_public_url: args.webPublicUrl,
-      web_token: args.webToken,
-      clear_web_token: args.clearWebToken,
     }),
   });
 }
@@ -1423,9 +1629,9 @@ export async function stopRemoteAccess() {
   });
 }
 
-// ============ User Token management ============
+// ============ Access token management ============
 
-export interface UserTokenEntry {
+export interface AccessTokenEntry {
   token?: string;
   token_id?: string;
   token_preview?: string;
@@ -1435,36 +1641,36 @@ export interface UserTokenEntry {
   created_at: string;
 }
 
-export async function fetchTokens() {
-  return apiJson<{ tokens: UserTokenEntry[] }>("/api/v1/tokens");
+export async function fetchAccessTokens() {
+  return apiJson<{ access_tokens: AccessTokenEntry[] }>("/api/v1/access-tokens");
 }
 
-export async function createToken(userId: string, isAdmin: boolean, allowedGroups: string[], customToken?: string) {
+export async function createAccessToken(userId: string, isAdmin: boolean, allowedGroups: string[], customToken?: string) {
   const body: Record<string, unknown> = {
     user_id: userId,
     is_admin: isAdmin,
     allowed_groups: allowedGroups,
   };
   if (customToken?.trim()) body.custom_token = customToken.trim();
-  return apiJson<{ token: UserTokenEntry }>("/api/v1/tokens", {
+  return apiJson<{ access_token: AccessTokenEntry }>("/api/v1/access-tokens", {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
-export async function updateToken(tokenId: string, updates: { allowed_groups?: string[]; is_admin?: boolean }) {
-  return apiJson<{ token: UserTokenEntry }>(`/api/v1/tokens/${encodeURIComponent(tokenId)}`, {
+export async function updateAccessToken(tokenId: string, updates: { allowed_groups?: string[]; is_admin?: boolean }) {
+  return apiJson<{ access_token: AccessTokenEntry }>(`/api/v1/access-tokens/${encodeURIComponent(tokenId)}`, {
     method: "PATCH",
     body: JSON.stringify(updates),
   });
 }
 
-export async function revealToken(tokenId: string) {
-  return apiJson<{ token: string }>(`/api/v1/tokens/${encodeURIComponent(tokenId)}/reveal`);
+export async function revealAccessToken(tokenId: string) {
+  return apiJson<{ token: string }>(`/api/v1/access-tokens/${encodeURIComponent(tokenId)}/reveal`);
 }
 
-export async function deleteToken(tokenId: string) {
-  return apiJson<{ deleted: boolean }>(`/api/v1/tokens/${encodeURIComponent(tokenId)}`, {
+export async function deleteAccessToken(tokenId: string) {
+  return apiJson<{ deleted: boolean; access_tokens_remain?: boolean; deleted_current_session?: boolean }>(`/api/v1/access-tokens/${encodeURIComponent(tokenId)}`, {
     method: "DELETE",
   });
 }
@@ -1475,7 +1681,7 @@ export async function fetchGroupSpaceStatus(groupId: string, provider: string = 
   );
 }
 
-export async function bindGroupSpace(groupId: string, remoteSpaceId: string = "", provider: string = "notebooklm") {
+export async function bindGroupSpace(groupId: string, remoteSpaceId: string = "", provider: string = "notebooklm", lane: "work" | "memory") {
   return apiJson<GroupSpaceStatus>(
     `/api/v1/groups/${encodeURIComponent(groupId)}/space/bind`,
     {
@@ -1483,6 +1689,7 @@ export async function bindGroupSpace(groupId: string, remoteSpaceId: string = ""
       body: JSON.stringify({
         by: "user",
         provider,
+        lane,
         action: "bind",
         remote_space_id: String(remoteSpaceId || ""),
       }),
@@ -1495,14 +1702,14 @@ export async function fetchGroupSpaceSpaces(groupId: string, provider: string = 
     group_id: string;
     provider: string;
     provider_state?: Record<string, unknown>;
-    binding?: Record<string, unknown>;
+    bindings?: Record<string, Record<string, unknown>>;
     spaces: GroupSpaceRemoteSpace[];
   }>(
     `/api/v1/groups/${encodeURIComponent(groupId)}/space/spaces?provider=${encodeURIComponent(provider)}`
   );
 }
 
-export async function unbindGroupSpace(groupId: string, provider: string = "notebooklm") {
+export async function unbindGroupSpace(groupId: string, provider: string = "notebooklm", lane: "work" | "memory") {
   return apiJson<GroupSpaceStatus>(
     `/api/v1/groups/${encodeURIComponent(groupId)}/space/bind`,
     {
@@ -1510,6 +1717,7 @@ export async function unbindGroupSpace(groupId: string, provider: string = "note
       body: JSON.stringify({
         by: "user",
         provider,
+        lane,
         action: "unbind",
         remote_space_id: "",
       }),
@@ -1520,6 +1728,7 @@ export async function unbindGroupSpace(groupId: string, provider: string = "note
 export async function ingestGroupSpace(args: {
   groupId: string;
   provider?: string;
+  lane: "work" | "memory";
   kind: "context_sync" | "resource_ingest";
   payload: Record<string, unknown>;
   idempotencyKey?: string;
@@ -1537,6 +1746,7 @@ export async function ingestGroupSpace(args: {
     body: JSON.stringify({
       by: "user",
       provider: args.provider || "notebooklm",
+      lane: args.lane,
       kind: args.kind,
       payload: args.payload || {},
       idempotency_key: String(args.idempotencyKey || ""),
@@ -1547,6 +1757,7 @@ export async function ingestGroupSpace(args: {
 export async function queryGroupSpace(args: {
   groupId: string;
   provider?: string;
+  lane: "work" | "memory";
   query: string;
   options?: Record<string, unknown>;
 }) {
@@ -1562,13 +1773,14 @@ export async function queryGroupSpace(args: {
     method: "POST",
     body: JSON.stringify({
       provider: args.provider || "notebooklm",
+      lane: args.lane,
       query: args.query,
       options: args.options || {},
     }),
   });
 }
 
-export async function fetchGroupSpaceSources(groupId: string, provider: string = "notebooklm") {
+export async function fetchGroupSpaceSources(groupId: string, provider: string = "notebooklm", lane: "work" | "memory") {
   return apiJson<{
     group_id: string;
     provider: string;
@@ -1578,13 +1790,14 @@ export async function fetchGroupSpaceSources(groupId: string, provider: string =
     sources: GroupSpaceSource[];
     list_result?: Record<string, unknown>;
   }>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/space/sources?provider=${encodeURIComponent(provider)}`
+    `/api/v1/groups/${encodeURIComponent(groupId)}/space/sources?provider=${encodeURIComponent(provider)}&lane=${encodeURIComponent(lane)}`
   );
 }
 
 export async function actionGroupSpaceSource(args: {
   groupId: string;
   provider?: string;
+  lane: "work" | "memory";
   action: "delete" | "rename" | "refresh";
   sourceId: string;
   newTitle?: string;
@@ -1604,6 +1817,7 @@ export async function actionGroupSpaceSource(args: {
     body: JSON.stringify({
       by: "user",
       provider: args.provider || "notebooklm",
+      lane: args.lane,
       action: args.action,
       source_id: args.sourceId,
       new_title: String(args.newTitle || ""),
@@ -1614,10 +1828,12 @@ export async function actionGroupSpaceSource(args: {
 export async function fetchGroupSpaceArtifacts(
   groupId: string,
   provider: string = "notebooklm",
+  lane: "work" | "memory",
   kind: string = ""
 ) {
   const params = new URLSearchParams({
     provider: String(provider || "notebooklm"),
+    lane: String(lane),
   });
   if (String(kind || "").trim()) {
     params.set("kind", String(kind || "").trim().toLowerCase());
@@ -1637,6 +1853,7 @@ export async function fetchGroupSpaceArtifacts(
 export async function actionGroupSpaceArtifact(args: {
   groupId: string;
   provider?: string;
+  lane: "work" | "memory";
   action: "generate" | "download";
   kind: string;
   options?: Record<string, unknown>;
@@ -1669,6 +1886,7 @@ export async function actionGroupSpaceArtifact(args: {
     body: JSON.stringify({
       by: "user",
       provider: args.provider || "notebooklm",
+      lane: args.lane,
       action: args.action,
       kind: String(args.kind || "").trim().toLowerCase(),
       options: args.options || {},
@@ -1687,11 +1905,13 @@ export async function actionGroupSpaceArtifact(args: {
 export async function listGroupSpaceJobs(args: {
   groupId: string;
   provider?: string;
+  lane: "work" | "memory";
   state?: string;
   limit?: number;
 }) {
   const params = new URLSearchParams({
     provider: String(args.provider || "notebooklm"),
+    lane: String(args.lane),
     limit: String(Math.max(1, Math.min(500, Number(args.limit || 50)))),
   });
   if (String(args.state || "").trim()) {
@@ -1708,6 +1928,7 @@ export async function listGroupSpaceJobs(args: {
 export async function actionGroupSpaceJob(args: {
   groupId: string;
   provider?: string;
+  lane: "work" | "memory";
   action: "retry" | "cancel";
   jobId: string;
 }) {
@@ -1721,6 +1942,7 @@ export async function actionGroupSpaceJob(args: {
     body: JSON.stringify({
       by: "user",
       provider: args.provider || "notebooklm",
+      lane: args.lane,
       action: args.action,
       job_id: args.jobId,
     }),
@@ -1730,6 +1952,7 @@ export async function actionGroupSpaceJob(args: {
 export async function syncGroupSpace(args: {
   groupId: string;
   provider?: string;
+  lane: "work" | "memory";
   action?: "status" | "run";
   force?: boolean;
 }) {
@@ -1743,6 +1966,7 @@ export async function syncGroupSpace(args: {
     body: JSON.stringify({
       by: "user",
       provider: args.provider || "notebooklm",
+      lane: args.lane,
       action: args.action || "run",
       force: Boolean(args.force),
     }),

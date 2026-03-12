@@ -233,7 +233,7 @@ Configure MCP for an agent runtime.
 ```bash
 cccc setup --runtime claude        # Auto-configure for Claude Code
 cccc setup --runtime codex         # Auto-configure for Codex
-cccc setup --runtime cursor        # Print manual config instructions
+cccc setup --runtime kimi          # Auto-configure for Kimi CLI
 ```
 
 ## Web Commands
@@ -264,5 +264,4 @@ cccc mcp                           # Start MCP server (stdio mode)
 | `CCCC_HOME` | `~/.cccc` | Runtime home directory |
 | `CCCC_WEB_HOST` | `127.0.0.1` | Web UI bind address |
 | `CCCC_WEB_PORT` | `8848` | Web UI port |
-| `CCCC_WEB_TOKEN` | (none) | Authentication token for Web UI |
 | `CCCC_LOG_LEVEL` | `INFO` | Log level |

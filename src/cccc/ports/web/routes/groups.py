@@ -40,6 +40,7 @@ from ..schemas import (
     filter_groups_for_principal,
     require_admin,
     require_group,
+    require_user,
 )
 
 
@@ -151,7 +152,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             },
         }
 
-    @global_router.get("/events/stream", dependencies=[Depends(require_admin)])
+    @global_router.get("/events/stream", dependencies=[Depends(require_user)])
     async def global_events_stream() -> StreamingResponse:
         """SSE stream for global events (group created/deleted, etc.)."""
         from ..streams import sse_global_events_tail, create_sse_response
@@ -184,8 +185,9 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         return await ctx.daemon({"op": "group_update", "args": {"group_id": group_id, "by": req.by, "patch": patch}})
 
     @group_router.delete("")
-    async def group_delete(group_id: str, confirm: str = "", by: str = "user") -> Dict[str, Any]:
-        """Delete a group (requires confirm=group_id)."""
+    async def group_delete(request: Request, group_id: str, confirm: str = "", by: str = "user") -> Dict[str, Any]:
+        """Delete a group (admin-only, requires confirm=group_id)."""
+        require_admin(request)
         if confirm != group_id:
             raise HTTPException(
                 status_code=400,
@@ -361,6 +363,154 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             return str(load_builtin_help_markdown() or "").strip()
         return ""
 
+    def _normalize_help_changed_blocks(raw: Any) -> list[str]:
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            if value == "common":
+                seen.add(value)
+                out.append(value)
+                continue
+            if value in ("role:foreman", "role:peer"):
+                seen.add(value)
+                out.append(value)
+                continue
+            if value.startswith("actor:"):
+                actor_id = str(value[len("actor:"):]).strip()
+                if actor_id:
+                    normalized = f"actor:{actor_id}"
+                    if normalized not in seen:
+                        seen.add(normalized)
+                        out.append(normalized)
+        return out
+
+    async def _list_running_actor_views(group_id: str) -> list[dict[str, Any]]:
+        try:
+            resp = await ctx.daemon({"op": "actor_list", "args": {"group_id": group_id, "include_unread": False}})
+        except Exception:
+            return []
+        result = resp.get("result") if isinstance(resp, dict) else None
+        actors = result.get("actors") if isinstance(result, dict) else None
+        if not isinstance(actors, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for item in actors:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("id") or "").strip()
+            if not aid:
+                continue
+            if not coerce_bool(item.get("running"), default=False):
+                continue
+            out.append(item)
+        return out
+
+    def _help_update_reason_labels(*, actor: dict[str, Any], changed_blocks: list[str], editor_mode: str) -> list[str]:
+        mode = str(editor_mode or "").strip().lower()
+        if mode != "structured":
+            return []
+        aid = str(actor.get("id") or "").strip()
+        role = str(actor.get("role") or "").strip().lower()
+        if not aid:
+            return []
+        labels: list[str] = []
+        seen: set[str] = set()
+
+        def _add(label: str) -> None:
+            if label and label not in seen:
+                seen.add(label)
+                labels.append(label)
+
+        blocks = list(changed_blocks or [])
+        if "common" in blocks:
+            _add("common guidance")
+        if "role:foreman" in blocks and role == "foreman":
+            _add("foreman notes")
+        if "role:peer" in blocks and role == "peer":
+            _add("peer notes")
+        if f"actor:{aid}" in blocks:
+            _add("your actor note")
+        return labels
+
+    def _help_update_notify_copy(*, labels: list[str]) -> tuple[str, str]:
+        reasons = [str(label or "").strip() for label in labels if str(label or "").strip()]
+        if not reasons:
+            return (
+                "Help updated",
+                "Group help changed. Run `cccc_help` now to refresh your effective playbook.",
+            )
+        if len(reasons) == 1:
+            title = f"Help updated: {reasons[0]}"
+        else:
+            title = "Help updated: multiple sections"
+        joined = ", ".join(reasons)
+        message = (
+            f"Updated: {joined}. Run `cccc_help` now to refresh your effective playbook; "
+            "then update `cccc_agent_state` if your plan changes."
+        )
+        return title, message
+
+    async def _notify_help_update(
+        group_id: str,
+        *,
+        by: str,
+        editor_mode: str,
+        changed_blocks: list[str],
+        content_changed: bool,
+    ) -> list[str]:
+        if not content_changed:
+            return []
+        running = await _list_running_actor_views(group_id)
+        if not running:
+            return []
+
+        target_reasons: dict[str, list[str]] = {}
+        for actor in running:
+            aid = str(actor.get("id") or "").strip()
+            if not aid:
+                continue
+            reasons = _help_update_reason_labels(
+                actor=actor,
+                changed_blocks=changed_blocks,
+                editor_mode=editor_mode,
+            )
+            if reasons:
+                target_reasons[aid] = reasons
+
+        if not target_reasons:
+            for actor in running:
+                aid = str(actor.get("id") or "").strip()
+                if aid:
+                    target_reasons[aid] = []
+
+        notified: list[str] = []
+        for aid in sorted(target_reasons.keys()):
+            title, message = _help_update_notify_copy(labels=target_reasons.get(aid) or [])
+            try:
+                resp = await ctx.daemon({
+                    "op": "system_notify",
+                    "args": {
+                        "group_id": group_id,
+                        "by": "system",
+                        "kind": "info",
+                        "priority": "normal",
+                        "title": title,
+                        "message": message,
+                        "target_actor_id": aid,
+                        "requires_ack": False,
+                    },
+                })
+                if isinstance(resp, dict) and resp.get("ok"):
+                    notified.append(aid)
+            except Exception:
+                continue
+        return notified
+
     @group_router.get("/prompts")
     async def prompts_get(group_id: str) -> Dict[str, Any]:
         """Get effective group guidance markdown (preamble/help) and override status."""
@@ -398,12 +548,35 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
         filename = _prompt_kind_to_filename(kind)
         try:
+            current_pf = read_group_prompt_file(group, filename)
+            current_content = str(current_pf.content or "") if current_pf.found and isinstance(current_pf.content, str) else _builtin_prompt_markdown(kind)
             raw = str(req.content or "")
+            editor_mode = str(req.editor_mode or "").strip().lower()
+            changed_blocks = _normalize_help_changed_blocks(req.changed_blocks)
+            content_changed = str(current_content) != str(raw if raw.strip() else _builtin_prompt_markdown(kind))
             if not raw.strip():
                 pf = delete_group_prompt_file(group, filename)
-                return {"ok": True, "result": {"kind": kind, "source": "builtin", "filename": filename, "path": pf.path, "content": _builtin_prompt_markdown(kind)}}
+                notified = []
+                if str(kind).strip().lower() == "help":
+                    notified = await _notify_help_update(
+                        group_id,
+                        by=str(req.by or "user").strip() or "user",
+                        editor_mode="raw",
+                        changed_blocks=[],
+                        content_changed=content_changed,
+                    )
+                return {"ok": True, "result": {"kind": kind, "source": "builtin", "filename": filename, "path": pf.path, "content": _builtin_prompt_markdown(kind), "notified_actor_ids": notified}}
             pf = write_group_prompt_file(group, filename, raw)
-            return {"ok": True, "result": {"kind": kind, "source": "home", "filename": filename, "path": pf.path, "content": pf.content or ""}}
+            notified = []
+            if str(kind).strip().lower() == "help":
+                notified = await _notify_help_update(
+                    group_id,
+                    by=str(req.by or "user").strip() or "user",
+                    editor_mode=editor_mode,
+                    changed_blocks=changed_blocks,
+                    content_changed=content_changed,
+                )
+            return {"ok": True, "result": {"kind": kind, "source": "home", "filename": filename, "path": pf.path, "content": pf.content or "", "notified_actor_ids": notified}}
         except Exception as e:
             return {"ok": False, "error": {"code": "WRITE_FAILED", "message": f"Failed to write {filename}: {e}"}}
 
@@ -419,8 +592,21 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
         filename = _prompt_kind_to_filename(kind)
         try:
+            current_pf = read_group_prompt_file(group, filename)
+            current_content = str(current_pf.content or "") if current_pf.found and isinstance(current_pf.content, str) else _builtin_prompt_markdown(kind)
+            next_content = _builtin_prompt_markdown(kind)
+            content_changed = str(current_content) != str(next_content)
             pf = delete_group_prompt_file(group, filename)
-            return {"ok": True, "result": {"kind": kind, "source": "builtin", "filename": filename, "path": pf.path, "content": _builtin_prompt_markdown(kind)}}
+            notified = []
+            if str(kind).strip().lower() == "help":
+                notified = await _notify_help_update(
+                    group_id,
+                    by="user",
+                    editor_mode="raw",
+                    changed_blocks=[],
+                    content_changed=content_changed,
+                )
+            return {"ok": True, "result": {"kind": kind, "source": "builtin", "filename": filename, "path": pf.path, "content": _builtin_prompt_markdown(kind), "notified_actor_ids": notified}}
         except Exception as e:
             return {"ok": False, "error": {"code": "DELETE_FAILED", "message": f"Failed to delete {filename}: {e}"}}
 
@@ -479,7 +665,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     "actor_idle_timeout_seconds": _safe_int(automation.get("actor_idle_timeout_seconds", 600), default=600, min_value=0),
                     "keepalive_delay_seconds": _safe_int(automation.get("keepalive_delay_seconds", 120), default=120, min_value=0),
                     "keepalive_max_per_actor": _safe_int(automation.get("keepalive_max_per_actor", 3), default=3, min_value=0),
-                    "silence_timeout_seconds": _safe_int(automation.get("silence_timeout_seconds", 600), default=600, min_value=0),
+                    "silence_timeout_seconds": _safe_int(automation.get("silence_timeout_seconds", 0), default=0, min_value=0),
                     "help_nudge_interval_seconds": _safe_int(automation.get("help_nudge_interval_seconds", 600), default=600, min_value=0),
                     "help_nudge_min_messages": _safe_int(automation.get("help_nudge_min_messages", 10), default=10, min_value=0),
                     "min_interval_seconds": _safe_int(delivery.get("min_interval_seconds", 0), default=0, min_value=0),

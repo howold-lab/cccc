@@ -19,6 +19,32 @@ import { MarkdownRenderer } from "./MarkdownRenderer";
 import { getRecipientDisplayName } from "../hooks/useActorDisplayName";
 import { ImageIcon, FileIcon, CloseIcon } from "./Icons";
 
+const RUNTIME_LOGO_BASE = import.meta.env.BASE_URL;
+const RUNTIME_LOGO: Record<string, string> = {
+    claude: `${RUNTIME_LOGO_BASE}logos/claude.png`,
+    codex: `${RUNTIME_LOGO_BASE}logos/codex.png`,
+    gemini: `${RUNTIME_LOGO_BASE}logos/gemini.png`,
+};
+
+function resolveSenderActor(actors: Actor[], senderId: string): Actor | null {
+    const key = String(senderId || "").trim();
+    if (!key) return null;
+
+    const exactId = actors.find((actor) => String(actor.id || "").trim() === key);
+    if (exactId) return exactId;
+
+    // 兼容历史消息：旧 `by` 可能已经不是现行 actor id，但仍等于当前 title。
+    const exactTitle = actors.find((actor) => String(actor.title || "").trim() === key);
+    if (exactTitle) return exactTitle;
+
+    const lower = key.toLowerCase();
+    return actors.find((actor) => {
+        const actorId = String(actor.id || "").trim().toLowerCase();
+        const actorTitle = String(actor.title || "").trim().toLowerCase();
+        return actorId === lower || actorTitle === lower;
+    }) || null;
+}
+
 
 function formatEventLine(ev: LedgerEvent): string {
     if (ev.kind === "chat.message" && ev.data && typeof ev.data === "object") {
@@ -107,7 +133,7 @@ function ImagePreview({
                             type="button"
                             className={classNames(
                                 "absolute inset-0",
-                                isDark ? "bg-black/80" : "bg-black/60"
+                                "glass-overlay"
                             )}
                             onClick={() => setIsLightboxOpen(false)}
                             aria-label={t('common:close')}
@@ -116,7 +142,7 @@ function ImagePreview({
                         <div
                             className={classNames(
                                 "relative z-[81] flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border shadow-2xl",
-                                isDark ? "border-slate-700 bg-slate-950/95" : "border-gray-200 bg-white/95"
+                                "glass-modal"
                             )}
                             role="dialog"
                             aria-modal="true"
@@ -125,18 +151,18 @@ function ImagePreview({
                         >
                             <div className={classNames(
                                 "flex items-center justify-between gap-3 border-b px-4 py-3",
-                                isDark ? "border-slate-800" : "border-gray-200"
+                                "border-[var(--glass-border-subtle)]"
                             )}>
                                 <div className="min-w-0">
                                     <p className={classNames(
                                         "truncate text-sm font-medium",
-                                        isDark ? "text-slate-100" : "text-gray-900"
+                                        "text-[var(--color-text-primary)]"
                                     )}>
                                         {alt}
                                     </p>
                                     <p className={classNames(
                                         "text-xs",
-                                        isDark ? "text-slate-400" : "text-gray-500"
+                                        "text-[var(--color-text-tertiary)]"
                                     )}>
                                         {t('imagePreviewHint')}
                                     </p>
@@ -222,6 +248,7 @@ export const MessageBubble = memo(function MessageBubble({
     onOpenSource,
 }: MessageBubbleProps) {
     const isUserMessage = ev.by === "user";
+    const isOptimistic = !!(ev.data as Record<string, unknown> | undefined)?._optimistic;
     const senderAccent = !isUserMessage ? getActorAccentColor(String(ev.by || ""), isDark) : null;
 
     // Floating UI for agent-state tooltip
@@ -378,11 +405,24 @@ export const MessageBubble = memo(function MessageBubble({
     }, [displayNameMap, dstGroupId, dstTo, groupLabelById, hasDestination, recipients]);
 
     // Sender display name (use title if available)
+    const senderActor = useMemo(() => {
+        if (isUserMessage) return null;
+        return resolveSenderActor(actors, String(ev.by || ""));
+    }, [actors, ev.by, isUserMessage]);
+
     const senderDisplayName = useMemo(() => {
         const by = String(ev.by || "");
         if (!by || by === "user") return by;
-        return displayNameMap.get(by) || by;
-    }, [ev.by, displayNameMap]);
+        return String(senderActor?.title || "").trim() || displayNameMap.get(by) || by;
+    }, [displayNameMap, ev.by, senderActor]);
+
+    // Sender runtime logo path (for actor avatars)
+    const senderLogoSrc = useMemo(() => {
+        if (isUserMessage) return null;
+        const runtime = String(senderActor?.runtime || "").toLowerCase();
+        if (!runtime) return null;
+        return RUNTIME_LOGO[runtime] || null;
+    }, [isUserMessage, senderActor]);
 
     const readPreviewEntries = visibleReadStatusEntries.slice(0, 3);
     const readPreviewOverflow = Math.max(0, visibleReadStatusEntries.length - readPreviewEntries.length);
@@ -393,13 +433,14 @@ export const MessageBubble = memo(function MessageBubble({
                 "flex gap-2 sm:gap-3 group",
                 isUserMessage
                     ? "flex-col items-end sm:items-start sm:flex-row-reverse"
-                    : "flex-col items-start sm:flex-row"
+                    : "flex-col items-start sm:flex-row",
+                isOptimistic ? "opacity-60" : ""
             )}
         >
             {/* Desktop Avatar (Hidden on mobile) */}
             <div
                 className={classNames(
-                    "hidden sm:flex flex-shrink-0 w-8 h-8 rounded-full items-center justify-center text-xs font-bold shadow-sm mt-1",
+                    "hidden sm:flex flex-shrink-0 w-8 h-8 rounded-full items-center justify-center text-xs font-bold shadow-sm mt-1 overflow-hidden",
                     isUserMessage
                         ? "bg-gradient-to-br from-blue-500 to-blue-600 text-white"
                         : isDark
@@ -410,7 +451,9 @@ export const MessageBubble = memo(function MessageBubble({
                 ref={setAgentStateReference}
                 {...getReferenceProps()}
             >
-                {isUserMessage ? "U" : (senderDisplayName || "?")[0].toUpperCase()}
+                {senderLogoSrc
+                    ? <img src={senderLogoSrc} alt="" className="w-full h-full object-cover" />
+                    : isUserMessage ? "U" : (senderDisplayName || "?")[0].toUpperCase()}
             </div>
 
             {/* Message Content */}
@@ -429,7 +472,7 @@ export const MessageBubble = memo(function MessageBubble({
                 >
                     <div
                         className={classNames(
-                            "flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shadow-sm",
+                            "flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shadow-sm overflow-hidden",
                             isUserMessage
                                 ? "bg-gradient-to-br from-blue-500 to-blue-600 text-white"
                                 : isDark
@@ -438,7 +481,9 @@ export const MessageBubble = memo(function MessageBubble({
                             !isUserMessage && senderAccent ? `ring-1 ring-inset ${senderAccent.ring}` : ""
                         )}
                     >
-                        {isUserMessage ? "U" : (senderDisplayName || "?")[0].toUpperCase()}
+                        {senderLogoSrc
+                            ? <img src={senderLogoSrc} alt="" className="w-full h-full object-cover" />
+                            : isUserMessage ? "U" : (senderDisplayName || "?")[0].toUpperCase()}
                     </div>
                     <span
                         className={classNames(
@@ -456,13 +501,13 @@ export const MessageBubble = memo(function MessageBubble({
                     >
                         {senderDisplayName}
                     </span>
-                    <span className={`text-[10px] flex-shrink-0 ${isDark ? "text-slate-500" : "text-gray-400"}`}>
-                        {formatTime(ev.ts)}
+                    <span className={`text-[10px] flex-shrink-0 text-[var(--color-text-muted)]`}>
+                        {isOptimistic ? t('sending', '发送中…') : formatTime(ev.ts)}
                     </span>
                     <span
                         className={classNames(
                             "text-[10px] min-w-0 truncate",
-                            isDark ? "text-slate-500" : "text-gray-500"
+                            "text-[var(--color-text-muted)]"
                         )}
                         title={`to ${toLabel}`}
                     >
@@ -488,10 +533,10 @@ export const MessageBubble = memo(function MessageBubble({
                     >
                         {senderDisplayName}
                     </span>
-                    <span className={`text-[10px] flex-shrink-0 ${isDark ? "text-slate-600" : "text-gray-400"}`}>
-                        {formatTime(ev.ts)}
+                    <span className={`text-[10px] flex-shrink-0 text-[var(--color-text-muted)]`}>
+                        {isOptimistic ? t('sending', '发送中…') : formatTime(ev.ts)}
                     </span>
-                    <span className={classNames("text-[10px] min-w-0 truncate", isDark ? "text-slate-500" : "text-gray-500")} title={`to ${toLabel}`}>
+                    <span className={classNames("text-[10px] min-w-0 truncate", "text-[var(--color-text-muted)]")} title={`to ${toLabel}`}>
                         to {toLabel}
                     </span>
                 </div>
@@ -503,7 +548,7 @@ export const MessageBubble = memo(function MessageBubble({
                             className={classNames(
                                 "absolute -top-2 z-10 text-[10px] font-semibold px-2 py-0.5 rounded-full border shadow-sm",
                                 isUserMessage ? "left-3" : "right-3",
-                                isDark ? "bg-amber-900/60 text-amber-200 border-amber-700/50" : "bg-amber-50 text-amber-700 border-amber-200"
+                                "bg-amber-500/15 text-amber-600 dark:text-amber-300 border-amber-500/25"
                             )}
                         >
                             {t('important')}
@@ -511,20 +556,14 @@ export const MessageBubble = memo(function MessageBubble({
                     )}
                 <div
                     className={classNames(
-                        "px-4 py-2.5 shadow-sm text-sm leading-relaxed overflow-hidden",
+                        "px-4 py-2.5 text-sm leading-relaxed",
                         isUserMessage
-                            ? "bg-blue-600 text-white rounded-2xl rounded-tr-none"
-                            : isDark
-                                ? "bg-slate-800 text-slate-200 border border-slate-700 rounded-2xl rounded-tl-none"
-                                : "bg-white text-gray-800 border border-gray-200 rounded-2xl rounded-tl-none"
+                            ? "bg-blue-600 text-white rounded-2xl rounded-tr-none shadow-sm"
+                            : "glass-bubble rounded-2xl rounded-tl-none text-[var(--color-text-primary)]"
                         ,
-                        isAttention ? (isDark ? "ring-1 ring-amber-500/30" : "ring-1 ring-amber-500/25") : ""
+                        isAttention ? "ring-1 ring-amber-500/25" : ""
                         ,
-                        isHighlighted
-                            ? isDark
-                                ? "outline outline-2 outline-sky-400/40 outline-offset-2"
-                                : "outline outline-2 outline-sky-500/30 outline-offset-2"
-                            : ""
+                        isHighlighted ? "outline outline-2 outline-sky-500/30 outline-offset-2" : ""
                     )}
                 >
 
@@ -534,9 +573,7 @@ export const MessageBubble = memo(function MessageBubble({
                             type="button"
                             className={classNames(
                                 "mb-2 inline-flex items-center gap-2 text-xs font-medium rounded-lg px-2 py-1 border",
-                                isDark
-                                    ? "border-white/10 bg-slate-900/40 text-slate-300 hover:bg-slate-900/60"
-                                    : "border-black/10 bg-gray-50 text-gray-700 hover:bg-gray-100",
+                                "glass-btn border border-[var(--glass-border-subtle)] text-[var(--color-text-secondary)]",
                                 onOpenSource ? "cursor-pointer" : "cursor-default"
                             )}
                             onClick={() => onOpenSource?.(srcGroupId, srcEventId)}
@@ -557,9 +594,7 @@ export const MessageBubble = memo(function MessageBubble({
                             <div
                                 className={classNames(
                                     "mb-2 inline-flex items-center gap-2 text-xs font-medium rounded-lg px-2 py-1 border",
-                                    isDark
-                                        ? "border-white/10 bg-slate-900/40 text-slate-300"
-                                        : "border-black/10 bg-gray-50 text-gray-700"
+                                    "glass-btn border border-[var(--glass-border-subtle)] text-[var(--color-text-secondary)]"
                                 )}
                                 title={t('sentTo', { label: dstGroupId, to: dstToLabel })}
                             >
@@ -573,7 +608,7 @@ export const MessageBubble = memo(function MessageBubble({
                     {/* Reply Context */}
                     {quoteText && (
                         <div
-                            className={`mb-2 text-xs border-l-2 pl-2 italic truncate opacity-80 ${isUserMessage ? "border-blue-400" : isDark ? "border-slate-600" : "border-gray-300"
+                            className={`mb-2 text-xs border-l-2 pl-2 italic truncate opacity-80 ${isUserMessage ? "border-blue-400" : "border-[var(--glass-border-subtle)]"
                                 }`}
                         >
                             "{quoteText}"
@@ -634,9 +669,7 @@ export const MessageBubble = memo(function MessageBubble({
                                                         "inline-flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors max-w-full",
                                                         isUserMessage
                                                             ? "bg-blue-700/50 hover:bg-blue-700 text-white border border-blue-500"
-                                                            : isDark
-                                                                ? "bg-slate-900/50 hover:bg-slate-900 text-slate-300 border border-slate-700"
-                                                                : "bg-gray-50 hover:bg-gray-100 text-gray-700 border border-gray-200"
+                                                            : "glass-btn border border-[var(--glass-border-subtle)] text-[var(--color-text-secondary)]"
                                                     )}
                                                     title={t('download', { name: label })}
                                                     download
@@ -659,7 +692,7 @@ export const MessageBubble = memo(function MessageBubble({
                         "flex items-center gap-3 mt-1 px-1 text-[10px] transition-opacity",
                         (obligationSummary || ackSummary || visibleReadStatusEntries.length > 0 || replyRequired) ? "justify-between" : "justify-end",
                         "opacity-70 group-hover:opacity-100",
-                        isDark ? "text-slate-500" : "text-gray-500"
+                        "text-[var(--color-text-muted)]"
                     )}
                 >
                     {obligationSummary ? (
@@ -669,12 +702,8 @@ export const MessageBubble = memo(function MessageBubble({
                                     className={classNames(
                                         "text-[10px] font-semibold tracking-tight",
                                         obligationSummary.done >= obligationSummary.total
-                                            ? isDark
-                                                ? "text-emerald-400"
-                                                : "text-emerald-600"
-                                            : isDark
-                                                ? "text-amber-400"
-                                                : "text-amber-600"
+                                            ? "text-emerald-600 dark:text-emerald-400"
+                                            : "text-amber-600 dark:text-amber-400"
                                     )}
                                 >
                                     {obligationSummary.kind === "reply" ? t('reply') : t('ack')} {obligationSummary.done}/{obligationSummary.total}
@@ -685,7 +714,7 @@ export const MessageBubble = memo(function MessageBubble({
                                 type="button"
                                 className={classNames(
                                     "touch-target-sm flex items-center gap-2 min-w-0 rounded-lg px-2 py-1",
-                                    isDark ? "hover:bg-slate-800/60" : "hover:bg-gray-100"
+                                    "hover:bg-[var(--glass-tab-bg-hover)]"
                                 )}
                                 onClick={onShowRecipients}
                                 aria-label={t('showObligationStatus')}
@@ -694,12 +723,8 @@ export const MessageBubble = memo(function MessageBubble({
                                     className={classNames(
                                         "text-[10px] font-semibold tracking-tight",
                                         obligationSummary.done >= obligationSummary.total
-                                            ? isDark
-                                                ? "text-emerald-400"
-                                                : "text-emerald-600"
-                                            : isDark
-                                                ? "text-amber-400"
-                                                : "text-amber-600"
+                                            ? "text-emerald-600 dark:text-emerald-400"
+                                            : "text-amber-600 dark:text-amber-400"
                                     )}
                                 >
                                     {obligationSummary.kind === "reply" ? t('reply') : t('ack')} {obligationSummary.done}/{obligationSummary.total}
@@ -713,12 +738,8 @@ export const MessageBubble = memo(function MessageBubble({
                                     className={classNames(
                                         "text-[10px] font-semibold tracking-tight",
                                         ackSummary.done >= ackSummary.total
-                                            ? isDark
-                                                ? "text-emerald-400"
-                                                : "text-emerald-600"
-                                            : isDark
-                                                ? "text-amber-400"
-                                                : "text-amber-600"
+                                            ? "text-emerald-600 dark:text-emerald-400"
+                                            : "text-amber-600 dark:text-amber-400"
                                     )}
                                 >
                                     {t('ack')} {ackSummary.done}/{ackSummary.total}
@@ -729,7 +750,7 @@ export const MessageBubble = memo(function MessageBubble({
                                 type="button"
                                 className={classNames(
                                     "touch-target-sm flex items-center gap-2 min-w-0 rounded-lg px-2 py-1",
-                                    isDark ? "hover:bg-slate-800/60" : "hover:bg-gray-100"
+                                    "hover:bg-[var(--glass-tab-bg-hover)]"
                                 )}
                                 onClick={onShowRecipients}
                                 aria-label={t('showAckStatus')}
@@ -738,12 +759,8 @@ export const MessageBubble = memo(function MessageBubble({
                                     className={classNames(
                                         "text-[10px] font-semibold tracking-tight",
                                         ackSummary.done >= ackSummary.total
-                                            ? isDark
-                                                ? "text-emerald-400"
-                                                : "text-emerald-600"
-                                            : isDark
-                                                ? "text-amber-400"
-                                                : "text-amber-600"
+                                            ? "text-emerald-600 dark:text-emerald-400"
+                                            : "text-amber-600 dark:text-amber-400"
                                     )}
                                 >
                                     {t('ack')} {ackSummary.done}/{ackSummary.total}
@@ -775,7 +792,7 @@ export const MessageBubble = memo(function MessageBubble({
                                         </span>
                                     ))}
                                     {readPreviewOverflow > 0 && (
-                                        <span className={classNames("text-[10px]", isDark ? "text-slate-500" : "text-gray-500")}>
+                                        <span className={classNames("text-[10px]", "text-[var(--color-text-muted)]")}>
                                             +{readPreviewOverflow}
                                         </span>
                                     )}
@@ -786,7 +803,7 @@ export const MessageBubble = memo(function MessageBubble({
                                 type="button"
                                 className={classNames(
                                     "touch-target-sm flex items-center gap-2 min-w-0 rounded-lg px-2 py-1",
-                                    isDark ? "hover:bg-slate-800/60" : "hover:bg-gray-100"
+                                    "hover:bg-[var(--glass-tab-bg-hover)]"
                                 )}
                                 onClick={onShowRecipients}
                                 aria-label={t('showRecipientStatus')}
@@ -813,7 +830,7 @@ export const MessageBubble = memo(function MessageBubble({
                                         </span>
                                     ))}
                                     {readPreviewOverflow > 0 && (
-                                        <span className={classNames("text-[10px]", isDark ? "text-slate-500" : "text-gray-500")}>
+                                        <span className={classNames("text-[10px]", "text-[var(--color-text-muted)]")}>
                                             +{readPreviewOverflow}
                                         </span>
                                     )}
@@ -826,7 +843,7 @@ export const MessageBubble = memo(function MessageBubble({
                         <span
                             className={classNames(
                                 "text-[10px] font-semibold tracking-tight",
-                                isDark ? "text-violet-300" : "text-violet-700"
+                                "text-violet-500 dark:text-violet-300"
                             )}
                         >
                             {t('needReply')}
@@ -840,7 +857,7 @@ export const MessageBubble = memo(function MessageBubble({
                                 type="button"
                                 className={classNames(
                                     "touch-target-sm px-2 py-1 rounded-lg text-[11px] font-medium transition-colors",
-                                    isDark ? "text-slate-400 hover:text-slate-200 hover:bg-white/5" : "text-gray-500 hover:text-gray-700 hover:bg-black/5"
+                                    "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]"
                                 )}
                                 onClick={() => onCopyLink(String(ev.id))}
                                 title={t('copyLink')}
@@ -853,7 +870,7 @@ export const MessageBubble = memo(function MessageBubble({
                                 type="button"
                                 className={classNames(
                                     "touch-target-sm px-2 py-1 rounded-lg text-[11px] font-medium transition-colors",
-                                    isDark ? "text-slate-400 hover:text-slate-200 hover:bg-white/5" : "text-gray-500 hover:text-gray-700 hover:bg-black/5"
+                                    "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]"
                                 )}
                                 onClick={() => onRelay(ev)}
                                 title={t('relayToGroup')}
@@ -865,7 +882,7 @@ export const MessageBubble = memo(function MessageBubble({
                             type="button"
                             className={classNames(
                                 "touch-target-sm px-2 py-1 rounded-lg text-[11px] font-medium transition-colors",
-                                isDark ? "text-slate-400 hover:text-slate-200 hover:bg-white/5" : "text-gray-500 hover:text-gray-700 hover:bg-black/5"
+                                "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]"
                             )}
                             onClick={onReply}
                         >
@@ -883,16 +900,13 @@ export const MessageBubble = memo(function MessageBubble({
                         style={floatingStyles}
                         {...getFloatingProps()}
                         className={classNames(
-                            "z-tooltip w-[min(360px,calc(100vw-32px))] rounded-xl border shadow-2xl px-3 py-2",
-                            isDark
-                                ? "bg-slate-900/95 border-white/10 text-slate-200"
-                                : "bg-white/95 border-black/10 text-gray-900"
+                            "glass-modal z-tooltip w-[min(360px,calc(100vw-32px))] px-3 py-2 text-[var(--color-text-primary)]"
                         )}
                         role="status"
                     >
                         <div className="flex items-center gap-2">
                             <div
-                                className={classNames("text-xs font-semibold", isDark ? "text-slate-200" : "text-gray-900")}
+                                className="text-xs font-semibold text-[var(--color-text-primary)]"
                             >
                                 {senderDisplayName}
                             </div>
@@ -900,7 +914,7 @@ export const MessageBubble = memo(function MessageBubble({
                                 <div
                                     className={classNames(
                                         "ml-auto text-xs tabular-nums",
-                                        isDark ? "text-slate-400" : "text-gray-500"
+                                        "text-[var(--color-text-tertiary)]"
                                     )}
                                     title={formatFullTime(agentState.updated_at)}
                                 >
@@ -909,7 +923,7 @@ export const MessageBubble = memo(function MessageBubble({
                             ) : null}
                         </div>
                         <div
-                            className={classNames("mt-1 text-xs whitespace-pre-wrap", isDark ? "text-slate-300" : "text-gray-700")}
+                            className="mt-1 text-xs whitespace-pre-wrap text-[var(--color-text-secondary)]"
                         >
                             {agentStateDisplay}
                         </div>
@@ -917,23 +931,23 @@ export const MessageBubble = memo(function MessageBubble({
                             <div className="mt-2 space-y-1">
                                 <div className="flex flex-wrap items-center gap-1.5">
                                     {stateTask ? (
-                                        <span className={classNames("text-[11px] px-2 py-0.5 rounded", isDark ? "bg-slate-700 text-slate-200" : "bg-gray-100 text-gray-700")}>
+                                        <span className="text-[11px] px-2 py-0.5 rounded bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]">
                                             {t("taskShort", { id: stateTask })}
                                         </span>
                                     ) : null}
                                     {blockerCount > 0 ? (
-                                        <span className={classNames("text-[11px] px-2 py-0.5 rounded", isDark ? "bg-rose-900/40 text-rose-300" : "bg-rose-100 text-rose-700")}>
+                                        <span className="text-[11px] px-2 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-300">
                                             {t("blockersShort", { count: blockerCount })}
                                         </span>
                                     ) : null}
                                 </div>
                                 {stateNext ? (
-                                    <div className={classNames("text-[11px]", isDark ? "text-slate-400" : "text-gray-600")}>
+                                    <div className="text-[11px] text-[var(--color-text-tertiary)]">
                                         {t("nextShort", { value: stateNext })}
                                     </div>
                                 ) : null}
                                 {stateChanged ? (
-                                    <div className={classNames("text-[11px]", isDark ? "text-slate-500" : "text-gray-500")}>
+                                    <div className={classNames("text-[11px]", "text-[var(--color-text-muted)]")}>
                                         {t("changedShort", { value: stateChanged })}
                                     </div>
                                 ) : null}

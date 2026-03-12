@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { TabBar } from "./components/TabBar";
 import { DropOverlay } from "./components/DropOverlay";
 import { AppModals } from "./components/AppModals";
@@ -12,10 +13,11 @@ import { useDragDrop } from "./hooks/useDragDrop";
 import { useGroupActions } from "./hooks/useGroupActions";
 import { useSwipeNavigation } from "./hooks/useSwipeNavigation";
 import { useCrossGroupRecipients } from "./hooks/useCrossGroupRecipients";
-import { useChatTab } from "./hooks/useChatTab";
 import { useDeepLink } from "./hooks/useDeepLink";
 import { useGlobalEvents } from "./hooks/useGlobalEvents";
 import { useViewportHeight } from "./hooks/useViewportHeight";
+import { getChatSession } from "./stores/useUIStore";
+import { classNames } from "./utils/classNames";
 import { ActorTab } from "./pages/ActorTab";
 import { ChatTab } from "./pages/chat";
 import { PanoramaTab } from "./pages/PanoramaTab";
@@ -28,11 +30,13 @@ import {
   useObservabilityStore,
 } from "./stores";
 import * as api from "./services/api";
-import type { Actor } from "./types";
+import type { Actor, ChatMessageData, LedgerEvent } from "./types";
 
 // ============ Main App Component ============
 
 export default function App() {
+  const { t } = useTranslation(["layout", "common"]);
+
   // Theme
   const { theme, setTheme, isDark } = useTheme();
 
@@ -40,47 +44,44 @@ export default function App() {
   useViewportHeight();
 
   // Zustand stores
-  const {
-    groups,
-    groupOrder,
-    selectedGroupId,
-    groupDoc,
-    actors,
-    groupContext,
-    groupSettings,
-    setSelectedGroupId,
-    refreshGroups,
-    refreshActors,
-    loadGroup,
-    openChatWindow,
-    closeChatWindow,
-    reorderGroups,
-    getOrderedGroups,
-  } = useGroupStore();
+  const groups = useGroupStore((state) => state.groups);
+  const groupOrder = useGroupStore((state) => state.groupOrder);
+  const selectedGroupId = useGroupStore((state) => state.selectedGroupId);
+  const groupDoc = useGroupStore((state) => state.groupDoc);
+  const actors = useGroupStore((state) => state.actors);
+  const groupContext = useGroupStore((state) => state.groupContext);
+  const groupSettings = useGroupStore((state) => state.groupSettings);
+  const setSelectedGroupId = useGroupStore((state) => state.setSelectedGroupId);
+  const refreshGroups = useGroupStore((state) => state.refreshGroups);
+  const refreshActors = useGroupStore((state) => state.refreshActors);
+  const loadGroup = useGroupStore((state) => state.loadGroup);
+  const warmGroup = useGroupStore((state) => state.warmGroup);
+  const openChatWindow = useGroupStore((state) => state.openChatWindow);
+  const closeChatWindow = useGroupStore((state) => state.closeChatWindow);
+  const reorderGroups = useGroupStore((state) => state.reorderGroups);
+  const getOrderedGroups = useGroupStore((state) => state.getOrderedGroups);
 
-  const {
-    busy,
-    errorMsg,
-    notice,
-    isTransitioning,
-    sidebarOpen,
-    sidebarCollapsed,
-    activeTab,
-    chatUnreadCount,
-    isSmallScreen,
-    webReadOnly,
-    showError,
-    dismissError,
-    dismissNotice,
-    setSidebarOpen,
-    toggleSidebarCollapsed,
-    setActiveTab,
-    setShowScrollButton,
-    setChatUnreadCount,
-    setSmallScreen,
-    setWebReadOnly,
-    sseStatus,
-  } = useUIStore();
+  const busy = useUIStore((s) => s.busy);
+  const errorMsg = useUIStore((s) => s.errorMsg);
+  const notice = useUIStore((s) => s.notice);
+  const isTransitioning = useUIStore((s) => s.isTransitioning);
+  const sidebarOpen = useUIStore((s) => s.sidebarOpen);
+  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed);
+  const activeTab = useUIStore((s) => s.activeTab);
+  const chatSessions = useUIStore((s) => s.chatSessions);
+  const isSmallScreen = useUIStore((s) => s.isSmallScreen);
+  const webReadOnly = useUIStore((s) => s.webReadOnly);
+  const showError = useUIStore((s) => s.showError);
+  const dismissError = useUIStore((s) => s.dismissError);
+  const dismissNotice = useUIStore((s) => s.dismissNotice);
+  const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
+  const toggleSidebarCollapsed = useUIStore((s) => s.toggleSidebarCollapsed);
+  const setActiveTab = useUIStore((s) => s.setActiveTab);
+  const setShowScrollButton = useUIStore((s) => s.setShowScrollButton);
+  const setChatUnreadCount = useUIStore((s) => s.setChatUnreadCount);
+  const setSmallScreen = useUIStore((s) => s.setSmallScreen);
+  const setWebReadOnly = useUIStore((s) => s.setWebReadOnly);
+  const sseStatus = useUIStore((s) => s.sseStatus);
 
   const { openModal } = useModalStore();
 
@@ -90,6 +91,8 @@ export default function App() {
     composerFiles,
     replyTarget,
     setDestGroupId,
+    setReplyTarget,
+    setToText,
     switchGroup,
   } = useComposerStore();
 
@@ -112,8 +115,13 @@ export default function App() {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const activeTabRef = useRef<string>("chat");
   const chatAtBottomRef = useRef<boolean>(true);
-  const chatScrollMemoryRef = useRef<Record<string, { atBottom: boolean; anchorId: string; offsetPx: number }>>({});
   const actorsRef = useRef<Actor[]>([]);
+  const chatSession = useMemo(
+    () => getChatSession(selectedGroupId, chatSessions),
+    [selectedGroupId, chatSessions]
+  );
+  const chatUnreadCount = chatSession.chatUnreadCount;
+  const chatSessionAtBottom = chatSession.scrollSnapshot?.atBottom;
 
   // Hide Panorama tab when browser lacks GPU/3D support or feature is disabled
   const canRender3D = useMemo(() => {
@@ -130,6 +138,7 @@ export default function App() {
   const [mentionSelectedIndex, setMentionSelectedIndex] = React.useState(0);
   const [mountedActorIds, setMountedActorIds] = React.useState<string[]>([]);
   const [ccccHome, setCcccHome] = React.useState("");
+  const [canAccessGlobalSettings, setCanAccessGlobalSettings] = React.useState<boolean | null>(null);
 
   // Custom hooks
   const { connectStream, fetchContext, contextRefreshTimerRef, cleanup: cleanupSSE } = useSSE({
@@ -159,21 +168,40 @@ export default function App() {
     composerGroupId: activeGroupId,
     sendGroupId: computedSendGroupId,
   });
+  const sendGroupId = computedSendGroupId;
 
-  // Chat tab hook (provides message actions and chat state)
-  const {
-    startReply,
-    destGroupId: sendGroupId,
-    inChatWindow,
-  } = useChatTab({
-    selectedGroupId,
-    actors,
-    recipientActors,
-    composerRef,
-    fileInputRef,
-    chatAtBottomRef,
-    chatScrollMemoryRef,
-  });
+  const startReply = React.useCallback((ev: LedgerEvent) => {
+    if (!ev.id || ev.kind !== "chat.message") return;
+    const data = ev.data as ChatMessageData | undefined;
+    const text = data?.text ? String(data.text) : "";
+
+    if (selectedGroupId) {
+      setDestGroupId(selectedGroupId);
+    }
+
+    const by = String(ev.by || "").trim();
+    const authorIsActor = by && by !== "user" && actors.some((a) => String(a.id || "") === by);
+    const originalTo = Array.isArray(data?.to)
+      ? data.to.map((token) => String(token || "").trim()).filter((token) => token)
+      : [];
+    const policy = groupSettings?.default_send_to || "foreman";
+    const defaultTo =
+      authorIsActor
+        ? [by]
+        : originalTo.length > 0
+          ? originalTo
+          : policy === "foreman"
+            ? ["@foreman"]
+            : [];
+    setToText(defaultTo.join(", "));
+
+    setReplyTarget({
+      eventId: String(ev.id),
+      by: String(ev.by || "unknown"),
+      text: text.slice(0, 100) + (text.length > 100 ? "..." : ""),
+    });
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, [selectedGroupId, actors, groupSettings, setDestGroupId, setReplyTarget, setToText]);
 
   // Deep link hook
   const { parseUrlDeepLink } = useDeepLink({
@@ -188,7 +216,29 @@ export default function App() {
   // Global events subscription (SSE with polling fallback)
   useGlobalEvents({ refreshGroups });
 
+  const refreshWebAccessSession = React.useCallback(async () => {
+    try {
+      const resp = await api.fetchWebAccessSession();
+      const session = resp.ok ? resp.result?.web_access_session ?? null : null;
+      const allowed = Boolean(session?.can_access_global_settings ?? !(session?.login_active ?? false));
+      setCanAccessGlobalSettings(allowed);
+    } catch {
+      setCanAccessGlobalSettings(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshWebAccessSession();
+    const handleFocus = () => {
+      void refreshWebAccessSession();
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [refreshWebAccessSession]);
+
   // Tab list for swipe navigation
+  const canManageGroups = canAccessGlobalSettings === true;
+
   const allTabs = useMemo(() => {
     return ["chat", ...actors.map((a) => a.id)];
   }, [actors]);
@@ -212,26 +262,28 @@ export default function App() {
   useEffect(() => {
     activeTabRef.current = activeTab;
     if (activeTab !== "chat") return;
+    if (!selectedGroupId) return;
     const el = eventContainerRef.current;
     if (!el) return;
 
     // If user was at bottom before switching away, scroll to bottom on return
     // (new messages may have arrived while on another tab)
-    if (chatAtBottomRef.current) {
+    if (chatSessionAtBottom ?? chatAtBottomRef.current) {
+      chatAtBottomRef.current = true;
       requestAnimationFrame(() => {
         el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
       });
-      setShowScrollButton(false);
-      setChatUnreadCount(0);
+      setShowScrollButton(selectedGroupId, false);
+      setChatUnreadCount(selectedGroupId, 0);
       return;
     }
 
     const threshold = 100;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
     chatAtBottomRef.current = atBottom;
-    setShowScrollButton(!atBottom);
-    if (atBottom) setChatUnreadCount(0);
-  }, [activeTab, setChatUnreadCount, setShowScrollButton]);
+    setShowScrollButton(selectedGroupId, !atBottom);
+    if (atBottom) setChatUnreadCount(selectedGroupId, 0);
+  }, [activeTab, selectedGroupId, chatSessionAtBottom, setChatUnreadCount, setShowScrollButton]);
 
   // Auto-fallback: switch away from panorama tab when feature is disabled
   useEffect(() => {
@@ -396,21 +448,12 @@ export default function App() {
 
   // ============ Computed for ChatTab ============
 
-  const restoreChatAnchor = useMemo(() => {
-    if (!selectedGroupId) return null;
-    if (inChatWindow) return null;
-    const snap = chatScrollMemoryRef.current[String(selectedGroupId || "").trim()];
-    if (!snap || snap.atBottom) return null;
-    if (!snap.anchorId) return null;
-    return snap;
-  }, [inChatWindow, selectedGroupId]);
-
   // ============ Render ============
 
   return (
     <div
       className={`w-full relative overflow-hidden ${isDark
-          ? "bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950"
+          ? "bg-black text-slate-100"
           : "bg-gradient-to-br from-slate-50 via-white to-slate-100"
         }`}
       style={{ height: "calc(100% - var(--vk-offset, 0px))" }}
@@ -419,24 +462,24 @@ export default function App() {
       <div className="pointer-events-none absolute inset-0 overflow-hidden hidden md:block">
         <div
           className={`absolute -top-32 -left-32 w-96 h-96 rounded-full liquid-blob ${isDark
-              ? "bg-gradient-to-br from-cyan-500/20 via-cyan-600/10 to-transparent"
-              : "bg-gradient-to-br from-cyan-400/25 via-cyan-500/15 to-transparent"
+              ? "bg-gradient-to-br from-cyan-500/10 via-cyan-600/5 to-transparent"
+              : "bg-gradient-to-br from-cyan-400/15 via-cyan-500/5 to-transparent"
             }`}
-          style={{ filter: "blur(60px)", willChange: "transform" }}
+          style={{ opacity: 0.75 }}
         />
         <div
           className={`absolute top-1/4 -right-24 w-80 h-80 rounded-full liquid-blob ${isDark
-              ? "bg-gradient-to-bl from-purple-500/15 via-indigo-600/10 to-transparent"
-              : "bg-gradient-to-bl from-purple-400/20 via-indigo-500/10 to-transparent"
+              ? "bg-gradient-to-bl from-purple-500/10 via-indigo-600/5 to-transparent"
+              : "bg-gradient-to-bl from-purple-400/10 via-indigo-500/5 to-transparent"
             }`}
-          style={{ filter: "blur(50px)", animationDelay: "-3s", willChange: "transform" }}
+          style={{ animationDelay: "-3s", opacity: 0.65 }}
         />
         <div
           className={`absolute -bottom-20 left-1/3 w-72 h-72 rounded-full liquid-blob ${isDark
-              ? "bg-gradient-to-tr from-blue-500/12 via-sky-600/8 to-transparent"
-              : "bg-gradient-to-tr from-blue-400/15 via-sky-500/10 to-transparent"
+              ? "bg-gradient-to-tr from-blue-500/10 via-sky-600/5 to-transparent"
+              : "bg-gradient-to-tr from-blue-400/10 via-sky-500/5 to-transparent"
             }`}
-          style={{ filter: "blur(45px)", animationDelay: "-5s", willChange: "transform" }}
+          style={{ animationDelay: "-5s", opacity: 0.6 }}
         />
       </div>
 
@@ -460,13 +503,14 @@ export default function App() {
           isDark={isDark}
           readOnly={webReadOnly}
           onSelectGroup={(gid) => setSelectedGroupId(gid)}
+          onWarmGroup={(gid) => void warmGroup(gid)}
           onCreateGroup={
-            webReadOnly
-              ? undefined
-              : () => {
+            !webReadOnly && canManageGroups
+              ? () => {
                 openModal("createGroup");
                 void fetchDirSuggestions();
               }
+              : undefined
           }
           onClose={() => setSidebarOpen(false)}
           onToggleCollapse={toggleSidebarCollapsed}
@@ -475,7 +519,7 @@ export default function App() {
 
         {/* Main content */}
         <main
-          className={`absolute inset-0 md:relative md:inset-auto h-full flex flex-col overflow-hidden backdrop-blur-sm ${isDark ? "bg-slate-950/40" : "bg-white/60"
+          className={`absolute inset-0 md:relative md:inset-auto h-full flex flex-col overflow-hidden ${isDark ? "bg-black/75" : "bg-white/80"
             }`}
         >
           <AppHeader
@@ -489,21 +533,14 @@ export default function App() {
             actors={actors}
             sseStatus={sseStatus}
             busy={busy}
-            errorMsg={errorMsg}
-            notice={notice}
-            onDismissError={dismissError}
-            onNoticeAction={() => {
-              dismissNotice();
-            }}
-            onDismissNotice={dismissNotice}
             onOpenSidebar={() => setSidebarOpen(true)}
-            onOpenGroupEdit={() => {
+            onOpenGroupEdit={canManageGroups ? () => {
               if (groupDoc) {
                 setEditGroupTitle(groupDoc.title || "");
                 setEditGroupTopic(groupDoc.topic || "");
                 openModal("groupEdit");
               }
-            }}
+            } : undefined}
             onOpenSearch={() => openModal("search")}
             onOpenContext={() => {
               if (selectedGroupId) void fetchContext(selectedGroupId);
@@ -565,9 +602,6 @@ export default function App() {
                 composerRef={composerRef}
                 fileInputRef={fileInputRef}
                 chatAtBottomRef={chatAtBottomRef}
-                chatScrollMemoryRef={chatScrollMemoryRef}
-                chatInitialScrollAnchorId={!inChatWindow ? restoreChatAnchor?.anchorId : undefined}
-                chatInitialScrollAnchorOffsetPx={!inChatWindow ? restoreChatAnchor?.offsetPx : undefined}
                 appendComposerFiles={handleAppendComposerFiles}
                 onStartGroup={handleStartGroup}
                 showMentionMenu={showMentionMenu}
@@ -578,25 +612,25 @@ export default function App() {
               />
               </ErrorBoundary>
             </div>
-            {/* Panorama Tab */}
-            <div
-              className={`absolute inset-0 flex min-h-0 flex-col ${showPanorama && activeTab === "panorama" ? "" : "invisible pointer-events-none"}`}
-              aria-hidden={!showPanorama || activeTab !== "panorama"}
-            >
-              <ErrorBoundary>
-                <PanoramaTab
-                  agents={(groupContext?.agent_states || []).filter(
-                    (a) => actors.some((act) => act.id === a.id)
-                  )}
-                  actors={actors}
-                  tasks={groupContext?.coordination?.tasks || []}
-                  tasksSummary={groupContext?.tasks_summary}
-                  projectStatus={groupContext?.meta?.project_status}
-                  isDark={isDark}
-                  groupId={selectedGroupId}
-                />
-              </ErrorBoundary>
-            </div>
+            {/* Panorama Tab — conditionally mounted to avoid 3D overhead on group switch */}
+            {showPanorama && activeTab === "panorama" && (
+              <div className="absolute inset-0 flex min-h-0 flex-col">
+                <ErrorBoundary>
+                  <PanoramaTab
+                    agents={(groupContext?.agent_states || []).filter(
+                      (a) => actors.some((act) => act.id === a.id)
+                    )}
+                    actors={actors}
+                    tasks={groupContext?.coordination?.tasks || []}
+                    tasksSummary={groupContext?.tasks_summary}
+                    projectStatus={groupContext?.meta?.project_status}
+                    isDark={isDark}
+                    isSmallScreen={isSmallScreen}
+                    groupId={selectedGroupId}
+                  />
+                </ErrorBoundary>
+              </div>
+            )}
             <div
               className={`absolute inset-0 flex min-h-0 flex-col ${activeTab === "chat" || activeTab === "panorama" ? "invisible pointer-events-none" : ""}`}
               aria-hidden={activeTab === "chat" || activeTab === "panorama"}
@@ -636,6 +670,68 @@ export default function App() {
         </main>
       </div>
 
+      {!webReadOnly && (errorMsg || notice) ? (
+        <div className="pointer-events-none fixed inset-x-0 top-4 z-[1200] flex flex-col items-center gap-3 px-4">
+          {errorMsg ? (
+            <div
+              className={classNames(
+                "pointer-events-auto flex w-full max-w-xl items-start gap-3 rounded-2xl px-4 py-3 text-sm shadow-2xl glass-modal animate-slide-up",
+                isDark ? "border-rose-500/20 text-rose-300" : "border-rose-200/50 text-rose-700"
+              )}
+              role="alert"
+            >
+              <span className="min-w-0 flex-1 break-words">{errorMsg}</span>
+              <button
+                type="button"
+                className={classNames(
+                  "flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg p-2 transition-all glass-btn",
+                  isDark ? "text-rose-400" : "text-rose-600"
+                )}
+                onClick={dismissError}
+                aria-label={t("layout:dismissError")}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
+
+          {notice ? (
+            <div
+              className={classNames(
+                "pointer-events-auto flex w-full max-w-xl items-start gap-3 rounded-2xl px-4 py-3 text-sm shadow-2xl glass-modal animate-slide-up",
+                isDark ? "border-white/10 text-slate-200" : "border-black/10 text-gray-800"
+              )}
+              role="status"
+            >
+              <span className="min-w-0 flex-1 break-words">{notice.message}</span>
+              {notice.actionId && notice.actionLabel ? (
+                <button
+                  type="button"
+                  className={classNames(
+                    "rounded-xl px-2 py-1 text-xs transition-all glass-btn",
+                    isDark ? "text-slate-100" : "text-gray-900"
+                  )}
+                  onClick={dismissNotice}
+                >
+                  {notice.actionLabel}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={classNames(
+                  "flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg p-2 transition-all glass-btn",
+                  isDark ? "text-slate-300" : "text-gray-600"
+                )}
+                onClick={dismissNotice}
+                aria-label={t("common:dismiss")}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* Modals */}
       <AppModals
         isDark={isDark}
@@ -647,6 +743,7 @@ export default function App() {
         onStopGroup={handleStopGroup}
         onSetGroupState={handleSetGroupState}
         fetchContext={fetchContext}
+        canManageGroups={canManageGroups}
       />
 
       <DropOverlay isOpen={dropOverlayOpen} isDark={isDark} maxFileMb={WEB_MAX_FILE_MB} />

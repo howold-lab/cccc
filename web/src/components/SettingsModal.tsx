@@ -1,7 +1,7 @@
 // SettingsModal renders the settings modal.
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { Actor, GroupDoc, GroupSettings, IMStatus, IMPlatform } from "../types";
+import { Actor, GroupDoc, GroupSettings, IMStatus, IMPlatform, WebAccessSession } from "../types";
 import * as api from "../services/api";
 import { useObservabilityStore } from "../stores";
 import {
@@ -15,8 +15,7 @@ import {
   BlueprintTab,
   CapabilitiesTab,
   ActorProfilesTab,
-  RemoteAccessTab,
-  TokensTab,
+  WebAccessTab,
   DeveloperTab,
   SettingsScope,
   GroupTabId,
@@ -54,6 +53,8 @@ export function SettingsModal({
   const [scope, setScope] = useState<SettingsScope>(groupId ? "group" : "global");
   const [groupTab, setGroupTab] = useState<GroupTabId>("automation");
   const [globalTab, setGlobalTab] = useState<GlobalTabId>("capabilities");
+  const [canAccessGlobalSettings, setCanAccessGlobalSettings] = useState<boolean | null>(null);
+  const [webAccessSession, setWebAccessSession] = useState<WebAccessSession | null>(null);
 
   // Automation + delivery settings state
   const [nudgeSeconds, setNudgeSeconds] = useState(300);
@@ -177,13 +178,39 @@ export function SettingsModal({
 
   useEffect(() => {
     if (!isOpen) return;
+    let cancelled = false;
+    const loadWebAccessSession = async () => {
+      try {
+        const resp = await api.fetchWebAccessSession();
+        if (cancelled) return;
+        const session = resp.ok ? resp.result?.web_access_session ?? null : null;
+        setWebAccessSession(session);
+        const allowed = Boolean(session?.can_access_global_settings ?? !(session?.login_active ?? false));
+        setCanAccessGlobalSettings(allowed);
+        const allowGlobalScope = Boolean(allowed || session?.current_browser_signed_in);
+        if (!allowGlobalScope && groupId) setScope("group");
+      } catch {
+        if (!cancelled) {
+          setWebAccessSession(null);
+          setCanAccessGlobalSettings(true);
+        }
+      }
+    };
+    void loadWebAccessSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, groupId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
     loadIMStatus({ resetFirst: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Only load when the modal opens or groupId changes.
   }, [isOpen, groupId]);
 
   useEffect(() => {
-    if (isOpen) loadObservability();
-  }, [isOpen]);
+    if (isOpen && canAccessGlobalSettings === true) loadObservability();
+  }, [isOpen, canAccessGlobalSettings]);
 
   useEffect(() => {
     if (isOpen && groupId) loadDevActors();
@@ -687,6 +714,33 @@ export function SettingsModal({
     }
   };
 
+  // ============ Derived state (must be before early return to keep hooks stable) ============
+
+  const globalSettingsEnabled = canAccessGlobalSettings === true;
+  const currentBrowserSignedIn = Boolean(webAccessSession?.current_browser_signed_in);
+  const globalScopeEnabled = globalSettingsEnabled || currentBrowserSignedIn;
+
+  const globalTabs = useMemo<{ id: GlobalTabId; label: string }[]>(() => [
+    ...(globalSettingsEnabled ? [
+      { id: "capabilities" as const, label: t("tabs.capabilities") },
+      { id: "actorProfiles" as const, label: t("tabs.actorProfiles") },
+    ] : []),
+    // Non-admin signed-in users see My Profiles; admin already has Actor Profiles covering all
+    ...(currentBrowserSignedIn && !globalSettingsEnabled ? [{ id: "myProfiles" as const, label: t("tabs.myProfiles") }] : []),
+    ...(globalSettingsEnabled ? [
+      { id: "webAccess" as const, label: t("tabs.webAccess") },
+      { id: "developer" as const, label: t("tabs.developer") },
+    ] : []),
+  ], [globalSettingsEnabled, currentBrowserSignedIn, t]);
+
+  useEffect(() => {
+    if (scope !== "global") return;
+    if (!globalTabs.length) return;
+    if (!globalTabs.some((tab) => tab.id === globalTab)) {
+      setGlobalTab(globalTabs[0].id);
+    }
+  }, [globalTab, globalTabs, scope]);
+
   // ============ Render ============
 
   if (!isOpen) return null;
@@ -710,14 +764,7 @@ export function SettingsModal({
     { id: "transcript", label: t("tabs.transcript") },
     { id: "blueprint", label: t("tabs.blueprint") },
   ];
-  const globalTabs: { id: GlobalTabId; label: string }[] = [
-    { id: "capabilities", label: t("tabs.capabilities") },
-    { id: "actorProfiles", label: t("tabs.actorProfiles") },
-    { id: "remote", label: t("tabs.remote") },
-    { id: "tokens", label: t("tabs.tokens") },
-    { id: "developer", label: t("tabs.developer") },
-  ];
-  const tabs = scope === "group" ? groupTabs : globalTabs;
+  const tabs = scope === "group" ? groupTabs : (globalScopeEnabled ? globalTabs : []);
   const activeTab = scope === "group" ? groupTab : globalTab;
   const setActiveTab = (tab: GroupTabId | GlobalTabId) => {
     if (scope === "group") setGroupTab(tab as GroupTabId);
@@ -734,12 +781,13 @@ export function SettingsModal({
       panelClassName="w-full h-full sm:h-[640px] sm:max-w-4xl sm:max-h-[85vh]"
       modalRef={modalRef}
     >
-      <div className="flex-1 flex flex-col sm:flex-row overflow-hidden">
+      <div className="min-h-0 flex-1 flex flex-col sm:flex-row overflow-hidden">
         <SettingsNavigation
           isDark={isDark}
           groupId={groupId}
           scope={scope}
           scopeRootUrl={scopeRootUrl}
+          globalEnabled={globalScopeEnabled}
           tabs={tabs}
           activeTab={activeTab}
           onScopeChange={setScope}
@@ -747,8 +795,24 @@ export function SettingsModal({
         />
 
         {/* Main Content Area */}
-        <div className="flex-1 overflow-y-auto flex flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto flex flex-col">
           <div className="p-5 sm:p-8 space-y-6">
+            {scope === "global" && !globalSettingsEnabled && !currentBrowserSignedIn ? (
+              <div className={`rounded-xl border p-6 ${isDark ? "border-amber-700/40 bg-amber-900/10 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
+                <div className="text-sm font-semibold">{t("navigation.globalLockedTitle")}</div>
+                <div className="mt-2 text-sm leading-6">{t("navigation.globalLockedContent")}</div>
+                {groupId ? (
+                  <button
+                    type="button"
+                    onClick={() => setScope("group")}
+                    className={`mt-4 px-3 py-2 rounded-lg text-xs ${isDark ? "bg-slate-800 text-slate-100 hover:bg-slate-700" : "bg-white text-gray-700 border border-gray-200 hover:bg-gray-50"}`}
+                  >
+                    {t("navigation.thisGroup")}
+                  </button>
+                ) : null}
+              </div>
+            ) : !tabs.some((tab) => tab.id === activeTab) ? null : (
+              <>
               {activeTab === "automation" && (
                 <AutomationTab
                   isDark={isDark}
@@ -871,7 +935,7 @@ export function SettingsModal({
                 />
               )}
 
-              {activeTab === "guidance" && <GuidanceTab isDark={isDark} groupId={groupId} settings={settings} onUpdateSettings={onUpdateSettings} />}
+              {activeTab === "guidance" && <GuidanceTab isDark={isDark} groupId={groupId} />}
 
               {activeTab === "space" && (
                 <GroupSpaceTab
@@ -894,18 +958,25 @@ export function SettingsModal({
                 <ActorProfilesTab
                   isDark={isDark}
                   isActive={scope === "global" && activeTab === "actorProfiles"}
+                  scope="global"
                 />
               )}
 
-              {activeTab === "remote" && <RemoteAccessTab isDark={isDark} isActive={scope === "global" && activeTab === "remote"} />}
-
-              {activeTab === "tokens" && (
-                <TokensTab
+              {activeTab === "myProfiles" && (
+                <ActorProfilesTab
                   isDark={isDark}
-                  isActive={scope === "global" && activeTab === "tokens"}
-                  onNavigateToRemote={() => setGlobalTab("remote")}
+                  isActive={scope === "global" && activeTab === "myProfiles"}
+                  scope="my"
                 />
               )}
+
+              {activeTab === "webAccess" && (
+                <WebAccessTab
+                  isDark={isDark}
+                  isActive={scope === "global" && activeTab === "webAccess"}
+                />
+              )}
+
 
               {activeTab === "developer" && (
                 <DeveloperTab
@@ -945,6 +1016,8 @@ export function SettingsModal({
                   onReconcileRegistry={handleReconcileRegistry}
                 />
               )}
+              </>
+            )}
           </div>
         </div>
       </div>

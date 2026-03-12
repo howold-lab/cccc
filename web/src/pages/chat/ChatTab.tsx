@@ -2,6 +2,7 @@
 // Refactored to use useChatTab hook for business logic, reducing prop drilling.
 
 import type { MutableRefObject, RefObject } from "react";
+import { CompassIcon } from "../../components/Icons";
 import { Actor, GroupMeta } from "../../types";
 import { VirtualMessageList } from "../../components/VirtualMessageList";
 import { classNames } from "../../utils/classNames";
@@ -34,13 +35,6 @@ export interface ChatTabProps {
 
   // Refs for scroll state (shared with App)
   chatAtBottomRef?: MutableRefObject<boolean>;
-  chatScrollMemoryRef?: MutableRefObject<
-    Record<string, { atBottom: boolean; anchorId: string; offsetPx: number }>
-  >;
-
-  // Scroll restore (computed in App)
-  chatInitialScrollAnchorId?: string;
-  chatInitialScrollAnchorOffsetPx?: number;
 
   // File handling (from useDragDrop)
   appendComposerFiles: (files: File[]) => void;
@@ -71,9 +65,6 @@ export function ChatTab({
   composerRef,
   fileInputRef,
   chatAtBottomRef,
-  chatScrollMemoryRef,
-  chatInitialScrollAnchorId,
-  chatInitialScrollAnchorOffsetPx,
   appendComposerFiles,
   onStartGroup,
   showMentionMenu,
@@ -92,6 +83,8 @@ export function ChatTab({
     chatViewKey,
     chatWindowProps,
     chatInitialScrollTargetId,
+    chatInitialScrollAnchorId,
+    chatInitialScrollAnchorOffsetPx,
     chatHighlightEventId,
     isLoadingHistory,
     hasMoreHistory,
@@ -149,14 +142,18 @@ export function ChatTab({
     composerRef,
     fileInputRef,
     chatAtBottomRef,
-    chatScrollMemoryRef,
     scrollRef,
   });
 
   const { t } = useTranslation('chat');
 
   // Empty state: show full-screen setup guidance.
-  if (chatMessages.length === 0 && showSetupCard) {
+  // Don't show setup card while initial group data is still loading.
+  // Fresh buckets have hasMoreHistory=true; the API sets it to the real value.
+  // When hasMoreHistory is true but messages are empty, we're still loading —
+  // fall through to VirtualMessageList which shows a loading spinner.
+  const isInitiallyLoading = chatMessages.length === 0 && hasMoreHistory;
+  if (chatMessages.length === 0 && showSetupCard && !isInitiallyLoading) {
     return (
       <>
         <div
@@ -167,7 +164,9 @@ export function ChatTab({
         >
           <div className="flex flex-col items-center justify-center h-full text-center pb-20">
             <div className={classNames("w-full max-w-md", isDark ? "text-slate-200" : "text-gray-800")}>
-              <div className="text-4xl mb-4">&#x1F9ED;</div>
+              <div className="mb-4 flex justify-center" aria-hidden="true">
+                <CompassIcon size={32} className={isDark ? "text-cyan-300" : "text-cyan-600"} />
+              </div>
               <div className={classNames("text-sm font-semibold", isDark ? "text-slate-200" : "text-gray-800")}>
                 {t('nextSteps')}
               </div>
@@ -346,7 +345,7 @@ export function ChatTab({
                         active
                           ? "bg-blue-600 text-white shadow-sm"
                           : isDark
-                            ? "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
+                            ? "text-slate-500 hover:text-slate-200 hover:bg-slate-800/60"
                             : "text-gray-500 hover:text-gray-900 hover:bg-gray-100"
                       )}
                       onClick={() => setChatFilter(k)}
@@ -365,10 +364,10 @@ export function ChatTab({
             >
               <div
                 className={classNames(
-                  "inline-flex items-center gap-1 rounded-full border p-1 shadow-lg pointer-events-auto backdrop-blur-md transition-all",
+                  "inline-flex items-center gap-1 xl:gap-2 rounded-full border p-1 sm:p-1.5 shadow-xl pointer-events-auto backdrop-blur-xl transition-all duration-300",
                   isDark
-                    ? "border-slate-700/60 bg-slate-900/60 shadow-black/20"
-                    : "border-gray-200/80 bg-white/70 shadow-gray-200/50"
+                    ? "border-white/10 bg-slate-900/60 shadow-black/40 ring-1 ring-white/5"
+                    : "border-black/5 bg-white/70 shadow-gray-200/50 ring-1 ring-black/5"
                 )}
                 role="tablist"
                 aria-label={t('chatFilters')}
@@ -390,7 +389,7 @@ export function ChatTab({
                         active
                           ? "bg-blue-600 text-white shadow-sm"
                           : isDark
-                            ? "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
+                            ? "text-slate-500 hover:text-slate-200 hover:bg-slate-800/60"
                             : "text-gray-500 hover:text-gray-900 hover:bg-gray-100"
                       )}
                       onClick={() => setChatFilter(k)}

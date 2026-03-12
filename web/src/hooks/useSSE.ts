@@ -1,6 +1,7 @@
 // SSE connection management for the ledger stream.
 import { useEffect, useRef } from "react";
 import { useGroupStore, useUIStore } from "../stores";
+import { useChatOutboxStore } from "../stores/chatOutboxStore";
 import * as api from "../services/api";
 import type { Actor, GroupContext } from "../types";
 import {
@@ -31,19 +32,21 @@ interface UseSSEOptions {
 }
 
 export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptions) {
-  const {
-    selectedGroupId,
-    appendEvent,
-    updateReadStatus,
-    updateAckStatus,
-    updateReplyStatus,
-    incrementActorUnread,
-    updateActorActivity,
-    setGroupContext,
-    refreshActors,
-  } = useGroupStore();
+  // Use individual selectors to avoid subscribing to the entire store.
+  // Without selectors, every state change (e.g. appendEvent) would trigger
+  // a re-render cascade through App.tsx → all children.
+  const selectedGroupId = useGroupStore((s) => s.selectedGroupId);
+  const appendEvent = useGroupStore((s) => s.appendEvent);
+  const updateReadStatus = useGroupStore((s) => s.updateReadStatus);
+  const updateAckStatus = useGroupStore((s) => s.updateAckStatus);
+  const updateReplyStatus = useGroupStore((s) => s.updateReplyStatus);
+  const incrementActorUnread = useGroupStore((s) => s.incrementActorUnread);
+  const updateActorActivity = useGroupStore((s) => s.updateActorActivity);
+  const setGroupContext = useGroupStore((s) => s.setGroupContext);
+  const refreshActors = useGroupStore((s) => s.refreshActors);
 
-  const { incrementChatUnread, setSSEStatus } = useUIStore();
+  const incrementChatUnread = useUIStore((s) => s.incrementChatUnread);
+  const setSSEStatus = useUIStore((s) => s.setSSEStatus);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const contextRefreshTimerRef = useRef<number | null>(null);
@@ -59,7 +62,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
 
   async function fetchContext(groupId: string) {
     const resp = await api.fetchContext(groupId);
-    if (resp.ok && resp.result && typeof resp.result === "object") {
+    if (resp.ok && resp.result && typeof resp.result === "object" && selectedGroupIdRef.current === groupId) {
       setGroupContext(resp.result as GroupContext);
     }
   }
@@ -147,7 +150,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
         if (isChatReadEvent(ev)) {
           const data = extractChatReadData(ev);
           if (data) {
-            updateReadStatus(data.eventId, data.actorId);
+            updateReadStatus(data.eventId, data.actorId, groupId);
           }
           scheduleActorRefresh(groupId);
           return;
@@ -157,7 +160,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
         if (isChatAckEvent(ev)) {
           const data = extractChatAckData(ev);
           if (data) {
-            updateAckStatus(data.eventId, data.actorId);
+            updateAckStatus(data.eventId, data.actorId, groupId);
           }
           return;
         }
@@ -167,7 +170,21 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
         initializeAckStatus(ev, actorsRef.current);
         initializeObligationStatus(ev, actorsRef.current);
 
-        appendEvent(ev);
+        appendEvent(ev, groupId);
+
+        // Reconcile outbox: when a user's chat.message arrives via SSE,
+        // remove matching outbox entries to prevent optimistic/canonical double-display.
+        if (isChatMessageEvent(ev) && String(ev.by || "") === "user") {
+          const outboxState = useChatOutboxStore.getState();
+          const pending = outboxState.entriesByGroup[groupId];
+          if (pending && pending.length > 0) {
+            // Remove the oldest pending entry (FIFO: the SSE event corresponds to the first pending send)
+            const oldest = pending.find((e) => e.status === "pending");
+            if (oldest) {
+              outboxState.remove(groupId, oldest.localId);
+            }
+          }
+        }
 
         // Reply to an earlier message updates its obligation status in-place.
         if (isChatMessageEvent(ev)) {
@@ -175,7 +192,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
           const replyTo = msgData && typeof msgData.reply_to === "string" ? String(msgData.reply_to || "").trim() : "";
           const replyBy = String(ev.by || "").trim();
           if (replyTo && replyBy) {
-            updateReplyStatus(replyTo, replyBy);
+            updateReplyStatus(replyTo, replyBy, groupId);
           }
         }
 
@@ -188,7 +205,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
 
         // Update unread count
         if (shouldIncrementUnread(ev, activeTabRef.current === "chat", chatAtBottomRef.current)) {
-          incrementChatUnread();
+          incrementChatUnread(groupId);
         }
 
         // Refresh actors when relevant events arrive

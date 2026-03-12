@@ -29,6 +29,7 @@ export interface GroupSidebarProps {
   isDark: boolean;
   readOnly?: boolean;
   onSelectGroup: (groupId: string) => void;
+  onWarmGroup?: (groupId: string) => void;
   onCreateGroup?: () => void;
   onClose: () => void;
   onToggleCollapse: () => void;
@@ -44,6 +45,7 @@ export function GroupSidebar({
   isDark,
   readOnly,
   onSelectGroup,
+  onWarmGroup,
   onCreateGroup,
   onClose,
   onToggleCollapse,
@@ -97,7 +99,7 @@ export function GroupSidebar({
         )}
       >
         {/* Header */}
-        <div className={`p-4 border-b ${isDark ? "border-white/5" : "border-black/5"}`}>
+        <div className="p-4 pb-2">
           <div
             className={classNames(
               "flex items-center",
@@ -106,13 +108,13 @@ export function GroupSidebar({
           >
             <div className={classNames("flex items-center", isCollapsed ? "" : "gap-3")}>
               <div className={classNames(
-                "w-9 h-9 rounded-xl flex items-center justify-center glass-btn",
-                isDark ? "text-cyan-400" : "text-cyan-600"
+                "w-11 h-11 rounded-xl flex items-center justify-center glass-btn",
+                "text-cyan-600 dark:text-cyan-400"
               )}>
                 <img src="/ui/logo.svg" alt="CCCC Logo" className="w-6 h-6 object-contain" />
               </div>
               {!isCollapsed && (
-                <span className={`text-lg font-bold tracking-tight ${isDark ? "text-white" : "text-gray-900"}`}>CCCC</span>
+                <span className="text-lg font-bold tracking-tight text-[var(--color-text-primary)]">CCCC</span>
               )}
             </div>
 
@@ -122,7 +124,7 @@ export function GroupSidebar({
                   <button
                     className={classNames(
                       "text-xs px-4 py-2 rounded-xl font-medium transition-all min-h-[36px] glass-btn-accent",
-                      isDark ? "text-cyan-300" : "text-cyan-700"
+                        isDark ? "text-gray-300" : "text-gray-800"
                     )}
                     onClick={onCreateGroup}
                     title={t('createNewGroup')}
@@ -135,7 +137,8 @@ export function GroupSidebar({
                 <button
                   className={classNames(
                     "hidden md:flex p-2 min-w-[36px] min-h-[36px] items-center justify-center rounded-xl transition-all glass-btn",
-                    isDark ? "text-slate-400 hover:text-white" : "text-gray-500 hover:text-gray-900"
+                    "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
+                                isDark ? "hover:bg-white/5" : "hover:bg-black/5"
                   )}
                   onClick={onToggleCollapse}
                   aria-label={t('collapseSidebar')}
@@ -147,7 +150,7 @@ export function GroupSidebar({
                 <button
                   className={classNames(
                     "md:hidden p-2 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl transition-all glass-btn",
-                    isDark ? "text-slate-400 hover:text-white" : "text-gray-500 hover:text-gray-900"
+                    "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
                   )}
                   onClick={onClose}
                   aria-label={t('closeSidebar')}
@@ -164,8 +167,8 @@ export function GroupSidebar({
           <div className="p-2 flex flex-col items-center gap-2">
             <button
               className={classNames(
-                "w-10 h-10 rounded-xl flex items-center justify-center transition-all glass-btn",
-                isDark ? "text-slate-400 hover:text-white" : "text-gray-500 hover:text-gray-900"
+                "w-11 h-11 rounded-xl flex items-center justify-center transition-all glass-btn",
+                "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
               )}
               onClick={onToggleCollapse}
               aria-label={t('expandSidebar')}
@@ -176,8 +179,8 @@ export function GroupSidebar({
             {!readOnly && onCreateGroup && (
               <button
                 className={classNames(
-                  "w-10 h-10 rounded-xl flex items-center justify-center transition-all glass-btn-accent",
-                  isDark ? "text-cyan-300" : "text-cyan-700"
+                  "w-11 h-11 rounded-xl flex items-center justify-center transition-all glass-btn-accent",
+                  "text-cyan-700 dark:text-cyan-300"
                 )}
                 onClick={onCreateGroup}
                 aria-label={t('createNewGroup')}
@@ -195,7 +198,7 @@ export function GroupSidebar({
           isCollapsed ? "p-2" : "p-3"
         )}>
           {!isCollapsed && (
-            <div className={`text-[10px] font-medium uppercase tracking-wider mb-3 px-2 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.15em] mb-3 px-2 text-[var(--color-text-muted)]">
               {t('workingGroups')}
             </div>
           )}
@@ -210,7 +213,7 @@ export function GroupSidebar({
               strategy={verticalListSortingStrategy}
             >
               <div className={classNames(
-                isCollapsed ? "flex flex-col items-center gap-2" : "space-y-1.5"
+                isCollapsed ? "flex flex-col items-center gap-2" : "space-y-1"
               )}>
                 {orderedGroups.map((g) => {
                   const gid = String(g.group_id || "");
@@ -227,6 +230,7 @@ export function GroupSidebar({
                         onSelectGroup(gid);
                         if (window.matchMedia("(max-width: 767px)").matches) onClose();
                       }}
+                      onWarm={active ? undefined : () => onWarmGroup?.(gid)}
                     />
                   );
                 })}
@@ -239,19 +243,19 @@ export function GroupSidebar({
             <div className="p-6 text-center">
               <div className={classNames(
                 "w-16 h-16 mx-auto mb-4 rounded-2xl flex items-center justify-center glass-card",
-                isDark ? "text-slate-400" : "text-gray-400"
+                "text-[var(--color-text-muted)]"
               )}>
                 <FolderIcon size={32} />
               </div>
-              <div className={`text-sm mb-2 font-medium ${isDark ? "text-slate-300" : "text-gray-700"}`}>{t('noGroupsYet')}</div>
-              <div className={`text-xs mb-5 max-w-[200px] mx-auto leading-relaxed ${isDark ? "text-slate-500" : "text-gray-500"}`}>
+              <div className="text-sm mb-2 font-medium text-[var(--color-text-secondary)]">{t('noGroupsYet')}</div>
+              <div className="text-xs mb-5 max-w-[200px] mx-auto leading-relaxed text-[var(--color-text-muted)]">
                 {t('noGroupsDescription')}
               </div>
               {!readOnly && onCreateGroup && (
                 <button
                   className={classNames(
                     "text-sm px-5 py-2.5 rounded-xl font-medium min-h-[44px] transition-all glass-btn-accent",
-                    isDark ? "text-cyan-300" : "text-cyan-700"
+                    "text-cyan-700 dark:text-cyan-300"
                   )}
                   onClick={onCreateGroup}
                 >

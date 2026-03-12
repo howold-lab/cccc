@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from ....kernel.group import load_group
 from ....ports.im.config_schema import canonicalize_im_config
 from ....util.conv import coerce_bool
+from ....util.process import SOFT_TERMINATE_SIGNAL, best_effort_signal_pid, pid_is_alive
 from ..schemas import (
     IMActionRequest,
     IMBindRequest,
@@ -18,6 +19,7 @@ from ..schemas import (
     InboxReadRequest,
     RouteContext,
     check_group,
+    get_principal,
     require_group,
 )
 
@@ -35,6 +37,13 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
     # Group-scoped endpoints (guard via router dependency)
     # =========================================================================
 
+    def _profile_auth_args(request: Request) -> Dict[str, Any]:
+        principal = get_principal(request)
+        return {
+            "caller_id": str(getattr(principal, "user_id", "") or "").strip(),
+            "is_admin": bool(getattr(principal, "is_admin", False)),
+        }
+
     @group_router.get("/inbox/{actor_id}")
     async def inbox_list(group_id: str, actor_id: str, by: str = "user", limit: int = 50) -> Dict[str, Any]:
         return await ctx.daemon({"op": "inbox_list", "args": {"group_id": group_id, "actor_id": actor_id, "by": by, "limit": int(limit)}})
@@ -46,8 +55,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         )
 
     @group_router.post("/start")
-    async def group_start(group_id: str, by: str = "user") -> Dict[str, Any]:
-        return await ctx.daemon({"op": "group_start", "args": {"group_id": group_id, "by": by}})
+    async def group_start(request: Request, group_id: str, by: str = "user") -> Dict[str, Any]:
+        return await ctx.daemon({"op": "group_start", "args": {"group_id": group_id, "by": by, **_profile_auth_args(request)}})
 
     @group_router.post("/stop")
     async def group_stop(group_id: str, by: str = "user") -> Dict[str, Any]:
@@ -87,12 +96,12 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                         pid = None
                         pid_path.unlink(missing_ok=True)
                     else:
-                        os.kill(pid, 0)  # Check if process exists
-                        running = True
+                        running = pid_is_alive(pid)
                 except (AttributeError, ChildProcessError):
-                    os.kill(pid, 0)  # Check if process exists
-                    running = True
-            except (ValueError, ProcessLookupError, PermissionError):
+                    running = pid_is_alive(pid)
+                if not running:
+                    pid = None
+            except ValueError:
                 pid = None
 
         # Get subscriber count
@@ -227,12 +236,14 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     if waited_pid == pid:
                         pid_path.unlink(missing_ok=True)
                     else:
-                        os.kill(pid, 0)
-                        return {"ok": False, "error": {"code": "already_running", "message": f"bridge already running (pid={pid})"}}
+                        if pid_is_alive(pid):
+                            return {"ok": False, "error": {"code": "already_running", "message": f"bridge already running (pid={pid})"}}
+                        pid_path.unlink(missing_ok=True)
                 except (AttributeError, ChildProcessError):
-                    os.kill(pid, 0)
-                    return {"ok": False, "error": {"code": "already_running", "message": f"bridge already running (pid={pid})"}}
-            except (ValueError, ProcessLookupError, PermissionError):
+                    if pid_is_alive(pid):
+                        return {"ok": False, "error": {"code": "already_running", "message": f"bridge already running (pid={pid})"}}
+                    pid_path.unlink(missing_ok=True)
+            except ValueError:
                 pass
 
         # Check IM config
@@ -342,8 +353,6 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
     @im_router.post("/api/im/stop")
     async def im_stop(request: Request, req: IMActionRequest) -> Dict[str, Any]:
         """Stop IM bridge for a group."""
-        import signal as sig
-
         check_group(request, req.group_id)
         group = load_group(req.group_id)
         if group is None:
@@ -366,13 +375,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         if pid_path.exists():
             try:
                 pid = int(pid_path.read_text(encoding="utf-8").strip())
-                try:
-                    os.killpg(os.getpgid(pid), sig.SIGTERM)
-                except Exception:
-                    try:
-                        os.kill(pid, sig.SIGTERM)
-                    except Exception:
-                        pass
+                best_effort_signal_pid(pid, SOFT_TERMINATE_SIGNAL, include_group=True)
                 stopped += 1
             except Exception:
                 pass

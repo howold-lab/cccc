@@ -27,6 +27,10 @@ export interface SemanticMapState {
 export const SEMANTIC_MAP_SCENE_EXTENT = 9;
 
 const TASK_ZONE_COLORS = ["#2563eb", "#0f766e", "#7c3aed"];
+const VIRTUAL_TASK_LABELS: Record<string, string> = {
+  __working__: "执行中",
+  __thinking__: "思考区",
+};
 
 function agentActiveTaskId(agent: AgentState): string {
   return String(agent.hot?.active_task_id || "").trim();
@@ -34,6 +38,12 @@ function agentActiveTaskId(agent: AgentState): string {
 
 function taskLabel(task: Task): string {
   return String(task.title || task.id || "未命名任务").trim();
+}
+
+function semanticTaskLabel(taskId: string, taskMap: Map<string, Task>): string {
+  const virtual = VIRTUAL_TASK_LABELS[taskId];
+  if (virtual) return virtual;
+  return taskLabel(taskMap.get(taskId) || { id: taskId });
 }
 
 function isRunningActor(actor?: Actor): boolean {
@@ -96,7 +106,7 @@ function compressTaskGroups(taskGroups: Map<string, string[]>, taskMap: Map<stri
   const entries = [...taskGroups.entries()]
     .map(([taskId, agentIds]) => ({
       taskId,
-      label: taskLabel(taskMap.get(taskId) || { id: taskId }),
+      label: semanticTaskLabel(taskId, taskMap),
       agentIds: [...agentIds],
     }))
     .sort((left, right) => right.agentIds.length - left.agentIds.length || left.label.localeCompare(right.label));
@@ -157,12 +167,7 @@ export function buildSemanticMapState(
       continue;
     }
 
-    if (isForeman && derived === "working") {
-      foremanIds.push(agent.id);
-      continue;
-    }
-
-    if (isForeman && hasLiveTask && (derived === "working" || derived === "thinking")) {
+    if (isForeman && (derived === "working" || derived === "thinking")) {
       foremanIds.push(agent.id);
       continue;
     }
@@ -174,16 +179,25 @@ export function buildSemanticMapState(
       continue;
     }
 
+    if (!isForeman && (derived === "working" || derived === "thinking")) {
+      // 状态优先：没有 live task，也不要直接掉回休闲区。
+      const virtualTaskId = derived === "working" ? "__working__" : "__thinking__";
+      const bucket = taskGroups.get(virtualTaskId) || [];
+      bucket.push(agent.id);
+      taskGroups.set(virtualTaskId, bucket);
+      continue;
+    }
+
     idleIds.push(agent.id);
   }
 
   const compressedTasks = compressTaskGroups(taskGroups, taskMap);
-  const taskZoneWidth = compressedTasks.length <= 1 ? 10.2 : compressedTasks.length === 2 ? 6.8 : 4.5;
+  const taskZoneWidth = compressedTasks.length <= 1 ? 7.8 : compressedTasks.length === 2 ? 5.6 : 3.8;
   const taskCenters = compressedTasks.length <= 1
     ? [0]
     : compressedTasks.length === 2
-      ? [-3.8, 3.8]
-      : [-4.8, 0, 4.8];
+      ? [-3.1, 3.1]
+      : [-3.9, 0, 3.9];
 
   const zones: SemanticZone[] = [
     {
@@ -192,8 +206,8 @@ export function buildSemanticMapState(
       label: "受阻区",
       subtitle: `${blockedIds.length} 人`,
       color: "#b91c1c",
-      center: [-4.8, 0, 4.9],
-      size: [4.6, 2.9],
+      center: [-3.8, 0, 3.9],
+      size: [3.8, 2.5],
       agentIds: blockedIds,
     },
     {
@@ -202,8 +216,8 @@ export function buildSemanticMapState(
       label: "指挥区",
       subtitle: `${foremanIds.length} 人`,
       color: "#c2410c",
-      center: [4.8, 0, 4.9],
-      size: [4.6, 2.9],
+      center: [3.8, 0, 3.9],
+      size: [3.8, 2.5],
       agentIds: foremanIds,
     },
     ...compressedTasks.map((taskGroup, index) => ({
@@ -213,7 +227,7 @@ export function buildSemanticMapState(
       subtitle: `${taskGroup.agentIds.length} 人`,
       color: TASK_ZONE_COLORS[index % TASK_ZONE_COLORS.length],
       center: [taskCenters[index] ?? 0, 0, 0] as [number, number, number],
-      size: [taskZoneWidth, 4.6] as [number, number],
+      size: [taskZoneWidth, 3.8] as [number, number],
       agentIds: taskGroup.agentIds,
       taskId: taskGroup.taskId,
     })),
@@ -223,8 +237,8 @@ export function buildSemanticMapState(
       label: "休闲区",
       subtitle: `${idleIds.length} 人`,
       color: "#0f766e",
-      center: [-4.8, 0, -4.4],
-      size: [4.4, 2.9],
+      center: [-3.8, 0, -3.2],
+      size: [3.6, 2.4],
       agentIds: idleIds,
     },
     {
@@ -233,8 +247,8 @@ export function buildSemanticMapState(
       label: "离线区",
       subtitle: `${offlineIds.length} 人`,
       color: "#475569",
-      center: [4.8, 0, -4.4],
-      size: [4.4, 2.9],
+      center: [3.8, 0, -3.2],
+      size: [3.6, 2.4],
       agentIds: offlineIds,
     },
   ];

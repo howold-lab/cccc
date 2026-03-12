@@ -38,7 +38,8 @@ MCP_TOOLS = [
         "name": "cccc_bootstrap",
         "description": (
             "Cold-start bootstrap: session + recovery + inbox_preview + memory_recall_gate + next_calls. "
-            "Use cccc_help / cccc_project_info / cccc_context_get on demand for cold detail."
+            "Use it first on cold start or resume; pull cccc_help / cccc_project_info / cccc_context_get "
+            "only when you need colder detail."
         ),
         "inputSchema": _obj(
             {
@@ -115,7 +116,7 @@ MCP_TOOLS = [
                         {"type": "array", "items": {"type": "string"}},
                     ]
                 },
-                "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"], "default": "normal"},
+                "priority": {"type": "string", "enum": ["normal", "attention"], "default": "normal"},
                 "reply_required": {"type": "boolean", "default": False},
             },
             required=["text"],
@@ -137,7 +138,7 @@ MCP_TOOLS = [
                         {"type": "array", "items": {"type": "string"}},
                     ]
                 },
-                "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"], "default": "normal"},
+                "priority": {"type": "string", "enum": ["normal", "attention"], "default": "normal"},
                 "reply_required": {"type": "boolean", "default": False},
             },
             required=["text"],
@@ -159,9 +160,9 @@ MCP_TOOLS = [
                         {"type": "array", "items": {"type": "string"}},
                     ]
                 },
-                "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"], "default": "normal"},
+                "priority": {"type": "string", "enum": ["normal", "attention"], "default": "normal"},
                 "reply_required": {"type": "boolean", "default": False},
-                "rel_path": {"type": "string", "description": "Required for action=blob_path"},
+                "rel_path": {"type": "string", "description": "Required for action=blob_path. Can be just the blob filename (e.g. 'sha256_image.png') or full relative path ('state/blobs/sha256_image.png')."},
             }
         ),
     },
@@ -401,14 +402,16 @@ MCP_TOOLS = [
     {
         "name": "cccc_space",
         "description": (
-            "Group Space hub tool. action: status|capabilities|bind|ingest|query|sources|artifact|jobs|sync|"
-            "provider_auth|provider_credential_status|provider_credential_update"
+            "Group Space hub tool. NotebookLM has two lanes: work and memory. action: status|capabilities|bind|ingest|query|sources|artifact|jobs|sync|"
+            "provider_auth|provider_credential_status|provider_credential_update. For artifact runs with wait=false, accepted=true plus "
+            "status=pending|queued means background accepted: do not poll in a loop; wait for the later system.notify."
         ),
         "inputSchema": _obj(
             {
                 **_COMMON_GROUP,
                 **_COMMON_BY,
                 "provider": {"type": "string", "default": "notebooklm"},
+                "lane": {"type": "string", "enum": ["work", "memory"]},
                 "action": {
                     "type": "string",
                     "enum": [
@@ -589,6 +592,19 @@ MCP_TOOLS = [
                 "user_model": {"type": "string"},
                 "persona_notes": {"type": "string"},
                 "resume_hint": {"type": "string"},
+            }
+        ),
+    },
+    {
+        "name": "cccc_role_notes",
+        "description": "Manage actor role notes (persona_notes): action=get|set|clear. Foreman/user can read and write any actor's role notes.",
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                "action": {"type": "string", "enum": ["get", "set", "clear"], "default": "get"},
+                "target_actor_id": {"type": "string", "description": "The actor whose role notes to read/write. Omit for get to list all."},
+                "content": {"type": "string", "description": "New role notes content (required for set, max 600 chars)"},
+                "by": {"type": "string", "description": "Caller actor id override (normally auto-resolved)"},
             }
         ),
     },

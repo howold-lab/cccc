@@ -6,7 +6,7 @@ import {
   RUNTIME_INFO,
 } from "../../types";
 import { useTranslation } from "react-i18next";
-import { BASIC_MCP_CONFIG_SNIPPET, COPILOT_MCP_CONFIG_SNIPPET, OPENCODE_MCP_CONFIG_SNIPPET } from "../../utils/mcpConfigSnippets";
+import { BASIC_MCP_CONFIG_SNIPPET } from "../../utils/mcpConfigSnippets";
 import { classNames } from "../../utils/classNames";
 import { useModalA11y } from "../../hooks/useModalA11y";
 import { CapabilityPicker } from "../CapabilityPicker";
@@ -61,6 +61,20 @@ export interface AddActorModalProps {
   onCancelAndReset: () => void;
 }
 
+function commandPreview(command: string[] | undefined): string {
+  const cmd = Array.isArray(command) ? command.filter((item) => typeof item === "string" && item.trim()) : [];
+  return cmd.join(" ");
+}
+
+function modeButtonClass(selected: boolean): string {
+  return [
+    "px-3 py-2.5 rounded-xl border text-sm min-h-[44px] font-medium transition-colors",
+    selected
+      ? "bg-blue-600 text-white border-blue-600"
+      : "border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]",
+  ].join(" ");
+}
+
 export function AddActorModal({
   isOpen,
   isDark,
@@ -99,16 +113,32 @@ export function AddActorModal({
   onClose,
   onCancelAndReset,
 }: AddActorModalProps) {
-  const { t } = useTranslation('actors');
+  const { t } = useTranslation("actors");
   const { modalRef } = useModalA11y(isOpen, onClose);
   if (!isOpen) return null;
 
-  const defaultCommand = runtimes.find((r) => r.name === newActorRuntime)?.recommended_command || "";
+  const runtimeInfo = runtimes.find((r) => r.name === newActorRuntime);
+  const runtimeAvailable = runtimeInfo?.available ?? false;
+  const defaultCommand = runtimeInfo?.recommended_command || "";
   const selectedProfile = actorProfiles.find((item) => String(item.id || "") === String(newActorProfileId || ""));
+  const selectedProfileRuntime = String(selectedProfile?.runtime || "").trim() as SupportedRuntime;
+  const selectedProfileCommand = commandPreview(selectedProfile?.command);
+  const showRuntimeSetup = !newActorUseProfile && newActorRuntime === "custom";
+  const showCommandEditor = !newActorUseProfile && (newActorRuntime === "custom" || !newActorUseDefaultCommand);
+
+  const sectionCardClass = "rounded-2xl p-4 sm:p-5 glass-panel";
+  const sectionTitleClass = "text-sm font-semibold text-[var(--color-text-primary)]";
+  const sectionHintClass = "mt-1 text-xs text-[var(--color-text-muted)]";
+  const collapsibleSummaryClass =
+    "flex cursor-pointer list-none items-start justify-between gap-3 [&::-webkit-details-marker]:hidden";
+  const collapsibleLabelClass = "text-xs font-medium text-[var(--color-text-secondary)]";
+  const collapsibleChevronClass =
+    "text-sm transition-transform group-open:rotate-180 text-[var(--color-text-tertiary)]";
+  const nestedCardClass = "rounded-xl border p-3 border-[var(--glass-border-subtle)] bg-[var(--glass-bg)]";
 
   return (
     <div
-      className={`fixed inset-0 backdrop-blur-sm flex items-stretch sm:items-start justify-center p-0 sm:p-6 z-50 animate-fade-in ${isDark ? "bg-black/50" : "bg-black/30"}`}
+      className="fixed inset-0 backdrop-blur-sm flex items-stretch sm:items-start justify-center p-0 sm:p-6 z-50 animate-fade-in glass-overlay"
       onPointerDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -118,386 +148,401 @@ export function AddActorModal({
     >
       <div
         ref={modalRef}
-        className={`w-full h-full sm:h-auto sm:max-w-lg sm:mt-16 sm:max-h-[80vh] overflow-y-auto border shadow-2xl animate-scale-in rounded-none sm:rounded-2xl ${
-          isDark ? "border-slate-700/50 bg-gradient-to-b from-slate-800 to-slate-900" : "border-gray-200 bg-white"
-        }`}
+        className="w-full h-full sm:h-auto sm:max-w-2xl sm:mt-10 sm:max-h-[calc(100vh-5rem)] border border-[var(--glass-border-subtle)] shadow-2xl animate-scale-in rounded-none sm:rounded-2xl glass-modal flex flex-col overflow-hidden text-[var(--color-text-primary)]"
       >
-        <div className={`px-6 py-4 border-b sticky top-0 safe-area-inset-top ${isDark ? "border-slate-700/50 bg-slate-800" : "border-gray-200 bg-white"}`}>
-          <div id="add-actor-title" className={`text-lg font-semibold ${isDark ? "text-white" : "text-gray-900"}`}>
-            {t('addAiAgent')}
+        <div className="px-6 py-4 border-b safe-area-inset-top border-[var(--glass-border-subtle)] glass-header flex-shrink-0">
+          <div id="add-actor-title" className="text-lg font-semibold text-[var(--color-text-primary)]">
+            {t("addAiAgent")}
           </div>
-          <div className={`text-sm mt-1 ${isDark ? "text-slate-400" : "text-gray-500"}`}>{t('chooseRuntime')}</div>
+          <div className="text-sm mt-1 text-[var(--color-text-muted)]">{t("addActorSubtitle")}</div>
         </div>
-        <div className="p-6 space-y-5">
-          {addActorError && (
-            <div
-              className={`rounded-xl border px-4 py-2.5 text-sm flex items-center justify-between gap-3 ${
-                isDark ? "border-rose-500/30 bg-rose-500/10 text-rose-300" : "border-rose-300 bg-rose-50 text-rose-700"
-              }`}
-              role="alert"
-            >
-              <span>{addActorError}</span>
-              <button
-                className={isDark ? "text-rose-300 hover:text-rose-100" : "text-rose-500 hover:text-rose-700"}
-                onClick={() => setAddActorError("")}
-              >
-                ×
-              </button>
-            </div>
-          )}
 
-          <div>
-            <label className={`block text-xs font-medium mb-2 ${isDark ? "text-slate-400" : "text-gray-500"}`}>
-              {t('agentName')} <span className={isDark ? "text-slate-500" : "text-gray-400"}>{t('unicodeSupport')}</span>
-            </label>
-            <input
-              className={`w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors ${
-                isDark
-                  ? "bg-slate-900/80 border-slate-600/50 text-white placeholder-slate-500 focus:border-blue-500"
-                  : "bg-white border-gray-300 text-gray-900 placeholder-gray-400 focus:border-blue-500"
-              }`}
-              value={newActorId}
-              onChange={(e) => setNewActorId(e.target.value)}
-              placeholder={suggestedActorId}
-            />
-            <div className={`text-[10px] mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
-              {t('leaveEmptyToUse')}{" "}
-              <code className={`px-1 rounded ${isDark ? "bg-slate-800" : "bg-gray-100"}`}>{suggestedActorId}</code>
-            </div>
-          </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 safe-area-bottom-compact">
+          <div className="mx-auto max-w-2xl space-y-4">
+            <section className={sectionCardClass}>
+              <div className={sectionTitleClass}>{t("sectionBasics")}</div>
+              <div className={sectionHintClass}>{t("addSectionBasicsHint")}</div>
 
-          <div>
-            <label className={`block text-xs font-medium mb-2 ${isDark ? "text-slate-400" : "text-gray-500"}`}>{t("creationMode")}</label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                className={classNames(
-                  "px-3 py-2.5 rounded-xl border text-sm min-h-[44px] font-medium transition-colors",
-                  newActorUseProfile
-                    ? isDark
-                      ? "bg-slate-900/60 border-slate-700 text-slate-300"
-                      : "bg-white border-gray-200 text-gray-700"
-                    : "bg-blue-600 text-white border-blue-600"
-                )}
-                onClick={() => setNewActorUseProfile(false)}
-              >
-                {t("customAgent")}
-              </button>
-              <button
-                type="button"
-                className={classNames(
-                  "px-3 py-2.5 rounded-xl border text-sm min-h-[44px] font-medium transition-colors",
-                  newActorUseProfile
-                    ? "bg-blue-600 text-white border-blue-600"
-                    : isDark
-                      ? "bg-slate-900/60 border-slate-700 text-slate-300"
-                      : "bg-white border-gray-200 text-gray-700"
-                )}
-                onClick={() => setNewActorUseProfile(true)}
-              >
-                {t("fromActorProfile")}
-              </button>
-            </div>
-          </div>
-
-          {newActorUseProfile ? (
-            <div>
-              <label className={`block text-xs font-medium mb-2 ${isDark ? "text-slate-400" : "text-gray-500"}`}>{t("actorProfile")}</label>
-              <select
-                className={`w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors ${
-                  isDark ? "bg-slate-900/80 border-slate-600/50 text-white focus:border-blue-500" : "bg-white border-gray-300 text-gray-900 focus:border-blue-500"
-                }`}
-                value={newActorProfileId}
-                onChange={(e) => setNewActorProfileId(e.target.value)}
-                disabled={actorProfilesBusy}
-              >
-                <option value="">{actorProfilesBusy ? t("loadingProfiles") : t("selectActorProfile")}</option>
-                {actorProfiles.map((profile) => (
-                  <option key={profile.id} value={profile.id}>
-                    {profile.name || profile.id}
-                  </option>
-                ))}
-              </select>
-              {selectedProfile ? (
-                <div className={`text-[10px] mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
-                  {RUNTIME_INFO[String(selectedProfile.runtime) as SupportedRuntime]?.label || selectedProfile.runtime}
+              <div className="mt-4 space-y-4">
+                <div>
+                  <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                    {t("agentName")} <span className="text-[var(--color-text-muted)]">{t("unicodeSupport")}</span>
+                  </label>
+                  <input
+                    className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)]"
+                    value={newActorId}
+                    onChange={(e) => setNewActorId(e.target.value)}
+                    placeholder={suggestedActorId}
+                  />
+                  <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                    {t("leaveEmptyToUse")}{" "}
+                    <code className="px-1 rounded bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]">
+                      {suggestedActorId}
+                    </code>
+                  </div>
                 </div>
-              ) : null}
-            </div>
-          ) : (
-            <div>
-              <label className={`block text-xs font-medium mb-2 ${isDark ? "text-slate-400" : "text-gray-500"}`}>{t('aiRuntime')}</label>
-            <select
-              className={`w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors ${
-                isDark ? "bg-slate-900/80 border-slate-600/50 text-white focus:border-blue-500" : "bg-white border-gray-300 text-gray-900 focus:border-blue-500"
-              }`}
-              value={newActorRuntime}
-              onChange={(e) => {
-                const next = e.target.value as SupportedRuntime;
-                setNewActorRuntime(next);
-                setNewActorCommand("");
-                setNewActorUseDefaultCommand(next !== "custom");
-              }}
-            >
-              {SUPPORTED_RUNTIMES.map((rt) => {
-                const info = RUNTIME_INFO[rt];
-                const rtInfo = runtimes.find((r) => r.name === rt);
-                const available = rtInfo?.available ?? false;
-                const selectable = available || rt === "custom";
-                return (
-                  <option key={rt} value={rt} disabled={!selectable}>
-                    {info?.label || rt}
-                    {!available && rt !== "custom" ? ` ${t('notInstalled')}` : ""}
-                  </option>
-                );
-              })}
-            </select>
-            {RUNTIME_INFO[newActorRuntime]?.desc ? (
-              <div className={`text-[10px] mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>{RUNTIME_INFO[newActorRuntime].desc}</div>
-            ) : null}
 
-            {(newActorRuntime === "cursor" ||
-              newActorRuntime === "kilocode" ||
-              newActorRuntime === "opencode" ||
-              newActorRuntime === "copilot" ||
-              newActorRuntime === "custom") && (
-              <div
-                className={`mt-2 rounded-xl border px-3 py-2 text-[11px] ${
-                  isDark ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-800"
-                }`}
-              >
-                <div className="font-medium">{t('manualMcpRequired')}</div>
-                {newActorRuntime === "custom" ? (
+                <div>
+                  <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("role")}</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      className={classNames(
+                        "px-4 py-2.5 rounded-xl border text-sm font-medium transition-all min-h-[44px]",
+                        newActorRole === "foreman"
+                          ? "bg-amber-500/20 border-amber-500 text-amber-700 dark:text-amber-300"
+                          : hasForeman
+                            ? "border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-muted)] cursor-not-allowed"
+                            : "border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]"
+                      )}
+                      onClick={() => {
+                        if (!hasForeman) setNewActorRole("foreman");
+                      }}
+                      disabled={hasForeman}
+                    >
+                      {t("foremanRole")} {hasForeman && t("foremanExists")}
+                    </button>
+                    <button
+                      type="button"
+                      className={classNames(
+                        "px-4 py-2.5 rounded-xl border text-sm font-medium transition-all min-h-[44px]",
+                        newActorRole === "peer"
+                          ? "bg-blue-500/20 border-blue-500 text-blue-700 dark:text-blue-300"
+                          : !hasForeman
+                            ? "border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-muted)] cursor-not-allowed"
+                            : "border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]"
+                      )}
+                      onClick={() => {
+                        if (hasForeman) setNewActorRole("peer");
+                      }}
+                      disabled={!hasForeman}
+                    >
+                      {t("peerRole")} {!hasForeman && t("needForemanFirst")}
+                    </button>
+                  </div>
+                  <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                    {hasForeman ? t("foremanLeads") : t("firstAgentForeman")}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className={sectionCardClass}>
+              <div className={sectionTitleClass}>{t("sectionRuntime")}</div>
+              <div className={sectionHintClass}>{t("sectionRuntimeHint")}</div>
+
+              <div className="mt-4">
+                <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("creationMode")}</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" className={modeButtonClass(!newActorUseProfile)} onClick={() => setNewActorUseProfile(false)}>
+                    {t("customAgent")}
+                  </button>
+                  <button type="button" className={modeButtonClass(newActorUseProfile)} onClick={() => setNewActorUseProfile(true)}>
+                    {t("fromActorProfile")}
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-4">
+                {newActorUseProfile ? (
                   <>
-                    <div className="mt-1">
-                      {t('customCommandHint').replace(/<1>|<\/1>/g, '')}
+                    <div>
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("actorProfile")}</label>
+                      <select
+                        className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)]"
+                        value={newActorProfileId}
+                        onChange={(e) => setNewActorProfileId(e.target.value)}
+                        disabled={actorProfilesBusy}
+                      >
+                        <option value="">{actorProfilesBusy ? t("loadingProfiles") : t("selectActorProfile")}</option>
+                        {actorProfiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name || profile.id}
+                          </option>
+                        ))}
+                      </select>
                     </div>
-                    <div className="mt-1">
-                      {t('configureMcpStdio')}{" "}
-                      <code className={`px-1 rounded ${isDark ? "bg-amber-900/30" : "bg-amber-100"}`}>cccc</code> {t('thatRuns')}{" "}
-                      <code className={`px-1 rounded ${isDark ? "bg-amber-900/30" : "bg-amber-100"}`}>cccc mcp</code>.
-                    </div>
-                  </>
-                ) : newActorRuntime === "cursor" ? (
-                  <>
-                    <div className="mt-1">
-                      {t('createEditFile')}{" "}
-                      <code className={`px-1 rounded ${isDark ? "bg-amber-900/30" : "bg-amber-100"}`}>~/.cursor/mcp.json</code> (or{" "}
-                      <code className={`px-1 rounded ${isDark ? "bg-amber-900/30" : "bg-amber-100"}`}>.cursor/mcp.json</code> {t('orInProject')})
-                    </div>
-                    <div className="mt-1">{t('addMcpConfig')}</div>
-                  </>
-                ) : newActorRuntime === "kilocode" ? (
-                  <>
-                    <div className="mt-1">
-                      {t('createEditFile')}{" "}
-                      <code className={`px-1 rounded ${isDark ? "bg-amber-900/30" : "bg-amber-100"}`}>.kilocode/mcp.json</code> {t('inProjectRoot')}
-                    </div>
-                    <div className="mt-1">{t('addMcpConfig')}</div>
-                  </>
-                ) : newActorRuntime === "opencode" ? (
-                  <>
-                    <div className="mt-1">
-                      {t('createEditFile')}{" "}
-                      <code className={`px-1 rounded ${isDark ? "bg-amber-900/30" : "bg-amber-100"}`}>~/.config/opencode/opencode.json</code>
-                    </div>
-                    <div className="mt-1">{t('addMcpConfig')}</div>
+
+                    {selectedProfile ? (
+                      <div className="rounded-xl border px-3 py-3 border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] text-[var(--color-text-secondary)]">
+                        <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                          {selectedProfile.name || selectedProfile.id}
+                        </div>
+                        <div className="mt-1 text-xs">
+                          {RUNTIME_INFO[selectedProfileRuntime]?.label || selectedProfile.runtime}
+                        </div>
+                        {selectedProfileCommand ? (
+                          <div className="mt-2 font-mono text-[11px] break-all text-[var(--color-text-tertiary)]">
+                            {selectedProfileCommand}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </>
                 ) : (
                   <>
-                    <div className="mt-1">
-                      {t('createEditFile')}{" "}
-                      <code className={`px-1 rounded ${isDark ? "bg-amber-900/30" : "bg-amber-100"}`}>~/.copilot/mcp-config.json</code>
+                    <div>
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("aiRuntime")}</label>
+                      <select
+                        className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)]"
+                        value={newActorRuntime}
+                        onChange={(e) => {
+                          const next = e.target.value as SupportedRuntime;
+                          setNewActorRuntime(next);
+                          setNewActorCommand("");
+                          setNewActorUseDefaultCommand(next !== "custom");
+                        }}
+                      >
+                        {SUPPORTED_RUNTIMES.map((rt) => {
+                          const info = RUNTIME_INFO[rt];
+                          const rtInfo = runtimes.find((r) => r.name === rt);
+                          const available = rtInfo?.available ?? false;
+                          const selectable = available || rt === "custom";
+                          return (
+                            <option key={rt} value={rt} disabled={!selectable}>
+                              {info?.label || rt}
+                              {!available && rt !== "custom" ? ` ${t("notInstalled")}` : ""}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      {RUNTIME_INFO[newActorRuntime]?.desc ? (
+                        <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                          {RUNTIME_INFO[newActorRuntime].desc}
+                        </div>
+                      ) : null}
                     </div>
-                    <div className="mt-1">
-                      {t('addMcpConfigOrFlag')}{" "}
-                      <code className={`px-1 rounded ${isDark ? "bg-amber-900/30" : "bg-amber-100"}`}>--additional-mcp-config</code>):
-                    </div>
+
+                    {newActorRuntime !== "custom" ? (
+                      <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                        <input
+                          type="checkbox"
+                          checked={newActorUseDefaultCommand}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setNewActorUseDefaultCommand(checked);
+                            if (checked) setNewActorCommand("");
+                          }}
+                        />
+                        {t("useRuntimeDefaultCommand")}
+                      </label>
+                    ) : null}
+
+                    {showCommandEditor ? (
+                      <div>
+                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                          {t("commandOverrideOptional")}
+                        </label>
+                        <input
+                          className="w-full rounded-xl border px-4 py-2.5 text-sm font-mono min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)]"
+                          value={newActorCommand}
+                          onChange={(e) => setNewActorCommand(e.target.value)}
+                          placeholder={defaultCommand || t("enterCommand")}
+                        />
+                      </div>
+                    ) : null}
+
+                    {defaultCommand.trim() ? (
+                      <div className="text-[10px] text-[var(--color-text-muted)]">
+                        {newActorUseDefaultCommand && newActorRuntime !== "custom"
+                          ? t("usingRuntimeDefaultCommand")
+                          : t("default")}{" "}
+                        <code className="px-1 rounded bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]">
+                          {defaultCommand}
+                        </code>
+                      </div>
+                    ) : null}
+
+                    {newActorRuntime === "custom" || !runtimeAvailable ? (
+                      <div className="rounded-xl border px-3 py-2 text-[11px] border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">
+                        <div className="font-medium">{t("manualMcpRequired")}</div>
+                        <div className="mt-1">{t("customCommandHint").replace(/<1>|<\/1>/g, "")}</div>
+                      </div>
+                    ) : null}
                   </>
                 )}
-
-                {newActorRuntime !== "custom" ? (
-                  <pre className={`mt-1.5 p-2 rounded overflow-x-auto whitespace-pre ${isDark ? "bg-amber-900/20 text-amber-100" : "bg-amber-50 text-amber-900"}`}>
-                    <code>
-                      {newActorRuntime === "opencode"
-                        ? OPENCODE_MCP_CONFIG_SNIPPET
-                        : newActorRuntime === "copilot"
-                          ? COPILOT_MCP_CONFIG_SNIPPET
-                          : BASIC_MCP_CONFIG_SNIPPET}
-                    </code>
-                  </pre>
-                ) : null}
-
-                <div className={`mt-1 text-[10px] ${isDark ? "text-amber-200/80" : "text-amber-800/80"}`}>
-                  {t('restartAfterConfig')}
-                </div>
               </div>
-            )}
-            </div>
-          )}
+            </section>
 
-          {!newActorUseProfile ? (
-          <div>
-            <label className={`block text-xs font-medium mb-2 ${isDark ? "text-slate-400" : "text-gray-500"}`}>{t('role')}</label>
-            <div className="flex gap-2">
-              <button
-                className={classNames(
-                  "flex-1 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all min-h-[44px]",
-                  newActorRole === "foreman"
-                    ? "bg-amber-500/20 border-amber-500 text-amber-600"
-                    : hasForeman
-                      ? isDark
-                        ? "bg-slate-900/30 border-slate-700/30 text-slate-500 cursor-not-allowed"
-                        : "bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed"
-                      : isDark
-                        ? "bg-slate-800/50 border-slate-600/50 text-slate-300 hover:border-slate-500"
-                        : "bg-gray-50 border-gray-200 text-gray-600 hover:border-gray-300"
-                )}
-                onClick={() => {
-                  if (!hasForeman) setNewActorRole("foreman");
-                }}
-                disabled={hasForeman}
+            {!newActorUseProfile ? (
+              <details
+                className={`group ${sectionCardClass}`}
+                open={showAdvancedActor}
+                onToggle={(e) => setShowAdvancedActor((e.currentTarget as HTMLDetailsElement).open)}
               >
-                {t('foremanRole')} {hasForeman && t('foremanExists')}
-              </button>
-              <button
-                className={classNames(
-                  "flex-1 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all min-h-[44px]",
-                  newActorRole === "peer"
-                    ? "bg-blue-500/20 border-blue-500 text-blue-600"
-                    : !hasForeman
-                      ? isDark
-                        ? "bg-slate-900/30 border-slate-700/30 text-slate-500 cursor-not-allowed"
-                        : "bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed"
-                      : isDark
-                        ? "bg-slate-800/50 border-slate-600/50 text-slate-300 hover:border-slate-500"
-                        : "bg-gray-50 border-gray-200 text-gray-600 hover:border-gray-300"
-                )}
-                onClick={() => {
-                  if (hasForeman) setNewActorRole("peer");
-                }}
-                disabled={!hasForeman}
-              >
-                {t('peerRole')} {!hasForeman && t('needForemanFirst')}
-              </button>
-            </div>
-            <div className={`text-[10px] mt-1.5 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
-              {hasForeman ? t('foremanLeads') : t('firstAgentForeman')}
-            </div>
-          </div>
-          ) : null}
-
-          {!newActorUseProfile ? (
-          <button
-            className={`flex items-center gap-2 text-xs min-h-[36px] ${isDark ? "text-slate-400 hover:text-slate-300" : "text-gray-500 hover:text-gray-700"}`}
-            onClick={() => setShowAdvancedActor(!showAdvancedActor)}
-          >
-            <span className={classNames("transition-transform", showAdvancedActor && "rotate-90")}>▶</span>
-            {t('advancedOptions')}
-          </button>
-          ) : null}
-
-          {!newActorUseProfile && showAdvancedActor && (
-            <div className={`space-y-4 pl-4 border-l-2 ${isDark ? "border-slate-700/50" : "border-gray-200"}`}>
-              <CapabilityPicker
-                isDark={isDark}
-                value={parseCapabilityIdInput(newActorCapabilityAutoloadText)}
-                onChange={(next) => setNewActorCapabilityAutoloadText(formatCapabilityIdInput(next))}
-                disabled={busy === "actor-add"}
-                label={t("autoloadCapabilities")}
-                hint={t("autoloadCapabilitiesHint")}
-              />
-
-              <div>
-                <label className={`block text-xs font-medium mb-2 ${isDark ? "text-slate-400" : "text-gray-500"}`}>{t('commandOverrideOptional')}</label>
-                {newActorRuntime !== "custom" ? (
-                  <label className={`inline-flex items-center gap-2 text-xs mb-2 ${isDark ? "text-slate-300" : "text-gray-700"}`}>
-                    <input
-                      type="checkbox"
-                      checked={newActorUseDefaultCommand}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setNewActorUseDefaultCommand(checked);
-                        if (checked) setNewActorCommand("");
-                      }}
-                    />
-                    {t("useRuntimeDefaultCommand")}
-                  </label>
-                ) : null}
-                {!newActorUseDefaultCommand || newActorRuntime === "custom" ? (
-                  <input
-                    className={`w-full rounded-xl border px-3 py-2 text-sm font-mono min-h-[44px] transition-colors ${
-                      isDark
-                        ? "bg-slate-900/80 border-slate-600/50 text-white placeholder-slate-500 focus:border-blue-500"
-                        : "bg-white border-gray-300 text-gray-900 placeholder-gray-400 focus:border-blue-500"
-                    }`}
-                    value={newActorCommand}
-                    onChange={(e) => setNewActorCommand(e.target.value)}
-                    placeholder={defaultCommand || t('enterCommand')}
-                  />
-                ) : null}
-                {defaultCommand.trim() ? (
-                  <div className={`text-[10px] mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
-                    {newActorUseDefaultCommand && newActorRuntime !== "custom" ? t("usingRuntimeDefaultCommand") : t('default')}{" "}
-                    <code className={`px-1 rounded ${isDark ? "bg-slate-800" : "bg-gray-100"}`}>{defaultCommand}</code>
+                <summary className={collapsibleSummaryClass}>
+                  <div>
+                    <div className={sectionTitleClass}>{t("sectionAdvanced")}</div>
+                    <div className={sectionHintClass}>{t("sectionAdvancedHint")}</div>
                   </div>
-                ) : null}
-              </div>
+                  <span aria-hidden="true" className={collapsibleChevronClass}>
+                    ⌄
+                  </span>
+                </summary>
 
-              <div>
-                <label className={`block text-xs font-medium mb-2 ${isDark ? "text-slate-400" : "text-gray-500"}`}>{t('secretsWriteOnly')}</label>
-                <textarea
-                  className={`w-full rounded-xl border px-3 py-2 text-sm font-mono min-h-[96px] transition-colors ${
-                    isDark
-                      ? "bg-slate-900/80 border-slate-600/50 text-white placeholder-slate-500 focus:border-blue-500"
-                      : "bg-white border-gray-300 text-gray-900 placeholder-gray-400 focus:border-blue-500"
-                  }`}
-                  value={newActorSecretsSetText}
-                  onChange={(e) => setNewActorSecretsSetText(e.target.value)}
-                  placeholder={'export OPENAI_API_KEY="...";\nexport ANTHROPIC_API_KEY="...";'}
-                />
-                <div className={`text-[10px] mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
-                  {t('secretsStoredLocally').replace(/<1>|<\/1>/g, '')}
+                <div className="mt-4 space-y-4 border-t border-[var(--glass-border-subtle)] pt-4">
+                  {showRuntimeSetup ? (
+                    <details className={`group ${nestedCardClass}`}>
+                      <summary className={collapsibleSummaryClass}>
+                        <div>
+                          <div className={collapsibleLabelClass}>{t("runtimeSetupSection")}</div>
+                          <div className={sectionHintClass}>{t("runtimeSetupSectionHint")}</div>
+                        </div>
+                        <span aria-hidden="true" className={collapsibleChevronClass}>
+                          ⌄
+                        </span>
+                      </summary>
+
+                      <div className="mt-4 rounded-xl border px-3 py-2 text-[11px] border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">
+                        <div className="font-medium">{t("manualMcpRequired")}</div>
+                        {newActorRuntime === "custom" ? (
+                          <>
+                            <div className="mt-1">{t("customCommandHint").replace(/<1>|<\/1>/g, "")}</div>
+                            <div className="mt-1">
+                              {t("configureMcpStdio")}{" "}
+                              <code className="px-1 rounded bg-amber-500/15">cccc</code> {t("thatRuns")}{" "}
+                              <code className="px-1 rounded bg-amber-500/15">cccc mcp</code>.
+                            </div>
+                          </>
+                        ) : null}
+
+                        {newActorRuntime === "custom" ? (
+                          <pre className="mt-1.5 p-2 rounded overflow-x-auto whitespace-pre bg-amber-500/10 text-amber-800 dark:text-amber-200">
+                            <code>{BASIC_MCP_CONFIG_SNIPPET}</code>
+                          </pre>
+                        ) : null}
+
+                        <div className="mt-1 text-[10px] text-amber-700/80 dark:text-amber-300/80">
+                          {t("restartAfterConfig")}
+                        </div>
+                      </div>
+                    </details>
+                  ) : null}
+
+                  <details className={`group ${nestedCardClass}`}>
+                    <summary className={collapsibleSummaryClass}>
+                      <div>
+                        <div className={collapsibleLabelClass}>{t("capabilitiesSection")}</div>
+                        <div className={sectionHintClass}>{t("capabilitiesSectionHint")}</div>
+                      </div>
+                      <span aria-hidden="true" className={collapsibleChevronClass}>
+                        ⌄
+                      </span>
+                    </summary>
+
+                    <div className="mt-4">
+                      <CapabilityPicker
+                        isDark={isDark}
+                        value={parseCapabilityIdInput(newActorCapabilityAutoloadText)}
+                        onChange={(next) => setNewActorCapabilityAutoloadText(formatCapabilityIdInput(next))}
+                        disabled={busy === "actor-add"}
+                        label={t("autoloadCapabilities")}
+                        hint={t("autoloadCapabilitiesHint")}
+                      />
+                    </div>
+                  </details>
+
+                  <details className={`group ${nestedCardClass}`}>
+                    <summary className={collapsibleSummaryClass}>
+                      <div>
+                        <div className={collapsibleLabelClass}>{t("secretsSection")}</div>
+                        <div className={sectionHintClass}>{t("secretsSectionHint")}</div>
+                      </div>
+                      <span aria-hidden="true" className={collapsibleChevronClass}>
+                        ⌄
+                      </span>
+                    </summary>
+
+                    <div className="mt-4">
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                        {t("secretsWriteOnly")}
+                      </label>
+                      <textarea
+                        className="w-full rounded-xl border px-3 py-2 text-sm font-mono min-h-[112px] transition-colors glass-input text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)]"
+                        value={newActorSecretsSetText}
+                        onChange={(e) => setNewActorSecretsSetText(e.target.value)}
+                        placeholder={'export OPENAI_API_KEY="...";\nexport ANTHROPIC_API_KEY="...";'}
+                        spellCheck={false}
+                      />
+                      <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                        {t("secretsStoredLocally").replace(/<1>|<\/1>/g, "")}
+                      </div>
+                      <div className="text-[10px] mt-1 text-[var(--color-text-muted)]">
+                        {t("secretsFormat").replace(/<1>|<\/1>|<2>|<\/2>/g, "")}
+                      </div>
+                    </div>
+                  </details>
+
+                  <details className={`group ${nestedCardClass}`}>
+                    <summary className={collapsibleSummaryClass}>
+                      <div>
+                        <div className={collapsibleLabelClass}>{t("profileToolsSection")}</div>
+                        <div className={sectionHintClass}>{t("profileToolsSectionHint")}</div>
+                      </div>
+                      <span aria-hidden="true" className={collapsibleChevronClass}>
+                        ⌄
+                      </span>
+                    </summary>
+
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        className="px-4 py-2.5 rounded-xl text-sm font-medium transition-colors min-h-[44px] border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]"
+                        onClick={onSaveAsProfile}
+                        disabled={busy === "actor-profile-save" || busy === "actor-add"}
+                      >
+                        {busy === "actor-profile-save" ? t("savingProfile") : t("addToActorProfiles")}
+                      </button>
+                    </div>
+                  </details>
                 </div>
-                <div className={`text-[10px] mt-1 ${isDark ? "text-slate-500" : "text-gray-500"}`}>
-                  {t('secretsFormat').replace(/<1>|<\/1>|<2>|<\/2>/g, '')}
-                </div>
+              </details>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="border-t px-4 py-3 sm:px-6 sm:py-4 safe-area-inset-bottom border-[var(--glass-border-subtle)] glass-header flex-shrink-0">
+          {addActorError ? (
+            <div
+              className="mb-3 rounded-xl border px-3 py-2 text-xs border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+              role="alert"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <span>{addActorError}</span>
+                <button
+                  type="button"
+                  className="text-rose-700 dark:text-rose-300 hover:opacity-80"
+                  onClick={() => setAddActorError("")}
+                  aria-label={t("common:close")}
+                >
+                  ×
+                </button>
               </div>
             </div>
-          )}
+          ) : null}
 
-          {!newActorUseProfile ? (
+          <div className="flex flex-col-reverse sm:flex-row gap-3">
             <button
               type="button"
-              className={`px-4 py-2.5 rounded-xl text-sm font-medium transition-colors min-h-[40px] ${
-                isDark ? "bg-slate-800 hover:bg-slate-700 text-slate-200" : "bg-white hover:bg-gray-50 text-gray-700 border border-gray-200"
-              }`}
-              onClick={onSaveAsProfile}
-              disabled={busy === "actor-profile-save" || busy === "actor-add"}
+              className="px-4 py-2.5 rounded-xl text-sm font-medium transition-colors min-h-[44px] border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]"
+              onClick={onCancelAndReset}
             >
-              {busy === "actor-profile-save" ? t("savingProfile") : t("addToActorProfiles")}
+              {t("common:cancel")}
             </button>
-          ) : null}
 
-          <div className="flex gap-3 pt-2">
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <button
+                type="button"
                 className="w-full rounded-xl bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 text-sm font-semibold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all min-h-[44px]"
                 onClick={onAddActor}
                 disabled={!canAddActor}
               >
-                {busy === "actor-add" ? t('adding') : (newActorUseProfile ? t("createFromProfile") : t('addAgent'))}
+                {busy === "actor-add" ? t("adding") : newActorUseProfile ? t("createFromProfile") : t("addAgent")}
               </button>
-              {addActorDisabledReason && <div className="text-[10px] text-amber-500 mt-1.5">{addActorDisabledReason}</div>}
+              {addActorDisabledReason ? (
+                <div className="text-[10px] text-amber-600 dark:text-amber-300 mt-1.5">{addActorDisabledReason}</div>
+              ) : null}
             </div>
-            <button
-              className={`px-4 py-2.5 rounded-xl text-sm font-medium transition-colors min-h-[44px] ${
-                isDark ? "bg-slate-700 hover:bg-slate-600 text-slate-200" : "bg-gray-100 hover:bg-gray-200 text-gray-700"
-              }`}
-              onClick={onCancelAndReset}
-            >
-              {t('common:cancel')}
-            </button>
           </div>
         </div>
       </div>

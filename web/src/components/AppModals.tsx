@@ -1,5 +1,5 @@
 // AppModals renders all modal components in one place.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ContextModal } from "./ContextModal";
 import { SettingsModal } from "./SettingsModal";
@@ -19,6 +19,7 @@ import { InboxModal } from "./modals/InboxModal";
 import { RelayMessageModal } from "./modals/RelayMessageModal";
 import { RecipientsModal } from "./modals/RecipientsModal";
 import { parsePrivateEnvSetText } from "../utils/privateEnvInput";
+import { parseHelpMarkdown, updateActorHelpNote } from "../utils/helpMarkdown";
 import { formatCapabilityIdInput, normalizeCapabilityIdList, parseCapabilityIdInput } from "../utils/capabilityAutoload";
 import {
   useGroupStore,
@@ -41,6 +42,7 @@ interface AppModalsProps {
   onStopGroup: () => Promise<void>;
   onSetGroupState: (state: "active" | "idle" | "paused") => Promise<void>;
   fetchContext: (groupId: string) => Promise<void>;
+  canManageGroups: boolean;
 }
 
 function getErrorDetailGroupId(err: unknown): string {
@@ -60,6 +62,7 @@ export function AppModals({
   onStopGroup,
   onSetGroupState,
   fetchContext,
+  canManageGroups,
 }: AppModalsProps) {
   const { t } = useTranslation('actors');
   // Stores
@@ -115,10 +118,12 @@ export function AppModals({
     editActorRuntime,
     editActorCommand,
     editActorTitle,
+    editActorRoleNotes,
     editActorCapabilityAutoloadText,
     setEditActorRuntime,
     setEditActorCommand,
     setEditActorTitle,
+    setEditActorRoleNotes,
     setEditActorCapabilityAutoloadText,
     newActorId,
     newActorRole,
@@ -167,6 +172,41 @@ export function AppModals({
   const [dirBrowseError, setDirBrowseError] = useState("");
   const [actorProfiles, setActorProfiles] = useState<ActorProfile[]>([]);
   const [actorProfilesBusy, setActorProfilesBusy] = useState(false);
+  const [editActorRoleNotesBusy, setEditActorRoleNotesBusy] = useState(false);
+  const editActorRoleNotesBaselineRef = useRef("");
+  const editActorRoleNotesSeqRef = useRef(0);
+
+  const loadEditingActorRoleNotes = useCallback(async (groupId: string, actorId: string) => {
+    const gid = String(groupId || "").trim();
+    const aid = String(actorId || "").trim();
+    if (!gid || !aid) {
+      editActorRoleNotesBaselineRef.current = "";
+      setEditActorRoleNotes("");
+      return;
+    }
+    const seq = ++editActorRoleNotesSeqRef.current;
+    setEditActorRoleNotesBusy(true);
+    try {
+      const resp = await api.fetchGroupPrompts(gid);
+      if (!resp.ok) {
+        if (seq === editActorRoleNotesSeqRef.current) {
+          editActorRoleNotesBaselineRef.current = "";
+          setEditActorRoleNotes("");
+        }
+        return;
+      }
+      const helpContent = String(resp.result?.help?.content || "");
+      const parsed = parseHelpMarkdown(helpContent);
+      const note = String(parsed.actorNotes[aid] || "");
+      if (seq !== editActorRoleNotesSeqRef.current) return;
+      editActorRoleNotesBaselineRef.current = note.trim();
+      setEditActorRoleNotes(note);
+    } finally {
+      if (seq === editActorRoleNotesSeqRef.current) {
+        setEditActorRoleNotesBusy(false);
+      }
+    }
+  }, [setEditActorRoleNotes]);
 
   // Computed
   const selectedGroupRunning = useGroupStore(
@@ -387,6 +427,8 @@ export function AppModals({
     const currentCapabilityAutoload = normalizeCapabilityIdList(
       (editingActor as { capability_autoload?: unknown[] })?.capability_autoload
     );
+    const currentRoleNotes = String(editActorRoleNotesBaselineRef.current || "").trim();
+    const nextRoleNotes = String(editActorRoleNotes || "").trim();
     const nextRuntime = String(editActorRuntime || "codex").trim();
     const nextCommand = String(editActorCommand || "").trim();
     const nextTitle = String(editActorTitle || "").trim();
@@ -400,10 +442,11 @@ export function AppModals({
     const autoloadChanged =
       JSON.stringify(nextCapabilityAutoload) !== JSON.stringify(currentCapabilityAutoload);
     const profileChanged = mode === "profile" && profileId !== String(editingActor.profile_id || "").trim();
+    const roleNotesChanged = nextRoleNotes !== currentRoleNotes;
     const hasActorMutation =
       convertToCustom || runtimeChanged || commandChanged || titleChanged || autoloadChanged || profileChanged;
 
-    if (!options.restart && !hasActorMutation && !willChangeSecrets) {
+    if (!options.restart && !hasActorMutation && !willChangeSecrets && !roleNotesChanged) {
       throw new Error(NO_CHANGES_SENTINEL);
     }
 
@@ -505,6 +548,30 @@ export function AppModals({
         }
       }
 
+      if (roleNotesChanged) {
+        const promptsResp = await api.fetchGroupPrompts(selectedGroupId);
+        if (!promptsResp.ok) {
+          showError(`${promptsResp.error?.code || "prompt_fetch_failed"}: ${promptsResp.error?.message || "Failed to load help prompt"}`);
+          return;
+        }
+        const currentHelpContent = String(promptsResp.result?.help?.content || "");
+        const nextHelpContent = updateActorHelpNote(
+          currentHelpContent,
+          actorId,
+          nextRoleNotes,
+          actors.map((item) => String(item.id || "").trim()).filter(Boolean)
+        );
+        const helpResp = await api.updateGroupPrompt(selectedGroupId, "help", nextHelpContent, {
+          editorMode: "structured",
+          changedBlocks: [`actor:${actorId}`],
+        });
+        if (!helpResp.ok) {
+          showError(`${helpResp.error?.code || "prompt_save_failed"}: ${helpResp.error?.message || "Failed to save help prompt"}`);
+          return;
+        }
+        editActorRoleNotesBaselineRef.current = nextRoleNotes;
+      }
+
       if (options.restart) {
         const restartResp = await api.restartActor(selectedGroupId, actorId);
         if (!restartResp.ok) {
@@ -541,11 +608,20 @@ export function AppModals({
     setEditActorRuntime((runtime || "codex") as SupportedRuntime);
     setEditActorCommand(Array.isArray(actor.command) ? actor.command.join(" ") : "");
     setEditActorTitle(String(actor.title || ""));
+    setEditActorRoleNotes("");
+    editActorRoleNotesBaselineRef.current = "";
     setEditActorCapabilityAutoloadText(
       formatCapabilityIdInput((actor as { capability_autoload?: unknown[] }).capability_autoload)
     );
     setEditingActor(actor as Actor);
-  }, [setEditActorRuntime, setEditActorCommand, setEditActorTitle, setEditActorCapabilityAutoloadText, setEditingActor]);
+  }, [setEditActorRuntime, setEditActorCommand, setEditActorTitle, setEditActorRoleNotes, setEditActorCapabilityAutoloadText, setEditingActor]);
+
+  useEffect(() => {
+    if (!editingActor || !selectedGroupId) return;
+    const actorId = String(editingActor.id || "").trim();
+    if (!actorId) return;
+    void loadEditingActorRoleNotes(selectedGroupId, actorId);
+  }, [editingActor, selectedGroupId, loadEditingActorRoleNotes]);
 
   useEffect(() => {
     if (!editingActor) return;
@@ -860,8 +936,12 @@ export function AppModals({
   );
 
   const handleCancelEditActor = useCallback(() => {
+    editActorRoleNotesSeqRef.current += 1;
+    editActorRoleNotesBaselineRef.current = "";
+    setEditActorRoleNotesBusy(false);
+    setEditActorRoleNotes("");
     setEditingActor(null);
-  }, [setEditingActor]);
+  }, [setEditActorRoleNotes, setEditingActor]);
 
   const relaySourceGroupId = useMemo(() => {
     const fromStore = relaySource?.groupId ? String(relaySource.groupId) : "";
@@ -936,13 +1016,13 @@ export function AppModals({
           openModal("context");
         }}
         onOpenSettings={() => openModal("settings")}
-        onOpenGroupEdit={() => {
+        onOpenGroupEdit={canManageGroups ? () => {
           if (groupDoc) {
             setEditGroupTitle(groupDoc.title || "");
             setEditGroupTopic(groupDoc.topic || "");
             openModal("groupEdit");
           }
-        }}
+        } : undefined}
         onStartGroup={onStartGroup}
         onStopGroup={onStopGroup}
         onSetGroupState={onSetGroupState}
@@ -952,7 +1032,6 @@ export function AppModals({
         <RelayMessageModal
           key={`${selectedGroupId}:${relayEventId}`}
           isOpen={true}
-          isDark={isDark}
           busy={busy === "relay"}
           srcGroupId={relaySourceGroupId}
           srcEvent={relaySourceEvent}
@@ -998,6 +1077,8 @@ export function AppModals({
           if (selectedGroupId) await fetchContext(selectedGroupId);
         }}
         isDark={isDark}
+        settings={groupSettings}
+        onUpdateSettings={handleUpdateSettings}
       />
 
       <SettingsModal
@@ -1014,7 +1095,6 @@ export function AppModals({
 
       <RecipientsModal
         isOpen={!!messageMeta}
-        isDark={isDark}
         isSmallScreen={isSmallScreen}
         toLabel={messageMeta?.toLabel || ""}
         statusKind={messageMeta?.statusKind || "read"}
@@ -1024,7 +1104,6 @@ export function AppModals({
 
       <InboxModal
         isOpen={modals.inbox}
-        isDark={isDark}
         actorId={inboxActorId}
         actors={actors}
         messages={inboxMessages}
@@ -1035,7 +1114,6 @@ export function AppModals({
 
       <GroupEditModal
         isOpen={modals.groupEdit}
-        isDark={isDark}
         busy={busy}
         groupId={selectedGroupId || groupDoc?.group_id || ""}
         ccccHome={ccccHome}
@@ -1071,6 +1149,9 @@ export function AppModals({
         onChangeCommand={setEditActorCommand}
         title={editActorTitle}
         onChangeTitle={setEditActorTitle}
+        roleNotes={editActorRoleNotes}
+        onChangeRoleNotes={setEditActorRoleNotes}
+        roleNotesBusy={editActorRoleNotesBusy}
         capabilityAutoloadText={editActorCapabilityAutoloadText}
         onChangeCapabilityAutoloadText={setEditActorCapabilityAutoloadText}
         onSave={handleSaveEditActorOnly}
@@ -1084,7 +1165,6 @@ export function AppModals({
 
       <CreateGroupModal
         isOpen={modals.createGroup}
-        isDark={isDark}
         busy={busy}
         dirSuggestions={dirSuggestions}
         dirItems={dirItems}

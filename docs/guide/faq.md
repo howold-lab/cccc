@@ -59,16 +59,13 @@ This checks Python version, available runtimes, and daemon status.
 
 - Claude Code (`claude`)
 - Codex CLI (`codex`)
-- GitHub Copilot CLI (`copilot`)
 - Droid (`droid`)
-- OpenCode (`opencode`)
 - Gemini CLI (`gemini`)
+- Kimi CLI (`kimi`)
 - Amp (`amp`)
 - Auggie (`auggie`)
-- Cursor (`cursor`)
-- Kilocode (`kilocode`)
 - Neovate (`neovate`)
-- Custom (any command)
+- Custom (manual fallback; provide your own command and MCP wiring)
 
 ### What's the difference between Foreman and Peer?
 
@@ -131,11 +128,7 @@ CCCC_WEB_HOST=$(tailscale ip -4) cccc
 
 ### Is it safe to expose the Web UI?
 
-Always set an authentication token:
-```bash
-export CCCC_WEB_TOKEN="your-secret-token"
-cccc
-```
+Before exposing the Web UI, create an **Admin Access Token** in **Settings > Web Access** and then sign in with that token.
 
 Use Cloudflare Access or Tailscale for additional security.
 

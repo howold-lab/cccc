@@ -52,7 +52,7 @@ def _wake_group_on_human_message(
         try:
             clear_pending_system_notifies(
                 group.group_id,
-                {"nudge", "keepalive", "help_nudge", "actor_idle", "silence_check", "automation"},
+                {"nudge", "keepalive", "help_nudge", "actor_idle", "silence_check", "auto_idle", "automation"},
             )
         except Exception:
             pass
@@ -117,10 +117,10 @@ def _notify_headless_targets(
     try:
         headless_targets = get_headless_targets_for_message(group, event=event, by=by)
         if reply_required:
-            notify_title = "Task message"
+            notify_title = "Need reply"
             notify_priority = "urgent" if priority == "attention" else "high"
         else:
-            notify_title = "Important message" if priority == "attention" else "New message"
+            notify_title = "Needs acknowledgement" if priority == "attention" else "New message"
             notify_priority = "urgent" if priority == "attention" else "high"
         for actor_id in headless_targets:
             append_event(
@@ -162,6 +162,7 @@ def handle_send(
     src_group_id = str(args.get("src_group_id") or "").strip()
     src_event_id = str(args.get("src_event_id") or "").strip()
     dst_group_id = str(args.get("dst_group_id") or "").strip()
+    client_id = str(args.get("client_id") or "").strip()
     dst_to_raw = args.get("dst_to")
     dst_to: list[str] = []
     if isinstance(dst_to_raw, list):
@@ -279,6 +280,7 @@ def handle_send(
             src_event_id=src_event_id or None,
             dst_group_id=dst_group_id or None,
             dst_to=dst_to if dst_group_id else None,
+            client_id=client_id or None,
         ).model_dump(),
     )
     _touch_registry_updated_at(group.group_id, str(event.get("ts") or utc_now_iso()))
@@ -359,6 +361,7 @@ def handle_reply(
     reply_to = str(args.get("reply_to") or "").strip()
     priority = str(args.get("priority") or "normal").strip() or "normal"
     reply_required = coerce_bool(args.get("reply_required"))
+    client_id = str(args.get("client_id") or "").strip()
     to_raw = args.get("to")
     to_tokens: list[str] = []
     if isinstance(to_raw, list):
@@ -435,6 +438,7 @@ def handle_reply(
             reply_to=reply_to,
             quote_text=quote_text,
             attachments=attachments,
+            client_id=client_id or None,
         ).model_dump(),
     )
 

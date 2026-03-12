@@ -33,11 +33,13 @@ from ..kernel.ledger_retention import snapshot as snapshot_ledger
 from ..kernel.messaging import default_reply_recipients
 from ..kernel.permissions import require_actor_permission, require_group_permission, require_inbox_permission
 from ..kernel.registry import load_registry
+from ..kernel.settings import resolve_remote_access_web_binding
 from ..kernel.scope import detect_scope
 from ..kernel.system_prompt import render_system_prompt
 from ..paths import ensure_home
 from ..ports.im.config_schema import canonicalize_im_config
 from ..util.conv import coerce_bool
+from ..util.process import SOFT_TERMINATE_SIGNAL, best_effort_signal_pid, pid_is_alive, terminate_pid
 
 _SPACE_QUERY_OPTION_KEYS = {"source_ids"}
 
@@ -55,6 +57,14 @@ def _http_host_literal(host: str) -> str:
     if h != "localhost" and ":" in h and not (h.startswith("[") and h.endswith("]")):
         return f"[{h}]"
     return h
+
+
+def _resolve_web_server_binding() -> tuple[str, int]:
+    binding = resolve_remote_access_web_binding()
+    host = str(binding.get("web_host") or "").strip() or "127.0.0.1"
+    port = int(binding.get("web_port") or 8848)
+    return host, port
+
 
 def _print_json(obj: Any) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
@@ -160,22 +170,9 @@ def _ensure_daemon_running() -> bool:
             # Last resort: terminate the stale daemon by pid (best-effort).
             if call_daemon({"op": "ping"}, timeout_s=0.5).get("ok") and daemon_pid > 0:
                 try:
-                    import signal
-
-                    killed = False
-                    try:
-                        os.killpg(os.getpgid(daemon_pid), signal.SIGTERM)
-                        killed = True
-                    except Exception as e_pg:
-                        try:
-                            os.kill(daemon_pid, signal.SIGTERM)
-                            killed = True
-                        except Exception as e_kill:
-                            print(
-                                f"warn: failed to terminate stale daemon pid={daemon_pid}: killpg={e_pg}; kill={e_kill}",
-                                file=sys.stderr,
-                            )
+                    killed = best_effort_signal_pid(daemon_pid, SOFT_TERMINATE_SIGNAL, include_group=True)
                     if not killed:
+                        print(f"warn: failed to terminate stale daemon pid={daemon_pid}: signal not delivered", file=sys.stderr)
                         return True
                 except Exception as e:
                     print(f"warn: failed to terminate stale daemon pid={daemon_pid}: {e}", file=sys.stderr)
@@ -271,7 +268,6 @@ def _show_welcome() -> None:
 
 def _default_entry() -> int:
     """Default entry: start daemon + web together, stop both on Ctrl+C."""
-    import signal
     import threading
     
     from ..paths import ensure_home
@@ -341,13 +337,7 @@ def _default_entry() -> int:
 
                 if call_daemon({"op": "ping"}, timeout_s=0.5).get("ok") and daemon_pid > 0:
                     try:
-                        try:
-                            os.killpg(os.getpgid(daemon_pid), signal.SIGTERM)
-                        except Exception:
-                            try:
-                                os.kill(daemon_pid, signal.SIGTERM)
-                            except Exception:
-                                pass
+                        best_effort_signal_pid(daemon_pid, SOFT_TERMINATE_SIGNAL, include_group=True)
                     except Exception:
                         pass
 
@@ -375,38 +365,10 @@ def _default_entry() -> int:
                 txt = pid_path.read_text(encoding="utf-8").strip()
                 pid = int(txt) if txt.isdigit() else 0
             if pid > 0:
-                try:
-                    os.kill(pid, 0)
-                except Exception:
+                if not pid_is_alive(pid):
                     pid = 0
             if pid > 0:
-                def _pid_alive_local(p: int) -> bool:
-                    try:
-                        os.kill(p, 0)
-                        return True
-                    except Exception:
-                        return False
-
-                try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
-                except Exception:
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                    except Exception:
-                        pass
-                deadline = time.time() + 2.0
-                while time.time() < deadline:
-                    if not _pid_alive_local(pid):
-                        break
-                    time.sleep(0.05)
-                if _pid_alive_local(pid):
-                    try:
-                        os.killpg(os.getpgid(pid), signal.SIGKILL)
-                    except Exception:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except Exception:
-                            pass
+                terminate_pid(pid, timeout_s=2.0, include_group=True, force=True)
 
             sock_path.unlink(missing_ok=True)
             addr_path.unlink(missing_ok=True)
@@ -508,9 +470,8 @@ def _default_entry() -> int:
     monitor_thread = threading.Thread(target=_monitor_daemon, daemon=True)
     monitor_thread.start()
 
-    # Build web args from environment
-    host = str(os.environ.get("CCCC_WEB_HOST") or "").strip() or "0.0.0.0"
-    port = int(os.environ.get("CCCC_WEB_PORT") or 8848)
+    # Keep runtime binding aligned with remote_access settings/UI.
+    host, port = _resolve_web_server_binding()
     log_level = str(os.environ.get("CCCC_WEB_LOG_LEVEL") or "").strip() or "info"
     reload_mode = _env_flag("CCCC_WEB_RELOAD", default=False)
     

@@ -35,11 +35,11 @@ from ...util.conv import coerce_bool
 from .common import (
     MCPError,
     _call_daemon_or_raise,
-    _env_str,
     _resolve_caller_actor_id,
     _resolve_caller_from_by,
     _resolve_group_id,
     _resolve_self_actor_id,
+    _runtime_context,
 )
 from .toolspecs import MCP_TOOLS
 
@@ -48,8 +48,8 @@ from .toolspecs import MCP_TOOLS
 # ---------------------------------------------------------------------------
 from .handlers.cccc_core import (  # noqa: F401
     _CCCC_HELP_BUILTIN,
+    _append_runtime_help_addenda,
     _build_context_hygiene_hint,
-    _append_runtime_skill_digest,
     bootstrap,
     inbox_list,
     inbox_mark_all_read,
@@ -122,6 +122,9 @@ from .handlers.context import (  # noqa: F401
     coordination_add_note,
     coordination_get,
     coordination_update_brief,
+    role_notes_clear,
+    role_notes_get,
+    role_notes_set,
     task_create,
     task_list,
     task_move,
@@ -159,8 +162,9 @@ from .utils.space_args import _normalize_space_query_options_mcp
 def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # --- Help ---
     if name == "cccc_help":
-        gid = _env_str("CCCC_GROUP_ID")
-        aid = _env_str("CCCC_ACTOR_ID")
+        runtime_ctx = _runtime_context()
+        gid = runtime_ctx.group_id
+        aid = runtime_ctx.actor_id
         role: Optional[str] = None
         help_result: Dict[str, Any]
         if gid:
@@ -174,7 +178,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 pf = read_group_prompt_file(g, HELP_FILENAME)
                 if pf.found and isinstance(pf.content, str) and pf.content.strip():
                     help_result = {
-                        "markdown": _append_runtime_skill_digest(
+                        "markdown": _append_runtime_help_addenda(
                             _select_help_markdown(pf.content, role=role, actor_id=aid),
                             group_id=gid,
                             actor_id=aid,
@@ -183,7 +187,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                     }
                 else:
                     help_result = {
-                        "markdown": _append_runtime_skill_digest(
+                        "markdown": _append_runtime_help_addenda(
                             _select_help_markdown(_CCCC_HELP_BUILTIN, role=role, actor_id=aid),
                             group_id=gid,
                             actor_id=aid,
@@ -192,7 +196,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                     }
             else:
                 help_result = {
-                    "markdown": _append_runtime_skill_digest(
+                    "markdown": _append_runtime_help_addenda(
                         _select_help_markdown(_CCCC_HELP_BUILTIN, role=role, actor_id=aid),
                         group_id=gid,
                         actor_id=aid,
@@ -201,7 +205,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 }
         else:
             help_result = {
-                "markdown": _append_runtime_skill_digest(
+                "markdown": _append_runtime_help_addenda(
                     _select_help_markdown(_CCCC_HELP_BUILTIN, role=role, actor_id=aid),
                     group_id=gid,
                     actor_id=aid,
@@ -506,17 +510,21 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
     if name == "cccc_space":
         gid = _resolve_group_id(arguments)
         provider = str(arguments.get("provider") or "notebooklm")
+        lane = str(arguments.get("lane") or "").strip()
         action = str(arguments.get("action") or "status").strip().lower()
         if action == "status":
             return space_status(group_id=gid, provider=provider)
         if action == "capabilities":
             return space_capabilities(group_id=gid, provider=provider)
+        if action in {"bind", "ingest", "query", "sources", "artifact", "jobs", "sync"} and not lane:
+            raise MCPError(code="invalid_request", message="cccc_space requires explicit lane for bind/ingest/query/sources/artifact/jobs/sync")
         if action == "bind":
             by = _resolve_caller_from_by(arguments)
             return space_bind(
                 group_id=gid,
                 by=by,
                 provider=provider,
+                lane=(lane or "work"),
                 action="bind",
                 remote_space_id=str(arguments.get("remote_space_id") or ""),
             )
@@ -527,6 +535,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 group_id=gid,
                 by=by,
                 provider=provider,
+                lane=(lane or "work"),
                 kind=parsed["kind"],
                 payload=parsed["payload"],
                 idempotency_key=str(arguments.get("idempotency_key") or ""),
@@ -539,6 +548,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
             return space_query(
                 group_id=gid,
                 provider=provider,
+                lane=(lane or "work"),
                 query=str(arguments.get("query") or ""),
                 options=options,
             )
@@ -548,6 +558,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 group_id=gid,
                 by=by,
                 provider=provider,
+                lane=(lane or "work"),
                 action=str(arguments.get("source_action") or arguments.get("sub_action") or "list"),
                 source_id=str(arguments.get("source_id") or ""),
                 new_title=str(arguments.get("new_title") or ""),
@@ -565,6 +576,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 group_id=gid,
                 by=by,
                 provider=provider,
+                lane=(lane or "work"),
                 action=parsed["action"],
                 kind=str(arguments.get("kind") or ""),
                 options=parsed["options"],
@@ -583,6 +595,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 group_id=gid,
                 by=by,
                 provider=provider,
+                lane=(lane or "work"),
                 action=str(arguments.get("job_action") or arguments.get("sub_action") or "list"),
                 job_id=str(arguments.get("job_id") or ""),
                 state=str(arguments.get("state") or ""),
@@ -594,6 +607,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 group_id=gid,
                 by=by,
                 provider=provider,
+                lane=(lane or "work"),
                 action=str(arguments.get("sync_action") or arguments.get("sub_action") or "run"),
                 force=bool(arguments.get("force") is True),
             )
@@ -677,6 +691,23 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
 
 
 def _handle_context_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if name == "cccc_role_notes":
+        gid = _resolve_group_id(arguments)
+        by = _resolve_caller_from_by(arguments)
+        action = str(arguments.get("action") or "get").strip().lower()
+        target = str(arguments.get("target_actor_id") or "").strip() or None
+        if action == "get":
+            return role_notes_get(group_id=gid, target_actor_id=target)
+        if action == "set":
+            if not target:
+                raise MCPError(code="invalid_request", message="target_actor_id is required for set")
+            content = str(arguments.get("content") or "")
+            return role_notes_set(group_id=gid, target_actor_id=target, content=content, by=by)
+        if action == "clear":
+            if not target:
+                raise MCPError(code="invalid_request", message="target_actor_id is required for clear")
+            return role_notes_clear(group_id=gid, target_actor_id=target, by=by)
+        raise MCPError(code="invalid_request", message="cccc_role_notes action must be get|set|clear")
     return _handle_context_namespace_impl(
         name,
         arguments,
@@ -777,8 +808,9 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if out is not None:
             return out
     # Dynamic capability tools are resolved by daemon capability runtime.
-    gid = _env_str("CCCC_GROUP_ID")
-    aid = _env_str("CCCC_ACTOR_ID")
+    runtime_ctx = _runtime_context()
+    gid = runtime_ctx.group_id
+    aid = runtime_ctx.actor_id
     if gid and aid:
         try:
             return _call_daemon_or_raise(
@@ -808,8 +840,9 @@ def list_tools_for_caller() -> List[Dict[str, Any]]:
     2) default: core + enabled capability packs from daemon capability_state
     3) daemon failure fallback: core-only
     """
-    gid = _env_str("CCCC_GROUP_ID")
-    aid = _env_str("CCCC_ACTOR_ID")
+    runtime_ctx = _runtime_context()
+    gid = runtime_ctx.group_id
+    aid = runtime_ctx.actor_id
     profile = str(os.environ.get("CCCC_MCP_TOOL_PROFILE") or "").strip().lower()
     state: Dict[str, Any] = {}
     if gid and aid:

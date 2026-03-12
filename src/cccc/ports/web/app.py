@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import logging
 import mimetypes
@@ -19,13 +20,15 @@ from starlette.concurrency import run_in_threadpool
 
 from ... import __version__
 from ...daemon.server import call_daemon
-from ...kernel.web_tokens import list_tokens, lookup_token
+from ...kernel.access_tokens import list_access_tokens, lookup_access_token
 from ...paths import ensure_home
 from ...util.obslog import setup_root_json_logging
-from .schemas import RouteContext, _configured_web_token
+from .schemas import RouteContext
 
 logger = logging.getLogger("cccc.web")
 _WEB_LOG_FH: Optional[Any] = None
+_WEB_LOG_PATH: Optional[Path] = None
+_SIGNED_OUT_COOKIE = "cccc_signed_out"
 
 
 @dataclass(frozen=True)
@@ -36,14 +39,28 @@ class Principal:
     is_admin: bool = False
 
 
+def _close_web_logging() -> None:
+    global _WEB_LOG_FH, _WEB_LOG_PATH
+    try:
+        if _WEB_LOG_FH is not None:
+            _WEB_LOG_FH.close()
+    except Exception:
+        pass
+    _WEB_LOG_FH = None
+    _WEB_LOG_PATH = None
+
+
 def _apply_web_logging(*, home: Path, level: str) -> None:
-    global _WEB_LOG_FH
+    global _WEB_LOG_FH, _WEB_LOG_PATH
     try:
         d = home / "daemon"
         d.mkdir(parents=True, exist_ok=True)
         p = d / "cccc-web.log"
+        if _WEB_LOG_FH is not None and _WEB_LOG_PATH is not None and _WEB_LOG_PATH != p:
+            _close_web_logging()
         if _WEB_LOG_FH is None:
             _WEB_LOG_FH = p.open("a", encoding="utf-8")
+            _WEB_LOG_PATH = p
         setup_root_json_logging(component="web", level=level, stream=_WEB_LOG_FH, force=True)
     except Exception:
         # Fall back to stderr if file logging isn't possible.
@@ -81,7 +98,7 @@ def _request_token_parts(request: Request) -> tuple[str, Literal["", "header", "
     if auth.lower().startswith("bearer "):
         return str(auth[7:] or "").strip(), "header"
 
-    cookie = str(request.cookies.get("cccc_web_token") or "").strip()
+    cookie = str(request.cookies.get("cccc_access_token") or "").strip()
     if cookie:
         return cookie, "cookie"
 
@@ -101,9 +118,7 @@ def _resolve_principal(request: Request) -> Principal:
     token = _request_token(request)
     if not token:
         return Principal(kind="anonymous")
-    entry = lookup_token(token)
-    if not isinstance(entry, dict) and token == _configured_web_token():
-        return Principal(kind="user", user_id="admin", is_admin=True)
+    entry = lookup_access_token(token)
     if not isinstance(entry, dict):
         return Principal(kind="anonymous")
     user_id = str(entry.get("user_id") or "").strip()
@@ -129,7 +144,14 @@ async def _daemon(req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="cccc web", version=__version__)
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            _close_web_logging()
+
+    app = FastAPI(title="cccc web", version=__version__, lifespan=_lifespan)
     home = ensure_home()
     web_mode = _web_mode()
     read_only = web_mode == "exhibit"
@@ -242,9 +264,15 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def _auth(request: Request, call_next):  # type: ignore[no-untyped-def]
         provided_token, token_source = _request_token_parts(request)
-        principal = _resolve_principal(request)
-        stale_cookie = False
-        tokens_active = bool(list_tokens()) or bool(_configured_web_token())
+        logout_marker = str(request.cookies.get(_SIGNED_OUT_COOKIE) or "").strip() == "1"
+        if logout_marker and token_source == "cookie":
+            provided_token = ""
+            token_source = ""
+        principal = _resolve_principal(request if not logout_marker else request)
+        stale_cookie = logout_marker and bool(str(request.cookies.get("cccc_access_token") or "").strip())
+        if logout_marker and stale_cookie:
+            principal = Principal(kind="anonymous")
+        tokens_active = bool(list_access_tokens())
         # header/query 是用户显式提供的认证材料，仍然严格按 401 收口；
         # cookie 在无 token 配置时允许匿名放行，并顺手清掉残留脏 cookie。
         if not _is_public_ui_path(request) and provided_token and principal.kind != "user":
@@ -267,15 +295,18 @@ def create_app() -> FastAPI:
 
         resp = await call_next(request)
         if stale_cookie:
-            resp.delete_cookie(key="cccc_web_token", path="/")
-        if principal.kind == "user" and provided_token and str(request.cookies.get("cccc_web_token") or "").strip() != provided_token:
+            resp.delete_cookie(key="cccc_access_token", path="/")
+        skip_cookie_refresh = bool(getattr(getattr(request, "state", None), "skip_token_cookie_refresh", False))
+        if logout_marker and principal.kind == "user" and token_source in ("header", "query"):
+            resp.delete_cookie(key=_SIGNED_OUT_COOKIE, path="/")
+        if not skip_cookie_refresh and principal.kind == "user" and provided_token and str(request.cookies.get("cccc_access_token") or "").strip() != provided_token:
             # Detect real protocol: env override > proxy header > request scheme
             # Set CCCC_WEB_SECURE=1 when behind HTTPS proxy that doesn't send X-Forwarded-Proto
             force_secure = str(os.environ.get("CCCC_WEB_SECURE") or "").strip().lower() in ("1", "true", "yes")
             forwarded_proto = str(request.headers.get("x-forwarded-proto") or "").strip().lower()
             actual_scheme = "https" if force_secure else (forwarded_proto if forwarded_proto in ("http", "https") else str(getattr(request.url, "scheme", "") or "").lower())
             resp.set_cookie(
-                key="cccc_web_token",
+                key="cccc_access_token",
                 value=provided_token,
                 httponly=True,
                 samesite="none" if actual_scheme == "https" else "lax",
@@ -362,7 +393,7 @@ def create_app() -> FastAPI:
     from .routes.messaging import create_routers as create_messaging_routers
     from .routes.actors import create_routers as create_actor_routers
     from .routes.im import register_im_routes
-    from .routes.tokens import create_routers as create_token_routers
+    from .routes.access_tokens import create_routers as create_access_token_routers
 
     route_ctx = RouteContext(
         home=home,
@@ -375,7 +406,6 @@ def create_app() -> FastAPI:
         daemon=_daemon,
         cached_json=_cached_json,
         apply_web_logging=_apply_web_logging,
-        configured_web_token=_configured_web_token,
     )
 
     register_base_routes(app, ctx=route_ctx)
@@ -387,7 +417,7 @@ def create_app() -> FastAPI:
     for router in create_actor_routers(route_ctx):
         app.include_router(router)
     register_im_routes(app, ctx=route_ctx)
-    for router in create_token_routers(route_ctx):
+    for router in create_access_token_routers(route_ctx):
         app.include_router(router)
 
     return app

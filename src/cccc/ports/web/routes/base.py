@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from ....kernel.access_tokens import list_access_tokens
 from ....kernel.scope import detect_scope
 from ..schemas import (
     DebugClearLogsRequest,
@@ -14,8 +15,10 @@ from ..schemas import (
     RemoteAccessConfigureRequest,
     RouteContext,
     check_group,
+    get_principal,
     require_admin,
     require_group,
+    require_user,
 )
 
 
@@ -80,6 +83,44 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             }
         }
 
+    @global_router.get("/api/v1/web_access/session")
+    async def web_access_session(request: Request) -> Dict[str, Any]:
+        principal = get_principal(request)
+        allowed_groups = getattr(principal, "allowed_groups", ()) or ()
+        groups = [str(item or "").strip() for item in allowed_groups if str(item or "").strip()]
+        access_tokens = list_access_tokens()
+        access_token_count = len(access_tokens)
+        login_active = access_token_count > 0
+        principal_kind = str(getattr(principal, "kind", "anonymous") or "anonymous")
+        is_admin = bool(getattr(principal, "is_admin", False))
+        can_access_global_settings = access_token_count == 0 or (principal_kind == "user" and is_admin)
+        return {
+            "ok": True,
+            "result": {
+                "web_access_session": {
+                    "login_active": login_active,
+                    "current_browser_signed_in": principal_kind == "user",
+                    "principal_kind": principal_kind,
+                    "user_id": str(getattr(principal, "user_id", "") or ""),
+                    "is_admin": is_admin,
+                    "allowed_groups": groups,
+                    "access_token_count": access_token_count,
+                    "can_access_global_settings": can_access_global_settings,
+                }
+            },
+        }
+
+    @global_router.post("/api/v1/web_access/logout")
+    async def web_access_logout(request: Request) -> JSONResponse:
+        request.state.skip_token_cookie_refresh = True
+        resp = JSONResponse({"ok": True, "result": {"signed_out": True}})
+        resp.delete_cookie(key="cccc_access_token", path="/")
+        host = str(getattr(getattr(request, "url", None), "hostname", "") or "").strip().lower()
+        if host:
+            resp.delete_cookie(key="cccc_access_token", path="/", domain=host)
+        resp.set_cookie(key="cccc_signed_out", value="1", httponly=True, samesite="lax", path="/", max_age=300)
+        return resp
+
     # debug/snapshot uses manual check_group (group_id from query param)
     @global_router.get("/api/v1/debug/snapshot")
     async def debug_snapshot(request: Request, group_id: str) -> Dict[str, Any]:
@@ -87,7 +128,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         check_group(request, group_id)
         return await ctx.daemon({"op": "debug_snapshot", "args": {"group_id": group_id, "by": "user"}})
 
-    @global_router.get("/api/v1/observability", dependencies=[Depends(require_admin)])
+    @global_router.get("/api/v1/observability", dependencies=[Depends(require_user)])
     async def observability_get() -> Dict[str, Any]:
         """Get global observability settings (developer mode, log level)."""
         return await ctx.daemon({"op": "observability_get"})
@@ -155,7 +196,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             )
         return await ctx.daemon({"op": "capability_allowlist_reset", "args": {"by": str(by or "user")}})
 
-    @global_router.get("/api/v1/capabilities/overview", dependencies=[Depends(require_admin)])
+    @global_router.get("/api/v1/capabilities/overview", dependencies=[Depends(require_user)])
     async def capability_overview(
         query: str = "",
         limit: int = 400,
@@ -245,18 +286,14 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             args["provider"] = str(req.provider)
         if req.mode is not None:
             args["mode"] = str(req.mode or "").strip()
-        if req.enforce_web_token is not None:
-            args["enforce_web_token"] = bool(req.enforce_web_token)
+        if req.require_access_token is not None:
+            args["require_access_token"] = bool(req.require_access_token)
         if req.web_host is not None:
             args["web_host"] = str(req.web_host or "").strip()
         if req.web_port is not None:
             args["web_port"] = int(req.web_port)
         if req.web_public_url is not None:
             args["web_public_url"] = str(req.web_public_url or "").strip()
-        if req.clear_web_token:
-            args["clear_web_token"] = True
-        elif req.web_token is not None:
-            args["web_token"] = str(req.web_token or "").strip()
         return await ctx.daemon({"op": "remote_access_configure", "args": args})
 
     @global_router.post("/api/v1/remote_access/start", dependencies=[Depends(require_admin)])
@@ -316,7 +353,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             }
         )
 
-    @global_router.get("/api/v1/runtimes", dependencies=[Depends(require_admin)])
+    @global_router.get("/api/v1/runtimes", dependencies=[Depends(require_user)])
     async def runtimes() -> Dict[str, Any]:
         """List available agent runtimes on the system."""
         if ctx.read_only:
@@ -393,7 +430,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         except Exception as e:
             return {"ok": False, "error": {"code": "ERROR", "message": str(e)}}
 
-    @global_router.get("/api/v1/fs/recent", dependencies=[Depends(require_admin)])
+    @global_router.get("/api/v1/fs/recent", dependencies=[Depends(require_user)])
     async def fs_recent() -> Dict[str, Any]:
         """Get recent/common directories for quick selection."""
         if ctx.read_only:

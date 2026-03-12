@@ -165,7 +165,7 @@ Ledger (完整记忆)
 | Nudge | `nudge_after_seconds` | 300s | 未读消息超时提醒 |
 | Actor idle | `actor_idle_timeout_seconds` | 600s | Actor 空闲通知 foreman |
 | Keepalive | `keepalive_delay_seconds` | 120s | Next: 声明后提醒 |
-| Silence | `silence_timeout_seconds` | 600s | 群聊静默通知 foreman |
+| 静默复核 | `silence_timeout_seconds` | 0s | 可选启发式检查；群组长时间静默时提醒 foreman 复核是否应转为空闲，`0` 表示关闭 |
 
 ### 4.2 投递限流
 
@@ -235,14 +235,13 @@ Ledger (完整记忆)
 | auggie | `auggie` | Auggie (Augment CLI) |
 | claude | `claude` | Claude Code |
 | codex | `codex` | Codex CLI |
-| cursor | `cursor-agent` | Cursor CLI |
 | droid | `droid` | Droid |
 | gemini | `gemini` | Gemini CLI |
-| kilocode | `kilocode` | Kilo Code CLI |
+| kimi | `kimi` | Kimi CLI |
 | neovate | `neovate` | Neovate Code |
-| opencode | `opencode` | OpenCode |
-| copilot | `copilot` | GitHub Copilot CLI |
 | custom | 自定义 | 任意命令 |
+
+CCCC 的 first-class runtime 正式支持仅限上面 8 个具名 CLI；`custom` 继续作为手动兜底入口。
 
 ### 6.2 Setup 命令
 
@@ -254,10 +253,7 @@ cccc setup --runtime amp
 cccc setup --runtime auggie
 cccc setup --runtime neovate
 cccc setup --runtime gemini
-cccc setup --runtime cursor   # prints config guidance (manual)
-cccc setup --runtime kilocode # prints config guidance (manual)
-cccc setup --runtime opencode
-cccc setup --runtime copilot
+cccc setup --runtime kimi
 cccc setup --runtime custom
 ```
 
