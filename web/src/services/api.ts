@@ -37,6 +37,7 @@ import type {
   TaskBoardEntry,
   TaskChecklistItem,
 } from "../types";
+import { actorProfileIdentityKey } from "../utils/actorProfiles";
 
 // ============ Access token auth ============
 
@@ -898,12 +899,27 @@ export async function deleteProfile(profileId: string, opts?: ProfileDeleteOptio
   );
 }
 
-export async function listActorProfiles() {
-  return listProfiles("global");
+export async function listActorProfiles(): Promise<ApiResponse<{ profiles: ActorProfile[] }>> {
+  const [globalRes, myRes] = await Promise.all([
+    listProfiles("global"),
+    listProfiles("my"),
+  ]);
+  if (!globalRes.ok) return globalRes;
+  if (!myRes.ok) return myRes;
+  const seen = new Set<string>();
+  const profiles: ActorProfile[] = [];
+  for (const p of [...globalRes.result.profiles, ...myRes.result.profiles]) {
+    const key = actorProfileIdentityKey(p);
+    if (!seen.has(key)) {
+      seen.add(key);
+      profiles.push(p);
+    }
+  }
+  return { ok: true, result: { profiles } };
 }
 
 export async function getActorProfile(profileId: string) {
-  return getProfile(profileId, { scope: "global" });
+  return getProfile(profileId);
 }
 
 export async function upsertActorProfile(profile: Record<string, unknown>, expectedRevision?: number) {
@@ -1297,7 +1313,8 @@ export async function sendMessage(
   to: string[],
   files?: File[],
   priority: "normal" | "attention" = "normal",
-  replyRequired = false
+  replyRequired = false,
+  clientId = ""
 ) {
   if (files && files.length > 0) {
     const form = new FormData();
@@ -1307,12 +1324,13 @@ export async function sendMessage(
     form.append("path", "");
     form.append("priority", priority);
     form.append("reply_required", replyRequired ? "true" : "false");
+    if (clientId) form.append("client_id", clientId);
     for (const f of files) form.append("files", f);
     return apiForm(`/api/v1/groups/${encodeURIComponent(groupId)}/send_upload`, form);
   }
   return apiJson(`/api/v1/groups/${encodeURIComponent(groupId)}/send`, {
     method: "POST",
-    body: JSON.stringify({ text, by: "user", to, path: "", priority, reply_required: replyRequired }),
+    body: JSON.stringify({ text, by: "user", to, path: "", priority, reply_required: replyRequired, client_id: clientId }),
   });
 }
 
@@ -1323,7 +1341,8 @@ export async function replyMessage(
   replyTo: string,
   files?: File[],
   priority: "normal" | "attention" = "normal",
-  replyRequired = false
+  replyRequired = false,
+  clientId = ""
 ) {
   if (files && files.length > 0) {
     const form = new FormData();
@@ -1333,12 +1352,13 @@ export async function replyMessage(
     form.append("reply_to", replyTo);
     form.append("priority", priority);
     form.append("reply_required", replyRequired ? "true" : "false");
+    if (clientId) form.append("client_id", clientId);
     for (const f of files) form.append("files", f);
     return apiForm(`/api/v1/groups/${encodeURIComponent(groupId)}/reply_upload`, form);
   }
   return apiJson(`/api/v1/groups/${encodeURIComponent(groupId)}/reply`, {
     method: "POST",
-    body: JSON.stringify({ text, by: "user", to, reply_to: replyTo, priority, reply_required: replyRequired }),
+    body: JSON.stringify({ text, by: "user", to, reply_to: replyTo, priority, reply_required: replyRequired, client_id: clientId }),
   });
 }
 
@@ -2013,8 +2033,9 @@ export async function checkGroupSpaceProviderHealth(provider: string = "notebook
 
 export async function controlGroupSpaceProviderAuth(args: {
   provider?: string;
-  action: "status" | "start" | "cancel";
+  action: "status" | "start" | "cancel" | "disconnect";
   timeoutSeconds?: number;
+  forceReauth?: boolean;
 }) {
   const provider = args.provider || "notebooklm";
   if (args.action === "status") {
@@ -2038,6 +2059,7 @@ export async function controlGroupSpaceProviderAuth(args: {
       by: "user",
       action: args.action,
       timeout_seconds: Number(args.timeoutSeconds || 900),
+      force_reauth: Boolean(args.forceReauth),
     }),
   });
 }

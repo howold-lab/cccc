@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .base import IMAdapter
+from .base import IMAdapter, OutboundStreamHandle
 
 # DingTalk API limits
 DINGTALK_MAX_MESSAGE_LENGTH = 4096
@@ -82,6 +82,7 @@ class DingTalkAdapter(IMAdapter):
     """
 
     platform = "dingtalk"
+    _LAST_SENDER_MAX = 256
 
     def __init__(
         self,
@@ -125,6 +126,17 @@ class DingTalkAdapter(IMAdapter):
         # Cache for seen message IDs (survives reconnect to deduplicate SDK-resent messages)
         # Key: "{conversation_id}:{msg_id}", Value: timestamp
         self._seen_msg_ids: Dict[str, float] = {}
+
+        # Persistent AI Card client (lazy init) — shared across stream calls
+        # so throttle state survives across begin/update/end invocations.
+        self._card_client: Optional[Any] = None
+
+        # Cache: last inbound sender per conversation (for outbound @mention)
+        # conversation_id -> (staff_id, nick)   — bounded to _LAST_SENDER_MAX entries
+        self._last_sender: Dict[str, tuple[str, str]] = {}
+
+        # Inbound health tracking: timestamp of last successfully enqueued message
+        self._last_enqueue_ts: float = 0.0
 
     def _log(self, msg: str) -> None:
         """Append to log file if configured."""
@@ -667,6 +679,17 @@ class DingTalkAdapter(IMAdapter):
                 self._session_webhook_cache[conversation_id] = (session_webhook, expires_at)
                 self._log(f"[webhook] Cached: id={conversation_id}, expires_raw={session_expires}, expires_at={expires_at:.0f}")
 
+            # Cache sender for outbound @mention (group chats only)
+            if sender_id and conversation_id:
+                # Evict oldest entries when cache is full
+                if len(self._last_sender) >= self._LAST_SENDER_MAX:
+                    try:
+                        oldest_key = next(iter(self._last_sender))
+                        del self._last_sender[oldest_key]
+                    except StopIteration:
+                        pass
+                self._last_sender[conversation_id] = (sender_id, sender_nick)
+
             # Normalize message
             normalized = {
                 "chat_id": conversation_id,
@@ -677,6 +700,7 @@ class DingTalkAdapter(IMAdapter):
                 "text": text,
                 "attachments": attachments,
                 "from_user": sender_nick or sender_id,
+                "from_user_id": sender_id,
                 "message_id": msg_id,
                 "timestamp": self._parse_event_time(event.get("createAt")),
                 # Keep sessionWebhook for potential reply use
@@ -685,6 +709,8 @@ class DingTalkAdapter(IMAdapter):
 
             with self._queue_lock:
                 self._message_queue.append(normalized)
+            self._last_enqueue_ts = time.time()
+            self._log(f"[enqueue] OK msg_id={msg_id} from={sender_nick or sender_id} text={text[:80]!r}")
             return True
 
         except Exception as e:
@@ -744,14 +770,19 @@ class DingTalkAdapter(IMAdapter):
         self._conversation_cache[conversation_id] = title
         return title
 
-    def _send_via_webhook(self, webhook_url: str, text: str) -> bool:
+    def _send_via_webhook(self, webhook_url: str, text: str,
+                          at_user_ids: Optional[List[str]] = None) -> bool:
         """Send message via sessionWebhook (most reliable for groups)."""
-        body = {
-            "msgtype": "text",
-            "text": {
-                "content": text
-            }
+        title = text[:20] if len(text) > 20 else text
+        body: Dict[str, Any] = {
+            "msgtype": "markdown",
+            "markdown": {
+                "title": title,
+                "text": text,
+            },
         }
+        if at_user_ids:
+            body["at"] = {"atUserIds": at_user_ids}
         data = json.dumps(body, ensure_ascii=False).encode('utf-8')
 
         req = urllib.request.Request(webhook_url, data=data, method="POST")
@@ -789,6 +820,13 @@ class DingTalkAdapter(IMAdapter):
         # Ensure message fits limit
         safe_text = self._compose_safe(text)
 
+        # Resolve @mention targets for group conversations
+        at_user_ids: Optional[List[str]] = None
+        if chat_id.startswith("cid") and chat_id in self._last_sender:
+            staff_id, _nick = self._last_sender[chat_id]
+            if staff_id:
+                at_user_ids = [staff_id]
+
         # Rate limit
         self._rate_limiter.wait_and_acquire(chat_id)
 
@@ -797,7 +835,7 @@ class DingTalkAdapter(IMAdapter):
             webhook_url, expires_at = self._session_webhook_cache[chat_id]
             current_time = time.time()
             if current_time < expires_at:
-                if self._send_via_webhook(webhook_url, safe_text):
+                if self._send_via_webhook(webhook_url, safe_text, at_user_ids=at_user_ids):
                     return True
                 self._log("[send] Webhook failed, falling back to API...")
             else:
@@ -816,8 +854,11 @@ class DingTalkAdapter(IMAdapter):
         # Use robot message API
         body: Dict[str, Any] = {
             "robotCode": self.robot_code,
-            "msgKey": "sampleText",
-            "msgParam": json.dumps({"content": safe_text}, ensure_ascii=False),
+            "msgKey": "sampleMarkdown",
+            "msgParam": json.dumps({
+                "title": safe_text[:20] if len(safe_text) > 20 else safe_text,
+                "text": safe_text,
+            }, ensure_ascii=False),
         }
 
         # Determine if group or 1:1
@@ -844,12 +885,14 @@ class DingTalkAdapter(IMAdapter):
 
     def _send_message_legacy(self, chat_id: str, text: str) -> bool:
         """Send message using legacy API (for older bot types)."""
+        title = text[:20] if len(text) > 20 else text
         body = {
             "chatid": chat_id,
             "msg": {
-                "msgtype": "text",
-                "text": {
-                    "content": text,
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": title,
+                    "text": text,
                 },
             },
         }
@@ -1190,6 +1233,80 @@ class DingTalkAdapter(IMAdapter):
         """
         self._enqueue_message(event)
         return None
+
+    # ── Streaming (AI Card) ────────────────────────────────────────────
+
+    def _get_card_client(self) -> Any:
+        """Return the persistent DingTalkAICardClient (lazy init).
+
+        Shared across all stream calls so throttle state survives.
+        """
+        if self._card_client is None:
+            from .dingtalk_card import DingTalkAICardClient
+
+            self._card_client = DingTalkAICardClient(
+                self._get_token,
+                robot_code=self.robot_code,
+            )
+        return self._card_client
+
+    @staticmethod
+    def _run_async(coro: Any) -> Any:
+        """Run an async coroutine from sync context."""
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result(timeout=30)
+        return asyncio.run(coro)
+
+    def begin_stream(self, chat_id: str, stream_id: str, *, text: str = "", thread_id: Optional[int] = None) -> Optional[OutboundStreamHandle]:
+        """Create a DingTalk AI Card and return a stream handle."""
+        try:
+            client = self._get_card_client()
+            card_instance_id = self._run_async(client.create_card(chat_id, text))
+            if not card_instance_id:
+                self._log(f"[stream] begin_stream create_card failed for chat={chat_id} stream={stream_id}")
+                return None
+            from .dingtalk_card import DingTalkCardHandle
+
+            card_handle = DingTalkCardHandle(client, card_instance_id, stream_id=stream_id)
+            return card_handle.as_handle()
+        except Exception:
+            self._log(f"[stream] begin_stream failed for chat={chat_id} stream={stream_id}")
+            return None
+
+    def update_stream(self, handle: OutboundStreamHandle, *, text: str = "", seq: int = 0) -> bool:
+        """Push a streaming update to the AI Card."""
+        try:
+            client = self._get_card_client()
+            card_instance_id = handle.get("platform_handle", "")
+            if not card_instance_id:
+                return False
+            self._run_async(client.update_card(str(card_instance_id), text, seq=seq))
+            return True
+        except Exception:
+            self._log(f"[stream] update_stream failed for stream={handle.get('stream_id', '')}")
+            return False
+
+    def end_stream(self, handle: OutboundStreamHandle, *, text: str = "") -> bool:
+        """Finalize the AI Card."""
+        try:
+            client = self._get_card_client()
+            card_instance_id = handle.get("platform_handle", "")
+            if not card_instance_id:
+                return False
+            self._run_async(client.finalize_card(str(card_instance_id), text))
+            return True
+        except Exception:
+            self._log(f"[stream] end_stream failed for stream={handle.get('stream_id', '')}")
+            return False
 
     def verify_callback_signature(
         self,
