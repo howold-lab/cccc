@@ -85,11 +85,19 @@ class IMAdapter(ABC):
         pass
 
     @abstractmethod
-    def send_message(self, chat_id: str, text: str, thread_id: Optional[int] = None) -> bool:
+    def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        thread_id: Optional[int] = None,
+        *,
+        mention_user_ids: Optional[List[str]] = None,
+    ) -> bool:
         """
         Send a message to a chat.
         Returns True if successful.
         """
+        _ = mention_user_ids
         pass
 
     @abstractmethod
@@ -148,12 +156,14 @@ class IMAdapter(ABC):
         filename: str,
         caption: str = "",
         thread_id: Optional[int] = None,
+        mention_user_ids: Optional[List[str]] = None,
     ) -> bool:
         """Send a file to a chat (platform-specific)."""
         _ = thread_id
         _ = caption
         _ = filename
         _ = file_path
+        _ = mention_user_ids
         return False
 
     def begin_stream(self, chat_id: str, stream_id: str, *, text: str = "", thread_id: Optional[int] = None) -> Optional[OutboundStreamHandle]:

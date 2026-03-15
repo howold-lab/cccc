@@ -3,16 +3,16 @@ import { useTranslation } from "react-i18next";
 
 import type { AutomationRule, AutomationRuleStatus } from "../../../types";
 import {
-  ACTOR_OPERATION_COPY,
-  GROUP_STATE_COPY,
-  WEEKDAY_OPTIONS,
   actionKind,
   clampInt,
   formatTimeInput,
+  getActorOperationCopy,
+  getGroupStateCopy,
+  getWeekdayOptions,
   isoToLocalDatetimeInput,
   parseCronToPreset,
 } from "./automationUtils";
-import { cardClass } from "./types";
+import { cardClass, dangerButtonClass, secondaryButtonClass } from "./types";
 
 interface AutomationRuleListProps {
   isDark: boolean;
@@ -42,6 +42,10 @@ export function AutomationRuleList({
   onDeleteRule,
 }: AutomationRuleListProps) {
   const { t } = useTranslation("settings");
+  const actorOperationCopy = getActorOperationCopy(t);
+  const groupStateCopy = getGroupStateCopy(t);
+  const weekdayOptions = getWeekdayOptions(t);
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-end gap-2 flex-wrap">
@@ -58,7 +62,7 @@ export function AutomationRuleList({
         </label>
         <button
           type="button"
-          className="glass-btn px-2 py-1.5 rounded-md text-[11px] min-h-[32px] font-medium transition-colors text-[var(--color-text-secondary)] disabled:opacity-50"
+          className={secondaryButtonClass("sm")}
           onClick={onClearCompleted}
           disabled={rulesBusy || completedOneTimeRuleIds.length === 0}
           title={t("ruleList.clearCompletedTitle")}
@@ -91,31 +95,31 @@ export function AutomationRuleList({
         const lastFireAt = String(ruleStatus.last_fired_at || "").trim();
         const schedule = parseCronToPreset(cronExpr);
         const scheduleTime = formatTimeInput(schedule.hour, schedule.minute);
-        const weekdayLabel = WEEKDAY_OPTIONS.find((x) => x.value === schedule.weekday)?.label || String(schedule.weekday);
+        const weekdayLabel = weekdayOptions.find((x) => x.value === schedule.weekday)?.label || String(schedule.weekday);
         const atLocal = atRaw ? isoToLocalDatetimeInput(atRaw).replace("T", " ") : "";
 
-        let scheduleLabel = "Schedule not set";
+        let scheduleLabel = t("ruleList.scheduleNotSet");
         if (triggerKind === "interval") {
-          scheduleLabel = `Every ${Math.max(1, Math.round(everySeconds / 60))} min`;
+          scheduleLabel = t("ruleList.scheduleEveryMinutes", { count: Math.max(1, Math.round(everySeconds / 60)) });
         } else if (triggerKind === "cron") {
-          if (schedule.preset === "daily") scheduleLabel = `Daily ${scheduleTime}`;
-          else if (schedule.preset === "weekly") scheduleLabel = `Weekly ${weekdayLabel} ${scheduleTime}`;
-          else scheduleLabel = `Monthly day ${schedule.dayOfMonth} ${scheduleTime}`;
+          if (schedule.preset === "daily") scheduleLabel = t("ruleList.scheduleDailyAt", { time: scheduleTime });
+          else if (schedule.preset === "weekly") scheduleLabel = t("ruleList.scheduleWeeklyAt", { weekday: weekdayLabel, time: scheduleTime });
+          else scheduleLabel = t("ruleList.scheduleMonthlyAt", { day: schedule.dayOfMonth, time: scheduleTime });
         } else if (triggerKind === "at") {
-          scheduleLabel = atLocal ? `One-time ${atLocal}` : "One-time (time not set)";
+          scheduleLabel = atLocal ? t("ruleList.scheduleOneTimeAt", { time: atLocal }) : t("ruleList.scheduleOneTimeUnset");
         }
 
-        let actionLabel = "Action not set";
+        let actionLabel = t("ruleList.actionNotSet");
         if (kind === "notify") {
-          const contentLabel = snippetRef ? `Snippet: ${snippetRef}` : message ? "Typed message" : "Message not set";
-          const recipientsLabel = recipients.length > 0 ? recipients.join(", ") : "(no recipients)";
-          actionLabel = `Reminder -> ${recipientsLabel} • ${contentLabel}`;
+          const contentLabel = snippetRef ? t("ruleList.snippetLabel", { id: snippetRef }) : message ? t("ruleList.typedMessage") : t("ruleList.messageNotSet");
+          const recipientsLabel = recipients.length > 0 ? recipients.join(", ") : t("ruleList.noRecipients");
+          actionLabel = t("ruleList.reminderAction", { recipients: recipientsLabel, content: contentLabel });
         } else if (kind === "group_state") {
           const stateValue = String(rule.action && "state" in rule.action ? rule.action.state || "paused" : "paused");
           const normalizedState = (["active", "idle", "paused", "stopped"].includes(stateValue)
             ? stateValue
             : "paused") as "active" | "idle" | "paused" | "stopped";
-          actionLabel = `Group status -> ${GROUP_STATE_COPY[normalizedState].label}`;
+          actionLabel = t("ruleList.groupStatusAction", { label: groupStateCopy[normalizedState].label });
         } else if (kind === "actor_control") {
           const operation = String(rule.action && "operation" in rule.action ? rule.action.operation || "restart" : "restart");
           const targets = Array.isArray(rule.action && "targets" in rule.action ? rule.action.targets : [])
@@ -124,7 +128,10 @@ export function AutomationRuleList({
           const normalizedOperation = (["start", "stop", "restart"].includes(operation)
             ? operation
             : "restart") as "start" | "stop" | "restart";
-          actionLabel = `${ACTOR_OPERATION_COPY[normalizedOperation].label} -> ${targets.length > 0 ? targets.join(", ") : "(no targets)"}`;
+          actionLabel = t("ruleList.actorControlAction", {
+            label: actorOperationCopy[normalizedOperation].label,
+            targets: targets.length > 0 ? targets.join(", ") : t("ruleList.noTargets"),
+          });
         }
 
         const hasError = Boolean(ruleStatus.last_error);
@@ -148,18 +155,18 @@ export function AutomationRuleList({
                     checked={enabled}
                     onChange={(e) => onToggleRuleEnabled(ruleId, e.target.checked)}
                   />
-                  on
+                  {t("ruleList.on")}
                 </label>
                 <button
                   type="button"
-                  className="glass-btn px-3 py-2 rounded-lg text-xs min-h-[36px] transition-colors text-[var(--color-text-secondary)]"
+                  className={secondaryButtonClass("sm")}
                   onClick={() => onEditRule(ruleId)}
                 >
                   {t("common:edit")}
                 </button>
                 <button
                   type="button"
-                  className="glass-btn px-3 py-2 rounded-lg text-xs min-h-[36px] transition-colors text-[var(--color-text-secondary)]"
+                  className={dangerButtonClass("sm")}
                   onClick={() => onDeleteRule(ruleId)}
                   title={t("automation.deleteRuleTitle")}
                 >
@@ -172,7 +179,7 @@ export function AutomationRuleList({
               <span className="font-mono">{actionLabel}</span>
             </div>
             <div className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-              Last: {lastFireAt || "—"} • Next: {nextFireAt || "—"}
+              {t("ruleList.lastShort")}: {lastFireAt || "—"} • {t("ruleList.nextShort")}: {nextFireAt || "—"}
             </div>
             {completed ? (
               <div className="mt-1 text-[11px] text-emerald-700 dark:text-emerald-300">

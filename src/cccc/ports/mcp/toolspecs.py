@@ -38,8 +38,8 @@ MCP_TOOLS = [
         "name": "cccc_bootstrap",
         "description": (
             "Cold-start bootstrap: session + recovery + inbox_preview + context_hygiene + memory_recall_gate + next_calls. "
-            "Use it first on cold start or resume; pull cccc_help / cccc_project_info / cccc_context_get "
-            "only when you need colder detail."
+            "Use it first on cold start or resume; usually follow with cccc_help once, then pull "
+            "cccc_project_info / cccc_context_get only when colder detail is needed."
         ),
         "inputSchema": _obj(
             {
@@ -437,7 +437,7 @@ MCP_TOOLS = [
                 },
                 "force_reauth": {
                     "type": "boolean",
-                    "description": "Only for provider_auth/start. Skip saved credential reuse and clear the auth browser profile first.",
+                    "description": "Only for provider_auth/start. Skip saved credential reuse and start with a fresh auth browser profile.",
                 },
                 "remote_space_id": {"type": "string"},
                 "kind": {"type": "string"},

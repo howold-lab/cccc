@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { TabBar } from "./components/TabBar";
 import { DropOverlay } from "./components/DropOverlay";
-import { AppModals } from "./components/AppModals";
+const AppModals = lazy(() => import("./components/AppModals").then((m) => ({ default: m.AppModals })));
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AppHeader } from "./components/layout/AppHeader";
 import { GroupSidebar } from "./components/layout/GroupSidebar";
@@ -20,14 +20,12 @@ import { getChatSession } from "./stores/useUIStore";
 import { classNames } from "./utils/classNames";
 import { ActorTab } from "./pages/ActorTab";
 import { ChatTab } from "./pages/chat";
-import { PanoramaTab } from "./pages/PanoramaTab";
 import {
   useGroupStore,
   useUIStore,
   useModalStore,
   useComposerStore,
   useFormStore,
-  useObservabilityStore,
 } from "./stores";
 import * as api from "./services/api";
 import type { Actor, ChatMessageData, LedgerEvent } from "./types";
@@ -83,7 +81,9 @@ export default function App() {
   const setWebReadOnly = useUIStore((s) => s.setWebReadOnly);
   const sseStatus = useUIStore((s) => s.sseStatus);
 
-  const { openModal } = useModalStore();
+  const openModal = useModalStore((s) => s.openModal);
+  const modalFlags = useModalStore((s) => s.modals);
+  const editingActor = useModalStore((s) => s.editingActor);
 
   const {
     activeGroupId,
@@ -123,14 +123,6 @@ export default function App() {
   const chatUnreadCount = chatSession.chatUnreadCount;
   const chatSessionAtBottom = chatSession.scrollSnapshot?.atBottom;
 
-  // Hide Panorama tab when browser lacks GPU/3D support or feature is disabled
-  const canRender3D = useMemo(() => {
-    try {
-      const canvas = document.createElement("canvas");
-      return !!(navigator.gpu || canvas.getContext("webgl2"));
-    } catch { return false; }
-  }, []);
-  const showPanorama = canRender3D && !!groupSettings?.panorama_enabled;
   const prevGroupIdRef = useRef<string | null>(null);
   // Local state
   const [showMentionMenu, setShowMentionMenu] = React.useState(false);
@@ -285,31 +277,9 @@ export default function App() {
     if (atBottom) setChatUnreadCount(selectedGroupId, 0);
   }, [activeTab, selectedGroupId, chatSessionAtBottom, setChatUnreadCount, setShowScrollButton]);
 
-  // Auto-fallback: switch away from panorama tab when feature is disabled
-  useEffect(() => {
-    if (!showPanorama && activeTab === "panorama") {
-      setActiveTab("chat");
-    }
-  }, [showPanorama, activeTab, setActiveTab]);
-
-  // BUG-1 + BUG-3: Refresh context on panorama tab activation + periodic polling fallback
-  useEffect(() => {
-    if (!showPanorama || activeTab !== "panorama" || !selectedGroupId) return;
-    // Immediate fetch on tab switch (skip if SSE debounce timer is already pending)
-    if (!contextRefreshTimerRef.current) {
-      void fetchContext(selectedGroupId);
-    }
-    // 12s polling fallback while panorama tab is active
-    const intervalId = window.setInterval(() => {
-      void fetchContext(selectedGroupId);
-    }, 12_000);
-    return () => window.clearInterval(intervalId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, selectedGroupId]);
-
   // Keep visited actor tabs mounted (sticky) so their terminal sessions do not reconnect/replay on tab switches.
   useEffect(() => {
-    if (!activeTab || activeTab === "chat" || activeTab === "panorama") return;
+    if (!activeTab || activeTab === "chat") return;
     setMountedActorIds((prev) => (prev.includes(activeTab) ? prev : [...prev, activeTab]));
   }, [activeTab]);
 
@@ -378,7 +348,7 @@ export default function App() {
   }, [hasComposerFiles, hasReplyTarget, selectedGroupId, sendGroupId, setDestGroupId]);
 
   const renderedActorIds = useMemo(() => {
-    if (activeTab !== "chat" && activeTab !== "panorama" && !mountedActorIds.includes(activeTab)) {
+    if (activeTab !== "chat" && !mountedActorIds.includes(activeTab)) {
       return [...mountedActorIds, activeTab];
     }
     return mountedActorIds;
@@ -416,13 +386,9 @@ export default function App() {
     parseUrlDeepLink();
 
     refreshGroups();
-    void fetchRuntimes();
-    void fetchDirSuggestions();
-    void useObservabilityStore.getState().load();
     void api.fetchPing().then((resp) => {
       if (resp.ok) {
         setWebReadOnly(Boolean(resp.result?.web?.read_only));
-        setCcccHome(String(resp.result?.home || "").trim());
       }
     }).catch(() => {
       /* ignore */
@@ -430,19 +396,54 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function fetchRuntimes() {
-    const resp = await api.fetchRuntimes();
-    if (resp.ok) {
-      useGroupStore.getState().setRuntimes(resp.result.runtimes || []);
+  const ensureRuntimesLoaded = React.useCallback(async () => {
+    if (useGroupStore.getState().runtimes.length > 0) return;
+    try {
+      const resp = await api.fetchRuntimes();
+      if (resp.ok) {
+        useGroupStore.getState().setRuntimes(resp.result.runtimes || []);
+        return;
+      }
+      showError(resp.error?.message || "Failed to load runtimes");
+    } catch {
+      showError("Failed to load runtimes");
     }
-  }
+  }, [showError]);
 
-  async function fetchDirSuggestions() {
-    const resp = await api.fetchDirSuggestions();
-    if (resp.ok) {
-      setDirSuggestions(resp.result.suggestions || []);
+  const fetchDirSuggestions = React.useCallback(async () => {
+    try {
+      const resp = await api.fetchDirSuggestions();
+      if (resp.ok) {
+        setDirSuggestions(resp.result.suggestions || []);
+        return;
+      }
+      showError(resp.error?.message || "Failed to load directories");
+    } catch {
+      showError("Failed to load directories");
     }
-  }
+  }, [setDirSuggestions, showError]);
+
+  const loadCcccHome = React.useCallback(async () => {
+    if (ccccHome) return;
+    try {
+      const resp = await api.fetchPing({ includeHome: true });
+      if (resp.ok) {
+        setCcccHome(String(resp.result?.home || "").trim());
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [ccccHome]);
+
+  useEffect(() => {
+    if (!modalFlags.groupEdit) return;
+    void loadCcccHome();
+  }, [loadCcccHome, modalFlags.groupEdit]);
+
+  useEffect(() => {
+    if (!modalFlags.addActor && !editingActor) return;
+    void ensureRuntimesLoaded();
+  }, [editingActor, ensureRuntimesLoaded, modalFlags.addActor]);
 
   // ============ Actions ============
 
@@ -570,7 +571,6 @@ export default function App() {
                   }
               }
               canAddAgent={!webReadOnly && !!selectedGroupId}
-              showPanorama={showPanorama}
             />
           )}
 
@@ -612,32 +612,13 @@ export default function App() {
               />
               </ErrorBoundary>
             </div>
-            {/* Panorama Tab — conditionally mounted to avoid 3D overhead on group switch */}
-            {showPanorama && activeTab === "panorama" && (
-              <div className="absolute inset-0 flex min-h-0 flex-col">
-                <ErrorBoundary>
-                  <PanoramaTab
-                    agents={(groupContext?.agent_states || []).filter(
-                      (a) => actors.some((act) => act.id === a.id)
-                    )}
-                    actors={actors}
-                    tasks={groupContext?.coordination?.tasks || []}
-                    tasksSummary={groupContext?.tasks_summary}
-                    projectStatus={groupContext?.meta?.project_status}
-                    isDark={isDark}
-                    isSmallScreen={isSmallScreen}
-                    groupId={selectedGroupId}
-                  />
-                </ErrorBoundary>
-              </div>
-            )}
             <div
-              className={`absolute inset-0 flex min-h-0 flex-col ${activeTab === "chat" || activeTab === "panorama" ? "invisible pointer-events-none" : ""}`}
-              aria-hidden={activeTab === "chat" || activeTab === "panorama"}
+              className={`absolute inset-0 flex min-h-0 flex-col ${activeTab === "chat" ? "invisible pointer-events-none" : ""}`}
+              aria-hidden={activeTab === "chat"}
             >
               {renderedActorIds.map((actorId) => {
                 const actor = actors.find((a) => a.id === actorId) || null;
-                const isVisible = activeTab === actorId && activeTab !== "chat" && activeTab !== "panorama";
+                const isVisible = activeTab === actorId && activeTab !== "chat";
                 const agentState =
                   (groupContext?.agent_states || []).find((p) => p.id === (actor?.id || "")) || null;
 
@@ -732,19 +713,21 @@ export default function App() {
         </div>
       ) : null}
 
-      {/* Modals */}
-      <AppModals
-        isDark={isDark}
-        ccccHome={ccccHome}
-        composerRef={composerRef}
-        onStartReply={startReply}
-        onThemeToggle={() => setTheme(isDark ? "light" : "dark")}
-        onStartGroup={handleStartGroup}
-        onStopGroup={handleStopGroup}
-        onSetGroupState={handleSetGroupState}
-        fetchContext={fetchContext}
-        canManageGroups={canManageGroups}
-      />
+      {/* Modals (lazy-loaded — not needed on first paint) */}
+      <Suspense fallback={null}>
+        <AppModals
+          isDark={isDark}
+          ccccHome={ccccHome}
+          composerRef={composerRef}
+          onStartReply={startReply}
+          onThemeToggle={() => setTheme(isDark ? "light" : "dark")}
+          onStartGroup={handleStartGroup}
+          onStopGroup={handleStopGroup}
+          onSetGroupState={handleSetGroupState}
+          fetchContext={fetchContext}
+          canManageGroups={canManageGroups}
+        />
+      </Suspense>
 
       <DropOverlay isOpen={dropOverlayOpen} isDark={isDark} maxFileMb={WEB_MAX_FILE_MB} />
     </div>

@@ -293,6 +293,10 @@ class IMBridge:
         # Inbound health monitoring: periodic log every 5 minutes
         self._last_health_log: float = 0.0
         self._inbound_count: int = 0  # messages processed since last health log
+        # Per chat/thread mention targets for outbound replies.
+        # The bridge computes this from inbound metadata and passes it explicitly
+        # to adapters instead of letting adapters guess from their own caches.
+        self._mention_targets: Dict[str, List[str]] = {}
 
     def _should_process_inbound(self, *, chat_id: str, thread_id: int, message_id: str) -> bool:
         """
@@ -432,6 +436,7 @@ class IMBridge:
             if not self._should_process_inbound(chat_id=chat_id, thread_id=thread_id, message_id=message_id):
                 continue
             self._inbound_count += 1
+            self._remember_mention_targets(chat_id, thread_id, msg)
 
             # Authorization check: unauthorized chats may only /subscribe.
             self._log(f"[inbound] Checking auth for chat_id={chat_id} thread={thread_id}")
@@ -469,7 +474,17 @@ class IMBridge:
                 self._handle_help(chat_id, thread_id=thread_id)
             elif parsed.type == CommandType.SEND:
                 attachments = msg.get("attachments") if isinstance(msg.get("attachments"), list) else []
-                self._handle_message(chat_id, parsed, from_user, attachments=attachments, thread_id=thread_id, message_id=message_id, from_user_id=from_user_id)
+                mention_user_ids = msg.get("mention_user_ids") if isinstance(msg.get("mention_user_ids"), list) else []
+                self._handle_message(
+                    chat_id,
+                    parsed,
+                    from_user,
+                    attachments=attachments,
+                    mention_user_ids=mention_user_ids,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    from_user_id=from_user_id,
+                )
             elif parsed.type == CommandType.MESSAGE:
                 routed = coerce_bool(msg.get("routed"), default=False)
 
@@ -483,6 +498,7 @@ class IMBridge:
                 # When routed (@bot or DM), treat plain text as implicit /send.
                 if routed or chat_type in ("private",):
                     attachments = msg.get("attachments") if isinstance(msg.get("attachments"), list) else []
+                    mention_user_ids = msg.get("mention_user_ids") if isinstance(msg.get("mention_user_ids"), list) else []
                     # Build a SEND-like ParsedCommand so _handle_message can extract @targets from args.
                     implicit_args = parsed.text.split() if parsed.text else []
                     implicit_send = ParsedCommand(
@@ -491,7 +507,16 @@ class IMBridge:
                         mentions=parsed.mentions,
                         args=implicit_args,
                     )
-                    self._handle_message(chat_id, implicit_send, from_user, attachments=attachments, thread_id=thread_id, message_id=message_id, from_user_id=from_user_id)
+                    self._handle_message(
+                        chat_id,
+                        implicit_send,
+                        from_user,
+                        attachments=attachments,
+                        mention_user_ids=mention_user_ids,
+                        thread_id=thread_id,
+                        message_id=message_id,
+                        from_user_id=from_user_id,
+                    )
                     continue
 
                 # Non-routed messages are ignored.
@@ -580,6 +605,53 @@ class IMBridge:
     @staticmethod
     def _stream_target_key(chat_id: str, thread_id: int) -> str:
         return f"{chat_id}:{int(thread_id or 0)}"
+
+    def _remember_mention_targets(self, chat_id: str, thread_id: int, msg: Dict[str, Any]) -> None:
+        """Cache the latest explicit mention target for this chat/thread."""
+        target_key = self._stream_target_key(chat_id, thread_id)
+        raw_ids = msg.get("mention_user_ids")
+        mention_user_ids = (
+            [str(x).strip() for x in raw_ids if str(x).strip()]
+            if isinstance(raw_ids, list)
+            else []
+        )
+        if mention_user_ids:
+            self._mention_targets[target_key] = mention_user_ids
+        else:
+            self._mention_targets.pop(target_key, None)
+
+        # Keep the cache bounded without introducing another dependency.
+        while len(self._mention_targets) > 256:
+            oldest_key = next(iter(self._mention_targets))
+            self._mention_targets.pop(oldest_key, None)
+
+    def _resolve_outbound_mention_targets(
+        self,
+        *,
+        event: Dict[str, Any],
+        sub: Any,
+        is_user_facing: bool,
+    ) -> Optional[List[str]]:
+        """Resolve explicit mention targets for an outbound IM message."""
+        if not is_user_facing:
+            return None
+
+        platform = str(getattr(self.adapter, "platform", "") or "").strip().lower()
+        if platform != "dingtalk":
+            return None
+
+        data = event.get("data", {})
+        if isinstance(data, dict):
+            raw_ids = data.get("mention_user_ids")
+            if isinstance(raw_ids, list):
+                cleaned = [str(x).strip() for x in raw_ids if str(x).strip()]
+                return cleaned
+
+        target_key = self._stream_target_key(sub.chat_id, sub.thread_id)
+        cached = self._mention_targets.get(target_key)
+        if cached is None:
+            return None
+        return list(cached)
 
     def _forward_stream_event(self, event: Dict[str, Any]) -> None:
         """Forward a chat.stream event to subscribed chats via adapter streaming methods.
@@ -732,6 +804,11 @@ class IMBridge:
                 if str(t or "").strip()
             ]
             formatted = self.adapter.format_outbound(display_by, display_to, text, is_system) if text else ""
+            mention_user_ids = self._resolve_outbound_mention_targets(
+                event=event,
+                sub=sub,
+                is_user_facing=is_user_facing,
+            )
 
             # Try file delivery first (if any attachments)
             sent_any_file = False
@@ -770,7 +847,16 @@ class IMBridge:
                     cap = formatted if (i == 0 and formatted and not skip_text_due_to_stream) else ""
                     ok = False
                     try:
-                        ok = bool(self.adapter.send_file(sub.chat_id, file_path=abs_path, filename=title, caption=cap, thread_id=sub.thread_id))
+                        ok = bool(
+                            self.adapter.send_file(
+                                sub.chat_id,
+                                file_path=abs_path,
+                                filename=title,
+                                caption=cap,
+                                thread_id=sub.thread_id,
+                                mention_user_ids=mention_user_ids,
+                            )
+                        )
                     except Exception:
                         ok = False
                     if ok:
@@ -780,7 +866,17 @@ class IMBridge:
 
             # If we didn't send any files, or if there's text with no files, send message.
             if formatted and not sent_any_file and not skip_text_due_to_stream:
-                sent_msg = bool(self.adapter.send_message(sub.chat_id, formatted, thread_id=sub.thread_id))
+                if mention_user_ids is None:
+                    sent_msg = bool(self.adapter.send_message(sub.chat_id, formatted, thread_id=sub.thread_id))
+                else:
+                    sent_msg = bool(
+                        self.adapter.send_message(
+                            sub.chat_id,
+                            formatted,
+                            thread_id=sub.thread_id,
+                            mention_user_ids=mention_user_ids,
+                        )
+                    )
                 if sent_msg and is_user_facing:
                     delivered_user_facing = True
 
@@ -1021,6 +1117,7 @@ class IMBridge:
         from_user: str,
         *,
         attachments: List[Dict[str, Any]],
+        mention_user_ids: Optional[List[str]] = None,
         thread_id: int = 0,
         message_id: str = "",
         from_user_id: str = "",
@@ -1193,6 +1290,8 @@ class IMBridge:
             # Nothing left to send (all attachments were ignored / failed).
             return
 
+        cleaned_mention_user_ids = [str(item).strip() for item in (mention_user_ids or []) if str(item).strip()]
+
         resp = self._daemon({
             "op": "send",
             "args": {
@@ -1202,6 +1301,10 @@ class IMBridge:
                 "to": canonical_to,
                 "path": "",
                 "attachments": stored_attachments,
+                "source_platform": str(getattr(self.adapter, "platform", "") or "").strip() or None,
+                "source_user_name": from_user or None,
+                "source_user_id": from_user_id or None,
+                "mention_user_ids": cleaned_mention_user_ids or None,
             },
         })
 

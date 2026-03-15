@@ -294,7 +294,6 @@ function normalizeContext(raw: unknown): GroupContext {
   const summary = normalizeTaskSummary(record.tasks_summary, tasks);
   const boardRecord = asRecord(record.board);
   const attentionRecord = asRecord(record.attention);
-  const panoramaRecord = asRecord(record.panorama);
   const metaRecord = asRecord(record.meta);
 
   return {
@@ -352,9 +351,6 @@ function normalizeContext(raw: unknown): GroupContext {
         }
       : null,
     tasks_summary: summary,
-    panorama: {
-      mermaid: asOptionalString(panoramaRecord?.mermaid),
-    },
     meta: metaRecord ? { ...metaRecord } : {},
   };
 }
@@ -443,9 +439,11 @@ export async function fetchGroups() {
   return apiJson<{ groups: GroupMeta[] }>("/api/v1/groups");
 }
 
-export async function fetchPing() {
-  return apiJson<{ home: string; daemon: unknown; version: string; web?: { mode?: string; read_only?: boolean } }>(
-    "/api/v1/ping"
+export async function fetchPing(options?: { includeHome?: boolean }) {
+  const includeHome = Boolean(options?.includeHome);
+  const suffix = includeHome ? "?include_home=1" : "";
+  return apiJson<{ home?: string; daemon: unknown; version: string; web?: { mode?: string; read_only?: boolean } }>(
+    `/api/v1/ping${suffix}`
   );
 }
 
@@ -1687,6 +1685,10 @@ export async function updateAccessToken(tokenId: string, updates: { allowed_grou
 
 export async function revealAccessToken(tokenId: string) {
   return apiJson<{ token: string }>(`/api/v1/access-tokens/${encodeURIComponent(tokenId)}/reveal`);
+}
+
+export async function fetchDesktopPetLaunchToken(groupId: string) {
+  return apiJson<{ token: string }>(`/api/v1/groups/${encodeURIComponent(groupId)}/desktop_pet/launch_token`);
 }
 
 export async function deleteAccessToken(tokenId: string) {

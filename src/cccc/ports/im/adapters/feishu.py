@@ -610,7 +610,14 @@ class FeishuAdapter(IMAdapter):
         self._chat_title_cache[chat_id] = title
         return title
 
-    def send_message(self, chat_id: str, text: str, thread_id: Optional[int] = None) -> bool:
+    def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        thread_id: Optional[int] = None,
+        *,
+        mention_user_ids: Optional[List[str]] = None,
+    ) -> bool:
         """
         Send a text message to a chat.
 
@@ -619,6 +626,7 @@ class FeishuAdapter(IMAdapter):
             text: Message text
             thread_id: Optional root_id for threading
         """
+        _ = mention_user_ids
         if not text:
             return True
 
@@ -719,8 +727,10 @@ class FeishuAdapter(IMAdapter):
         filename: str,
         caption: str = "",
         thread_id: Optional[int] = None,
+        mention_user_ids: Optional[List[str]] = None,
     ) -> bool:
         """Send a file to a chat."""
+        _ = mention_user_ids
         if not self._connected:
             return False
 

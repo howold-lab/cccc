@@ -46,6 +46,10 @@ class ChatMessageData(BaseModel):
     to: List[str] = Field(default_factory=list)  # @mentions (empty = broadcast)
     reply_to: Optional[str] = None  # The replied-to message event_id
     quote_text: Optional[str] = None  # Quoted snippet for display
+    source_platform: Optional[str] = None  # External IM source platform, e.g. dingtalk
+    source_user_name: Optional[str] = None  # External IM sender display name
+    source_user_id: Optional[str] = None  # External IM sender platform user id
+    mention_user_ids: Optional[List[str]] = None  # External IM real-mention targets
 
     # Cross-group provenance (for relays/forwarding)
     src_group_id: Optional[str] = None
