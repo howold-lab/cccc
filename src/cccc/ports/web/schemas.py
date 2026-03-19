@@ -242,6 +242,7 @@ class RemoteAccessConfigureRequest(BaseModel):
     by: str = Field(default="user")
     provider: Optional[Literal["off", "manual", "tailscale"]] = None
     mode: Optional[str] = None
+    enabled: Optional[bool] = None
     require_access_token: Optional[bool] = None
     web_host: Optional[str] = None
     web_port: Optional[int] = None
@@ -330,7 +331,7 @@ class GroupSpaceProviderAuthRequest(BaseModel):
 
 class IMSetRequest(BaseModel):
     group_id: str
-    platform: Literal["telegram", "slack", "discord", "feishu", "dingtalk"]
+    platform: Literal["telegram", "slack", "discord", "feishu", "dingtalk", "wecom"]
     # Legacy single token field (backward compat for telegram/discord)
     token_env: str = ""
     token: str = ""
@@ -345,6 +346,9 @@ class IMSetRequest(BaseModel):
     dingtalk_app_key: str = ""
     dingtalk_app_secret: str = ""
     dingtalk_robot_code: str = ""
+    # WeCom fields
+    wecom_bot_id: str = ""
+    wecom_secret: str = ""
 
 
 class IMActionRequest(BaseModel):

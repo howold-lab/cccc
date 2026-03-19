@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, TouchSensor, useDraggable, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import { useTranslation } from "react-i18next";
-import { addCoordinationNote, apiJson, contextSync, fetchDesktopPetLaunchToken, updateCoordinationBrief, updateCoordinationTask } from "../services/api";
+import { addCoordinationNote, apiJson, contextSync, updateCoordinationBrief, updateCoordinationTask } from "../services/api";
 import type {
   AgentState,
   CoordinationBrief,
@@ -18,10 +19,11 @@ import type {
 } from "../types";
 import { formatFullTime, formatTime } from "../utils/time";
 import { classNames } from "../utils/classNames";
-import { buildDesktopPetDaemonUrl, buildDesktopPetDownloadUrl, buildDesktopPetLaunchUrl } from "../utils/desktopPetLaunch";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { useModalA11y } from "../hooks/useModalA11y";
 import { ModalFrame } from "./modals/ModalFrame";
+import { settingsDialogBodyClass, settingsDialogPanelClass } from "./modals/settings/types";
+import { useWebPetStore } from "../stores";
 
 interface ContextModalProps {
   isOpen: boolean;
@@ -598,6 +600,8 @@ export function ContextModal({
   onUpdateSettings,
 }: ContextModalProps) {
   const { t } = useTranslation("modals");
+  const pendingIntent = useWebPetStore((state) => state.pendingIntent);
+  const setPendingIntent = useWebPetStore((state) => state.setPendingIntent);
   const tr = useCallback((key: string, fallback: string, vars?: Record<string, unknown>) =>
     String(t(key as never, { defaultValue: fallback, ...(vars || {}) } as never)), [t]);
 
@@ -615,8 +619,6 @@ export function ContextModal({
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState("");
   const [viewBusy, setViewBusy] = useState(false);
-  const [desktopPetLaunchBusy, setDesktopPetLaunchBusy] = useState(false);
-  const [desktopPetLaunchError, setDesktopPetLaunchError] = useState<React.ReactNode>("");
 
   const [projectMd, setProjectMd] = useState<ProjectMdInfo | null>(null);
   const [projectBusy, setProjectBusy] = useState(false);
@@ -624,6 +626,7 @@ export function ContextModal({
   const [projectNotice, setProjectNotice] = useState("");
   const [editingProject, setEditingProject] = useState(false);
   const [projectText, setProjectText] = useState("");
+  const [projectExpanded, setProjectExpanded] = useState(false);
   const [notifyAgents, setNotifyAgents] = useState(false);
   const [notifyError, setNotifyError] = useState("");
   const [decisionDraft, setDecisionDraft] = useState<NoteDraft>(emptyNoteDraft());
@@ -633,59 +636,6 @@ export function ContextModal({
 
   const brief = context?.coordination?.brief || null;
   const desktopPetEnabled = Boolean(settings?.desktop_pet_enabled);
-  const desktopPetLaunchPreviewUrl = useMemo(
-    () => buildDesktopPetLaunchUrl({
-      daemonUrl: buildDesktopPetDaemonUrl(),
-      token: "",
-      groupId,
-    }),
-    [groupId]
-  );
-
-  const resolveDesktopPetLaunchToken = useCallback(async (): Promise<string | null> => {
-    const launchResp = await fetchDesktopPetLaunchToken(groupId);
-    if (!launchResp.ok) {
-      const raw = launchResp.error?.message || "";
-      const code = launchResp.error?.code || "";
-      const combined = `${code} ${raw}`;
-      const isNotFound = /not.?found/i.test(combined) || /PARSE_ERROR|EMPTY_RESPONSE/i.test(code) || /returned 4\d\d/i.test(raw);
-      const msg = isNotFound
-        ? tr("context.desktopPetLaunchNotFound", "The daemon does not support Desktop Pet yet. Please upgrade to the latest version.")
-        : raw || tr("context.desktopPetLaunchTokenFailed", "Failed to load access tokens.");
-      throw new Error(msg);
-    }
-    // Empty string token is valid in empty-password mode
-    const token = launchResp.result?.token;
-    return typeof token === "string" ? token : null;
-  }, [groupId, tr]);
-
-  const handlePrepareDesktopPetLaunch = useCallback(async () => {
-    setDesktopPetLaunchBusy(true);
-    setDesktopPetLaunchError("");
-    try {
-      const token = await resolveDesktopPetLaunchToken();
-      if (token === null) {
-        setDesktopPetLaunchError(tr("context.desktopPetLaunchNoToken", "No access token is available for this group."));
-        return;
-      }
-
-      const launchUrl = buildDesktopPetLaunchUrl({
-        daemonUrl: buildDesktopPetDaemonUrl(),
-        token,
-        groupId,
-      });
-
-      window.location.href = launchUrl;
-    } catch (error) {
-      setDesktopPetLaunchError(
-        error instanceof Error
-          ? error.message
-          : tr("context.desktopPetLaunchBlocked", "The browser blocked the Desktop Pet launch request.")
-      );
-    } finally {
-      setDesktopPetLaunchBusy(false);
-    }
-  }, [resolveDesktopPetLaunchToken, tr]);
   const tasks = useMemo(() => (Array.isArray(context?.coordination?.tasks) ? context.coordination.tasks : []), [context]);
   const agents = useMemo(() => (Array.isArray(context?.agent_states) ? context.agent_states : []), [context]);
   const board = useMemo(() => buildBoard(tasks, context?.board), [context?.board, tasks]);
@@ -816,6 +766,7 @@ export function ContextModal({
     setProjectNotice("");
     setEditingProject(false);
     setProjectText("");
+    setProjectExpanded(false);
     setNotifyError("");
     setNotifyAgents(false);
     setDecisionDraft(emptyNoteDraft());
@@ -1027,6 +978,8 @@ export function ContextModal({
     return (
       <div ref={setNodeRef} style={style} className={classNames("group/task", isDragging && "z-20 opacity-80")}>
         <div
+          id={`context-task-${task.id}`}
+          data-task-id={task.id}
           {...attributes}
           onClick={() => selectTask(task)}
           className={classNames(
@@ -1120,7 +1073,7 @@ export function ContextModal({
     return window.confirm(tr("context.unsavedTaskConfirm", "You have unsaved task edits. Discard them and continue?"));
   }, [hasTaskUnsaved, tr]);
 
-  const selectTask = (task: Task) => {
+  const selectTask = useCallback((task: Task) => {
     if (selectedTaskId === task.id && taskEditorMode === "edit") return;
     if (!confirmDiscardTaskChanges()) return;
     setSelectedTaskId(task.id);
@@ -1128,7 +1081,31 @@ export function ContextModal({
     setTaskEditorMode("edit");
     setSyncError("");
     setActiveView("coordination");
-  };
+  }, [confirmDiscardTaskChanges, selectedTaskId, taskEditorMode]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (pendingIntent?.kind !== "task") return;
+
+    const task = taskMap.get(pendingIntent.taskId);
+    if (task) {
+      setActiveView("coordination");
+      setTaskFilter("all");
+      setAssigneeFilter("__all__");
+      setTaskQuery("");
+      selectTask(task);
+    }
+
+    const rafId = window.requestAnimationFrame(() => {
+      document
+        .getElementById(`context-task-${pendingIntent.taskId}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+
+    setPendingIntent(null);
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, [isOpen, pendingIntent, selectTask, setPendingIntent, taskMap]);
 
   const closeTaskEditor = () => {
     if (!confirmDiscardTaskChanges()) return;
@@ -1182,20 +1159,18 @@ export function ContextModal({
   }, [hasSteeringUnsaved, hasTaskUnsaved, onClose, tr]);
 
   const { modalRef } = useModalA11y(isOpen, handleModalClose);
+  const closeProjectExpanded = useCallback(() => setProjectExpanded(false), []);
+  const { modalRef: projectExpandedRef } = useModalA11y(projectExpanded, closeProjectExpanded);
 
   const handleToggleDesktopPet = useCallback(async (enabled: boolean) => {
     if (!onUpdateSettings) return;
     setViewBusy(true);
     try {
-      const ok = await onUpdateSettings({ desktop_pet_enabled: enabled });
-      if (ok === false) return; // settings update failed — don't proceed with launch
-      if (enabled) {
-        await handlePrepareDesktopPetLaunch();
-      }
+      await onUpdateSettings({ desktop_pet_enabled: enabled });
     } finally {
       setViewBusy(false);
     }
-  }, [handlePrepareDesktopPetLaunch, onUpdateSettings]);
+  }, [onUpdateSettings]);
 
   const handleSaveBrief = async () => {
     if (!groupId) return;
@@ -1346,6 +1321,93 @@ export function ContextModal({
     } finally {
       setProjectBusy(false);
     }
+  };
+
+  const renderProjectPanel = (expanded = false) => {
+    const shellClass = expanded
+      ? "flex h-full min-h-0 flex-col"
+      : classNames("rounded-xl border p-4", "glass-card");
+    const contentClass = expanded ? "mt-4 min-h-0 flex flex-1 flex-col" : "mt-4";
+    const textAreaClass = classNames(
+      textareaClass,
+      expanded ? "min-h-[520px] flex-1" : "min-h-[320px]"
+    );
+    const markdownContainerClass = classNames(
+      expanded ? "min-h-0 flex-1 overflow-y-auto rounded-xl border p-4" : "max-h-[36rem] overflow-y-auto rounded-xl border p-3",
+      "glass-card"
+    );
+
+    return (
+      <section className={shellClass}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className={classNames("text-sm font-semibold", "text-[var(--color-text-primary)]")}>{t("context.projectMd", { defaultValue: "PROJECT.md" })}</div>
+            <div className={classNames("mt-1 text-xs", mutedTextClass)}>{projectBusy ? t("common:loading", { defaultValue: "Loading…" }) : projectPathLabel}</div>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {!expanded ? (
+              <button
+                type="button"
+                onClick={() => setProjectExpanded(true)}
+                disabled={projectBusy}
+                className={buttonSecondaryClass}
+              >
+                {tr("context.expand", "Expand")}
+              </button>
+            ) : null}
+            {editingProject ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingProject(false);
+                  setProjectText(String(projectMd?.content || ""));
+                  setNotifyAgents(false);
+                }}
+                disabled={projectBusy}
+                className={buttonSecondaryClass}
+              >
+                {tr("context.cancel", "Cancel")}
+              </button>
+            ) : null}
+            <button type="button" onClick={() => void handleEditProject()} className={buttonPrimaryClass}>
+              {editingProject ? tr("context.editing", "Editing") : (projectMd?.found ? t("context.editButton", { defaultValue: "Edit" }) : t("context.createButton", { defaultValue: "Create" }))}
+            </button>
+          </div>
+        </div>
+        {projectError ? <div className={classNames("mt-3 rounded-lg border px-3 py-2 text-sm", "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400")}>{projectError}</div> : null}
+        {notifyError ? <div className={classNames("mt-3 rounded-lg border px-3 py-2 text-sm", "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400")}>{notifyError}</div> : null}
+        {projectNotice ? <div className={classNames("mt-3 rounded-lg border px-3 py-2 text-sm", "border-emerald-500/30 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400")}>{projectNotice}</div> : null}
+        <div className={contentClass}>
+          {editingProject ? (
+            <>
+              <textarea
+                value={projectText}
+                onChange={(event) => setProjectText(event.target.value)}
+                className={textAreaClass}
+                placeholder={t("context.writePlaceholder", { defaultValue: "Write your project constitution here…" })}
+              />
+              <label className={classNames("mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm", "glass-card text-[var(--color-text-primary)]")}>
+                <input type="checkbox" checked={notifyAgents} onChange={(event) => setNotifyAgents(event.target.checked)} />
+                {tr("context.notifyAgents", "Notify the team in chat (@all) after save")}
+              </label>
+              <div className="mt-3 flex items-center gap-2">
+                <button type="button" onClick={() => void handleSaveProject()} disabled={projectBusy} className={buttonPrimaryClass}>
+                  {projectBusy ? tr("context.saving", "Saving…") : tr("context.saveProject", "Save PROJECT.md")}
+                </button>
+              </div>
+            </>
+          ) : projectMd?.found && projectMd.content ? (
+            <div className={markdownContainerClass}>
+              <MarkdownRenderer content={String(projectMd.content)} isDark={isDark} className={classNames("text-sm", subtleTextClass)} />
+            </div>
+          ) : (
+            <div className={classNames("rounded-xl border border-dashed px-3 py-4 text-sm", "border-[var(--glass-border-subtle)] text-[var(--color-text-muted)]")}>
+              {t("context.noProjectMd", { defaultValue: "No PROJECT.md found" })}
+            </div>
+          )}
+        </div>
+      </section>
+    );
   };
 
   const handleAddCoordinationNote = async (kind: "decision" | "handoff") => {
@@ -1607,41 +1669,7 @@ export function ContextModal({
             ) : null}
 
             {steeringTab === "project" ? (
-              <section className={classNames("rounded-xl border p-4", "glass-card")}>
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className={classNames("text-sm font-semibold", "text-[var(--color-text-primary)]")}>{t("context.projectMd", { defaultValue: "PROJECT.md" })}</div>
-                    <div className={classNames("mt-1 text-xs", mutedTextClass)}>{projectBusy ? t("common:loading", { defaultValue: "Loading…" }) : projectPathLabel}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {editingProject ? <button type="button" onClick={() => { setEditingProject(false); setProjectText(String(projectMd?.content || "")); setNotifyAgents(false); }} disabled={projectBusy} className={buttonSecondaryClass}>{tr("context.cancel", "Cancel")}</button> : null}
-                    <button type="button" onClick={() => void handleEditProject()} className={buttonPrimaryClass}>{editingProject ? tr("context.editing", "Editing") : (projectMd?.found ? t("context.editButton", { defaultValue: "Edit" }) : t("context.createButton", { defaultValue: "Create" }))}</button>
-                  </div>
-                </div>
-                {projectError ? <div className={classNames("mt-3 rounded-lg border px-3 py-2 text-sm", "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400")}>{projectError}</div> : null}
-                {notifyError ? <div className={classNames("mt-3 rounded-lg border px-3 py-2 text-sm", "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400")}>{notifyError}</div> : null}
-                {projectNotice ? <div className={classNames("mt-3 rounded-lg border px-3 py-2 text-sm", "border-emerald-500/30 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400")}>{projectNotice}</div> : null}
-                <div className="mt-4">
-                  {editingProject ? (
-                    <>
-                      <textarea value={projectText} onChange={(event) => setProjectText(event.target.value)} className={classNames(textareaClass, "min-h-[320px]")} />
-                      <label className={classNames("mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm", "glass-card text-[var(--color-text-primary)]")}>
-                        <input type="checkbox" checked={notifyAgents} onChange={(event) => setNotifyAgents(event.target.checked)} />
-                        {tr("context.notifyAgents", "Notify the team in chat (@all) after save")}
-                      </label>
-                      <div className="mt-3 flex items-center gap-2">
-                        <button type="button" onClick={() => void handleSaveProject()} disabled={projectBusy} className={buttonPrimaryClass}>{projectBusy ? tr("context.saving", "Saving…") : tr("context.saveProject", "Save PROJECT.md")}</button>
-                      </div>
-                    </>
-                  ) : projectMd?.found && projectMd.content ? (
-                    <div className={classNames("max-h-[36rem] overflow-y-auto rounded-xl border p-3", "glass-card")}>
-                      <MarkdownRenderer content={String(projectMd.content)} isDark={isDark} className={classNames("text-sm", subtleTextClass)} />
-                    </div>
-                  ) : (
-                    <div className={classNames("rounded-xl border border-dashed px-3 py-4 text-sm", "border-[var(--glass-border-subtle)] text-[var(--color-text-muted)]")}>{t("context.noProjectMd", { defaultValue: "No PROJECT.md found" })}</div>
-                  )}
-                </div>
-              </section>
+              renderProjectPanel()
             ) : null}
 
             {steeringTab === "log" ? (
@@ -1740,7 +1768,7 @@ export function ContextModal({
       return (
         <section className={classNames(surfaceClass, "p-4")}>
           <div className={classNames("text-sm", mutedTextClass)}>
-            {tr("context.desktopPetUnavailable", "Desktop Pet settings are unavailable in this context.")}
+            {tr("context.desktopPetUnavailable", "Web Pet settings are unavailable in this context.")}
           </div>
         </section>
       );
@@ -1751,71 +1779,35 @@ export function ContextModal({
         <div className="flex flex-col gap-4">
           <div>
             <div className={classNames("flex items-center gap-2 text-lg font-semibold", "text-[var(--color-text-primary)]")}>
-              {tr("context.desktopPetTitle", "Desktop Pet")}
+              {tr("context.desktopPetTitle", "Web Pet")}
               <span className="rounded-md bg-cyan-500/15 px-2 py-0.5 text-xs font-semibold leading-none text-cyan-400">Beta</span>
             </div>
             <div className={classNames("mt-1 text-sm", subtleTextClass)}>
-              {tr("context.desktopPetHint", "Show a pixel cat on your desktop that reflects this team's status.")}
+              {tr("context.desktopPetHint", "Show a floating web pet in the corner that reflects this team's status.")}
             </div>
           </div>
-
-          {desktopPetLaunchError ? <div className={classNames("rounded-xl border px-3 py-2 text-sm", "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400")}>{desktopPetLaunchError}</div> : null}
 
           <div className={classNames("flex flex-col gap-4 rounded-2xl border p-4", "glass-panel")}>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className={classNames("text-sm font-medium", "text-[var(--color-text-primary)]")}>
-                  {tr("context.desktopPetSwitchLabel", "Enable Desktop Pet")}
+                  {tr("context.desktopPetSwitchLabel", "Enable Web Pet")}
                 </div>
                 <div className={classNames("mt-1 text-xs", mutedTextClass)}>
-                  {tr("context.desktopPetTabHint", "Each enabled group opens its own Desktop Pet window.")}
+                  {tr("context.desktopPetTabHint", "Each enabled group shows its own Web Pet in the web UI.")}
                 </div>
               </div>
               <button
                 type="button"
                 role="switch"
                 aria-checked={desktopPetEnabled}
-                aria-label={tr("context.desktopPetSwitchLabel", "Enable Desktop Pet")}
+                aria-label={tr("context.desktopPetSwitchLabel", "Enable Web Pet")}
                 onClick={() => void handleToggleDesktopPet(!desktopPetEnabled)}
                 disabled={viewBusy}
                 className={switchTrackClass(desktopPetEnabled)}
               >
                 <span className={switchThumbClass(desktopPetEnabled)} />
               </button>
-            </div>
-
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className={classNames("text-xs", mutedTextClass)}>
-                {tr("context.desktopPetLaunchHint", "Launch opens the Desktop Pet app for this group using your Web access token.")}
-              </div>
-              <div className="flex items-center gap-3">
-                {(() => {
-                  const dl = buildDesktopPetDownloadUrl();
-                  if (!dl) return null;
-                  const label = tr("context.desktopPetDownloadFor", `Download for ${dl.label}`, { platform: dl.label });
-                  return (
-                    <a
-                      href={dl.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={classNames("text-xs underline", mutedTextClass)}
-                    >
-                      {label}
-                    </a>
-                  );
-                })()}
-                <button
-                  type="button"
-                  className={buttonSecondaryClass}
-                  title={desktopPetLaunchPreviewUrl}
-                  disabled={desktopPetLaunchBusy}
-                  onClick={() => void handlePrepareDesktopPetLaunch()}
-                >
-                  {desktopPetLaunchBusy
-                    ? tr("context.desktopPetLaunchLoading", "Preparing…")
-                    : tr("context.desktopPetLaunch", "Launch")}
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -1918,35 +1910,63 @@ export function ContextModal({
   };
 
   return (
-    <ModalFrame
-      isDark={isDark}
-      onClose={handleModalClose}
-      titleId="context-modal-title"
-      title={t("context.title", { defaultValue: "Project Context" })}
-      closeAriaLabel={t("context.closeAria", { defaultValue: "Close context modal" })}
-      panelClassName="h-full w-full overflow-hidden rounded-none sm:h-[94vh] sm:max-w-[96vw]"
-      modalRef={modalRef}
-    >
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="flex min-h-full flex-col gap-4 p-4 sm:p-5">
-          {syncError ? <div className={classNames("rounded-xl border px-3 py-2 text-sm", "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400")}>{syncError}</div> : null}
+    <>
+      <ModalFrame
+        isDark={isDark}
+        onClose={handleModalClose}
+        titleId="context-modal-title"
+        title={t("context.title", { defaultValue: "Project Context" })}
+        closeAriaLabel={t("context.closeAria", { defaultValue: "Close context modal" })}
+        panelClassName="h-full w-full overflow-hidden rounded-none sm:h-[94vh] sm:max-w-[96vw]"
+        modalRef={modalRef}
+      >
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="flex min-h-full flex-col gap-4 p-4 sm:p-5">
+            {syncError ? <div className={classNames("rounded-xl border px-3 py-2 text-sm", "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400")}>{syncError}</div> : null}
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className={classNames("inline-flex w-fit rounded-2xl border p-1", isDark ? "border-slate-800 bg-slate-950/70" : "border-gray-200 bg-gray-100/80")}>
-              <button type="button" onClick={() => handleSwitchActiveView("coordination")} className={viewButtonClass(activeView === "coordination")}>{tr("context.coordination", "Coordination")}</button>
-              <button type="button" onClick={() => handleSwitchActiveView("agents")} className={viewButtonClass(activeView === "agents")}>{tr("context.agents", "Agents")}</button>
-              <button type="button" onClick={() => handleSwitchActiveView("desktop_pet")} className={viewButtonClass(activeView === "desktop_pet")}>{tr("context.desktopPetTab", "Desktop Pet")}<span className="ml-1.5 rounded-md bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-cyan-400">Beta</span></button>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className={classNames("inline-flex w-fit rounded-2xl border p-1", isDark ? "border-slate-800 bg-slate-950/70" : "border-gray-200 bg-gray-100/80")}>
+                <button type="button" onClick={() => handleSwitchActiveView("coordination")} className={viewButtonClass(activeView === "coordination")}>{tr("context.coordination", "Coordination")}</button>
+                <button type="button" onClick={() => handleSwitchActiveView("agents")} className={viewButtonClass(activeView === "agents")}>{tr("context.agents", "Agents")}</button>
+                <button type="button" onClick={() => handleSwitchActiveView("desktop_pet")} className={viewButtonClass(activeView === "desktop_pet")}>{tr("context.desktopPetTab", "Web Pet")}<span className="ml-1.5 rounded-md bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-cyan-400">Beta</span></button>
+              </div>
             </div>
-          </div>
 
-          {activeView === "coordination"
-            ? renderCoordinationView()
-            : activeView === "agents"
-              ? renderAgentsView()
-              : renderDesktopPetView()}
+            {activeView === "coordination"
+              ? renderCoordinationView()
+              : activeView === "agents"
+                ? renderAgentsView()
+                : renderDesktopPetView()}
+          </div>
         </div>
-      </div>
-    </ModalFrame>
+      </ModalFrame>
+
+      {projectExpanded && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[70] animate-fade-in"
+              role="dialog"
+              aria-modal="true"
+              onPointerDown={(event) => {
+                if (event.target === event.currentTarget) setProjectExpanded(false);
+              }}
+            >
+              <div className="absolute inset-0 glass-overlay" />
+              <div ref={projectExpandedRef} className={settingsDialogPanelClass("xl")}>
+                <div className="flex shrink-0 justify-end border-b border-[var(--glass-border-subtle)] px-3 py-2 sm:px-4 sm:py-3">
+                  <button type="button" className={buttonSecondaryClass} onClick={() => setProjectExpanded(false)}>
+                    {t("common:close")}
+                  </button>
+                </div>
+                <div className={settingsDialogBodyClass}>
+                  {renderProjectPanel(true)}
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
+    </>
   );
 
 }

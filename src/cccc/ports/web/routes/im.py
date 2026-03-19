@@ -13,7 +13,7 @@ from ....kernel.group import load_group
 from ....paths import ensure_home
 from ....ports.im.config_schema import canonicalize_im_config
 from ....util.conv import coerce_bool
-from ....util.process import SOFT_TERMINATE_SIGNAL, best_effort_signal_pid, pid_is_alive
+from ....util.process import SOFT_TERMINATE_SIGNAL, best_effort_signal_pid, pid_is_alive, resolve_background_python_argv, supervised_process_popen_kwargs
 from ..schemas import (
     IMActionRequest,
     IMBindRequest,
@@ -25,6 +25,7 @@ from ..schemas import (
     get_principal,
     require_group,
 )
+from .actors import invalidate_readonly_actor_list
 
 
 def create_routers(ctx: RouteContext) -> list[APIRouter]:
@@ -59,15 +60,18 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
     @group_router.post("/start")
     async def group_start(request: Request, group_id: str, by: str = "user") -> Dict[str, Any]:
+        await invalidate_readonly_actor_list(group_id)
         return await ctx.daemon({"op": "group_start", "args": {"group_id": group_id, "by": by, **_profile_auth_args(request)}})
 
     @group_router.post("/stop")
     async def group_stop(group_id: str, by: str = "user") -> Dict[str, Any]:
+        await invalidate_readonly_actor_list(group_id)
         return await ctx.daemon({"op": "group_stop", "args": {"group_id": group_id, "by": by}})
 
     @group_router.post("/state")
     async def group_set_state(group_id: str, state: str, by: str = "user") -> Dict[str, Any]:
         """Set group state (active/idle/paused) to control automation behavior."""
+        await invalidate_readonly_actor_list(group_id)
         return await ctx.daemon({"op": "group_set_state", "args": {"group_id": group_id, "state": state, "by": by}})
 
     # =========================================================================
@@ -195,6 +199,13 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 im_cfg["dingtalk_app_secret"] = app_secret
             if robot_code:
                 im_cfg["dingtalk_robot_code"] = robot_code
+        elif platform == "wecom":
+            bot_id = str(req.wecom_bot_id or "").strip()
+            secret = str(req.wecom_secret or "").strip()
+            if bot_id:
+                im_cfg["wecom_bot_id"] = bot_id
+            if secret:
+                im_cfg["wecom_secret"] = secret
 
         im_cfg = canonicalize_im_config(im_cfg)
 
@@ -239,6 +250,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
     async def im_start(request: Request, req: IMActionRequest) -> Dict[str, Any]:
         """Start IM bridge for a group."""
         import subprocess
+        import sys
 
         check_group(request, req.group_id)
         group = load_group(req.group_id)
@@ -319,6 +331,22 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 env[app_secret_env] = app_secret
             if robot_code_env and robot_code:
                 env[robot_code_env] = robot_code
+        elif platform == "wecom":
+            # WeCom: set WECOM_BOT_ID and WECOM_SECRET
+            bot_id = im_cfg.get("wecom_bot_id") or ""
+            secret = im_cfg.get("wecom_secret") or ""
+            bot_id_env = im_cfg.get("wecom_bot_id_env") or ""
+            secret_env = im_cfg.get("wecom_secret_env") or ""
+            # Set actual values to default env var names
+            if bot_id:
+                env["WECOM_BOT_ID"] = bot_id
+            if secret:
+                env["WECOM_SECRET"] = secret
+            # Also set to custom env var names if specified
+            if bot_id_env and bot_id:
+                env[bot_id_env] = bot_id
+            if secret_env and secret:
+                env[secret_env] = secret
         else:
             # Telegram/Slack/Discord: token-based
             bot_token_env = str(im_cfg.get("bot_token_env") or "").strip()
@@ -340,33 +368,42 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         log_path = state_dir / "im_bridge.log"
 
         try:
-            import sys
-            log_file = log_path.open("a", encoding="utf-8")
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "cccc.ports.im.bridge", req.group_id, platform],
-                env=env,
-                stdout=log_file,
-                stderr=log_file,
-                start_new_session=True,
-            )
-            # If the process exits immediately (common for missing token/deps), report failure.
-            await asyncio.sleep(0.25)
-            exit_code = proc.poll()
-            if exit_code is not None:
-                try:
-                    proc.wait(timeout=0.1)
-                except Exception:
-                    pass
-                return {
-                    "ok": False,
-                    "error": {
-                        "code": "bridge_exited",
-                        "message": f"bridge exited early (code={exit_code}). Check log: {log_path}",
-                    },
-                }
+            popen_kwargs: Dict[str, Any] = {
+                "env": env,
+                "stdin": subprocess.DEVNULL,
+                "close_fds": True,
+                "cwd": str(ensure_home()),
+            }
+            if os.name == "nt":
+                popen_kwargs.update(supervised_process_popen_kwargs())
+            else:
+                popen_kwargs["start_new_session"] = True
 
-            pid_path.write_text(str(proc.pid), encoding="utf-8")
-            return {"ok": True, "result": {"group_id": req.group_id, "platform": platform, "pid": proc.pid}}
+            with log_path.open("a", encoding="utf-8") as log_file:
+                proc = subprocess.Popen(
+                    resolve_background_python_argv([sys.executable, "-m", "cccc.ports.im", req.group_id, platform]),
+                    stdout=log_file,
+                    stderr=log_file,
+                    **popen_kwargs,
+                )
+                # If the process exits immediately (common for missing token/deps), report failure.
+                await asyncio.sleep(0.25)
+                exit_code = proc.poll()
+                if exit_code is not None:
+                    try:
+                        proc.wait(timeout=0.1)
+                    except Exception:
+                        pass
+                    return {
+                        "ok": False,
+                        "error": {
+                            "code": "bridge_exited",
+                            "message": f"bridge exited early (code={exit_code}). Check log: {log_path}",
+                        },
+                    }
+
+                pid_path.write_text(str(proc.pid), encoding="utf-8")
+                return {"ok": True, "result": {"group_id": req.group_id, "platform": platform, "pid": proc.pid}}
         except Exception as e:
             return {"ok": False, "error": {"code": "start_failed", "message": str(e)}}
 
