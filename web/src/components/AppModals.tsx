@@ -16,33 +16,39 @@ import {
 } from "./modals/EditActorModal";
 import { GroupEditModal } from "./modals/GroupEditModal";
 import { InboxModal } from "./modals/InboxModal";
+import { PresentationPinModal } from "./presentation/PresentationPinModal";
+import { PresentationViewerModal } from "./presentation/PresentationViewerModal";
 import { RelayMessageModal } from "./modals/RelayMessageModal";
 import { RecipientsModal } from "./modals/RecipientsModal";
 import { parsePrivateEnvSetText } from "../utils/privateEnvInput";
 import { parseHelpMarkdown, updateActorHelpNote } from "../utils/helpMarkdown";
 import { formatCapabilityIdInput, normalizeCapabilityIdList, parseCapabilityIdInput } from "../utils/capabilityAutoload";
 import { actorProfileIdentityKey, actorProfileMatchesRef } from "../utils/actorProfiles";
+import { findPresentationSlot } from "../utils/presentation";
+import { buildPresentationRefForSlot } from "../utils/presentationRefs";
 import {
   useGroupStore,
   useUIStore,
   useModalStore,
+  useComposerStore,
   useInboxStore,
   useFormStore,
 } from "../stores";
 import { getAckRecipientIdsForEvent, getRecipientActorIdsForEvent } from "../hooks/useSSE";
 import * as api from "../services/api";
-import { Actor, ActorProfile, RUNTIME_INFO, LedgerEvent, GroupSettings, ChatMessageData, SupportedRuntime } from "../types";
+import { Actor, ActorProfile, RUNTIME_INFO, LedgerEvent, GroupSettings, ChatMessageData, PresentationMessageRef, SupportedRuntime } from "../types";
 
 interface AppModalsProps {
   isDark: boolean;
+  readOnly?: boolean;
   ccccHome: string;
-  composerRef: React.RefObject<HTMLTextAreaElement>;
+  composerRef: React.RefObject<HTMLTextAreaElement | null>;
   onStartReply: (ev: LedgerEvent) => void;
   onThemeToggle: () => void;
   onStartGroup: () => Promise<void>;
   onStopGroup: () => Promise<void>;
   onSetGroupState: (state: "active" | "idle" | "paused") => Promise<void>;
-  fetchContext: (groupId: string, opts?: { fresh?: boolean }) => Promise<void>;
+  fetchContext: (groupId: string, opts?: { fresh?: boolean; detail?: "summary" | "full" }) => Promise<void>;
   canManageGroups: boolean;
 }
 
@@ -53,8 +59,17 @@ function getErrorDetailGroupId(err: unknown): string {
   return String((details as { group_id?: unknown }).group_id || "").trim();
 }
 
+function sortPresentationSlotIds(slotIds: string[]): string[] {
+  return [...slotIds].sort((left, right) => {
+    const leftIndex = Number(String(left || "").replace("slot-", "")) || 0;
+    const rightIndex = Number(String(right || "").replace("slot-", "")) || 0;
+    return leftIndex - rightIndex;
+  });
+}
+
 export function AppModals({
   isDark,
+  readOnly,
   ccccHome,
   composerRef,
   onStartReply,
@@ -65,7 +80,7 @@ export function AppModals({
   fetchContext,
   canManageGroups,
 }: AppModalsProps) {
-  const { t } = useTranslation('actors');
+  const { t } = useTranslation(['actors', 'chat']);
   // Stores
   const {
     groups,
@@ -76,11 +91,13 @@ export function AppModals({
     actors,
     groupContext,
     groupSettings,
+    groupPresentation,
     runtimes,
     setSelectedGroupId,
     setGroupDoc,
     setGroupContext,
     setGroupSettings,
+    setGroupPresentation,
     refreshGroups,
     refreshActors,
     loadGroup,
@@ -94,6 +111,7 @@ export function AppModals({
     showError,
     showNotice,
     setActiveTab,
+    setChatMobileSurface,
   } = useUIStore();
 
   const {
@@ -101,15 +119,22 @@ export function AppModals({
     recipientsEventId: _recipientsEventId,
     relayEventId,
     relaySource,
+    presentationViewer,
+    presentationPin,
     editingActor,
     openModal,
     closeModal,
     setRecipientsModal,
     setRelayModal,
+    setPresentationViewer,
+    setPresentationPin,
+    clearPresentationSlotAttention,
     setEditingActor,
   } = useModalStore();
 
   const { inboxActorId, inboxMessages, setInboxMessages } = useInboxStore();
+  const setQuotedPresentationRef = useComposerStore((state) => state.setQuotedPresentationRef);
+  const setComposerDestGroupId = useComposerStore((state) => state.setDestGroupId);
 
   const {
     editGroupTitle,
@@ -176,8 +201,85 @@ export function AppModals({
   const [actorProfiles, setActorProfiles] = useState<ActorProfile[]>([]);
   const [actorProfilesBusy, setActorProfilesBusy] = useState(false);
   const [editActorRoleNotesBusy, setEditActorRoleNotesBusy] = useState(false);
+  const [presentationViewerCacheByGroup, setPresentationViewerCacheByGroup] = useState<Record<string, string[]>>({});
   const editActorRoleNotesBaselineRef = useRef("");
   const editActorRoleNotesSeqRef = useRef(0);
+
+  const rememberPresentationViewerSlot = useCallback((groupId: string, slotId: string) => {
+    const normalizedGroupId = String(groupId || "").trim();
+    const normalizedSlotId = String(slotId || "").trim();
+    if (!normalizedGroupId || !normalizedSlotId) return;
+    setPresentationViewerCacheByGroup((current) => {
+      const existing = current[normalizedGroupId] || [];
+      if (existing.includes(normalizedSlotId)) return current;
+      return {
+        ...current,
+        [normalizedGroupId]: sortPresentationSlotIds([...existing, normalizedSlotId]),
+      };
+    });
+  }, []);
+
+  const forgetPresentationViewerSlot = useCallback((groupId: string, slotId: string) => {
+    const normalizedGroupId = String(groupId || "").trim();
+    const normalizedSlotId = String(slotId || "").trim();
+    if (!normalizedGroupId || !normalizedSlotId) return;
+    setPresentationViewerCacheByGroup((current) => {
+      const existing = current[normalizedGroupId] || [];
+      if (!existing.includes(normalizedSlotId)) return current;
+      const nextSlots = existing.filter((item) => item !== normalizedSlotId);
+      if (nextSlots.length === existing.length) return current;
+      if (nextSlots.length === 0) {
+        const next = { ...current };
+        delete next[normalizedGroupId];
+        return next;
+      }
+      return {
+        ...current,
+        [normalizedGroupId]: nextSlots,
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (presentationViewer && presentationViewer.groupId !== selectedGroupId) {
+      setPresentationViewer(null);
+    }
+  }, [presentationViewer, selectedGroupId, setPresentationViewer]);
+
+  useEffect(() => {
+    if (!presentationViewer) return;
+    if (presentationViewer.groupId !== selectedGroupId) return;
+    if (findPresentationSlot(groupPresentation, presentationViewer.slotId)?.card) return;
+    if (presentationViewer.focusRef) return;
+    setPresentationViewer(null);
+  }, [groupPresentation, presentationViewer, selectedGroupId, setPresentationViewer]);
+
+  useEffect(() => {
+    if (!presentationViewer) return;
+    rememberPresentationViewerSlot(presentationViewer.groupId, presentationViewer.slotId);
+  }, [presentationViewer, rememberPresentationViewerSlot]);
+
+  useEffect(() => {
+    if (presentationPin && presentationPin.groupId !== selectedGroupId) {
+      setPresentationPin(null);
+    }
+  }, [presentationPin, selectedGroupId, setPresentationPin]);
+
+  const presentationViewerSlotIds = useMemo(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid) return [];
+    const cachedSlots = (presentationViewerCacheByGroup[gid] || []).filter(
+      (slotId) => !!findPresentationSlot(groupPresentation, slotId)?.card
+    );
+    const activeSlotId =
+      presentationViewer && presentationViewer.groupId === gid
+        ? String(presentationViewer.slotId || "").trim()
+        : "";
+    if (activeSlotId && !cachedSlots.includes(activeSlotId)) {
+      cachedSlots.push(activeSlotId);
+    }
+    return sortPresentationSlotIds(cachedSlots);
+  }, [groupPresentation, presentationViewer, presentationViewerCacheByGroup, selectedGroupId]);
 
   const loadEditingActorRoleNotes = useCallback(async (groupId: string, actorId: string) => {
     const gid = String(groupId || "").trim();
@@ -1032,6 +1134,27 @@ export function AppModals({
     return (events || []).find((ev) => String(ev.id || "") === eid) || null;
   }, [chatWindow, events, relayEventId, relaySource, selectedGroupId]);
 
+  const presentationReferenceEvents = useMemo(() => {
+    const next = new Map<string, LedgerEvent>();
+    for (const event of events || []) {
+      if (!event?.id) continue;
+      next.set(String(event.id), event);
+    }
+    if (chatWindow?.groupId === selectedGroupId) {
+      for (const event of chatWindow.events || []) {
+        if (!event?.id) continue;
+        next.set(String(event.id), event);
+      }
+    }
+    return Array.from(next.values());
+  }, [chatWindow, events, selectedGroupId]);
+
+  const presentationViewerSourceEvent = useMemo(() => {
+    const focusEventId = String(presentationViewer?.focusEventId || "").trim();
+    if (!focusEventId || presentationViewer?.groupId !== selectedGroupId) return null;
+    return presentationReferenceEvents.find((event) => String(event.id || "").trim() === focusEventId) || null;
+  }, [presentationReferenceEvents, presentationViewer, selectedGroupId]);
+
   const handleRelayMessage = async (dstGroupId: string, toTokens: string[], note: string) => {
     const src = relaySourceEvent;
      const srcGroupId = relaySourceGroupId;
@@ -1069,6 +1192,149 @@ export function AppModals({
     }
   };
 
+  const handlePresentationPublishUrl = useCallback(
+    async (payload: { slotId: string; url: string; title: string; summary: string }) => {
+      const gid = String(selectedGroupId || "").trim();
+      if (!gid) return;
+      setBusy("presentation-pin");
+      try {
+        const resp = await api.publishPresentationUrl(gid, payload);
+        if (!resp.ok) {
+          showError(`${resp.error.code}: ${resp.error.message}`);
+          return;
+        }
+        setGroupPresentation(resp.result.presentation);
+        setPresentationPin(null);
+        setPresentationViewer({ groupId: gid, slotId: resp.result.slot_id || payload.slotId });
+      } finally {
+        setBusy("");
+      }
+    },
+    [selectedGroupId, setBusy, setGroupPresentation, setPresentationPin, setPresentationViewer, showError],
+  );
+
+  const handlePresentationPublishFile = useCallback(
+    async (payload: { slotId: string; file: File; title: string; summary: string }) => {
+      const gid = String(selectedGroupId || "").trim();
+      if (!gid) return;
+      setBusy("presentation-pin");
+      try {
+        const resp = await api.publishPresentationUpload(gid, payload);
+        if (!resp.ok) {
+          showError(`${resp.error.code}: ${resp.error.message}`);
+          return;
+        }
+        setGroupPresentation(resp.result.presentation);
+        setPresentationPin(null);
+        setPresentationViewer({ groupId: gid, slotId: resp.result.slot_id || payload.slotId });
+      } finally {
+        setBusy("");
+      }
+    },
+    [selectedGroupId, setBusy, setGroupPresentation, setPresentationPin, setPresentationViewer, showError],
+  );
+
+  const handlePresentationPublishWorkspace = useCallback(
+    async (payload: { slotId: string; path: string; title: string; summary: string }) => {
+      const gid = String(selectedGroupId || "").trim();
+      if (!gid) return;
+      setBusy("presentation-pin");
+      try {
+        const resp = await api.publishPresentationWorkspace(gid, payload);
+        if (!resp.ok) {
+          showError(`${resp.error.code}: ${resp.error.message}`);
+          return;
+        }
+        setGroupPresentation(resp.result.presentation);
+        setPresentationPin(null);
+        setPresentationViewer({ groupId: gid, slotId: resp.result.slot_id || payload.slotId });
+      } finally {
+        setBusy("");
+      }
+    },
+    [selectedGroupId, setBusy, setGroupPresentation, setPresentationPin, setPresentationViewer, showError],
+  );
+
+  const handlePresentationClear = useCallback(
+    async (slotId: string) => {
+      const gid = String(selectedGroupId || "").trim();
+      const normalizedSlotId = String(slotId || "").trim();
+      if (!gid || !normalizedSlotId) return;
+      const confirmed = window.confirm(
+        t("chat:presentationClearConfirm", {
+          index: Number(normalizedSlotId.replace("slot-", "") || 0) || normalizedSlotId,
+          defaultValue: `Clear ${normalizedSlotId}?`,
+        }),
+      );
+      if (!confirmed) return;
+      setBusy("presentation-clear");
+      try {
+        const resp = await api.clearPresentationSlot(gid, normalizedSlotId);
+        if (!resp.ok) {
+          showError(`${resp.error.code}: ${resp.error.message}`);
+          return;
+        }
+        setGroupPresentation(resp.result.presentation);
+        setPresentationViewer(null);
+        setPresentationPin(null);
+        clearPresentationSlotAttention(gid, normalizedSlotId);
+        forgetPresentationViewerSlot(gid, normalizedSlotId);
+      } finally {
+        setBusy("");
+      }
+    },
+    [clearPresentationSlotAttention, forgetPresentationViewerSlot, selectedGroupId, setBusy, setGroupPresentation, setPresentationViewer, setPresentationPin, showError, t],
+  );
+
+  const handleQuotePresentationReference = useCallback(
+    (payload: { slotId: string; ref?: PresentationMessageRef | null }) => {
+      const gid = String(selectedGroupId || "").trim();
+      const normalizedSlotId = String(payload.slotId || "").trim();
+      if (!gid || !normalizedSlotId) return;
+      const slot = findPresentationSlot(groupPresentation, normalizedSlotId);
+      const ref = payload.ref || buildPresentationRefForSlot(slot);
+      if (!ref) {
+        showError(t("chat:presentationMissingCard", { defaultValue: "This presentation slot is empty." }));
+        return;
+      }
+      setQuotedPresentationRef(ref);
+      setComposerDestGroupId(gid);
+      setActiveTab("chat");
+      setChatMobileSurface(gid, "messages");
+      setPresentationViewer(null);
+      window.setTimeout(() => composerRef.current?.focus(), 0);
+    },
+    [composerRef, groupPresentation, selectedGroupId, setActiveTab, setChatMobileSurface, setComposerDestGroupId, setPresentationViewer, setQuotedPresentationRef, showError, t],
+  );
+
+  const handleOpenPresentationMessageContext = useCallback(
+    async (eventId: string) => {
+      const gid = String(selectedGroupId || "").trim();
+      const eid = String(eventId || "").trim();
+      if (!gid || !eid) return;
+      setActiveTab("chat");
+      setChatMobileSurface(gid, "messages");
+      setPresentationViewer(null);
+      await openChatWindow(gid, eid);
+    },
+    [openChatWindow, selectedGroupId, setActiveTab, setChatMobileSurface, setPresentationViewer],
+  );
+
+  const handleReplyToPresentationMessage = useCallback(
+    async (event: LedgerEvent) => {
+      const gid = String(selectedGroupId || "").trim();
+      const eid = String(event.id || "").trim();
+      if (!gid || !eid) return;
+      setActiveTab("chat");
+      setChatMobileSurface(gid, "messages");
+      onStartReply(event);
+      setPresentationViewer(null);
+      await openChatWindow(gid, eid);
+      window.setTimeout(() => composerRef.current?.focus(), 0);
+    },
+    [composerRef, onStartReply, openChatWindow, selectedGroupId, setActiveTab, setChatMobileSurface, setPresentationViewer],
+  );
+
   return (
     <>
       <MobileMenuSheet
@@ -1083,7 +1349,6 @@ export function AppModals({
         onToggleTheme={onThemeToggle}
         onOpenSearch={() => openModal("search")}
         onOpenContext={() => {
-          if (selectedGroupId && !groupContext) void fetchContext(selectedGroupId);
           openModal("context");
         }}
         onOpenSettings={() => openModal("settings")}
@@ -1139,13 +1404,62 @@ export function AppModals({
         }}
       />
 
+      <PresentationPinModal
+        key={
+          presentationPin
+            ? `${presentationPin.groupId}:${presentationPin.slotId}:${
+                findPresentationSlot(groupPresentation, presentationPin?.slotId || "")?.card?.published_at || "empty"
+              }`
+            : "presentation-pin-closed"
+        }
+        isOpen={!!presentationPin && presentationPin.groupId === selectedGroupId}
+        groupId={selectedGroupId}
+        isDark={isDark}
+        slot={presentationPin?.groupId === selectedGroupId ? findPresentationSlot(groupPresentation, presentationPin?.slotId || "") : null}
+        busy={busy === "presentation-pin"}
+        onClose={() => setPresentationPin(null)}
+        onSubmitUrl={handlePresentationPublishUrl}
+        onSubmitWorkspace={handlePresentationPublishWorkspace}
+        onSubmitFile={handlePresentationPublishFile}
+      />
+
+      {presentationViewerSlotIds.map((slotId) => {
+        const slot = findPresentationSlot(groupPresentation, slotId);
+        const version = String(slot?.card?.published_at || "empty").trim() || "empty";
+        return (
+          <PresentationViewerModal
+            key={`${selectedGroupId}:${slotId}:${version}`}
+            isOpen={!!presentationViewer && presentationViewer.groupId === selectedGroupId && presentationViewer.slotId === slotId}
+            isDark={isDark}
+            readOnly={readOnly}
+            groupId={selectedGroupId}
+            slotId={slotId}
+            presentation={groupPresentation}
+            focusRef={presentationViewer?.groupId === selectedGroupId && presentationViewer.slotId === slotId ? presentationViewer.focusRef || null : null}
+            focusEventId={presentationViewer?.groupId === selectedGroupId && presentationViewer.slotId === slotId ? presentationViewer.focusEventId || null : null}
+            sourceEvent={presentationViewer?.groupId === selectedGroupId && presentationViewer.slotId === slotId ? presentationViewerSourceEvent : null}
+            onQuoteInChat={handleQuotePresentationReference}
+            onOpenMessageContext={(eventId) => void handleOpenPresentationMessageContext(eventId)}
+            onReplyToMessage={(event) => void handleReplyToPresentationMessage(event)}
+            onReplaceSlot={(nextSlotId) => {
+              const gid = String(selectedGroupId || "").trim();
+              if (!gid || !nextSlotId) return;
+              setPresentationViewer(null);
+              setPresentationPin({ groupId: gid, slotId: nextSlotId });
+            }}
+            onClearSlot={(nextSlotId) => void handlePresentationClear(nextSlotId)}
+            onClose={() => setPresentationViewer(null)}
+          />
+        );
+      })}
+
       <ContextModal
         isOpen={modals.context}
         onClose={() => closeModal("context")}
         groupId={selectedGroupId}
         context={groupContext}
         onRefreshContext={async () => {
-          if (selectedGroupId) await fetchContext(selectedGroupId, { fresh: true });
+          if (selectedGroupId) await fetchContext(selectedGroupId, { fresh: true, detail: "full" });
         }}
         isDark={isDark}
         settings={groupSettings}
