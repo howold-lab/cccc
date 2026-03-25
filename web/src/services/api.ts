@@ -168,6 +168,7 @@ export type ApiResponse<T> =
   | { ok: true; result: T; error?: null }
   | { ok: false; result?: unknown; error: { code: string; message: string; details?: unknown } };
 
+type ApiErrorShape = { code: string; message: string; details?: unknown };
 type SharedReadPromise = Promise<ApiResponse<unknown>>;
 type RecentReadEntry = {
   response: ApiResponse<unknown>;
@@ -247,6 +248,10 @@ function groupPromptsRequestKey(groupId: string): string {
   return `group-prompts:${String(groupId || "").trim()}`;
 }
 
+function petPeerContextRequestKey(groupId: string, fresh: boolean): string {
+  return `pet-peer-context:${String(groupId || "").trim()}:${fresh ? "fresh" : "default"}`;
+}
+
 function pingRequestKey(includeHome: boolean): string {
   return includeHome ? "ping:include-home" : "ping:default";
 }
@@ -320,6 +325,63 @@ function asOptionalString(value: unknown): string | null {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => asString(item).trim()).filter(Boolean);
+}
+
+function humanizeDiagnosticToken(value: unknown): string {
+  return asString(value).trim().replace(/[_-]+/g, " ");
+}
+
+function formatDaemonEndpoint(details: UnknownRecord): string {
+  const transport = asString(details.transport).trim().toLowerCase();
+  const endpoint = asRecord(details.endpoint);
+  if (transport === "tcp") {
+    const host = asString(endpoint?.host ?? details.host).trim() || "127.0.0.1";
+    const port = Number(endpoint?.port ?? details.port ?? 0);
+    return port > 0 ? `${host}:${port}` : host;
+  }
+  if (transport === "unix") {
+    return asString(endpoint?.path ?? details.path).trim() || "socket";
+  }
+  return "";
+}
+
+export function formatApiErrorMessage(error: ApiErrorShape): string {
+  const code = asString(error.code).trim();
+  const message = asString(error.message).trim() || code || "Request failed";
+  if (code !== "daemon_unavailable") return message;
+
+  const details = asRecord(error.details);
+  if (!details) return message;
+
+  const transport = asString(details.transport).trim().toLowerCase();
+  const endpoint = formatDaemonEndpoint(details);
+  const endpointLabel = [transport, endpoint].filter(Boolean).join(" ").trim();
+  const phaseReason = [humanizeDiagnosticToken(details.phase), humanizeDiagnosticToken(details.reason)]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const suffix = [endpointLabel, phaseReason].filter(Boolean).join(" · ");
+  return suffix ? `${message} · ${suffix}` : message;
+}
+
+function normalizeApiError(value: unknown): ApiErrorShape | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const code = asString(record.code).trim();
+  const rawMessage = asString(record.message).trim() || code || "Request failed";
+  const details = record.details;
+  const error: ApiErrorShape = {
+    code: code || "UNKNOWN_ERROR",
+    message: formatApiErrorMessage({
+      code: code || "UNKNOWN_ERROR",
+      message: rawMessage,
+      details,
+    }),
+  };
+  if (typeof details !== "undefined") {
+    error.details = details;
+  }
+  return error;
 }
 
 function normalizeChecklistItem(value: unknown, index: number): TaskChecklistItem | null {
@@ -655,8 +717,18 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<ApiR
   }
 
   try {
-    const data = JSON.parse(text);
-    if (!data.ok && data.error?.code === "unauthorized") {
+    const data: unknown = JSON.parse(text);
+    const record = asRecord(data);
+    if (record?.ok === false) {
+      const error = normalizeApiError(record.error);
+      if (error?.code === "unauthorized") {
+        _authRequiredHandler?.();
+      }
+      if (error) {
+        return { ...record, ok: false, error } as ApiResponse<T>;
+      }
+    }
+    if (record?.ok === false && asRecord(record.error)?.code === "unauthorized") {
       _authRequiredHandler?.();
     }
     return data as ApiResponse<T>;
@@ -694,8 +766,18 @@ export async function apiForm<T>(path: string, form: FormData, init?: RequestIni
   }
 
   try {
-    const data = JSON.parse(text);
-    if (!data.ok && data.error?.code === "unauthorized") {
+    const data: unknown = JSON.parse(text);
+    const record = asRecord(data);
+    if (record?.ok === false) {
+      const error = normalizeApiError(record.error);
+      if (error?.code === "unauthorized") {
+        _authRequiredHandler?.();
+      }
+      if (error) {
+        return { ...record, ok: false, error } as ApiResponse<T>;
+      }
+    }
+    if (record?.ok === false && asRecord(record.error)?.code === "unauthorized") {
       _authRequiredHandler?.();
     }
     return data as ApiResponse<T>;
@@ -1234,6 +1316,15 @@ export type GroupPromptsResponse = {
   help: GroupPromptInfo;
 };
 
+export type PetPeerContextResponse = {
+  persona: string;
+  help: string;
+  prompt: string;
+  snapshot: string;
+  source: "help" | "default";
+  help_prompt: GroupPromptInfo;
+};
+
 export type PromptUpdateOptions = {
   editorMode?: "structured" | "raw";
   changedBlocks?: string[];
@@ -1244,6 +1335,21 @@ export async function fetchGroupPrompts(groupId: string) {
   return reuseSharedReadRequest(
     groupPromptsRequestKey(gid),
     () => apiJson<GroupPromptsResponse>(`/api/v1/groups/${encodeURIComponent(gid)}/prompts`)
+  );
+}
+
+export async function fetchPetPeerContext(groupId: string, opts?: { fresh?: boolean }) {
+  const gid = String(groupId || "").trim();
+  const fresh = !!opts?.fresh;
+  const params = new URLSearchParams();
+  if (fresh) params.set("fresh", "1");
+  const suffix = params.toString();
+  return reuseSharedReadRequest(
+    petPeerContextRequestKey(gid, fresh),
+    () =>
+      apiJson<PetPeerContextResponse>(
+        `/api/v1/groups/${encodeURIComponent(gid)}/pet-context${suffix ? `?${suffix}` : ""}`
+      )
   );
 }
 
@@ -2752,6 +2858,7 @@ export async function controlGroupSpaceProviderAuth(args: {
   action: "status" | "start" | "cancel" | "disconnect";
   timeoutSeconds?: number;
   forceReauth?: boolean;
+  projected?: boolean;
 }) {
   const provider = args.provider || "notebooklm";
   if (args.action === "status") {
@@ -2776,8 +2883,31 @@ export async function controlGroupSpaceProviderAuth(args: {
       action: args.action,
       timeout_seconds: Number(args.timeoutSeconds || 900),
       force_reauth: Boolean(args.forceReauth),
+      projected: Boolean(args.projected),
     }),
   });
+}
+
+export async function fetchGroupSpaceProviderAuthBrowserSession(
+  provider: string = "notebooklm",
+): Promise<ApiResponse<{ provider: string; browser_surface: PresentationBrowserSurfaceState }>> {
+  const resp = await controlGroupSpaceProviderAuth({ provider, action: "status" });
+  if (!resp.ok) {
+    return resp as ApiResponse<{ provider: string; browser_surface: PresentationBrowserSurfaceState }>;
+  }
+  return {
+    ok: true,
+    result: {
+      provider,
+      browser_surface: normalizePresentationBrowserSurfaceState(resp.result.auth?.projected_browser),
+    },
+  };
+}
+
+export function getGroupSpaceProviderAuthBrowserWebSocketUrl(provider: string = "notebooklm"): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const base = `${protocol}//${window.location.host}/api/v1/space/providers/${encodeURIComponent(provider)}/auth/browser_surface/ws`;
+  return withAuthToken(base);
 }
 
 export interface RegistryReconcileResult {

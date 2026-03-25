@@ -3,13 +3,19 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import threading
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from ....daemon.server import call_daemon, get_daemon_endpoint
 from ....daemon.actors.actor_profile_store import get_actor_profile, get_actor_profile_by_ref
+from ....daemon.runner_state_ops import pty_state_path, headless_state_path
 from ....kernel.group import load_group
+from ....kernel.query_projections import get_actor_list_projection
+from ....kernel.inbox import get_indexed_unread_counts
+from ....util.process import pid_is_alive
+from .groups import invalidate_context_read
 from ..schemas import (
     ActorCreateRequest,
     ActorProfileUpsertRequest,
@@ -27,10 +33,65 @@ from ..schemas import (
 )
 
 _READONLY_ACTOR_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
-_READONLY_ACTOR_INFLIGHT: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
+_READONLY_ACTOR_INFLIGHT: Dict[str, Dict[str, Any]] = {}
+_READONLY_ACTOR_HANDOFF_ONCE: set[str] = set()
 _READONLY_ACTOR_GENERATION: Dict[str, int] = {}
-_READONLY_ACTOR_CACHE_LOCK = asyncio.Lock()
+_READONLY_ACTOR_CACHE_LOCK = threading.Lock()
 _READONLY_ACTOR_TTL_S = 0.8
+
+
+def _effective_runner_kind_local(runner_kind: str) -> str:
+    rk = str(runner_kind or "").strip().lower() or "pty"
+    return "headless" if rk == "headless" else "pty"
+
+
+def _actor_running_local(group_id: str, actor_id: str, *, runner_kind: str) -> bool:
+    gid = str(group_id or "").strip()
+    aid = str(actor_id or "").strip()
+    effective_runner = _effective_runner_kind_local(runner_kind)
+    if not gid or not aid:
+        return False
+    if effective_runner == "headless":
+        return headless_state_path(gid, aid).exists()
+    state_path = pty_state_path(gid, aid)
+    if not state_path.exists():
+        return False
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+        pid = int(raw.get("pid") or 0)
+    except Exception:
+        pid = 0
+    return pid > 0 and pid_is_alive(pid)
+
+
+def _read_actor_list_local(group_id: str, *, include_unread: bool) -> Dict[str, Any]:
+    gid = str(group_id or "").strip()
+    if not gid:
+        return {"ok": False, "error": {"code": "missing_group_id", "message": "missing group_id", "details": {}}}
+    group = load_group(gid)
+    if group is None:
+        return {"ok": False, "error": {"code": "group_not_found", "message": f"group not found: {gid}", "details": {}}}
+
+    actors = get_actor_list_projection(group)
+    for actor in actors:
+        aid = str(actor.get("id") or "").strip()
+        if not aid:
+            continue
+        runner_kind = str(actor.get("runner") or "pty").strip()
+        effective_runner = _effective_runner_kind_local(runner_kind)
+        actor["running"] = _actor_running_local(gid, aid, runner_kind=runner_kind)
+        actor["idle_seconds"] = None
+        if effective_runner != runner_kind:
+            actor["runner_effective"] = effective_runner
+
+    if include_unread:
+        counts = get_indexed_unread_counts(group, actors=actors)
+        for actor in actors:
+            aid = str(actor.get("id") or "").strip()
+            if aid:
+                actor["unread_count"] = counts.get(aid, 0)
+
+    return {"ok": True, "result": {"actors": actors}}
 
 
 async def invalidate_readonly_actor_list(group_id: str) -> None:
@@ -38,9 +99,10 @@ async def invalidate_readonly_actor_list(group_id: str) -> None:
     if not gid:
         return
     cache_key = f"actors:{gid}:readonly"
-    async with _READONLY_ACTOR_CACHE_LOCK:
+    with _READONLY_ACTOR_CACHE_LOCK:
         _READONLY_ACTOR_GENERATION[cache_key] = int(_READONLY_ACTOR_GENERATION.get(cache_key, 0)) + 1
         _READONLY_ACTOR_CACHE.pop(cache_key, None)
+        _READONLY_ACTOR_HANDOFF_ONCE.discard(cache_key)
         _READONLY_ACTOR_INFLIGHT.pop(cache_key, None)
 
 
@@ -56,46 +118,65 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         ttl_s = _READONLY_ACTOR_TTL_S if ctx.read_only else 0.0
         cache_key = f"actors:{gid}:readonly"
         now = time.monotonic()
-        fut: asyncio.Future[Dict[str, Any]] | None = None
+        inflight_entry: Optional[Dict[str, Any]] = None
         fetch_generation = 0
         do_fetch = False
 
-        async with _READONLY_ACTOR_CACHE_LOCK:
+        with _READONLY_ACTOR_CACHE_LOCK:
             hit = _READONLY_ACTOR_CACHE.get(cache_key)
             if ttl_s > 0 and hit is not None and hit[0] > now:
                 return hit[1]
-            fut = _READONLY_ACTOR_INFLIGHT.get(cache_key)
-            if fut is None or fut.done():
-                loop = asyncio.get_running_loop()
-                fut = loop.create_future()
-                _READONLY_ACTOR_INFLIGHT[cache_key] = fut
+            if ttl_s <= 0 and hit is not None and cache_key in _READONLY_ACTOR_HANDOFF_ONCE:
+                _READONLY_ACTOR_HANDOFF_ONCE.discard(cache_key)
+                _READONLY_ACTOR_CACHE.pop(cache_key, None)
+                return hit[1]
+            inflight_entry = _READONLY_ACTOR_INFLIGHT.get(cache_key)
+            if inflight_entry is None:
+                inflight_entry = {"event": threading.Event(), "result": None, "error": None, "waiters": 1}
+                _READONLY_ACTOR_INFLIGHT[cache_key] = inflight_entry
                 fetch_generation = int(_READONLY_ACTOR_GENERATION.get(cache_key, 0))
                 do_fetch = True
-
-        if fut is not None and not do_fetch:
-            return await fut
+            else:
+                inflight_entry["waiters"] = int(inflight_entry.get("waiters", 1)) + 1
 
         try:
+            if inflight_entry is not None and not do_fetch:
+                await asyncio.to_thread(inflight_entry["event"].wait)
+                error = inflight_entry.get("error")
+                if error is not None:
+                    raise error
+                result = inflight_entry.get("result")
+                if isinstance(result, dict):
+                    return result
+                return await fetcher()
+
             val = await fetcher()
-            async with _READONLY_ACTOR_CACHE_LOCK:
+            with _READONLY_ACTOR_CACHE_LOCK:
                 current_generation = int(_READONLY_ACTOR_GENERATION.get(cache_key, 0))
-                if current_generation == fetch_generation and _READONLY_ACTOR_INFLIGHT.get(cache_key) is fut:
+                if current_generation == fetch_generation and _READONLY_ACTOR_INFLIGHT.get(cache_key) is inflight_entry:
                     if ttl_s > 0:
                         _READONLY_ACTOR_CACHE[cache_key] = (time.monotonic() + ttl_s, val)
                     else:
-                        _READONLY_ACTOR_CACHE.pop(cache_key, None)
-                if fut is not None and not fut.done():
-                    fut.set_result(val)
+                        _READONLY_ACTOR_CACHE[cache_key] = (time.monotonic(), val)
+                        _READONLY_ACTOR_HANDOFF_ONCE.add(cache_key)
+                if inflight_entry is not None:
+                    inflight_entry["result"] = val
+                    inflight_entry["event"].set()
             return val
         except Exception as exc:
-            async with _READONLY_ACTOR_CACHE_LOCK:
-                if fut is not None and not fut.done():
-                    fut.set_exception(exc)
+            with _READONLY_ACTOR_CACHE_LOCK:
+                if inflight_entry is not None:
+                    inflight_entry["error"] = exc
+                    inflight_entry["event"].set()
             raise
         finally:
-            async with _READONLY_ACTOR_CACHE_LOCK:
-                if _READONLY_ACTOR_INFLIGHT.get(cache_key) is fut:
-                    _READONLY_ACTOR_INFLIGHT.pop(cache_key, None)
+            with _READONLY_ACTOR_CACHE_LOCK:
+                if inflight_entry is not None:
+                    remaining_waiters = int(inflight_entry.get("waiters", 1)) - 1
+                    if remaining_waiters > 0:
+                        inflight_entry["waiters"] = remaining_waiters
+                    elif _READONLY_ACTOR_INFLIGHT.get(cache_key) is inflight_entry:
+                        _READONLY_ACTOR_INFLIGHT.pop(cache_key, None)
 
     async def _developer_mode_enabled() -> bool:
         try:
@@ -248,7 +329,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
     async def actors(group_id: str, include_unread: bool = False) -> Dict[str, Any]:
         gid = str(group_id or "").strip()
         async def _fetch() -> Dict[str, Any]:
-            return await ctx.daemon({"op": "actor_list", "args": {"group_id": gid, "include_unread": include_unread}})
+            return _read_actor_list_local(gid, include_unread=include_unread)
 
         if not include_unread:
             return await _cached_readonly_actor_list(gid, _fetch)
@@ -270,7 +351,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             profile_scope=str(req.profile_scope or ""),
             profile_owner=str(req.profile_owner or ""),
         )
-        return await ctx.daemon(
+        resp = await ctx.daemon(
             {
                 "op": "actor_add",
                 "args": {
@@ -293,6 +374,9 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 },
             }
         )
+        if bool(resp.get("ok")):
+            await invalidate_context_read(group_id)
+        return resp
 
     @group_router.post("/actors/{actor_id}")
     async def actor_update(request: Request, group_id: str, actor_id: str, req: ActorUpdateRequest) -> Dict[str, Any]:
@@ -337,12 +421,16 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             args.update(_profile_ref_args(scope=req.profile_scope, owner_id=req.profile_owner))
         if req.profile_action is not None:
             args["profile_action"] = str(req.profile_action or "").strip()
-        return await ctx.daemon({"op": "actor_update", "args": args})
+        resp = await ctx.daemon({"op": "actor_update", "args": args})
+        return resp
 
     @group_router.delete("/actors/{actor_id}")
     async def actor_delete(group_id: str, actor_id: str, by: str = "user") -> Dict[str, Any]:
         await invalidate_readonly_actor_list(group_id)
-        return await ctx.daemon({"op": "actor_remove", "args": {"group_id": group_id, "actor_id": actor_id, "by": by}})
+        resp = await ctx.daemon({"op": "actor_remove", "args": {"group_id": group_id, "actor_id": actor_id, "by": by}})
+        if bool(resp.get("ok")):
+            await invalidate_context_read(group_id)
+        return resp
 
     @group_router.post("/actors/{actor_id}/start")
     async def actor_start(request: Request, group_id: str, actor_id: str, by: str = "user") -> Dict[str, Any]:
