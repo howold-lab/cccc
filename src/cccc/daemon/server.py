@@ -18,6 +18,7 @@ from .. import __version__
 from ..contracts.v1 import DaemonError, DaemonRequest, DaemonResponse
 from ..kernel.group import get_group_state, load_group
 from ..kernel.actors import find_actor, find_foreman, update_actor, get_effective_role
+from ..kernel.actor_avatar_assets import delete_actor_avatar as _delete_actor_avatar
 from ..kernel.blobs import resolve_blob_attachment_path
 from ..kernel.ledger_retention import compact as compact_ledger
 from ..kernel.settings import (
@@ -40,6 +41,8 @@ from ..util.time import utc_now_iso
 from .automation import AutomationManager
 from .im.bootstrap_im_ops import autostart_enabled_im_bridges
 from .group.bootstrap_actor_ops import autostart_running_groups
+from .pet.review_scheduler import recover_pending_pet_reviews
+from .pet.profile_refresh import recover_due_pet_profile_refreshes
 from .mcp_install import (
     is_mcp_installed as runtime_is_mcp_installed,
     ensure_mcp_installed as runtime_ensure_mcp_installed,
@@ -756,6 +759,7 @@ def _request_dispatch_deps() -> RequestDispatchDeps:
         private_env_max_keys=_PRIVATE_ENV_MAX_KEYS,
         start_actor_process=_start_actor_process,
         delete_actor_private_env=_delete_actor_private_env,
+        delete_actor_avatar=_delete_actor_avatar,
         get_actor_profile=_get_actor_profile,
         load_actor_profile_secrets=_load_actor_profile_secrets,
         remove_headless_state=_remove_headless_state,
@@ -986,6 +990,7 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
             stop_event=stop_event,
             home=p.home,
             pty_supervisor=pty_runner.SUPERVISOR,
+            headless_supervisor=headless_runner.SUPERVISOR,
             event_broadcaster=_activity_broadcaster,
             load_group=load_group,
             interval_seconds=10.0,
@@ -1019,6 +1024,8 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
 
         # Bootstrap background work only after the daemon socket is ready, but
         # don't block the accept loop (clients should see the daemon as responsive).
+        recover_pending_pet_reviews()
+        recover_due_pet_profile_refreshes()
         start_bootstrap_thread(
             maybe_autostart_running_groups=_maybe_autostart_running_groups,
             maybe_autostart_enabled_im_bridges=_maybe_autostart_enabled_im_bridges,

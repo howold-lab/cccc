@@ -17,7 +17,7 @@ from ....daemon.server import get_daemon_endpoint
 from ....daemon.group.presentation_ops import load_presentation_snapshot, resolve_workspace_asset_path
 from ....runners import headless as headless_runner
 from ....kernel.blobs import resolve_blob_attachment_path, store_blob_bytes
-from ....kernel.group import load_group
+from ....kernel.group import get_group_state, load_group
 from ....kernel.query_projections import get_groups_projection
 from ....daemon.runner_state_ops import pty_state_path
 from ....kernel.group_template import parse_group_template
@@ -32,9 +32,14 @@ from ....kernel.prompt_files import (
     resolve_active_scope_root,
     write_group_prompt_file,
 )
-from ....kernel.system_prompt import render_role_system_prompt
-from ...mcp.utils.help_markdown import _select_help_markdown, parse_help_markdown
+from ....kernel.pet_prompt import build_pet_prompt_parts, build_pet_snapshot_text, load_pet_help_markdown
+from ....kernel.pet_outcomes import append_pet_decision_outcome
+from ....kernel.pet_actor import get_pet_actor, is_desktop_pet_enabled
+from ....kernel.pet_signals import load_pet_signals
+from ....daemon.pet.review_scheduler import request_manual_pet_review
+from ...mcp.utils.help_markdown import parse_help_markdown
 from ....kernel.access_tokens import list_access_tokens
+from ....kernel.pet_decisions import load_pet_decisions
 from ....util.conv import coerce_bool
 from ....util.fs import atomic_write_text
 from ....util.process import pid_is_alive
@@ -51,6 +56,7 @@ from ..schemas import (
     GroupSettingsRequest,
     GroupTemplatePreviewRequest,
     GroupUpdateRequest,
+    PetDecisionOutcomeRequest,
     ProjectMdUpdateRequest,
     RepoPromptUpdateRequest,
     RouteContext,
@@ -147,76 +153,37 @@ async def invalidate_context_read(group_id: str, *, detail: Optional[str] = None
                 _CONTEXT_GENERATION[key] = 1
 
 
-def _pet_context_snapshot_text(group: Any, context_payload: Dict[str, Any]) -> str:
-    parts: list[str] = []
-    title = str(group.doc.get("title") or group.group_id or "").strip() or "unknown-group"
-    state = str(group.doc.get("state") or "").strip() or "unknown"
-    parts.append(f"Group: {title}")
-    parts.append(f"Group State: {state}")
-
-    tasks_summary = context_payload.get("tasks_summary") if isinstance(context_payload.get("tasks_summary"), dict) else {}
-    if tasks_summary:
-        parts.append(
-            "Tasks: total={total}, active={active}, done={done}, archived={archived}".format(
-                total=int(tasks_summary.get("total") or 0),
-                active=int(tasks_summary.get("active") or 0),
-                done=int(tasks_summary.get("done") or 0),
-                archived=int(tasks_summary.get("archived") or 0),
-            )
-        )
-
-    agent_states = context_payload.get("agent_states") if isinstance(context_payload.get("agent_states"), list) else []
-    snapshots: list[str] = []
-    for item in agent_states[:6]:
-        if not isinstance(item, dict):
-            continue
-        agent_id = str(item.get("id") or "").strip()
-        hot = item.get("hot") if isinstance(item.get("hot"), dict) else {}
-        active_task_id = str(hot.get("active_task_id") or "").strip()
-        focus = str(hot.get("focus") or "").strip()
-        if not agent_id:
-            continue
-        if active_task_id and focus:
-            snapshots.append(f"{agent_id}: {active_task_id} | {focus}")
-        elif active_task_id:
-            snapshots.append(f"{agent_id}: {active_task_id}")
-        elif focus:
-            snapshots.append(f"{agent_id}: {focus}")
-        else:
-            snapshots.append(agent_id)
-    if snapshots:
-        parts.append(f"Agent Snapshot: {' ; '.join(snapshots)}")
-
-    return "\n".join(parts)
-
-
-def _build_pet_context_payload(group: Any, help_prompt: Dict[str, Any], context_payload: Dict[str, Any]) -> Dict[str, Any]:
+def _build_pet_context_payload(
+    group: Any,
+    help_prompt: Dict[str, Any],
+    context_payload: Dict[str, Any],
+    *,
+    verbose: bool = False,
+) -> Dict[str, Any]:
     help_content = str(help_prompt.get("content") or "")
-    parsed = parse_help_markdown(help_content)
-    persona = str(parsed.get("pet") or "").strip()
-    selected_help = _select_help_markdown(help_content, role="peer", actor_id=None, include_pet=True)
-    snapshot = _pet_context_snapshot_text(group, context_payload)
-    prompt = "\n\n".join(
-        [
-            render_role_system_prompt(
-                group=group,
-                actor_id="pet-peer",
-                role="peer",
-                runtime_name="web-pet",
-                runner="headless",
-            ).strip(),
-            "Pet-Specific Help:\n" + str(selected_help or "").strip(),
-            "Pet Persona:\n" + (persona or "(default pet peer persona)"),
-            "Runtime Snapshot:\n" + snapshot,
-        ]
-    ).strip()
-    return {
+    persona = str(help_prompt.get("persona") or "").strip()
+    source = str(help_prompt.get("pet_source") or "default").strip() or "default"
+    decisions = load_pet_decisions(group)
+    signals = load_pet_signals(group, context_payload=context_payload)
+    payload = {
         "persona": persona,
-        "help": selected_help,
-        "prompt": prompt,
-        "snapshot": snapshot,
-        "source": "help" if persona else "default",
+        "snapshot": build_pet_snapshot_text(group, context_payload),
+        "decisions": decisions,
+        "signals": signals,
+        "source": source,
     }
+    if not verbose:
+        return payload
+    parts = build_pet_prompt_parts(group, help_markdown=help_content, context_payload=context_payload)
+    payload.update(
+        {
+            "help": str(parts.get("help") or ""),
+            "prompt": str(parts.get("prompt") or ""),
+            "help_prompt": help_prompt,
+            "source": str(parts.get("source") or payload["source"]),
+        }
+    )
+    return payload
 
 
 def create_routers(ctx: RouteContext) -> list[APIRouter]:
@@ -1163,7 +1130,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         }
 
     @group_router.get("/pet-context")
-    async def pet_context_get(group_id: str, fresh: bool = False) -> Dict[str, Any]:
+    async def pet_context_get(group_id: str, fresh: bool = False, verbose: bool = False) -> Dict[str, Any]:
         """Get the injected context payload for the independent pet peer."""
         group = load_group(group_id)
         if group is None:
@@ -1171,14 +1138,24 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
         def _help_prompt() -> Dict[str, Any]:
             pf = read_group_prompt_file(group, HELP_FILENAME)
+            content = ""
+            prompt_source = "builtin"
             if pf.found and isinstance(pf.content, str) and pf.content.strip():
-                return {"kind": "help", "source": "home", "filename": HELP_FILENAME, "path": pf.path, "content": str(pf.content)}
+                content = str(pf.content)
+                prompt_source = "home"
+            else:
+                content = load_pet_help_markdown(group)
+            parsed = parse_help_markdown(content)
+            persona = str(parsed.get("pet") or "").strip()
             return {
                 "kind": "help",
-                "source": "builtin",
+                "source": prompt_source,
+                "pet_source": "help" if persona else "default",
+                "prompt_source": prompt_source,
                 "filename": HELP_FILENAME,
                 "path": pf.path,
-                "content": str(load_builtin_help_markdown() or ""),
+                "content": content,
+                "persona": persona,
             }
 
         if fresh:
@@ -1191,10 +1168,53 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         return {
             "ok": True,
             "result": {
-                "help_prompt": help_prompt,
-                **_build_pet_context_payload(group, help_prompt, context_resp.get("result") if isinstance(context_resp.get("result"), dict) else {}),
+                **_build_pet_context_payload(
+                    group,
+                    help_prompt,
+                    context_resp.get("result") if isinstance(context_resp.get("result"), dict) else {},
+                    verbose=verbose,
+                ),
             },
         }
+
+    @group_router.post("/pet-context/review")
+    async def pet_context_review_post(group_id: str) -> Dict[str, Any]:
+        group = load_group(group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail={"code": "group_not_found", "message": f"group not found: {group_id}"})
+        if not is_desktop_pet_enabled(group):
+            return {"ok": False, "error": {"code": "desktop_pet_disabled", "message": "desktop pet is disabled"}}
+        if get_group_state(group) not in {"active", "idle"}:
+            return {"ok": False, "error": {"code": "group_not_active", "message": "pet review requires active or idle group state"}}
+        pet_actor = get_pet_actor(group)
+        if not isinstance(pet_actor, dict) or not bool(pet_actor.get("enabled", True)):
+            return {"ok": False, "error": {"code": "pet_actor_unavailable", "message": "pet actor is unavailable"}}
+        accepted = await run_in_threadpool(
+            request_manual_pet_review,
+            group_id,
+            reason="bubble_click",
+        )
+        if not accepted:
+            return {"ok": False, "error": {"code": "pet_review_unavailable", "message": "pet review is currently unavailable"}}
+        return {"ok": True, "result": {"accepted": True}}
+
+    @group_router.post("/pet-decisions/outcome")
+    async def pet_decision_outcome_post(group_id: str, req: PetDecisionOutcomeRequest) -> Dict[str, Any]:
+        group = load_group(group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail={"code": "group_not_found", "message": f"group not found: {group_id}"})
+        event = await run_in_threadpool(
+            append_pet_decision_outcome,
+            group,
+            by=str(req.by or "user").strip() or "user",
+            fingerprint=str(req.fingerprint or "").strip(),
+            outcome=str(req.outcome or "").strip(),
+            decision_id=str(req.decision_id or "").strip(),
+            action_type=str(req.action_type or "").strip(),
+            cooldown_ms=int(req.cooldown_ms or 0),
+            source_event_id=str(req.source_event_id or "").strip(),
+        )
+        return {"ok": True, "result": {"event": event}}
 
     @group_router.put("/prompts/{kind}")
     async def prompts_put(group_id: str, kind: str, req: RepoPromptUpdateRequest) -> Dict[str, Any]:

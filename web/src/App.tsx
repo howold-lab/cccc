@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useMemo } from "react";
+import React, { lazy, Suspense, useEffect, useMemo } from "react";
 import { DropOverlay } from "./components/DropOverlay";
 const AppModals = lazy(() => import("./components/AppModals").then((m) => ({ default: m.AppModals })));
 const WebPet = lazy(() => import("./features/webPet/WebPet").then((m) => ({ default: m.WebPet })));
@@ -27,6 +27,7 @@ import {
   useComposerStore,
   useFormStore,
 } from "./stores";
+import { useChatOutboxStore } from "./stores/chatOutboxStore";
 import type { ChatMessageData, LedgerEvent } from "./types";
 
 // ============ Main App Component ============
@@ -41,6 +42,7 @@ export default function App() {
   // Zustand stores
   const groups = useGroupStore((state) => state.groups);
   const groupOrder = useGroupStore((state) => state.groupOrder);
+  const archivedGroupIds = useGroupStore((state) => state.archivedGroupIds);
   const selectedGroupId = useGroupStore((state) => state.selectedGroupId);
   const groupDoc = useGroupStore((state) => state.groupDoc);
   const actors = useGroupStore((state) => state.actors);
@@ -53,7 +55,9 @@ export default function App() {
   const warmGroup = useGroupStore((state) => state.warmGroup);
   const openChatWindow = useGroupStore((state) => state.openChatWindow);
   const closeChatWindow = useGroupStore((state) => state.closeChatWindow);
-  const reorderGroups = useGroupStore((state) => state.reorderGroups);
+  const reorderGroupsInSection = useGroupStore((state) => state.reorderGroupsInSection);
+  const archiveGroup = useGroupStore((state) => state.archiveGroup);
+  const restoreGroup = useGroupStore((state) => state.restoreGroup);
   const getOrderedGroups = useGroupStore((state) => state.getOrderedGroups);
 
   const busy = useUIStore((s) => s.busy);
@@ -96,6 +100,7 @@ export default function App() {
   } = useComposerStore();
 
   const { setNewActorRole, setEditGroupTitle, setEditGroupTopic, setDirSuggestions } = useFormStore();
+  const clearAllOutbox = useChatOutboxStore((state) => state.clearAll);
 
   // Actor actions hook
   const {
@@ -117,6 +122,15 @@ export default function App() {
   const [showMentionMenu, setShowMentionMenu] = React.useState(false);
   const [_mentionFilter, setMentionFilter] = React.useState("");
   const [mentionSelectedIndex, setMentionSelectedIndex] = React.useState(0);
+
+  useEffect(() => {
+    const handlePageHide = () => clearAllOutbox();
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      clearAllOutbox();
+    };
+  }, [clearAllOutbox]);
 
   const {
     composerRef,
@@ -209,7 +223,11 @@ export default function App() {
     showError,
   });
 
-  useGlobalEvents({ refreshGroups });
+  useGlobalEvents({
+    refreshGroups,
+    refreshActors,
+    selectedGroupId,
+  });
 
   const { canManageGroups, ccccHome, fetchDirSuggestions } = useAppChrome({
     parseUrlDeepLink,
@@ -284,7 +302,7 @@ export default function App() {
 
       <AppShell
         orderedGroups={orderedGroups}
-        groupOrder={groupOrder}
+        archivedGroupIds={archivedGroupIds}
         groups={groups}
         selectedGroupId={selectedGroupId}
         groupDoc={groupDoc}
@@ -329,7 +347,9 @@ export default function App() {
         onCloseSidebar={() => setSidebarOpen(false)}
         onToggleSidebar={toggleSidebarCollapsed}
         onResizeSidebar={setSidebarWidth}
-        onReorderGroups={reorderGroups}
+        onReorderGroupsInSection={reorderGroupsInSection}
+        onArchiveGroup={archiveGroup}
+        onRestoreGroup={restoreGroup}
         onOpenSidebar={() => setSidebarOpen(true)}
         onOpenGroupEdit={
           canManageGroups

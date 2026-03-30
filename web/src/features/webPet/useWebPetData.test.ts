@@ -1,53 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { shouldSurfaceReminder } from "./useWebPetData";
 import type { PetReminder } from "./types";
-import type { PetPersonaPolicy } from "./petPersona";
-
-function makePolicy(overrides: Partial<PetPersonaPolicy> = {}): PetPersonaPolicy {
-  return {
-    compactMessageEvents: true,
-    autoRestartActors: true,
-    autoCompleteTasks: true,
-    ...overrides,
-  };
-}
 
 function makeReminder(overrides: Partial<PetReminder> = {}): PetReminder {
   return {
     id: "mention:evt-1",
-    kind: "mention",
+    kind: "suggestion",
     priority: 70,
-    summary: "peer 提到了你，需要你查看。",
+    summary: "peer 给了一个可直接发送的建议。",
     agent: "peer",
-    source: { eventId: "evt-1" },
-    fingerprint: "group:g-1:mention:evt-1",
+    source: { eventId: "evt-1", suggestionKind: "mention" },
+    fingerprint: "group:g-1:suggestion:mention:evt-1",
     action: {
-      type: "open_chat",
+      type: "draft_message",
       groupId: "g-1",
-      eventId: "evt-1",
+      text: "我来处理这条。",
+      to: ["peer"],
+      replyTo: "evt-1",
     },
     ...overrides,
   };
 }
 
 describe("shouldSurfaceReminder", () => {
-  it("hides generic open_chat mention reminders for low-noise persona", () => {
-    expect(shouldSurfaceReminder(makeReminder(), makePolicy())).toBe(false);
-  });
-
-  it("keeps actionable send_suggestion reminders for low-noise persona", () => {
+  it("keeps actionable draft_message reminders", () => {
     expect(
       shouldSurfaceReminder(
         makeReminder({
           action: {
-            type: "send_suggestion",
+            type: "draft_message",
             groupId: "g-1",
             text: "我来处理这条。",
             to: ["peer"],
             replyTo: "evt-1",
           },
         }),
-        makePolicy(),
       ),
     ).toBe(true);
   });
@@ -64,34 +51,62 @@ describe("shouldSurfaceReminder", () => {
             actorId: "peer-1",
           },
         }),
-        makePolicy(),
       ),
     ).toBe(true);
   });
 
-  it("hides non-suggestion reminders even for low-noise persona", () => {
+  it("hides malformed draft_message reminders", () => {
     expect(
       shouldSurfaceReminder(
         makeReminder({
-          id: "waiting_user:T1",
-          kind: "waiting_user",
           action: {
-            type: "open_task",
+            type: "draft_message",
             groupId: "g-1",
-            taskId: "T1",
+            text: "",
           },
         }),
-        makePolicy(),
       ),
     ).toBe(false);
   });
 
-  it("still hides generic open_chat reminders when persona is not low-noise", () => {
+  it("keeps task proposal reminders when they can be forwarded to foreman", () => {
     expect(
       shouldSurfaceReminder(
-        makeReminder(),
-        makePolicy({ compactMessageEvents: false }),
+        makeReminder({
+          summary: "建议把 T315 推进到 active。",
+          action: {
+            type: "task_proposal",
+            groupId: "g-1",
+            operation: "move",
+            taskId: "T315",
+            status: "active",
+          },
+        }),
       ),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("keeps automation proposal reminders when they have executable actions", () => {
+    expect(
+      shouldSurfaceReminder(
+        makeReminder({
+          summary: "建议创建一条一次性提醒规则。",
+          action: {
+            type: "automation_proposal",
+            groupId: "g-1",
+            title: "One-shot follow-up",
+            summary: "稍后检查 waiting_user 是否已推进。",
+            actions: [
+              {
+                type: "create_rule",
+                rule: {
+                  id: "pet-user-dependency-followup-once",
+                },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toBe(true);
   });
 });

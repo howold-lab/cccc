@@ -52,6 +52,7 @@ describe("useGroupStore actors fetch policy", () => {
     useGroupStore.setState({
       groups: [{ group_id: "g-demo", title: "Demo", topic: "", state: "active" }],
       groupOrder: ["g-demo"],
+      archivedGroupIds: [],
       selectedGroupId: "g-demo",
       chatByGroup: {},
       groupDoc: null,
@@ -139,6 +140,36 @@ describe("useGroupStore actors fetch policy", () => {
 
     expect(api.fetchActors).toHaveBeenCalledWith("g-demo", false);
     expect(useGroupStore.getState().actors).toEqual([{ id: "peer-1", running: false, unread_count: 4 }]);
+  });
+
+  it("updateActorActivity merges effective working state fields", () => {
+    useGroupStore.setState({
+      actors: [{ id: "peer-1", unread_count: 4, running: true, idle_seconds: 8 }],
+    });
+
+    useGroupStore.getState().updateActorActivity([
+      {
+        id: "peer-1",
+        running: true,
+        idle_seconds: 2,
+        effective_working_state: "working",
+        effective_working_reason: "agent_active_task",
+        effective_active_task_id: "T1",
+      },
+    ]);
+
+    expect(useGroupStore.getState().actors).toEqual([
+      {
+        id: "peer-1",
+        unread_count: 4,
+        running: true,
+        idle_seconds: 2,
+        effective_working_state: "working",
+        effective_working_reason: "agent_active_task",
+        effective_working_updated_at: null,
+        effective_active_task_id: "T1",
+      },
+    ]);
   });
 
   it("loadGroup keeps unread counts on the selected group path", async () => {

@@ -26,7 +26,6 @@ describe("aggregateWebPetState", () => {
   it("returns napping when no activity", () => {
     const result = aggregateWebPetState(makeInput());
     expect(result.catState).toBe("napping");
-    expect(result.panelData.actionItems).toHaveLength(0);
   });
 
   it("returns working when single agent is active", () => {
@@ -36,6 +35,36 @@ describe("aggregateWebPetState", () => {
     const result = aggregateWebPetState(makeInput({ groupContext: context }));
     expect(result.catState).toBe("working");
     expect(result.panelData.agents[0].state).toBe("working");
+  });
+
+  it("prefers actors_runtime effective working state over active task heuristics", () => {
+    const context: GroupContext = {
+      agent_states: [makeAgentState("peer-impl-1", "", "implementing")],
+      actors_runtime: [
+        {
+          id: "peer-impl-1",
+          effective_working_state: "working",
+        },
+      ],
+    };
+    const result = aggregateWebPetState(makeInput({ groupContext: context }));
+    expect(result.catState).toBe("working");
+    expect(result.panelData.agents[0].state).toBe("working");
+  });
+
+  it("includes runtime-only actors in panel state", () => {
+    const context: GroupContext = {
+      actors_runtime: [
+        {
+          id: "peer-impl-1",
+          effective_working_state: "working",
+        },
+      ],
+    };
+    const result = aggregateWebPetState(makeInput({ groupContext: context }));
+    expect(result.catState).toBe("working");
+    expect(result.panelData.agents).toHaveLength(1);
+    expect(result.panelData.agents[0].id).toBe("peer-impl-1");
   });
 
   it("returns busy when multiple agents are active", () => {
@@ -67,7 +96,6 @@ describe("aggregateWebPetState", () => {
     };
     const result = aggregateWebPetState(makeInput({ groupContext: context }));
     expect(result.catState).toBe("napping");
-    expect(result.panelData.actionItems).toHaveLength(0);
   });
 
   it("does not promote reply_required events into pet state", () => {
@@ -89,7 +117,6 @@ describe("aggregateWebPetState", () => {
     ];
     const result = aggregateWebPetState(makeInput({ events }));
     expect(result.catState).toBe("napping");
-    expect(result.panelData.actionItems).toHaveLength(0);
   });
 
   it("returns napping when group is paused (overrides everything)", () => {
@@ -128,7 +155,6 @@ describe("aggregateWebPetState", () => {
     ];
     const result = aggregateWebPetState(makeInput({ events }));
     expect(result.catState).toBe("napping");
-    expect(result.panelData.actionItems).toHaveLength(0);
   });
 
   it("focus-only agents are not considered active", () => {
@@ -165,7 +191,7 @@ describe("aggregateWebPetState", () => {
       agent_states: [],
     };
     const result = aggregateWebPetState(makeInput({ groupContext: context }));
-    expect(result.panelData.actionItems).toHaveLength(0);
+    expect(result.panelData.agents).toHaveLength(0);
   });
 
   it("does not populate waiting_user actions in the panel", () => {
@@ -176,10 +202,10 @@ describe("aggregateWebPetState", () => {
       agent_states: [],
     };
     const result = aggregateWebPetState(makeInput({ groupContext: context, groupId: "g_abc" }));
-    expect(result.panelData.actionItems).toHaveLength(0);
+    expect(result.panelData.agents).toHaveLength(0);
   });
 
-  it("keeps actionItems empty even when reply_required events exist", () => {
+  it("ignores reply_required events for panel content", () => {
     const events: LedgerEvent[] = [
       {
         id: "evt1",
@@ -192,7 +218,7 @@ describe("aggregateWebPetState", () => {
       },
     ];
     const result = aggregateWebPetState(makeInput({ events, groupId: "g_xyz" }));
-    expect(result.panelData.actionItems).toEqual([]);
+    expect(result.panelData.agents).toHaveLength(0);
   });
 
   it("populates taskProgress from tasks_summary excluding archived", () => {

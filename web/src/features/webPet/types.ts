@@ -14,47 +14,35 @@ export interface AgentSummary {
   focus: string;
 }
 
-export interface ActionItem {
-  id: string;
-  kind?: "waiting_user" | "reply_required";
-  agent: string;
-  summary: string;
-  action?: ReminderAction;
-}
-
 export type ReminderKind =
-  | "waiting_user"
-  | "reply_required"
-  | "stalled_peer"
+  | "suggestion"
   | "actor_down"
-  | "mention";
+  ;
 
 export type ReminderAction =
   | {
-      type: "open_chat";
-      groupId: string;
-      eventId: string;
-    }
-  | {
-      type: "open_task";
-      groupId: string;
-      taskId: string;
-    }
-  | {
-      type: "open_panel";
-      groupId: string;
-    }
-  | {
-      type: "complete_task";
-      groupId: string;
-      taskId: string;
-    }
-  | {
-      type: "send_suggestion";
+      type: "draft_message";
       groupId: string;
       text: string;
       to?: string[];
       replyTo?: string;
+    }
+  | {
+      type: "task_proposal";
+      groupId: string;
+      operation: "create" | "update" | "move" | "handoff" | "archive";
+      taskId?: string;
+      title?: string;
+      status?: string;
+      assignee?: string;
+      text?: string;
+    }
+  | {
+      type: "automation_proposal";
+      groupId: string;
+      title?: string;
+      summary?: string;
+      actions: Array<Record<string, unknown>>;
     }
   | {
       type: "restart_actor";
@@ -67,14 +55,15 @@ export interface PetReminder {
   kind: ReminderKind;
   priority: number;
   summary: string;
-  suggestion?: string;
-  suggestionPreview?: string;
   agent: string;
   ephemeral?: boolean;
   source: {
     eventId?: string;
     taskId?: string;
     actorId?: string;
+    actorRole?: string;
+    errorReason?: string;
+    suggestionKind?: "mention" | "reply_required";
   };
   fingerprint: string;
   action: ReminderAction;
@@ -88,7 +77,6 @@ export interface ConnectionStatus {
 export interface PanelData {
   teamName: string;
   agents: AgentSummary[];
-  actionItems: ActionItem[];
   connection: ConnectionStatus;
   taskProgress?: {
     total: number;

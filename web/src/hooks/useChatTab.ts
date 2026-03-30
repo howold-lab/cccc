@@ -1,7 +1,7 @@
 // useChatTab - Encapsulates ChatTab business logic and state.
 // Reduces prop drilling by providing state from stores and computed values directly.
 
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import {
   useGroupStore,
@@ -14,7 +14,7 @@ import {
 import { getEffectiveComposerDestGroupId } from "../stores/useComposerStore";
 import { getChatSession } from "../stores/useUIStore";
 import { useChatOutboxStore, selectOutboxEntries } from "../stores/chatOutboxStore";
-import type { Actor, LedgerEvent, ChatMessageData, MessageRef } from "../types";
+import type { Actor, LedgerEvent, ChatMessageData, MessageRef, OptimisticAttachment } from "../types";
 import * as api from "../services/api";
 
 interface UseChatTabOptions {
@@ -59,7 +59,6 @@ export function useChatTab({
 
   const busy = useUIStore((s) => s.busy);
   const chatSessions = useUIStore((s) => s.chatSessions);
-  const setBusy = useUIStore((s) => s.setBusy);
   const setChatFilter = useUIStore((s) => s.setChatFilter);
   const setShowScrollButton = useUIStore((s) => s.setShowScrollButton);
   const setChatUnreadCount = useUIStore((s) => s.setChatUnreadCount);
@@ -104,6 +103,7 @@ export function useChatTab({
   );
   const enqueueOutbox = useChatOutboxStore((s) => s.enqueue);
   const removeOutbox = useChatOutboxStore((s) => s.remove);
+  const sendInFlightRef = useRef(false);
 
   // ============ Computed Values ============
 
@@ -356,7 +356,7 @@ export function useChatTab({
   );
 
   const sendMessage = useCallback(async () => {
-    if (busy === "send") return; // re-entrancy guard (keyboard shortcut can bypass disabled button)
+    if (sendInFlightRef.current) return; // keyboard shortcut can bypass UI state; keep send single-flight locally
     const txt = composerText.trim();
     if (!selectedGroupId) return;
     if (!txt && composerFiles.length === 0) return;
@@ -419,6 +419,14 @@ export function useChatTab({
     // Optimistic: enqueue to outbox immediately for same-group sends.
     // If the request fails, we remove the pending entry and restore the composer.
     if (!isCrossGroup) {
+      const optimisticAttachments: OptimisticAttachment[] = composerFilesSnapshot.map((file) => ({
+        kind: "file",
+        path: "",
+        title: String(file.name || "file"),
+        bytes: Number(file.size || 0),
+        mime_type: String(file.type || ""),
+        local_preview_url: String(URL.createObjectURL(file)),
+      }));
       const optimisticEvent: LedgerEvent = {
         id: localId,
         kind: "chat.message",
@@ -435,9 +443,7 @@ export function useChatTab({
           quote_text: replyTargetSnapshot?.text || undefined,
           refs: refsSnapshot,
           format: "plain",
-          // Keep optimistic events schema-compatible with real ledger events.
-          // Attachment previews should only render after the server returns blob paths.
-          attachments: [],
+          attachments: optimisticAttachments,
           _optimistic: true,
         } as LedgerEvent["data"],
       };
@@ -445,7 +451,7 @@ export function useChatTab({
     }
 
     applyImmediateComposerFeedback();
-    setBusy("send");
+    sendInFlightRef.current = true;
     try {
       const to = toTokens;
       let resp;
@@ -491,13 +497,18 @@ export function useChatTab({
 
       // Cross-group sends do not deliver a canonical event into the current
       // group's stream, so clear the optimistic entry on HTTP success.
-      if (isCrossGroup || canonicalEvent) {
+      //
+      // Same-group sends keep the optimistic row until SSE reconciliation by
+      // client_id. Replacing an optimistic attachment preview with the HTTP
+      // response event causes a second image load/layout pass, which produces
+      // a visible jump while the list is following bottom.
+      if (isCrossGroup) {
         removeOutbox(selectedGroupId, localId);
       }
-      // Accepted-without-event for same-group sends means the daemon has
-      // queued the send; keep the optimistic entry until SSE delivers the
-      // canonical event with client_id.
-      if (canonicalEvent) {
+      // For same-group sends, rely on SSE to append the canonical event and
+      // clear the matching optimistic row. Cross-group sends still need the
+      // returned event because they do not stream back into the current group.
+      if (canonicalEvent && isCrossGroup) {
         appendEvent(canonicalEvent, selectedGroupId);
       }
       setDestGroupId(selectedGroupId);
@@ -521,10 +532,9 @@ export function useChatTab({
       restoreComposerState();
       showError(message);
     } finally {
-      setBusy("");
+      sendInFlightRef.current = false;
     }
   }, [
-    busy,
     composerText,
     composerFiles,
     selectedGroupId,
@@ -539,7 +549,6 @@ export function useChatTab({
     appendEvent,
     enqueueOutbox,
     removeOutbox,
-    setBusy,
     showError,
     clearComposer,
     setComposerText,

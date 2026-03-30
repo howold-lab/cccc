@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-
 class TestContextV2Ops(unittest.TestCase):
     def _with_home(self):
         old_home = os.environ.get("CCCC_HOME")
@@ -101,6 +100,214 @@ class TestContextV2Ops(unittest.TestCase):
             self.assertEqual(brief["current_focus"], "Board-first B3 rollout")
             self.assertEqual(brief["constraints"], ["No backward-compat ballast", "Keep bootstrap lean"])
             self.assertIn("coordination + agent_state", brief["project_brief"])
+        finally:
+            cleanup()
+
+    def test_context_get_marks_running_pty_without_prompt_as_waiting(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            from cccc.kernel.actors import add_actor
+            from cccc.kernel.context import ContextStorage
+            from cccc.kernel.group import load_group
+
+            group = load_group(gid)
+            self.assertIsNotNone(group)
+            add_actor(group, actor_id="peer1", runtime="codex", runner="pty")  # type: ignore[arg-type]
+            group.save()  # type: ignore[union-attr]
+
+            storage = ContextStorage(group)  # type: ignore[arg-type]
+            storage.update_agent_state("peer1", "Implement feature", active_task_id="T123")
+
+            with patch("cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.actor_running", return_value=True), patch(
+                "cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.idle_seconds",
+                return_value=8.0,
+            ):
+                ctx, _ = self._context(gid)
+
+            self.assertTrue(ctx.ok, getattr(ctx, "error", None))
+            actors_runtime = ctx.result.get("actors_runtime") if isinstance(ctx.result, dict) else []
+            self.assertEqual(len(actors_runtime), 1)
+            self.assertEqual(actors_runtime[0]["id"], "peer1")
+            self.assertEqual(actors_runtime[0]["effective_working_state"], "waiting")
+            self.assertEqual(actors_runtime[0]["effective_working_reason"], "pty_no_prompt_waiting")
+            self.assertEqual(actors_runtime[0]["effective_active_task_id"], "T123")
+        finally:
+            cleanup()
+
+    def test_context_get_terminal_banner_can_mark_codex_working_without_active_task(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            from cccc.kernel.actors import add_actor
+            from cccc.kernel.group import load_group
+
+            group = load_group(gid)
+            self.assertIsNotNone(group)
+            add_actor(group, actor_id="peer1", runtime="codex", runner="pty")  # type: ignore[arg-type]
+            group.save()  # type: ignore[union-attr]
+
+            with (
+                patch("cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.actor_running", return_value=True),
+                patch("cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.idle_seconds", return_value=1.0),
+                patch(
+                    "cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.tail_output",
+                    return_value="◦ Working (49s • esc to interrupt)\n".encode("utf-8"),
+                ),
+            ):
+                ctx, _ = self._context(gid)
+
+            self.assertTrue(ctx.ok, getattr(ctx, "error", None))
+            actors_runtime = ctx.result.get("actors_runtime") if isinstance(ctx.result, dict) else []
+            self.assertEqual(len(actors_runtime), 1)
+            self.assertEqual(actors_runtime[0]["effective_working_state"], "working")
+            self.assertEqual(actors_runtime[0]["effective_working_reason"], "pty_terminal_codex_working_banner")
+        finally:
+            cleanup()
+
+    def test_context_get_prefers_terminal_prompt_over_older_codex_working_banner(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            from cccc.kernel.actors import add_actor
+            from cccc.kernel.group import load_group
+
+            group = load_group(gid)
+            self.assertIsNotNone(group)
+            add_actor(group, actor_id="peer1", runtime="codex", runner="pty")  # type: ignore[arg-type]
+            group.save()  # type: ignore[union-attr]
+
+            with (
+                patch("cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.actor_running", return_value=True),
+                patch("cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.idle_seconds", return_value=1.0),
+                patch(
+                    "cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.tail_output",
+                    return_value=(
+                        "◦ Working (49s • esc to interrupt)\n"
+                        "stream disconnected before completion\n"
+                        "› Find and fix a bug in @filename\n"
+                        "gpt-5.4 default · 41% left · ~/Desktop/waterbang/ai/hr-agent\n"
+                    ).encode("utf-8"),
+                ),
+            ):
+                ctx, _ = self._context(gid)
+
+            self.assertTrue(ctx.ok, getattr(ctx, "error", None))
+            actors_runtime = ctx.result.get("actors_runtime") if isinstance(ctx.result, dict) else []
+            self.assertEqual(len(actors_runtime), 1)
+            self.assertEqual(actors_runtime[0]["effective_working_state"], "idle")
+            self.assertEqual(actors_runtime[0]["effective_working_reason"], "pty_terminal_prompt_visible")
+        finally:
+            cleanup()
+
+    def test_context_get_does_not_mark_fresh_running_pty_without_output_as_working(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            from cccc.kernel.actors import add_actor
+            from cccc.kernel.group import load_group
+
+            group = load_group(gid)
+            self.assertIsNotNone(group)
+            add_actor(group, actor_id="peer1", runtime="codex", runner="pty")  # type: ignore[arg-type]
+            group.save()  # type: ignore[union-attr]
+
+            with (
+                patch("cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.actor_running", return_value=True),
+                patch("cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.idle_seconds", return_value=0.6),
+                patch("cccc.daemon.context.context_ops.pty_runner.SUPERVISOR.tail_output", return_value=b""),
+            ):
+                ctx, _ = self._context(gid)
+
+            self.assertTrue(ctx.ok, getattr(ctx, "error", None))
+            actors_runtime = ctx.result.get("actors_runtime") if isinstance(ctx.result, dict) else []
+            self.assertEqual(len(actors_runtime), 1)
+            self.assertEqual(actors_runtime[0]["effective_working_state"], "waiting")
+            self.assertEqual(actors_runtime[0]["effective_working_reason"], "pty_no_prompt_waiting")
+        finally:
+            cleanup()
+
+    def test_waiting_user_task_create_requests_immediate_pet_review(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            with patch("cccc.daemon.context.context_ops.request_pet_review") as review_mock:
+                resp, _ = self._sync(
+                    gid,
+                    [
+                        {
+                            "op": "task.create",
+                            "title": "Need user answer",
+                            "status": "active",
+                            "waiting_on": "user",
+                        }
+                    ],
+                )
+            self.assertTrue(resp.ok, getattr(resp, "error", None))
+            review_mock.assert_called_once()
+            self.assertEqual(str(review_mock.call_args.kwargs.get("reason") or ""), "task_waiting_user")
+            self.assertTrue(bool(review_mock.call_args.kwargs.get("immediate")))
+        finally:
+            cleanup()
+
+    def test_notes_only_task_update_does_not_request_pet_review(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            create_resp, _ = self._sync(
+                gid,
+                [{"op": "task.create", "title": "Normal task", "status": "active"}],
+            )
+            self.assertTrue(create_resp.ok, getattr(create_resp, "error", None))
+            tasks_resp, _ = self._tasks(gid)
+            self.assertTrue(tasks_resp.ok, getattr(tasks_resp, "error", None))
+            tasks = (tasks_resp.result or {}).get("tasks") if isinstance(tasks_resp.result, dict) else []
+            self.assertIsInstance(tasks, list)
+            task_id = str((tasks[0] if tasks else {}).get("id") or "").strip()
+            self.assertTrue(task_id)
+
+            with patch("cccc.daemon.context.context_ops.request_pet_review") as review_mock:
+                update_resp, _ = self._sync(
+                    gid,
+                    [{"op": "task.update", "task_id": task_id, "notes": "Add more implementation detail."}],
+                )
+            self.assertTrue(update_resp.ok, getattr(update_resp, "error", None))
+            review_mock.assert_not_called()
+        finally:
+            cleanup()
+
+    def test_coordination_brief_update_requests_immediate_pet_review(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            with patch("cccc.daemon.context.context_ops.request_pet_review") as review_mock:
+                resp, _ = self._sync(
+                    gid,
+                    [{"op": "coordination.brief.update", "current_focus": "Need user confirmation"}],
+                )
+            self.assertTrue(resp.ok, getattr(resp, "error", None))
+            review_mock.assert_called_once()
+            self.assertEqual(str(review_mock.call_args.kwargs.get("reason") or ""), "coordination_brief_changed")
+            self.assertTrue(bool(review_mock.call_args.kwargs.get("immediate")))
+        finally:
+            cleanup()
+
+    def test_coordination_brief_noop_does_not_request_pet_review(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            first_resp, _ = self._sync(
+                gid,
+                [{"op": "coordination.brief.update", "current_focus": "Stable focus"}],
+            )
+            self.assertTrue(first_resp.ok, getattr(first_resp, "error", None))
+            with patch("cccc.daemon.context.context_ops.request_pet_review") as review_mock:
+                second_resp, _ = self._sync(
+                    gid,
+                    [{"op": "coordination.brief.update", "current_focus": "Stable focus"}],
+                )
+            self.assertTrue(second_resp.ok, getattr(second_resp, "error", None))
+            review_mock.assert_not_called()
         finally:
             cleanup()
 
@@ -234,7 +441,8 @@ class TestContextV2Ops(unittest.TestCase):
                     rebuilt_counts,
                     counts_after_sync,
                 )
-                mock_schedule.assert_called_once_with(gid)
+                self.assertEqual(mock_schedule.call_count, 2)
+                mock_schedule.assert_any_call(gid)
         finally:
             cleanup()
 
@@ -264,6 +472,39 @@ class TestContextV2Ops(unittest.TestCase):
                 self.assertEqual(mock_load_agents.call_count, 0)
                 self.assertEqual(mock_load_context.call_count, 0)
                 mock_schedule.assert_called_once_with(gid)
+        finally:
+            cleanup()
+
+    def test_context_sync_schedules_summary_snapshot_rebuild_after_write(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            with patch("cccc.daemon.context.context_ops._schedule_summary_snapshot_rebuild", return_value=True) as mock_schedule:
+                resp, _ = self._sync(
+                    gid,
+                    [{"op": "coordination.brief.update", "objective": "Schedule rebuild"}],
+                )
+            self.assertTrue(resp.ok, getattr(resp, "error", None))
+            mock_schedule.assert_called_once_with(gid)
+        finally:
+            cleanup()
+
+    def test_context_sync_dry_run_does_not_schedule_summary_snapshot_rebuild(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            with patch("cccc.daemon.context.context_ops._schedule_summary_snapshot_rebuild", return_value=True) as mock_schedule:
+                resp, _ = self._call(
+                    "context_sync",
+                    {
+                        "group_id": gid,
+                        "by": "user",
+                        "dry_run": True,
+                        "ops": [{"op": "coordination.brief.update", "objective": "Dry run only"}],
+                    },
+                )
+            self.assertTrue(resp.ok, getattr(resp, "error", None))
+            mock_schedule.assert_not_called()
         finally:
             cleanup()
 
@@ -340,6 +581,185 @@ class TestContextV2Ops(unittest.TestCase):
         finally:
             cleanup()
 
+    def test_task_type_round_trips_through_task_surfaces(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            create_resp, _ = self._sync(
+                gid,
+                [
+                    {
+                        "op": "task.create",
+                        "title": "Optimize cold start",
+                        "outcome": "Keep best branch visible",
+                        "task_type": "optimization",
+                        "notes": "Custom optimization note",
+                    }
+                ],
+            )
+            self.assertTrue(create_resp.ok, getattr(create_resp, "error", None))
+
+            task_list_resp, _ = self._tasks(gid)
+            self.assertTrue(task_list_resp.ok, getattr(task_list_resp, "error", None))
+            tasks = (task_list_resp.result or {}).get("tasks") if isinstance(task_list_resp.result, dict) else []
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]["task_type"], "optimization")
+            task_id = tasks[0]["id"]
+
+            ctx_resp, _ = self._context(gid)
+            self.assertTrue(ctx_resp.ok, getattr(ctx_resp, "error", None))
+            ctx_tasks = (ctx_resp.result or {}).get("coordination", {}).get("tasks", [])
+            self.assertEqual(len(ctx_tasks), 1)
+            self.assertEqual(ctx_tasks[0]["task_type"], "optimization")
+
+            single_resp, _ = self._call("task_list", {"group_id": gid, "task_id": task_id})
+            self.assertTrue(single_resp.ok, getattr(single_resp, "error", None))
+            single_task = (single_resp.result or {}).get("task") if isinstance(single_resp.result, dict) else None
+            self.assertIsInstance(single_task, dict)
+            self.assertEqual(single_task["task_type"], "optimization")
+            self.assertEqual(single_task["notes"], "Custom optimization note")
+            self.assertEqual(single_task.get("checklist") or [], [])
+        finally:
+            cleanup()
+
+    def test_task_create_defaults_structural_task_type(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            root_resp, _ = self._sync(
+                gid,
+                [{"op": "task.create", "title": "Root task"}],
+            )
+            self.assertTrue(root_resp.ok, getattr(root_resp, "error", None))
+            root_task = self._tasks(gid)[0].result["tasks"][0]
+            self.assertEqual(root_task["task_type"], "standard")
+
+            child_resp, _ = self._sync(
+                gid,
+                [{"op": "task.create", "title": "Child task", "parent_id": root_task["id"]}],
+            )
+            self.assertTrue(child_resp.ok, getattr(child_resp, "error", None))
+            tasks = self._tasks(gid)[0].result["tasks"]
+            child_task = next(task for task in tasks if task["id"] != root_task["id"])
+            self.assertEqual(child_task["task_type"], "free")
+        finally:
+            cleanup()
+
+    def test_task_create_with_type_keeps_notes_and_checklist_plain_when_blank(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            create_resp, _ = self._sync(
+                gid,
+                [
+                    {
+                        "op": "task.create",
+                        "title": "Optimize runtime",
+                        "task_type": "optimization",
+                    }
+                ],
+            )
+            self.assertTrue(create_resp.ok, getattr(create_resp, "error", None))
+
+            task = self._tasks(gid)[0].result["tasks"][0]
+            self.assertEqual(task["task_type"], "optimization")
+            self.assertEqual(str(task.get("notes") or ""), "")
+            self.assertEqual(task.get("checklist") or [], [])
+        finally:
+            cleanup()
+
+    def test_task_create_with_type_preserves_explicit_notes_and_checklist(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            create_resp, _ = self._sync(
+                gid,
+                [
+                    {
+                        "op": "task.create",
+                        "title": "Ship release",
+                        "task_type": "standard",
+                        "notes": "Custom release framing",
+                        "checklist": [{"text": "Run smoke verification", "status": "pending"}],
+                    }
+                ],
+            )
+            self.assertTrue(create_resp.ok, getattr(create_resp, "error", None))
+
+            task = self._tasks(gid)[0].result["tasks"][0]
+            self.assertEqual(task["notes"], "Custom release framing")
+            self.assertEqual(task["task_type"], "standard")
+            checklist = task.get("checklist") or []
+            self.assertTrue(any(str(item.get("text") or "") == "Run smoke verification" for item in checklist))
+        finally:
+            cleanup()
+
+    def test_task_update_validates_task_type_and_does_not_realign_on_reparent(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            create_resp, _ = self._sync(
+                gid,
+                [{"op": "task.create", "title": "Ship release", "task_type": "standard"}],
+            )
+            self.assertTrue(create_resp.ok, getattr(create_resp, "error", None))
+            task_id = self._tasks(gid)[0].result["tasks"][0]["id"]
+
+            update_resp, _ = self._sync(
+                gid,
+                [{"op": "task.update", "task_id": task_id, "task_type": "optimization"}],
+            )
+            self.assertTrue(update_resp.ok, getattr(update_resp, "error", None))
+            task = self._tasks(gid)[0].result["tasks"][0]
+            self.assertEqual(task["task_type"], "optimization")
+
+            invalid_null_resp, _ = self._sync(
+                gid,
+                [{"op": "task.update", "task_id": task_id, "task_type": None}],
+            )
+            self.assertFalse(invalid_null_resp.ok)
+            self.assertIn("task_type", str(invalid_null_resp.error.message).lower())
+
+            invalid_resp, _ = self._sync(
+                gid,
+                [{"op": "task.update", "task_id": task_id, "task_type": "invalid"}],
+            )
+            self.assertFalse(invalid_resp.ok)
+            self.assertIn("task_type", str(invalid_resp.error.message).lower())
+
+            root_resp, _ = self._sync(
+                gid,
+                [{"op": "task.create", "title": "Parent"}],
+            )
+            self.assertTrue(root_resp.ok, getattr(root_resp, "error", None))
+            parent_task = next(task for task in self._tasks(gid)[0].result["tasks"] if task["title"] == "Parent")
+
+            child_resp, _ = self._sync(
+                gid,
+                [{"op": "task.create", "title": "Child"}],
+            )
+            self.assertTrue(child_resp.ok, getattr(child_resp, "error", None))
+            child_task = next(task for task in self._tasks(gid)[0].result["tasks"] if task["title"] == "Child")
+            self.assertEqual(child_task["task_type"], "standard")
+
+            reparent_resp, _ = self._sync(
+                gid,
+                [{"op": "task.update", "task_id": child_task["id"], "parent_id": parent_task["id"]}],
+            )
+            self.assertTrue(reparent_resp.ok, getattr(reparent_resp, "error", None))
+            child_after_reparent = next(task for task in self._tasks(gid)[0].result["tasks"] if task["id"] == child_task["id"])
+            self.assertEqual(child_after_reparent["task_type"], "standard")
+
+            detach_resp, _ = self._sync(
+                gid,
+                [{"op": "task.update", "task_id": child_task["id"], "parent_id": None}],
+            )
+            self.assertTrue(detach_resp.ok, getattr(detach_resp, "error", None))
+            child_after_detach = next(task for task in self._tasks(gid)[0].result["tasks"] if task["id"] == child_task["id"])
+            self.assertEqual(child_after_detach["task_type"], "standard")
+        finally:
+            cleanup()
+
     def test_task_move_status_restore_and_invalid_status(self) -> None:
         _, cleanup = self._with_home()
         try:
@@ -364,6 +784,23 @@ class TestContextV2Ops(unittest.TestCase):
             bad_resp, _ = self._sync(gid, [{"op": "task.move", "task_id": task_id, "status": "pending"}])
             self.assertFalse(bad_resp.ok)
             self.assertIn("invalid task status", str(bad_resp.error.message).lower())
+        finally:
+            cleanup()
+
+    def test_task_move_rejects_patch_fields(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            gid = self._create_group()
+            self._sync(gid, [{"op": "task.create", "title": "T", "outcome": "G"}])
+            task_id = self._tasks(gid)[0].result["tasks"][0]["id"]
+
+            bad_resp, _ = self._sync(
+                gid,
+                [{"op": "task.move", "task_id": task_id, "status": "done", "outcome": "ship it"}],
+            )
+            self.assertFalse(bad_resp.ok)
+            self.assertIn("task.move only accepts task_id and status", str(bad_resp.error.message).lower())
+            self.assertIn("task.update", str(bad_resp.error.message).lower())
         finally:
             cleanup()
 
