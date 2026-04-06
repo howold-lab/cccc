@@ -2,6 +2,7 @@
 
 // Theme types
 export type Theme = "light" | "dark" | "system";
+export type TextScale = 90 | 100 | 125;
 
 export type GroupMeta = {
   group_id: string;
@@ -124,6 +125,7 @@ export type LedgerEvent = {
 export type Actor = {
   id: string;
   role?: string;
+  internal_kind?: string | null;
   title?: string;
   avatar_url?: string | null;
   has_custom_avatar?: boolean;
@@ -602,6 +604,10 @@ export type WebAccessSession = {
   allowed_groups?: string[];
   access_token_count?: number;
   can_access_global_settings?: boolean;
+  runtime_visibility?: {
+    peer_runtime?: "hidden" | "visible" | string;
+    pet_runtime?: "hidden" | "visible" | string;
+  };
 };
 
 export type WebBranding = {
@@ -861,7 +867,7 @@ export type GroupAutomation = {
   server_now?: string;
 };
 
-export type IMPlatform = "telegram" | "slack" | "discord" | "feishu" | "dingtalk" | "wecom";
+export type IMPlatform = "telegram" | "slack" | "discord" | "feishu" | "dingtalk" | "wecom" | "weixin";
 
 export type IMConfig = {
   platform?: IMPlatform;
@@ -890,6 +896,9 @@ export type IMConfig = {
   // WeCom fields
   wecom_bot_id?: string;
   wecom_secret?: string;
+  // Weixin fields
+  weixin_account_id?: string;
+  weixin_command?: string;
 };
 
 export type IMStatus = {
@@ -899,6 +908,18 @@ export type IMStatus = {
   running: boolean;
   pid?: number;
   subscribers: number;
+};
+
+export type WeixinLoginStatus = {
+  status: string;
+  logged_in: boolean;
+  account_id?: string;
+  qrcode_url?: string;
+  qr_ascii?: string;
+  error?: string;
+  running: boolean;
+  pid?: number | null;
+  updated_at?: string;
 };
 
 export type DirItem = { name: string; path: string; is_dir: boolean };

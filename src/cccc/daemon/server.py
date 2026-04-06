@@ -33,7 +33,7 @@ from ..paths import ensure_home
 from ..runners import pty as pty_runner
 from ..runners import headless as headless_runner
 from ..util.conv import coerce_bool
-from ..util.obslog import setup_root_json_logging
+from ..util.obslog import apply_logger_levels, setup_root_json_logging
 from ..util.process import best_effort_signal_pid, pid_is_alive
 from ..util.fs import atomic_write_json, atomic_write_text, read_json
 from ..util.file_lock import acquire_lockfile, release_lockfile, LockUnavailableError
@@ -139,6 +139,11 @@ _DAEMON_CLIENT_WARN_LOCK = threading.Lock()
 _DAEMON_CLIENT_WARN_SEEN: Dict[tuple[str, str, str], float] = {}
 _SPACE_SYNC_RUN_QUEUE: Optional[GroupSpaceSyncRunQueue] = None
 _REQUEST_FAST_QUEUE_OPS = {"send", "reply", "chat_ack"}
+_REQUEST_FAST_QUEUE_READ_OPS = {
+    "group_space_status",
+    "im_list_authorized",
+    "im_list_pending",
+}
 
 
 def _should_log_daemon_client_warning(*, op: str, phase: str, reason: str) -> bool:
@@ -183,13 +188,28 @@ def _apply_observability_settings(home: Path, obs: Dict[str, Any]) -> None:
         _OBSERVABILITY.update(copy.deepcopy(obs))
         _OBSERVABILITY_HOME = home
 
-    # Logging: keep simple; configure root JSONL logger to stderr.
-    level = str(obs.get("log_level") or "INFO").strip().upper() or "INFO"
-    if coerce_bool(obs.get("developer_mode"), default=False):
-        # Developer mode typically wants more detail.
-        if level == "INFO":
-            level = "DEBUG"
-    setup_root_json_logging(component="daemon", level=level, force=True)
+    # Keep root conservative and express targeted DEBUG via logger overrides.
+    requested_level = str(obs.get("log_level") or "INFO").strip().upper() or "INFO"
+    effective_level = requested_level
+    if coerce_bool(obs.get("developer_mode"), default=False) and requested_level == "INFO":
+        effective_level = "DEBUG"
+    root_level = "INFO" if effective_level == "DEBUG" else effective_level
+    logger_levels = {
+        str(name): str(level)
+        for name, level in (obs.get("logger_levels") or {}).items()
+    } if isinstance(obs.get("logger_levels"), dict) else {}
+    if effective_level == "DEBUG":
+        logger_levels.setdefault("cccc", "DEBUG")
+        for noisy_logger in (
+            "asyncio",
+            "httpcore",
+            "httpx",
+            "cccc.delivery",
+            "cccc.providers.notebooklm._vendor.notebooklm",
+        ):
+            logger_levels.setdefault(noisy_logger, "INFO")
+    setup_root_json_logging(component="daemon", level=root_level, force=True)
+    apply_logger_levels(logger_levels)
 
 
 def _apply_space_provider_runtime_flags_from_state() -> None:
@@ -237,8 +257,14 @@ def _request_queue_for(
     slow_queue: DaemonRequestExecutionQueue,
 ) -> DaemonRequestExecutionQueue:
     op = str(getattr(req, "op", "") or "").strip()
+    args = getattr(req, "args", None)
+    if op in _REQUEST_FAST_QUEUE_READ_OPS:
+        return fast_queue
+    if op == "group_space_provider_auth":
+        action = str(args.get("action") or "").strip().lower() if isinstance(args, dict) else ""
+        if action == "status":
+            return fast_queue
     if op in _REQUEST_FAST_QUEUE_OPS:
-        args = getattr(req, "args", None)
         group_id = str(args.get("group_id") or "").strip() if isinstance(args, dict) else ""
         if group_id:
             group = load_group(group_id)
@@ -588,6 +614,9 @@ def _maybe_autostart_running_groups() -> None:
         throttle_reset_actor=lambda gid, aid: THROTTLE.reset_actor(gid, aid, keep_pending=True),
         automation_on_resume=AUTOMATION.on_resume,
         get_group_state=get_group_state,
+        load_actor_private_env=_load_actor_private_env,
+        update_actor_private_env=_update_actor_private_env,
+        delete_actor_private_env=_delete_actor_private_env,
         resolve_linked_actor_before_start=lambda grp, aid, caller_id="", is_admin=False: _resolve_linked_actor_before_start(
             grp,
             aid,
@@ -684,6 +713,7 @@ def _start_actor_process(
         clear_preamble_sent=clear_preamble_sent,
         throttle_reset_actor=lambda gid, aid: THROTTLE.reset_actor(gid, aid, keep_pending=True),
         supported_runtimes=SUPPORTED_RUNTIMES,
+        load_actor_private_env=_load_actor_private_env,
         resolve_linked_actor_before_start=lambda grp, aid, caller_id="", is_admin=False: _resolve_linked_actor_before_start(
             grp,
             aid,

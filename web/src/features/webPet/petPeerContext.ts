@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
 import type { PetPeerContextResponse } from "../../services/api";
 import { fetchPetPeerContext } from "../../services/api";
-import type { PetReminder } from "./types";
+import type { PetCompanionProfile, PetReminder } from "./types";
 
 export type PetPeerContextStatus = "idle" | "loading" | "loaded" | "error";
 
+const PET_CONTEXT_INITIAL_FETCH_DELAY_MS = 800;
+const petPeerContextCache = new Map<string, Partial<PetPeerContextResponse> | null>();
+
 export type PetPeerContext = {
+  companion: PetCompanionProfile;
   decisions: PetReminder[];
   signals: {
     replyPressure: {
@@ -61,6 +65,15 @@ export type PetPeerContext = {
   snapshot: string;
   source: "help" | "default";
   status: PetPeerContextStatus;
+};
+
+const DEFAULT_COMPANION: PetCompanionProfile = {
+  name: "Momo",
+  species: "cat",
+  identity: "Momo is a small desk-side companion who watches team flow quietly.",
+  temperament: "steady",
+  speechStyle: "short, plain sentences",
+  careStyle: "prefers the smallest next step that unblocks progress",
 };
 
 function mapTaskProposalOperation(value: unknown): "create" | "update" | "move" | "handoff" | "archive" {
@@ -152,16 +165,6 @@ function mapDecision(raw: NonNullable<PetPeerContextResponse["decisions"]>[numbe
             assignee: String(raw?.action?.assignee || "").trim() || undefined,
             text: String(raw?.action?.text || "").trim() || undefined,
           }
-      : actionType === "automation_proposal"
-        ? {
-            type: "automation_proposal" as const,
-            groupId: String(raw?.action?.group_id || "").trim(),
-            title: String(raw?.action?.title || "").trim() || undefined,
-            summary: String(raw?.action?.summary || "").trim() || undefined,
-            actions: Array.isArray(raw?.action?.actions)
-              ? raw.action.actions.filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
-              : [],
-          }
       : actionType === "draft_message"
         ? {
           type: "draft_message" as const,
@@ -179,7 +182,6 @@ function mapDecision(raw: NonNullable<PetPeerContextResponse["decisions"]>[numbe
   if (action.type === "restart_actor" && (!action.groupId || !action.actorId)) return null;
   if (action.type === "draft_message" && !action.text) return null;
   if (action.type === "task_proposal" && !action.groupId) return null;
-  if (action.type === "automation_proposal" && (!action.groupId || action.actions.length === 0)) return null;
 
   return {
     id,
@@ -206,6 +208,23 @@ function mapDecision(raw: NonNullable<PetPeerContextResponse["decisions"]>[numbe
   };
 }
 
+function mapCompanion(raw?: PetPeerContextResponse["companion"] | null): PetCompanionProfile {
+  const name = String(raw?.name || "").trim();
+  const species = String(raw?.species || "").trim();
+  const identity = String(raw?.identity || "").trim();
+  const temperament = String(raw?.temperament || "").trim();
+  const speechStyle = String(raw?.speech_style || "").trim();
+  const careStyle = String(raw?.care_style || "").trim();
+  return {
+    name: name || DEFAULT_COMPANION.name,
+    species: species || DEFAULT_COMPANION.species,
+    identity: identity || DEFAULT_COMPANION.identity,
+    temperament: temperament || DEFAULT_COMPANION.temperament,
+    speechStyle: speechStyle || DEFAULT_COMPANION.speechStyle,
+    careStyle: careStyle || DEFAULT_COMPANION.careStyle,
+  };
+}
+
 export function buildPetPeerContext(
   raw?: Partial<PetPeerContextResponse> | null,
   opts?: { status?: PetPeerContextStatus },
@@ -219,6 +238,7 @@ export function buildPetPeerContext(
     : [];
 
   return {
+    companion: mapCompanion(raw?.companion),
     decisions,
     signals: mapSignals(raw?.signals),
     persona,
@@ -236,54 +256,63 @@ export function usePetPeerContext(input: {
 }): PetPeerContext {
   const groupId = String(input.groupId || "").trim();
   const refreshToken = Number(input.refreshToken || 0);
+  const cachedContext = groupId ? (petPeerContextCache.get(groupId) ?? null) : null;
   const [state, setState] = useState<{
     groupId: string;
     rawContext: Partial<PetPeerContextResponse> | null;
     status: PetPeerContextStatus;
   }>({
-    groupId: "",
-    rawContext: null,
-    status: "idle",
+    groupId,
+    rawContext: cachedContext,
+    status: groupId ? (cachedContext ? "loaded" : "loading") : "idle",
   });
 
   useEffect(() => {
     if (!groupId) return;
 
     let cancelled = false;
+    const cached = petPeerContextCache.get(groupId) ?? null;
     // 同步更新 state.groupId 以避免在 fetch 期间产生 state.groupId !== groupId 的
     // "中间态"，该中间态会导致每次重渲染创建新对象，引发 VirtualMessageList 级联刷新
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 有意为之的同步状态机转换
     setState({
       groupId,
-      rawContext: null,
-      status: "loading",
+      rawContext: cached,
+      status: cached ? "loaded" : "loading",
     });
-    void fetchPetPeerContext(groupId)
-      .then((resp) => {
-        if (cancelled) return;
-        setState({
-          groupId,
-          rawContext: resp.ok ? resp.result || null : null,
-          status: resp.ok ? "loaded" : "error",
+    const timeout = window.setTimeout(() => {
+      void fetchPetPeerContext(groupId)
+        .then((resp) => {
+          if (cancelled) return;
+          const nextRawContext = resp.ok ? resp.result || null : cached;
+          if (resp.ok) {
+            petPeerContextCache.set(groupId, nextRawContext);
+          }
+          setState({
+            groupId,
+            rawContext: nextRawContext,
+            status: resp.ok ? "loaded" : cached ? "loaded" : "error",
+          });
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          console.warn("failed to load pet peer context", error);
+          setState({
+            groupId,
+            rawContext: cached,
+            status: cached ? "loaded" : "error",
+          });
         });
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        console.warn("failed to load pet peer context", error);
-        setState({
-          groupId,
-          rawContext: null,
-          status: "error",
-        });
-      });
+    }, refreshToken > 0 ? 0 : PET_CONTEXT_INITIAL_FETCH_DELAY_MS);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timeout);
     };
   }, [groupId, refreshToken]);
 
   if (!groupId || state.groupId !== groupId) {
-    return buildPetPeerContext(null, { status: !groupId ? "idle" : "loading" });
+    return buildPetPeerContext(cachedContext, { status: !groupId ? "idle" : (cachedContext ? "loaded" : "loading") });
   }
 
   return buildPetPeerContext(state.rawContext, { status: state.status });

@@ -3,13 +3,11 @@ import { useGroupStore, useUIStore } from "../../stores";
 import { getWebPetPosition, useWebPetStore } from "../../stores/useWebPetStore";
 import {
   fetchActors,
-  fetchAutomation,
   fetchContext,
   fetchGroup,
   fetchLedgerTail,
   fetchPetPeerContext,
   fetchSettings,
-  manageAutomation,
   recordPetDecisionOutcome,
   requestPetPeerReview,
   restartActor,
@@ -24,6 +22,7 @@ import { stagePetReminderDraft } from "./petSuggestionDraft";
 import { getBackgroundRefreshDelayMs } from "./reviewTiming";
 import { WEB_PET_BUBBLE_SIZE } from "./constants";
 import { getLatestPetContextRefreshMarker } from "./petContextRefresh";
+import { shouldProjectReminderForGroupState } from "./useWebPetNotifications";
 import type { PetReminder } from "./types";
 import type { Actor, GroupContext, GroupDoc, GroupSettings, LedgerEvent } from "../../types";
 import i18n from "../../i18n";
@@ -46,6 +45,10 @@ function tPet(key: string, fallback: string, vars?: Record<string, unknown>): st
   return String(i18n.t(`webPet:${key}`, { defaultValue: fallback, ...(vars || {}) }));
 }
 
+export function isManualReviewReminderReady(reminder: PetReminder, groupState: string): boolean {
+  return shouldSurfaceReminder(reminder) && shouldProjectReminderForGroupState(reminder, groupState);
+}
+
 function handleReminderAction(
   reminder: PetReminder,
   onExecuted?: () => void,
@@ -64,7 +67,7 @@ function handleReminderAction(
       });
       onExecuted?.();
       useUIStore.getState().showNotice({
-        message: tPet("notice.suggestionDrafted", "Draft added to composer"),
+        message: tPet("notice.suggestionDrafted", "Filled into chat composer"),
       });
       break;
     }
@@ -92,39 +95,6 @@ function handleReminderAction(
           error instanceof Error
             ? error.message
             : tPet("notice.actorRestartFailed", "Failed to restart actor");
-        useUIStore.getState().showError(message);
-      });
-      break;
-    }
-    case "automation_proposal": {
-      void fetchAutomation(action.groupId).then((automationResp) => {
-        if (!automationResp.ok) {
-          useUIStore.getState().showError(`${automationResp.error.code}: ${automationResp.error.message}`);
-          return;
-        }
-        const expectedVersion = Number(automationResp.result?.version || 0) || undefined;
-        return manageAutomation(action.groupId, action.actions, expectedVersion).then((resp) => {
-          if (!resp.ok) {
-            useUIStore.getState().showError(`${resp.error.code}: ${resp.error.message}`);
-            return;
-          }
-          void recordPetDecisionOutcome(action.groupId, {
-            fingerprint: reminder.fingerprint,
-            outcome: "executed",
-            decisionId: reminder.id,
-            actionType: action.type,
-            sourceEventId: reminder.source.eventId,
-          });
-          onExecuted?.();
-          useUIStore.getState().showNotice({
-            message: tPet("notice.automationProposalApplied", "Automation proposal applied"),
-          });
-        });
-      }).catch((error) => {
-        const message =
-          error instanceof Error
-            ? error.message
-            : tPet("notice.automationProposalApplyFailed", "Failed to apply automation proposal");
         useUIStore.getState().showError(message);
       });
       break;
@@ -185,6 +155,8 @@ export function WebPet({
   );
   const {
     catState,
+    panelData,
+    taskSummaries,
     hint,
     reminders,
     activeReminder,
@@ -258,7 +230,7 @@ export function WebPet({
         if (contextResp.ok) {
           const refreshedContext = buildPetPeerContext(contextResp.result, { status: "loaded" });
           const refreshedReminder =
-            refreshedContext.decisions.find((decision) => shouldSurfaceReminder(decision)) || null;
+            refreshedContext.decisions.find((decision) => isManualReviewReminderReady(decision, groupDoc?.state || "")) || null;
           if (refreshedReminder) {
             reminderReady = true;
             setPetContextRefreshToken((current) => current + 1);
@@ -529,6 +501,8 @@ export function WebPet({
         <PetPanel
           reminder={selectedReminder}
           reminders={reminders}
+          companion={petContext.companion}
+          taskSummaries={taskSummaries.length > 0 ? taskSummaries : panelData.agents.map((agent) => agent.focus).filter(Boolean)}
           reviewInFlight={reviewInFlight}
           onDismiss={dismissReminder}
           onAction={handleReminderActionWithDismiss}
@@ -545,6 +519,7 @@ export function WebPet({
         groupId={groupId}
         stackIndex={stackIndex}
         state={catState}
+        companion={petContext.companion}
         hint={hint}
         reaction={reaction}
         onPress={handleBubblePress}

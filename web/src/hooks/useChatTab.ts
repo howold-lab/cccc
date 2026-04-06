@@ -19,6 +19,7 @@ import * as api from "../services/api";
 
 interface UseChatTabOptions {
   selectedGroupId: string;
+  selectedGroupRunning: boolean;
   actors: Actor[];
   recipientActors: Actor[];
   /** Callback for when message is sent */
@@ -36,6 +37,7 @@ type ChatEmptyState = "ready" | "hydrating" | "business_empty";
 
 export function useChatTab({
   selectedGroupId,
+  selectedGroupRunning,
   actors,
   recipientActors,
   onMessageSent,
@@ -161,11 +163,6 @@ export function useChatTab({
   const hasForeman = useMemo(() => actors.some((a) => a.role === "foreman"), [actors]);
 
   // Selected group running state
-  const selectedGroupRunning = useMemo(() => {
-    const anyActorRunning = actors.some((a) => !!a.running);
-    return anyActorRunning;
-  }, [actors]);
-
   // Setup checklist conditions
   const needsScope = !!selectedGroupId && !projectRoot;
   const needsActors = !!selectedGroupId && actors.length === 0;
@@ -272,7 +269,7 @@ export function useChatTab({
   }, [inChatWindow, chatWindow]);
 
   const effectiveIsLoadingHistory = inChatWindow ? isChatWindowLoading : isLoadingHistory;
-  const effectiveHasMoreHistory = inChatWindow ? false : (!hasLoadedTail || hasMoreHistory);
+  const effectiveHasMoreHistory = !selectedGroupId ? false : inChatWindow ? false : (!hasLoadedTail || hasMoreHistory);
 
   const hasHydratedGroupDoc = useMemo(() => {
     if (!groupDoc || String(groupDoc.group_id || "") !== String(selectedGroupId || "")) return false;
@@ -733,7 +730,7 @@ export function useChatTab({
       setChatUnreadCount(selectedGroupId, 0);
       setChatScrollSnapshot(selectedGroupId, { atBottom: true, anchorId: "", offsetPx: 0 });
     }
-  }, [selectedGroupId, chatAtBottomRef, setShowScrollButton, setChatUnreadCount, setChatScrollSnapshot]);
+  }, [chatAtBottomRef, selectedGroupId, setShowScrollButton, setChatUnreadCount, setChatScrollSnapshot]);
 
   const handleScrollChange = useCallback(
     (isAtBottom: boolean) => {

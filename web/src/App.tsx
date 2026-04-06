@@ -1,10 +1,12 @@
 import React, { lazy, Suspense, useEffect, useMemo } from "react";
+import * as api from "./services/api";
 import { DropOverlay } from "./components/DropOverlay";
 const AppModals = lazy(() => import("./components/AppModals").then((m) => ({ default: m.AppModals })));
 const WebPet = lazy(() => import("./features/webPet/WebPet").then((m) => ({ default: m.WebPet })));
 import { AppBackground } from "./components/app/AppBackground";
 import { AppFeedback } from "./components/app/AppFeedback";
 import { AppShell } from "./components/app/AppShell";
+import { useTextScale } from "./hooks/useTextScale";
 import { useTheme } from "./hooks/useTheme";
 import { useActorActions } from "./hooks/useActorActions";
 import { useSSE } from "./hooks/useSSE";
@@ -26,15 +28,18 @@ import {
   useModalStore,
   useComposerStore,
   useFormStore,
+  useObservabilityStore,
 } from "./stores";
 import { useChatOutboxStore } from "./stores/chatOutboxStore";
-import type { ChatMessageData, LedgerEvent } from "./types";
+import type { Actor, ChatMessageData, LedgerEvent } from "./types";
+import { filterVisibleRuntimeActors, isPetRuntimeActor } from "./utils/runtimeVisibility";
 
 // ============ Main App Component ============
 
 export default function App() {
   // Theme
   const { theme, setTheme, isDark } = useTheme();
+  const { textScale, setTextScale } = useTextScale();
 
   // Virtual keyboard viewport adjustment for mobile
   useViewportHeight();
@@ -48,6 +53,7 @@ export default function App() {
   const actors = useGroupStore((state) => state.actors);
   const groupContext = useGroupStore((state) => state.groupContext);
   const groupSettings = useGroupStore((state) => state.groupSettings);
+  const selectedGroupActorsHydrating = useGroupStore((state) => state.selectedGroupActorsHydrating);
   const setSelectedGroupId = useGroupStore((state) => state.setSelectedGroupId);
   const refreshGroups = useGroupStore((state) => state.refreshGroups);
   const refreshActors = useGroupStore((state) => state.refreshActors);
@@ -87,6 +93,8 @@ export default function App() {
   const openModal = useModalStore((s) => s.openModal);
   const modalFlags = useModalStore((s) => s.modals);
   const editingActor = useModalStore((s) => s.editingActor);
+  const peerRuntimeVisibility = useObservabilityStore((state) => state.peerRuntimeVisibility);
+  const petRuntimeVisibility = useObservabilityStore((state) => state.petRuntimeVisibility);
 
   const {
     activeGroupId,
@@ -122,6 +130,23 @@ export default function App() {
   const [showMentionMenu, setShowMentionMenu] = React.useState(false);
   const [_mentionFilter, setMentionFilter] = React.useState("");
   const [mentionSelectedIndex, setMentionSelectedIndex] = React.useState(0);
+  const [internalRuntimeActors, setInternalRuntimeActors] = React.useState<Actor[]>([]);
+  const visibleRuntimeActors = useMemo(
+    () =>
+      filterVisibleRuntimeActors(
+        [
+          ...actors,
+          ...internalRuntimeActors.filter(
+            (actor) => !actors.some((existing) => String(existing.id || "") === String(actor.id || ""))
+          ),
+        ],
+        {
+        peerRuntimeVisibility,
+        petRuntimeVisibility,
+      }
+      ),
+    [actors, internalRuntimeActors, peerRuntimeVisibility, petRuntimeVisibility]
+  );
 
   useEffect(() => {
     const handlePageHide = () => clearAllOutbox();
@@ -147,6 +172,7 @@ export default function App() {
   } = useAppTabState({
     activeTab,
     actors,
+    runtimeActors: visibleRuntimeActors,
     selectedGroupId,
     chatSessionAtBottom,
     isSmallScreen,
@@ -154,6 +180,39 @@ export default function App() {
     setShowScrollButton,
     setChatUnreadCount,
   });
+
+  useEffect(() => {
+    if (activeTab === "chat") return;
+    if (visibleRuntimeActors.some((actor) => String(actor.id || "") === activeTab)) return;
+    setActiveTab("chat");
+  }, [activeTab, setActiveTab, visibleRuntimeActors]);
+
+  useEffect(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid || petRuntimeVisibility !== "visible") {
+      setInternalRuntimeActors([]);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    void api
+      .fetchActors(gid, false, { noCache: true, signal: controller.signal }, { includeInternal: true })
+      .then((resp) => {
+        if (cancelled || !resp.ok) return;
+        const next = Array.isArray(resp.result?.actors)
+          ? resp.result.actors.filter((actor) => isPetRuntimeActor(actor))
+          : [];
+        setInternalRuntimeActors(next);
+      })
+      .catch((error) => {
+        if (cancelled || controller.signal.aborted) return;
+        console.error(`Failed to load internal runtime actors for group=${gid}:`, error);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [selectedGroupId, petRuntimeVisibility, groupSettings?.desktop_pet_enabled]);
 
   // Custom hooks
   const { connectStream, fetchContext, cleanup: cleanupSSE } = useSSE({
@@ -293,10 +352,13 @@ export default function App() {
 
   return (
     <div
-      className={`relative w-full overflow-hidden ${
+      className={`relative min-h-0 w-full overflow-hidden ${
         isDark ? "bg-black text-slate-100" : "bg-gradient-to-br from-slate-50 via-white to-slate-100"
       }`}
-      style={{ height: "calc(100% - var(--vk-offset, 0px))" }}
+      style={{
+        height: "calc(100dvh - var(--vk-offset, 0px))",
+        maxHeight: "calc(100dvh - var(--vk-offset, 0px))",
+      }}
     >
       <AppBackground isDark={isDark} />
 
@@ -308,6 +370,7 @@ export default function App() {
         groupDoc={groupDoc}
         groupContext={groupContext}
         actors={actors}
+        runtimeActors={visibleRuntimeActors}
         recipientActors={recipientActors}
         recipientActorsBusy={recipientActorsBusy}
         destGroupScopeLabel={destGroupScopeLabel}
@@ -322,7 +385,9 @@ export default function App() {
         isSmallScreen={isSmallScreen}
         webReadOnly={webReadOnly}
         selectedGroupRunning={selectedGroupRunning}
+        selectedGroupActorsHydrating={selectedGroupActorsHydrating}
         theme={theme}
+        textScale={textScale}
         sseStatus={sseStatus}
         groupLabelById={groupLabelById}
         chatUnreadCount={chatUnreadCount}
@@ -334,6 +399,7 @@ export default function App() {
         contentRef={contentRef}
         chatAtBottomRef={chatAtBottomRef}
         onThemeChange={setTheme}
+        onTextScaleChange={setTextScale}
         onSelectGroup={setSelectedGroupId}
         onWarmGroup={(gid) => void warmGroup(gid)}
         onCreateGroup={
@@ -414,11 +480,14 @@ export default function App() {
       <Suspense fallback={null}>
         <AppModals
           isDark={isDark}
+          theme={theme}
+          textScale={textScale}
           readOnly={webReadOnly}
           ccccHome={ccccHome}
           composerRef={composerRef}
           onStartReply={startReply}
-          onThemeToggle={() => setTheme(isDark ? "light" : "dark")}
+          onThemeChange={setTheme}
+          onTextScaleChange={setTextScale}
           onStartGroup={handleStartGroup}
           onStopGroup={handleStopGroup}
           onSetGroupState={handleSetGroupState}

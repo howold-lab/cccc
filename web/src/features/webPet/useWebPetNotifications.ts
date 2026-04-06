@@ -4,6 +4,12 @@ import { recordPetDecisionOutcome } from "../../services/api";
 import type { PetReminder } from "./types";
 import { buildTaskProposalMessage } from "./taskProposal";
 import {
+  evaluateLocalTaskProposalReminders,
+  type LocalTaskProposalEvaluation,
+} from "./localTaskAdvisor";
+import { cloneTaskAdvisorHistory, type TaskAdvisorHistoryState } from "./taskAdvisor/history";
+import { deriveTaskProposalStylePolicy } from "./taskProposalStylePolicy";
+import {
   createMentionReaction,
   createTaskReactionSnapshot,
   diffTaskReaction,
@@ -31,12 +37,14 @@ export interface UseWebPetNotificationsResult {
 }
 
 export function shouldProjectReminderForGroupState(
-  reminder: PetReminder,
+  _reminder: PetReminder,
   groupState: string,
 ): boolean {
   const normalizedState = String(groupState || "").trim().toLowerCase();
-  if (normalizedState === "active") return true;
-  return reminder.action.type === "restart_actor" || reminder.action.type === "automation_proposal";
+  if (!normalizedState || normalizedState === "active" || normalizedState === "idle") {
+    return true;
+  }
+  return false;
 }
 
 function normalizeCompareText(value: string): string {
@@ -59,8 +67,60 @@ function eventTextMentionsTask(reminder: PetReminder, text: string): boolean {
   if (reminder.action.type !== "task_proposal") return false;
   const normalizedText = normalizeCompareText(text);
   if (!normalizedText) return false;
-  const expectedText = normalizeCompareText(buildTaskProposalMessage(reminder.action));
-  return !!expectedText && normalizedText === expectedText;
+  const explicitText = normalizeCompareText(String(reminder.action.text || ""));
+  if (explicitText && normalizedText === explicitText) return true;
+
+  const renderedText = normalizeCompareText(buildTaskProposalMessage(reminder.action));
+  if (renderedText && normalizedText === renderedText) return true;
+
+  const taskIdToken = normalizeCompareText(
+    reminder.action.taskId ? `task_id=${String(reminder.action.taskId).trim()}` : "",
+  );
+  if (!taskIdToken || !normalizedText.includes(taskIdToken)) return false;
+  if (normalizedText.includes("cccc_task")) return true;
+
+  return [
+    reminder.action.title ? `title="${String(reminder.action.title).trim()}"` : "",
+    reminder.action.status ? `status=${String(reminder.action.status).trim()}` : "",
+    reminder.action.assignee ? `assignee=${String(reminder.action.assignee).trim()}` : "",
+  ]
+    .map(normalizeCompareText)
+    .filter(Boolean)
+    .some((token) => normalizedText.includes(token));
+}
+
+function getTaskProposalIdentity(reminder: PetReminder): string {
+  if (reminder.action.type !== "task_proposal") return "";
+  const groupId = String(reminder.action.groupId || "").trim();
+  const taskId = String(reminder.action.taskId || "").trim();
+  if (!groupId || !taskId) return "";
+  return `${groupId}::${taskId}`;
+}
+
+export function mergeTaskProposalReminders(
+  localReminders: PetReminder[],
+  decisionReminders: PetReminder[],
+): PetReminder[] {
+  const remoteTaskIds = new Set(
+    decisionReminders
+      .map((reminder) => getTaskProposalIdentity(reminder))
+      .filter(Boolean),
+  );
+  const merged = [
+    ...localReminders.filter((reminder) => {
+      const identity = getTaskProposalIdentity(reminder);
+      return !identity || !remoteTaskIds.has(identity);
+    }),
+    ...decisionReminders,
+  ];
+  const seenFingerprints = new Set<string>();
+  return merged.filter((reminder) => {
+    const fingerprint = String(reminder.fingerprint || "").trim();
+    if (!fingerprint) return true;
+    if (seenFingerprints.has(fingerprint)) return false;
+    seenFingerprints.add(fingerprint);
+    return true;
+  });
 }
 
 export function shouldSuppressTaskProposalEcho(
@@ -266,6 +326,11 @@ export function useWebPetNotifications(input: {
   groupContext: GroupContext | null;
   events: LedgerEvent[];
   decisions?: PetReminder[];
+  petContext?: {
+    persona?: string;
+    help?: string;
+    prompt?: string;
+  } | null;
 }): UseWebPetNotificationsResult {
   const groupId = String(input.groupId || "").trim();
   const groupState = String(input.groupState || "").trim().toLowerCase();
@@ -286,16 +351,33 @@ export function useWebPetNotifications(input: {
   const hiddenFingerprintsRef = useRef<ReminderPriorityMap>(initialState.hiddenFingerprints);
   const seenFingerprintsRef = useRef<Record<string, true>>({});
   const blockedAutoPeekRef = useRef<ReminderPriorityMap>({});
+  const advisorHistoryRef = useRef<TaskAdvisorHistoryState>(cloneTaskAdvisorHistory(new Map()));
+  const advisorCommittedSignatureRef = useRef("");
+  const [localTaskProposalEvaluation, setLocalTaskProposalEvaluation] = useState<{
+    groupId: string;
+    evaluation: LocalTaskProposalEvaluation;
+  }>({
+    groupId,
+    evaluation: {
+      reminders: [],
+      nextHistory: cloneTaskAdvisorHistory(new Map()),
+      signature: "",
+    },
+  });
 
   const projected = useMemo(() => {
     const decisions = Array.isArray(input.decisions) ? input.decisions : [];
+    const localReminders = localTaskProposalEvaluation.groupId === groupId
+      ? localTaskProposalEvaluation.evaluation.reminders
+      : [];
+    const mergedReminders = mergeTaskProposalReminders(localReminders, decisions);
     return sortProjectedReminders(
-      decisions.filter((reminder) =>
+      mergedReminders.filter((reminder) =>
         shouldProjectReminderForGroupState(reminder, groupState) &&
         !shouldSuppressTaskProposalEcho(reminder, events),
       ),
     );
-  }, [events, groupState, input.decisions]);
+  }, [events, groupId, groupState, input.decisions, localTaskProposalEvaluation]);
 
   const reminderByFingerprint = useMemo(
     () => new Map(projected.map((reminder) => [reminder.fingerprint, reminder])),
@@ -330,6 +412,8 @@ export function useWebPetNotifications(input: {
     lastProcessedEventIdRef.current = "";
     didHydrateTaskSnapshotRef.current = false;
     previousTaskSnapshotRef.current = {};
+    advisorHistoryRef.current = cloneTaskAdvisorHistory(new Map());
+    advisorCommittedSignatureRef.current = "";
     const frame = window.requestAnimationFrame(() => {
       setHiddenFingerprintsSnapshot(nextState.hiddenFingerprints);
       setSeenFingerprintsSnapshot({});
@@ -338,6 +422,33 @@ export function useWebPetNotifications(input: {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [groupId]);
+
+  useEffect(() => {
+    const stylePolicy = deriveTaskProposalStylePolicy(input.petContext);
+    const nextEvaluation = evaluateLocalTaskProposalReminders(
+      groupId,
+      groupContext,
+      stylePolicy,
+      advisorHistoryRef.current,
+    );
+    const signature = String(nextEvaluation.signature || "").trim();
+    if (signature && advisorCommittedSignatureRef.current !== signature) {
+      advisorHistoryRef.current = cloneTaskAdvisorHistory(nextEvaluation.nextHistory);
+      advisorCommittedSignatureRef.current = signature;
+    }
+    setLocalTaskProposalEvaluation((current) => {
+      if (
+        current.groupId === groupId
+        && current.evaluation.signature === nextEvaluation.signature
+      ) {
+        return current;
+      }
+      return {
+        groupId,
+        evaluation: nextEvaluation,
+      };
+    });
+  }, [groupContext, groupId, input.petContext]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

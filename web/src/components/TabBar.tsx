@@ -1,10 +1,85 @@
-import { useRef, useEffect, useState, useCallback, type CSSProperties } from "react";
+import { memo, useRef, useEffect, useState, useCallback, type CSSProperties, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { Actor } from "../types";
+import { useActorDisplayState } from "../hooks/useActorDisplayState";
 import { classNames } from "../utils/classNames";
-import { useTerminalSignalsStore, getTerminalSignalKey } from "../stores";
-import { getActorDisplayWorkingState } from "../utils/terminalWorkingState";
-import { getRuntimeIndicatorState } from "../utils/statusIndicators";
+
+type AgentTabButtonProps = {
+  groupId: string;
+  actor: Actor;
+  isActive: boolean;
+  onTabChange: (tab: string) => void;
+  selectedGroupRunning: boolean;
+  selectedGroupActorsHydrating: boolean;
+  tabRef: Ref<HTMLButtonElement> | null;
+};
+
+const AgentTabButton = memo(function AgentTabButton({
+  groupId,
+  actor,
+  isActive,
+  onTabChange,
+  selectedGroupRunning,
+  selectedGroupActorsHydrating,
+  tabRef,
+}: AgentTabButtonProps) {
+  const { indicator } = useActorDisplayState({
+    groupId,
+    actor,
+    selectedGroupRunning,
+    selectedGroupActorsHydrating,
+  });
+
+  return (
+    <button
+      ref={tabRef}
+      onClick={() => onTabChange(actor.id)}
+      className={classNames(
+        "glass-tab relative flex items-center gap-2 px-3 py-1.5 text-sm font-medium whitespace-nowrap flex-shrink-0 focus:outline-none",
+        isActive
+          ? "glass-tab-active text-[var(--color-text-primary)]"
+          : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
+      )}
+      role="tab"
+      aria-selected={isActive}
+    >
+      <span
+        className={classNames(
+          "relative inline-flex w-2.5 h-2.5 rounded-full flex-shrink-0 transition-all",
+          indicator.dotClass
+        )}
+      >
+        {indicator.pulse && (
+          <span
+            className={classNames(
+              "absolute inset-[-3px] rounded-full motion-reduce:animate-none",
+              indicator.strongPulse
+                ? "animate-ping bg-emerald-300/35"
+                : "animate-pulse bg-current/20"
+            )}
+          />
+        )}
+        {indicator.strongPulse && (
+          <span className="absolute inset-[-7px] rounded-full border border-emerald-300/35 animate-ping motion-reduce:animate-none [animation-duration:1.6s]" />
+        )}
+      </span>
+
+      <span className={indicator.labelClass}>{actor.title || actor.id}</span>
+
+      {actor.role === "foreman" && (
+        <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 dark:text-amber-400">
+          F
+        </span>
+      )}
+
+      {(actor.unread_count ?? 0) > 0 && (
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-indigo-500/15 text-indigo-500 dark:text-indigo-300">
+          {actor.unread_count}
+        </span>
+      )}
+    </button>
+  );
+});
 
 interface TabBarProps {
   groupId: string;
@@ -13,31 +88,24 @@ interface TabBarProps {
   onTabChange: (tab: string) => void;
   unreadChatCount: number;
   isDark: boolean;
+  selectedGroupRunning?: boolean;
+  selectedGroupActorsHydrating?: boolean;
   onAddAgent?: () => void;
   canAddAgent?: boolean;
 }
 
-type ActorTabIndicator = {
-  dotClass: string;
-  labelClass: string;
-  pulse: boolean;
-  strongPulse: boolean;
-};
-
-export function getActorTabIndicatorState(input: {
-  isRunning: boolean;
-  workingState: string;
-}): ActorTabIndicator {
-  const indicator = getRuntimeIndicatorState(input);
-  return {
-    dotClass: indicator.dotClass,
-    labelClass: indicator.labelClass,
-    pulse: indicator.pulse,
-    strongPulse: indicator.strongPulse,
-  };
-}
-
-export function TabBar({ groupId, actors, activeTab, onTabChange, unreadChatCount, isDark: _isDark, onAddAgent, canAddAgent = true }: TabBarProps) {
+export function TabBar({
+  groupId,
+  actors,
+  activeTab,
+  onTabChange,
+  unreadChatCount,
+  isDark: _isDark,
+  selectedGroupRunning: _selectedGroupRunning = false,
+  selectedGroupActorsHydrating: _selectedGroupActorsHydrating = false,
+  onAddAgent,
+  canAddAgent = true,
+}: TabBarProps) {
   const { t } = useTranslation("layout");
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -47,8 +115,6 @@ export function TabBar({ groupId, actors, activeTab, onTabChange, unreadChatCoun
   const [isOverflowing, setIsOverflowing] = useState(false);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
-  const terminalSignals = useTerminalSignalsStore((state) => state.signals);
-
   // Check if content overflows
   const checkOverflow = useCallback(() => {
     const rootEl = rootRef.current;
@@ -139,24 +205,17 @@ export function TabBar({ groupId, actors, activeTab, onTabChange, unreadChatCoun
     </button>
   );
 
-  const getActorIndicator = (actor: Actor) => {
-    const terminalSignal = terminalSignals[getTerminalSignalKey(groupId, actor.id)];
-    const workingState = getActorDisplayWorkingState(actor, terminalSignal);
-    const isRunning = actor.running ?? actor.enabled ?? false;
-    return getActorTabIndicatorState({ isRunning: Boolean(isRunning), workingState });
-  };
-
   return (
     <div
       ref={rootRef}
-      className="glass-header flex items-center sticky top-0 z-10"
+      className="glass-header sticky top-0 z-10 flex flex-shrink-0 items-center"
       role="tablist"
       aria-label={t("navigationTabs")}
     >
       {/* Scrollable tabs area */}
       <div
         ref={scrollRef}
-        className="flex-1 flex items-center gap-1.5 px-3 py-1.5 overflow-x-auto min-w-0 scrollbar-hide"
+        className="flex-1 flex items-center gap-1.5 px-3 py-1 overflow-x-auto min-w-0 scrollbar-hide"
         style={{
           WebkitOverflowScrolling: "touch",
           ...(canScrollLeft && canScrollRight
@@ -175,7 +234,7 @@ export function TabBar({ groupId, actors, activeTab, onTabChange, unreadChatCoun
             ref={activeTab === "chat" ? activeTabRef : null}
             onClick={() => onTabChange("chat")}
             className={classNames(
-              "glass-tab relative flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap flex-shrink-0 focus:outline-none",
+              "glass-tab relative flex items-center gap-2 px-3 py-1.5 text-sm font-medium whitespace-nowrap flex-shrink-0 focus:outline-none",
               activeTab === "chat"
                 ? "glass-tab-active text-[var(--color-text-primary)]"
                 : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
@@ -199,58 +258,18 @@ export function TabBar({ groupId, actors, activeTab, onTabChange, unreadChatCoun
           {/* Agent Tabs */}
           {actors.map((actor) => {
             const isActive = activeTab === actor.id;
-            const indicator = getActorIndicator(actor);
 
             return (
-              <button
+              <AgentTabButton
                 key={actor.id}
-                ref={isActive ? activeTabRef : null}
-                onClick={() => onTabChange(actor.id)}
-                className={classNames(
-                  "glass-tab relative flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap flex-shrink-0 focus:outline-none",
-                  isActive
-                    ? "glass-tab-active text-[var(--color-text-primary)]"
-                    : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
-                )}
-                role="tab"
-                aria-selected={isActive}
-                >
-                {/* Run Indicator */}
-                <span
-                  className={classNames(
-                    "relative inline-flex w-2.5 h-2.5 rounded-full flex-shrink-0 transition-all",
-                    indicator.dotClass
-                  )}
-                >
-                  {indicator.pulse && (
-                    <span
-                      className={classNames(
-                        "absolute inset-[-3px] rounded-full motion-reduce:animate-none",
-                        indicator.strongPulse
-                          ? "animate-ping bg-emerald-300/35"
-                          : "animate-pulse bg-current/20"
-                      )}
-                    />
-                  )}
-                  {indicator.strongPulse && (
-                    <span className="absolute inset-[-7px] rounded-full border border-emerald-300/35 animate-ping motion-reduce:animate-none [animation-duration:1.6s]" />
-                  )}
-                </span>
-
-                <span className={indicator.labelClass}>{actor.title || actor.id}</span>
-
-                {actor.role === "foreman" && (
-                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 dark:text-amber-400">
-                    F
-                  </span>
-                )}
-
-                {(actor.unread_count ?? 0) > 0 && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-indigo-500/15 text-indigo-500 dark:text-indigo-300">
-                    {actor.unread_count}
-                  </span>
-                )}
-              </button>
+                groupId={groupId}
+                actor={actor}
+                isActive={isActive}
+                onTabChange={onTabChange}
+                selectedGroupRunning={_selectedGroupRunning}
+                selectedGroupActorsHydrating={_selectedGroupActorsHydrating}
+                tabRef={isActive ? activeTabRef : null}
+              />
             );
           })}
         </div>
@@ -261,7 +280,7 @@ export function TabBar({ groupId, actors, activeTab, onTabChange, unreadChatCoun
 
       {/* Fixed Add Button when overflowing */}
       {isOverflowing && onAddAgent && (
-        <div className="flex-shrink-0 px-2 py-1.5 border-l border-[var(--glass-border-subtle)]">
+        <div className="flex-shrink-0 px-2 py-1 border-l border-[var(--glass-border-subtle)]">
           {addButton}
         </div>
       )}

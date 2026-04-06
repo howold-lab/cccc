@@ -1,11 +1,11 @@
-import type { CSSProperties } from "react";
+import { useEffect, type CSSProperties } from "react";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { TabBar } from "../TabBar";
 import { AppHeader } from "../layout/AppHeader";
 import { GroupSidebar } from "../layout/GroupSidebar";
 import { ActorTab } from "../../pages/ActorTab";
 import { ChatTab } from "../../pages/chat";
-import type { Actor, GroupContext, GroupDoc, GroupMeta } from "../../types";
+import type { Actor, GroupContext, GroupDoc, GroupMeta, TextScale } from "../../types";
 import { SIDEBAR_COLLAPSED_WIDTH } from "../../stores/useUIStore";
 
 type AppShellProps = {
@@ -16,6 +16,7 @@ type AppShellProps = {
   groupDoc: GroupDoc | null;
   groupContext: GroupContext | null;
   actors: Actor[];
+  runtimeActors: Actor[];
   recipientActors: Actor[];
   recipientActorsBusy: boolean;
   destGroupScopeLabel: string;
@@ -30,7 +31,9 @@ type AppShellProps = {
   isSmallScreen: boolean;
   webReadOnly: boolean;
   selectedGroupRunning: boolean;
+  selectedGroupActorsHydrating: boolean;
   theme: "light" | "dark" | "system";
+  textScale: TextScale;
   sseStatus: "connected" | "connecting" | "disconnected";
   groupLabelById: Record<string, string>;
   chatUnreadCount: number;
@@ -42,6 +45,7 @@ type AppShellProps = {
   contentRef: React.MutableRefObject<HTMLDivElement | null>;
   chatAtBottomRef: React.MutableRefObject<boolean>;
   onThemeChange: (theme: "light" | "dark" | "system") => void;
+  onTextScaleChange: (scale: TextScale) => void;
   onSelectGroup: (groupId: string) => void;
   onWarmGroup: (groupId: string) => void;
   onCreateGroup: (() => void) | undefined;
@@ -85,6 +89,7 @@ export function AppShell({
   groupDoc,
   groupContext,
   actors,
+  runtimeActors,
   recipientActors,
   recipientActorsBusy,
   destGroupScopeLabel,
@@ -99,7 +104,9 @@ export function AppShell({
   isSmallScreen,
   webReadOnly,
   selectedGroupRunning,
+  selectedGroupActorsHydrating,
   theme,
+  textScale,
   sseStatus,
   groupLabelById,
   chatUnreadCount,
@@ -111,6 +118,7 @@ export function AppShell({
   contentRef,
   chatAtBottomRef,
   onThemeChange,
+  onTextScaleChange,
   onSelectGroup,
   onWarmGroup,
   onCreateGroup,
@@ -149,9 +157,49 @@ export function AppShell({
     "--sidebar-width": `${sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}px`,
   } as CSSProperties;
 
+  useEffect(() => {
+    if (!selectedGroupId || runtimeActors.length === 0) return;
+    if (typeof window === "undefined") return;
+
+    const nav = navigator as Navigator & {
+      connection?: {
+        saveData?: boolean;
+        effectiveType?: string;
+      };
+    };
+    const connection = nav.connection;
+    if (connection?.saveData) return;
+    if (typeof connection?.effectiveType === "string" && /(^|-)2g$/.test(connection.effectiveType)) return;
+
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+    let idleId: number | null = null;
+    const preloadActorTab = () => {
+      void import("../AgentTab").then(() => {
+        if (cancelled) return;
+      });
+    };
+
+    if ("requestIdleCallback" in window) {
+      idleId = window.requestIdleCallback(() => preloadActorTab(), { timeout: 1500 });
+    } else {
+      timeoutId = globalThis.setTimeout(() => preloadActorTab(), 600);
+    }
+
+    return () => {
+      cancelled = true;
+      if (idleId !== null && "cancelIdleCallback" in window) {
+        window.cancelIdleCallback(idleId);
+      }
+      if (timeoutId !== null) {
+        globalThis.clearTimeout(timeoutId);
+      }
+    };
+  }, [selectedGroupId, runtimeActors.length]);
+
   return (
     <div
-      className="relative h-full transition-[grid-template-columns] duration-300 ease-out md:grid md:[grid-template-columns:var(--sidebar-width)_minmax(0,1fr)]"
+      className="relative h-full min-h-0 transition-[grid-template-columns] duration-300 ease-out md:grid md:[grid-template-columns:var(--sidebar-width)_minmax(0,1fr)]"
       style={shellStyle}
     >
       <GroupSidebar
@@ -175,14 +223,16 @@ export function AppShell({
       />
 
       <main
-        className={`absolute inset-0 flex h-full flex-col overflow-hidden md:relative md:inset-auto ${
+        className={`absolute inset-0 flex h-full min-h-0 flex-col overflow-hidden md:relative md:inset-auto ${
           isDark ? "bg-black/75" : "bg-white/80"
         }`}
       >
         <AppHeader
           isDark={isDark}
           theme={theme}
+          textScale={textScale}
           onThemeChange={onThemeChange}
+          onTextScaleChange={onTextScaleChange}
           webReadOnly={webReadOnly}
           selectedGroupId={selectedGroupId}
           groupDoc={groupDoc}
@@ -204,11 +254,13 @@ export function AppShell({
         {selectedGroupId ? (
           <TabBar
             groupId={selectedGroupId}
-            actors={actors}
+            actors={runtimeActors}
             activeTab={activeTab}
             onTabChange={onTabChange}
             unreadChatCount={chatUnreadCount}
             isDark={isDark}
+            selectedGroupRunning={selectedGroupRunning}
+            selectedGroupActorsHydrating={selectedGroupActorsHydrating}
             onAddAgent={onAddAgent}
             canAddAgent={!webReadOnly && !!selectedGroupId}
           />
@@ -234,6 +286,7 @@ export function AppShell({
                 isSmallScreen={isSmallScreen}
                 readOnly={webReadOnly}
                 selectedGroupId={selectedGroupId}
+                selectedGroupRunning={selectedGroupRunning}
                 groupLabelById={groupLabelById}
                 actors={actors}
                 groups={groups}
@@ -262,7 +315,7 @@ export function AppShell({
             aria-hidden={activeTab === "chat"}
           >
             {renderedActorIds.map((actorId) => {
-              const actor = actors.find((item) => item.id === actorId) || null;
+              const actor = runtimeActors.find((item) => item.id === actorId) || null;
               const isVisible = activeTab === actorId && activeTab !== "chat";
               const agentState =
                 (groupContext?.agent_states || []).find((item) => item.id === (actor?.id || "")) || null;
