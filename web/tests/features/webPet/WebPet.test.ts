@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getBackgroundRefreshDelayMs } from "../../../src/features/webPet/reviewTiming";
-import { isManualReviewReminderReady } from "../../../src/features/webPet/WebPet";
+import { isManualReviewReminderReady } from "../../../src/features/webPet/manualReviewReminder";
 import type { PetReminder } from "../../../src/features/webPet/types";
 
 function makeReminder(overrides: Partial<PetReminder> = {}): PetReminder {
@@ -38,8 +38,8 @@ describe("isManualReviewReminderReady", () => {
     expect(isManualReviewReminderReady(makeReminder(), "active")).toBe(true);
   });
 
-  it("surfaces reminders when group is idle", () => {
-    expect(isManualReviewReminderReady(makeReminder(), "idle")).toBe(true);
+  it("suppresses draft reminders when group is idle", () => {
+    expect(isManualReviewReminderReady(makeReminder(), "idle")).toBe(false);
   });
 
   it("still treats restart reminders as ready while idle", () => {
