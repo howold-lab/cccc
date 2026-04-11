@@ -37,7 +37,7 @@ class TestBootstrapActorOps(unittest.TestCase):
                 effective_runner_kind=lambda runner: runner,
                 find_scope_url=lambda _group, _scope_key: "",
                 supported_runtimes=("codex",),
-                ensure_mcp_installed=lambda _runtime, _cwd: True,
+                ensure_mcp_installed=lambda _runtime, _cwd, **_kwargs: True,
                 auto_mcp_runtimes=("codex",),
                 pty_supported=lambda: True,
                 merge_actor_env_with_private=lambda _gid, _aid, env: dict(env),
@@ -80,7 +80,7 @@ class TestBootstrapActorOps(unittest.TestCase):
                 effective_runner_kind=lambda runner: runner,
                 find_scope_url=lambda _group, _scope_key: "",
                 supported_runtimes=("codex",),
-                ensure_mcp_installed=lambda _runtime, _cwd: True,
+                ensure_mcp_installed=lambda _runtime, _cwd, **_kwargs: True,
                 auto_mcp_runtimes=("codex",),
                 pty_supported=lambda: True,
                 merge_actor_env_with_private=lambda _gid, _aid, env: dict(env),
@@ -207,7 +207,7 @@ class TestBootstrapActorOps(unittest.TestCase):
                         else ""
                     ),
                     supported_runtimes=("codex", "custom"),
-                    ensure_mcp_installed=lambda _runtime, _cwd: True,
+                    ensure_mcp_installed=lambda _runtime, _cwd, **_kwargs: True,
                     auto_mcp_runtimes=("codex",),
                     pty_supported=lambda: True,
                     merge_actor_env_with_private=merge_actor_env_with_private,
@@ -369,7 +369,7 @@ class TestBootstrapActorOps(unittest.TestCase):
                         else ""
                     ),
                     supported_runtimes=("codex", "custom"),
-                    ensure_mcp_installed=lambda _runtime, _cwd: True,
+                    ensure_mcp_installed=lambda _runtime, _cwd, **_kwargs: True,
                     auto_mcp_runtimes=("codex",),
                     pty_supported=lambda: True,
                     merge_actor_env_with_private=merge_actor_env_with_private,
@@ -427,6 +427,7 @@ class TestBootstrapActorOps(unittest.TestCase):
                     "actor_id": "peer1",
                     "runtime": "codex",
                     "runner": "headless",
+                    "env": {"OPENAI_API_KEY": "sk-test"},
                     "by": "user",
                 },
             )
@@ -462,7 +463,6 @@ class TestBootstrapActorOps(unittest.TestCase):
                 return _Session()
 
             with (
-                patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False),
                 patch("cccc.daemon.group.bootstrap_actor_ops.codex_app_supervisor.start_actor", side_effect=_fake_codex_start_actor),
                 patch("cccc.daemon.group.bootstrap_actor_ops.codex_app_supervisor.group_running", return_value=True),
             ):
@@ -471,7 +471,7 @@ class TestBootstrapActorOps(unittest.TestCase):
                     effective_runner_kind=lambda runner: runner,
                     find_scope_url=lambda _group, _scope_key: str(Path(".").resolve()),
                     supported_runtimes=("codex",),
-                    ensure_mcp_installed=lambda _runtime, _cwd: True,
+                    ensure_mcp_installed=lambda _runtime, _cwd, **_kwargs: True,
                     auto_mcp_runtimes=("codex",),
                     pty_supported=lambda: True,
                     merge_actor_env_with_private=lambda _gid, _aid, env: dict(env),
@@ -495,10 +495,8 @@ class TestBootstrapActorOps(unittest.TestCase):
             self.assertEqual(captured[0]["actor_id"], "peer1")
             env = captured[0]["env"]
             assert isinstance(env, dict)
-            self.assertEqual(
-                Path(str(env.get("CODEX_HOME") or "")).resolve(),
-                (home / "groups" / group_id / "runtime" / "codex" / "peer1").resolve(),
-            )
+            self.assertEqual(str(env.get("OPENAI_API_KEY") or ""), "sk-test")
+            self.assertNotIn("CODEX_HOME", env)
             self.assertEqual(resumed, [group_id])
         finally:
             cleanup()
@@ -567,13 +565,16 @@ class TestBootstrapActorOps(unittest.TestCase):
             with patch("cccc.daemon.group.bootstrap_actor_ops.pty_runner.SUPERVISOR.start_actor", side_effect=_fake_pty_start_actor), patch(
                 "cccc.daemon.group.bootstrap_actor_ops.codex_app_supervisor.start_actor",
                 side_effect=AssertionError("codex supervisor should not start for PTY runner"),
+            ), patch(
+                "cccc.daemon.group.bootstrap_actor_ops.runtime_start_preflight_error",
+                return_value="",
             ):
                 autostart_running_groups(
                     home,
                     effective_runner_kind=lambda runner: runner,
                     find_scope_url=lambda _group, _scope_key: str(Path(".").resolve()),
                     supported_runtimes=("codex",),
-                    ensure_mcp_installed=lambda _runtime, _cwd: True,
+                    ensure_mcp_installed=lambda _runtime, _cwd, **_kwargs: True,
                     auto_mcp_runtimes=("codex",),
                     pty_supported=lambda: True,
                     merge_actor_env_with_private=lambda _gid, _aid, env: dict(env),

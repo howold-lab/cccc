@@ -108,7 +108,7 @@ export default function App() {
     switchGroup,
   } = useComposerStore();
 
-  const { setNewActorRole, setEditGroupTitle, setEditGroupTopic, setDirSuggestions } = useFormStore();
+  const { setEditGroupTitle, setEditGroupTopic, setDirSuggestions } = useFormStore();
   const clearAllOutbox = useChatOutboxStore((state) => state.clearAll);
 
   // Actor actions hook
@@ -125,7 +125,6 @@ export default function App() {
     () => getChatSession(selectedGroupId, chatSessions),
     [selectedGroupId, chatSessions]
   );
-  const chatUnreadCount = chatSession.chatUnreadCount;
   const chatSessionFollowMode = chatSession.scrollSnapshot?.mode === "follow";
 
   const [showMentionMenu, setShowMentionMenu] = React.useState(false);
@@ -291,28 +290,16 @@ export default function App() {
     onTabChange: handleTabChange,
   });
 
-  const hasForeman = useMemo(() => actors.some((a) => a.role === "foreman"), [actors]);
   const {
     selectedGroupRunning,
-    orderedSelectedGroupPatch,
+    selectedGroupRuntimeStatus,
   } = useSelectedGroupRuntime({
     groups,
     selectedGroupId,
     groupDoc,
     actors,
   });
-  const orderedGroups = useMemo(() => {
-    const base = getOrderedGroups();
-    const selectedId = String(selectedGroupId || "").trim();
-    if (!selectedId || !orderedSelectedGroupPatch) return base;
-    return base.map((group) => {
-      if (String(group.group_id || "").trim() !== selectedId) return group;
-      return {
-        ...group,
-        ...orderedSelectedGroupPatch,
-      };
-    });
-  }, [selectedGroupId, orderedSelectedGroupPatch, getOrderedGroups]);
+  const orderedGroups = getOrderedGroups();
 
   const groupLabelById = useMemo(() => {
     const out: Record<string, string> = {};
@@ -381,12 +368,12 @@ export default function App() {
         isSmallScreen={isSmallScreen}
         webReadOnly={webReadOnly}
         selectedGroupRunning={selectedGroupRunning}
+        selectedGroupRuntimeStatus={selectedGroupRuntimeStatus}
         selectedGroupActorsHydrating={selectedGroupActorsHydrating}
         theme={theme}
         textScale={textScale}
         sseStatus={sseStatus}
         groupLabelById={groupLabelById}
-        chatUnreadCount={chatUnreadCount}
         mentionSelectedIndex={mentionSelectedIndex}
         showMentionMenu={showMentionMenu}
         composerRef={composerRef}
@@ -435,14 +422,6 @@ export default function App() {
         onOpenSettings={() => openModal("settings")}
         onOpenMobileMenu={() => openModal("mobileMenu")}
         onTabChange={handleTabChange}
-        onAddAgent={
-          webReadOnly
-            ? undefined
-            : () => {
-                setNewActorRole(hasForeman ? "peer" : "foreman");
-                openModal("addActor");
-              }
-        }
         appendComposerFiles={handleAppendComposerFiles}
         setMentionFilter={setMentionFilter}
         setMentionSelectedIndex={setMentionSelectedIndex}
@@ -460,7 +439,7 @@ export default function App() {
 
       {selectedGroupId ? (
         <Suspense fallback={null}>
-          <WebPet key={selectedGroupId} groupId={selectedGroupId} />
+          <WebPet groupId={selectedGroupId} />
         </Suspense>
       ) : null}
 

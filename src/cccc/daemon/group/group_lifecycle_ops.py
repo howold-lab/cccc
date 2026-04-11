@@ -12,7 +12,7 @@ from ...kernel.context import ContextStorage
 from ...kernel.group import load_group
 from ...kernel.ledger import append_event
 from ...kernel.permissions import require_group_permission
-from ...kernel.runtime import inject_runtime_home_env, runtime_start_preflight_error
+from ...kernel.runtime import runtime_start_preflight_error
 from ..claude_app_sessions import SUPERVISOR as claude_app_supervisor
 from ..codex_app_sessions import SUPERVISOR as codex_app_supervisor
 from ...runners import headless as headless_runner
@@ -36,7 +36,7 @@ def handle_group_start(
     *,
     effective_runner_kind: Callable[[str], str],
     find_scope_url: Callable[[Any, str], str],
-    ensure_mcp_installed: Callable[[str, Path], Any],
+    ensure_mcp_installed: Callable[..., Any],
     merge_actor_env_with_private: Callable[[str, str, Dict[str, Any]], Dict[str, Any]],
     inject_actor_context_env: Callable[..., Dict[str, Any]],
     normalize_runtime_command: Callable[[str, list[str]], list[str]],
@@ -186,15 +186,16 @@ def handle_group_start(
             runtime = str(launch_spec["runtime"])
             runner_effective = str(launch_spec["effective_runner"])
             update_actor(group, aid, {"enabled": True})
-            effective_env = inject_runtime_home_env(
-                launch_spec["merged_env"],
-                runtime=runtime,
-                group_id=group.group_id,
-                actor_id=aid,
-            )
+            effective_env = dict(launch_spec["merged_env"])
             if runner_effective != "headless":
                 try:
-                    mcp_ready = bool(ensure_mcp_installed(runtime, cwd))
+                    mcp_ready = bool(
+                        ensure_mcp_installed(
+                            runtime,
+                            cwd,
+                            env={str(k): str(v) for k, v in effective_env.items() if isinstance(k, str)},
+                        )
+                    )
                 except Exception as e:
                     raise RuntimeError(f"failed to install MCP for actor {aid}: {e}") from e
                 if not mcp_ready:
@@ -368,7 +369,7 @@ def try_handle_group_lifecycle_op(
     *,
     effective_runner_kind: Callable[[str], str],
     find_scope_url: Callable[[Any, str], str],
-    ensure_mcp_installed: Callable[[str, Path], Any],
+    ensure_mcp_installed: Callable[..., Any],
     merge_actor_env_with_private: Callable[[str, str, Dict[str, Any]], Dict[str, Any]],
     inject_actor_context_env: Callable[..., Dict[str, Any]],
     normalize_runtime_command: Callable[[str, list[str]], list[str]],

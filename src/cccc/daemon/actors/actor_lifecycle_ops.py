@@ -11,7 +11,6 @@ from ...kernel.context import ContextStorage
 from ...kernel.group import load_group
 from ...kernel.ledger import append_event
 from ...kernel.permissions import require_actor_permission
-from ...kernel.runtime import inject_runtime_home_env
 from ..claude_app_sessions import SUPERVISOR as claude_app_supervisor
 from ..codex_app_sessions import SUPERVISOR as codex_app_supervisor
 from ...runners import headless as headless_runner
@@ -190,7 +189,7 @@ def handle_actor_restart(
     normalize_runtime_command: Callable[[str, list[str]], list[str]],
     prepare_pty_env: Callable[[Dict[str, Any]], Dict[str, Any]],
     pty_backlog_bytes: Callable[[], int],
-    ensure_mcp_installed: Callable[[str, Path], bool],
+    ensure_mcp_installed: Callable[..., bool],
     write_headless_state: Callable[[str, str], None],
     write_pty_state: Callable[..., None],
     get_actor_profile: Callable[[str], Optional[Dict[str, Any]]],
@@ -250,6 +249,7 @@ def handle_actor_restart(
             return _error("permission_denied", msg)
         return _error("actor_restart_failed", msg)
 
+    runner_effective = effective_runner_kind(str(actor.get("runner") or "pty"))
     if coerce_bool(group.doc.get("running"), default=False):
         try:
             launch_spec = resolve_actor_launch_spec(
@@ -328,15 +328,16 @@ def handle_actor_restart(
         runner_kind = str(launch_spec["runner"])
         runner_effective = str(launch_spec["effective_runner"])
         runtime = str(launch_spec["runtime"])
-        effective_env = inject_runtime_home_env(
-            launch_spec["merged_env"],
-            runtime=runtime,
-            group_id=group.group_id,
-            actor_id=actor_id,
-        )
+        effective_env = dict(launch_spec["merged_env"])
         if runner_effective != "headless":
             try:
-                mcp_ready = bool(ensure_mcp_installed(runtime, cwd))
+                mcp_ready = bool(
+                    ensure_mcp_installed(
+                        runtime,
+                        cwd,
+                        env={str(k): str(v) for k, v in effective_env.items() if isinstance(k, str)},
+                    )
+                )
             except Exception as e:
                 return _error("actor_restart_failed", f"failed to install MCP: {e}")
             if not mcp_ready:
@@ -440,7 +441,7 @@ def try_handle_actor_lifecycle_op(
     normalize_runtime_command: Callable[[str, list[str]], list[str]],
     prepare_pty_env: Callable[[Dict[str, Any]], Dict[str, Any]],
     pty_backlog_bytes: Callable[[], int],
-    ensure_mcp_installed: Callable[[str, Path], bool],
+    ensure_mcp_installed: Callable[..., bool],
     write_headless_state: Callable[[str, str], None],
     write_pty_state: Callable[..., None],
     get_actor_profile: Callable[[str], Optional[Dict[str, Any]]],

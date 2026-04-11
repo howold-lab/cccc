@@ -345,8 +345,8 @@ class PtySession:
             if chunk is None:
                 self._running = False
                 break
+            self._append_backlog(chunk)
             with self._lock:
-                self._append_backlog(chunk)
                 clients = list(self._clients.items())
             for fileno, client in clients:
                 if self._max_client_buffer_bytes and (len(client.outbuf) + len(chunk) > self._max_client_buffer_bytes):
@@ -389,7 +389,6 @@ class PtySession:
             ("terminate", (True,)),
             ("terminate", ()),
             ("kill", ()),
-            ("close", ()),
         ):
             fn = getattr(self._proc, name, None)
             if not callable(fn):
@@ -397,11 +396,32 @@ class PtySession:
             try:
                 fn(*args)
                 if not self._proc_alive():
-                    return
+                    break
             except TypeError:
                 continue
             except Exception:
                 continue
+
+        close = getattr(self._proc, "close", None)
+        if callable(close):
+            def _close_proc() -> None:
+                try:
+                    close()
+                except TypeError:
+                    pass
+                except Exception:
+                    pass
+
+            try:
+                close_thread = threading.Thread(
+                    target=_close_proc,
+                    name=f"cccc-conpty-close:{getattr(self, 'group_id', '?')}:{getattr(self, 'actor_id', '?')}",
+                    daemon=True,
+                )
+                close_thread.start()
+                close_thread.join(timeout=0.2)
+            except Exception:
+                pass
 
     def stop(self) -> None:
         self._running = False

@@ -161,11 +161,19 @@ def _group_runtime_status_local(group: Any) -> Dict[str, Any]:
         or pty_runner.SUPERVISOR.group_running(gid)
         or headless_runner.SUPERVISOR.group_running(gid)
     )
+    # If the group doc says running=True but no processes are alive yet,
+    # the daemon is still autostarting actors after a restart.  Report
+    # runtime_running=True so the UI doesn't flash "stopped" during boot.
+    doc_running = coerce_bool(group.doc.get("running"), default=False) if group is not None else False
+    booting = bool(doc_running and not runtime_running and lifecycle_state not in ("stopped",))
+    if booting:
+        runtime_running = True
     return {
         "lifecycle_state": lifecycle_state,
         "runtime_running": runtime_running,
         "running_actor_count": running_actor_count,
         "has_running_foreman": has_running_foreman,
+        "booting": booting,
     }
 
 
@@ -2193,15 +2201,13 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             raise HTTPException(status_code=404, detail={"code": "group_not_found", "message": f"group not found: {group_id}"})
         return create_sse_response(sse_ledger_tail(group.ledger_path))
 
-    @group_router.get("/headless/snapshot")
-    async def headless_snapshot(group_id: str) -> Dict[str, Any]:
+    async def _serve_headless_snapshot(group_id: str) -> Dict[str, Any]:
         group = load_group(group_id)
         if group is None:
             raise HTTPException(status_code=404, detail={"code": "group_not_found", "message": f"group not found: {group_id}"})
         return {"ok": True, "result": _read_active_headless_snapshot(group)}
 
-    @group_router.get("/headless/stream")
-    async def headless_stream(group_id: str, replay: bool = True) -> StreamingResponse:
+    async def _serve_headless_stream(group_id: str, replay: bool = True) -> StreamingResponse:
         from ..streams import create_sse_response, sse_jsonl_tail_shared
 
         group = load_group(group_id)
@@ -2217,6 +2223,22 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 initial_lines=replay_lines,
             )
         )
+
+    @group_router.get("/headless/snapshot")
+    async def headless_snapshot(group_id: str) -> Dict[str, Any]:
+        return await _serve_headless_snapshot(group_id)
+
+    @group_router.get("/codex/snapshot")
+    async def codex_snapshot_legacy(group_id: str) -> Dict[str, Any]:
+        return await _serve_headless_snapshot(group_id)
+
+    @group_router.get("/headless/stream")
+    async def headless_stream(group_id: str, replay: bool = True) -> StreamingResponse:
+        return await _serve_headless_stream(group_id, replay=replay)
+
+    @group_router.get("/codex/stream")
+    async def codex_stream_legacy(group_id: str, replay: bool = True) -> StreamingResponse:
+        return await _serve_headless_stream(group_id, replay=replay)
 
     return [global_router, group_router]
 

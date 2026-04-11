@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 from ...kernel.actors import find_actor
 from ...kernel.context import ContextStorage
 from ...kernel.ledger import append_event
-from ...kernel.runtime import inject_runtime_home_env, runtime_start_preflight_error
+from ...kernel.runtime import runtime_start_preflight_error
 from ..claude_app_sessions import SUPERVISOR as claude_app_supervisor
 from ..codex_app_sessions import SUPERVISOR as codex_app_supervisor
 from ...runners import headless as headless_runner
@@ -184,7 +184,7 @@ def start_actor_process(
     effective_runner_kind: Callable[[str], str],
     merge_actor_env_with_private: Callable[[str, str, Dict[str, Any]], Dict[str, Any]],
     normalize_runtime_command: Callable[[str, List[str]], List[str]],
-    ensure_mcp_installed: Callable[[str, Path], bool],
+    ensure_mcp_installed: Callable[..., bool],
     inject_actor_context_env: Callable[[Dict[str, Any], str, str], Dict[str, Any]],
     prepare_pty_env: Callable[[Dict[str, Any]], Dict[str, str]],
     pty_backlog_bytes: Callable[[], int],
@@ -219,12 +219,7 @@ def start_actor_process(
 
     actor = launch_spec["actor"]
     effective_runner = launch_spec["effective_runner"]
-    effective_env = inject_runtime_home_env(
-        launch_spec["merged_env"],
-        runtime=launch_spec["runtime"],
-        group_id=group.group_id,
-        actor_id=actor_id,
-    )
+    effective_env = dict(launch_spec["merged_env"])
     effective_cmd = launch_spec["effective_command"]
     cwd = launch_spec["cwd"]
     runtime = launch_spec["runtime"]
@@ -235,7 +230,13 @@ def start_actor_process(
             error_message = pty_support_error_message() or "PTY runner is not supported in this environment."
             return {"success": False, "error": error_message}
         try:
-            mcp_ready = bool(ensure_mcp_installed(runtime, cwd))
+            mcp_ready = bool(
+                ensure_mcp_installed(
+                    runtime,
+                    cwd,
+                    env={str(k): str(v) for k, v in effective_env.items() if isinstance(k, str)},
+                )
+            )
         except Exception as e:
             return {"success": False, "error": f"failed to install MCP: {e}"}
         if not mcp_ready:

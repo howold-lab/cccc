@@ -7,6 +7,8 @@ import { formatFullTime, formatMessageTimestamp, formatTime } from "../utils/tim
 import { classNames } from "../utils/classNames";
 import { getReplyEventId } from "../utils/chatReply";
 import { getPresentationMessageRefs, getPresentationRefChipLabel } from "../utils/presentationRefs";
+import { isRedundantWecomImagePlaceholder } from "../utils/messageAttachments";
+import { selectStreamingReplySession, useGroupStore } from "../stores";
 import { MessageAttachments } from "./messageBubble/MessageAttachments";
 import { MessageFooter, MessageMetadataHeader } from "./messageBubble/MessageBubbleChrome";
 import { withAuthToken } from "../services/api/base";
@@ -19,12 +21,15 @@ import {
 } from "./messageBubble/model";
 import { ActorAvatar } from "./ActorAvatar";
 import {
-    getMessageBubbleMotionClass,
-    isQueuedOnlyStreamingPlaceholder,
-    normalizeStreamingActivities,
     StreamingMessageBody,
 } from "./messageBubble/StreamingMessageBody";
-import { formatEventLine } from "./messageBubble/helpers";
+import {
+    formatEventLine,
+    getMessageBubbleMotionClass,
+    isQueuedOnlyStreamingPlaceholder,
+    mayContainMarkdown,
+    normalizeStreamingActivities,
+} from "./messageBubble/helpers";
 
 const LazyMarkdownRenderer = lazy(() =>
     import("./MarkdownRenderer").then((module) => ({ default: module.MarkdownRenderer }))
@@ -71,15 +76,6 @@ function PlainMessageText({
             {text}
         </div>
     );
-}
-
-function mayContainMarkdown(text: string): boolean {
-    const value = String(text || "");
-    if (!value.trim()) return false;
-    // Internal delivery manifests should stay compact plain text instead of
-    // picking up prose list spacing from Markdown rendering.
-    if (/^\[cccc\]\s+(Attachments|References):/m.test(value)) return false;
-    return /(```|`[^`\n]+`|\[[^\]]+\]\([^)]+\)|^#{1,6}\s|^\s*[-*+]\s|^\s*\d+\.\s|^\s*>\s)/m.test(value);
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -576,6 +572,7 @@ export const MessageBubble = memo(function MessageBubble({
     }, [msgData?.dst_to]);
     const hasDestination = !!dstGroupId;
     const rawAttachments: MessageAttachment[] = Array.isArray(msgData?.attachments) ? msgData.attachments : [];
+    const sourcePlatform = typeof msgData?.source_platform === "string" ? String(msgData.source_platform || "").trim() : "";
     const blobAttachments = rawAttachments
         .filter((a): a is MessageAttachment => a != null && typeof a === "object")
         .map((a) => ({
@@ -587,23 +584,43 @@ export const MessageBubble = memo(function MessageBubble({
             local_preview_url: "local_preview_url" in a ? String(a.local_preview_url || "") : "",
         }))
         .filter((a) => a.path.startsWith("state/blobs/") || a.local_preview_url.startsWith("blob:"));
+    const displayMessageText = useMemo(() => {
+        if (isRedundantWecomImagePlaceholder(messageText, blobAttachments, sourcePlatform)) {
+            return "";
+        }
+        return messageText;
+    }, [blobAttachments, messageText, sourcePlatform]);
     const presentationRefs = useMemo(() => getPresentationMessageRefs(msgData?.refs), [msgData?.refs]);
-    const shouldRenderMarkdown = useMemo(() => !isStreaming && mayContainMarkdown(messageText), [isStreaming, messageText]);
+    const shouldRenderMarkdown = useMemo(() => !isStreaming && mayContainMarkdown(displayMessageText), [displayMessageText, isStreaming]);
     const streamingActivities = useMemo(() => {
         return normalizeStreamingActivities((msgData as { activities?: unknown } | undefined)?.activities);
     }, [msgData]);
-    const pendingEventId = String((msgData as { pending_event_id?: unknown } | undefined)?.pending_event_id || "").trim();
+    const pendingEventId = String(
+        (msgData as { pending_event_id?: unknown; reply_to?: unknown } | undefined)?.pending_event_id
+        || (msgData as { pending_event_id?: unknown; reply_to?: unknown } | undefined)?.reply_to
+        || ""
+    ).trim();
     const actorId = String(ev.by || "").trim();
+    const hasLiveReplySession = useGroupStore(useCallback((state) => {
+        if (isUserMessage || !actorId || !pendingEventId) return false;
+        const session = selectStreamingReplySession(state, groupId, {
+            pendingEventId,
+            streamId,
+            actorId,
+        });
+        return !!session && (session.phase === "pending" || session.phase === "streaming");
+    }, [actorId, groupId, isUserMessage, pendingEventId, streamId]));
+    const shouldRenderStreamingBody = isStreaming || hasLiveReplySession;
     const isQueuedOnlyPlaceholder = useMemo(() => {
         return isQueuedOnlyStreamingPlaceholder({
-            isStreaming,
-            messageText,
+            isStreaming: shouldRenderStreamingBody,
+            messageText: displayMessageText,
             liveStreamingText: "",
             blobAttachmentCount: blobAttachments.length,
             presentationRefCount: presentationRefs.length,
             activities: streamingActivities,
         });
-    }, [blobAttachments.length, isStreaming, messageText, presentationRefs.length, streamingActivities]);
+    }, [blobAttachments.length, displayMessageText, presentationRefs.length, shouldRenderStreamingBody, streamingActivities]);
     const streamPhase = String((msgData as { stream_phase?: unknown } | undefined)?.stream_phase || "").trim().toLowerCase();
     const bubbleMotionClass = useMemo(() => getMessageBubbleMotionClass({
         isStreaming,
@@ -630,14 +647,14 @@ export const MessageBubble = memo(function MessageBubble({
         () =>
             buildMessageCopyText({
                 quoteText,
-                messageText,
+                messageText: displayMessageText,
                 presentationRefs,
                 attachments: blobAttachments.map((attachment) => ({
                     title: attachment.title,
                     path: attachment.path || attachment.local_preview_url,
                 })),
             }),
-        [blobAttachments, messageText, presentationRefs, quoteText]
+        [blobAttachments, displayMessageText, presentationRefs, quoteText]
     );
     const messageTimestamp = formatMessageTimestamp(ev.ts);
     const fullMessageTimestamp = formatFullTime(ev.ts);
@@ -834,7 +851,10 @@ export const MessageBubble = memo(function MessageBubble({
 
                 {/* Bubble wrapper (allows badge to overflow) */}
                 <div
-                    className="relative w-full max-w-full min-w-0 md:w-auto"
+                    className={classNames(
+                        "relative max-w-full min-w-0 md:w-auto",
+                        isUserMessage ? "w-auto self-end" : "w-full"
+                    )}
                     style={isAttention ? { minWidth: "min(8.5rem, 85vw)" } : undefined}
                 >
                     {isAttention && (
@@ -879,12 +899,12 @@ export const MessageBubble = memo(function MessageBubble({
                         relayChipClass={relayChipClass}
                         quoteText={quoteText}
                         presentationRefs={presentationRefs}
-                        isStreaming={isStreaming}
+                        isStreaming={shouldRenderStreamingBody}
                         streamingActivities={streamingActivities}
                         streamId={streamId}
                         actorId={actorId}
                         pendingEventId={pendingEventId}
-                        messageText={messageText}
+                        messageText={displayMessageText}
                         isQueuedOnlyPlaceholder={isQueuedOnlyPlaceholder}
                         streamingPlaceholderLabel={streamingPlaceholderLabel}
                         shouldRenderMarkdown={shouldRenderMarkdown}

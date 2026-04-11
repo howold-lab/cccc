@@ -1,7 +1,31 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const { localStorageMock } = vi.hoisted(() => {
+  function makeStorage() {
+    const data = new Map<string, string>();
+    return {
+      getItem: vi.fn((key: string) => data.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        data.set(key, String(value));
+      }),
+      removeItem: vi.fn((key: string) => {
+        data.delete(key);
+      }),
+      clear: vi.fn(() => {
+        data.clear();
+      }),
+    };
+  }
+
+  const storage = makeStorage();
+  vi.stubGlobal("localStorage", storage);
+  vi.stubGlobal("window", { setTimeout, clearTimeout, localStorage: storage });
+  return { localStorageMock: storage };
+});
 
 import {
   CHAT_SCROLL_SNAPSHOT_MAX_AGE_MS,
+  buildReplyAnchorTsMap,
   buildReplySlotTsMap,
   collapseActorStreamingPlaceholders,
   dedupeStreamingEvents,
@@ -11,6 +35,8 @@ import {
   supportsChatStreamingPlaceholder,
 } from "../../src/hooks/useChatTab";
 import type { LedgerEvent } from "../../src/types";
+
+void localStorageMock;
 
 function makeStreamingEvent({
   id,
@@ -46,7 +72,7 @@ function makeStreamingEvent({
 }
 
 describe("dedupeStreamingEvents", () => {
-  it("collapses multiple stream ids for the same pending event into one bubble", () => {
+  it("keeps distinct text-bearing stream ids for the same pending event", () => {
     const events = dedupeStreamingEvents([
       makeStreamingEvent({
         id: "stream:commentary-1",
@@ -62,33 +88,34 @@ describe("dedupeStreamingEvents", () => {
       }),
     ]);
 
-    expect(events).toHaveLength(1);
-    expect(String((events[0]?.data as { stream_id?: string }).stream_id || "")).toBe("commentary-1");
-    expect(String((events[0]?.data as { text?: string }).text || "")).toBe("先查一下");
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => String(event.id || ""))).toEqual([
+      "stream:commentary-1",
+      "stream:commentary-2",
+    ]);
   });
 
-  it("prefers commentary text over a same-pending final placeholder", () => {
+  it("collapses duplicate pending placeholders for the same pending event", () => {
     const events = dedupeStreamingEvents([
       makeStreamingEvent({
-        id: "stream:final-1",
-        streamId: "final-1",
+        id: "pending:evt-1:claude-1:a",
+        streamId: "pending:evt-1:claude-1:a",
         pendingEventId: "evt-1",
-        text: "",
+        pendingPlaceholder: true,
       }),
       makeStreamingEvent({
-        id: "stream:commentary-1",
-        streamId: "commentary-1",
+        id: "pending:evt-1:claude-1:b",
+        streamId: "pending:evt-1:claude-1:b",
         pendingEventId: "evt-1",
-        text: "我先继续查前端合并链路",
+        pendingPlaceholder: true,
       }),
     ]);
 
     expect(events).toHaveLength(1);
-    expect(String((events[0]?.data as { stream_id?: string }).stream_id || "")).toBe("commentary-1");
-    expect(String((events[0]?.data as { text?: string }).text || "")).toBe("我先继续查前端合并链路");
+    expect(String((events[0]?.data as { pending_event_id?: string }).pending_event_id || "")).toBe("evt-1");
   });
 
-  it("collapses placeholder and bound stream variants of the same pending event", () => {
+  it("keeps a real stream separate from its queued placeholder before later collapse", () => {
     const events = dedupeStreamingEvents([
       makeStreamingEvent({
         id: "pending:evt-1:claude-1",
@@ -104,14 +131,48 @@ describe("dedupeStreamingEvents", () => {
       }),
     ]);
 
-    expect(events).toHaveLength(1);
-    expect(String((events[0]?.data as { stream_id?: string }).stream_id || "")).toBe("final-1");
-    expect(String((events[0]?.data as { pending_event_id?: string }).pending_event_id || "")).toBe("evt-1");
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => String(event.id || ""))).toEqual([
+      "pending:evt-1:claude-1",
+      "stream:final-1",
+    ]);
+  });
+
+  it("keeps explicit commentary streams separate even if their ids still look pending-like", () => {
+    const events = dedupeStreamingEvents([
+      makeStreamingEvent({
+        id: "pending:evt-2:claude-1",
+        streamId: "pending:evt-2:claude-1",
+        pendingEventId: "evt-2",
+        pendingPlaceholder: true,
+      }),
+      {
+        id: "stream:commentary-2",
+        kind: "chat.message",
+        by: "claude-1",
+        _streaming: true,
+        data: {
+          text: "先同步一下排查路径",
+          to: ["user"],
+          stream_id: "pending:evt-2:claude-1:commentary",
+          pending_event_id: "evt-2",
+          pending_placeholder: false,
+          stream_phase: "commentary",
+          activities: [],
+        },
+      },
+    ]);
+
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => String(event.id || ""))).toEqual([
+      "pending:evt-2:claude-1",
+      "stream:commentary-2",
+    ]);
   });
 });
 
 describe("collapseActorStreamingPlaceholders", () => {
-  it("drops process-only pending bubbles when the same actor already has real streaming text", () => {
+  it("keeps process-only pending bubbles when the same actor already has real streaming text", () => {
     const events = collapseActorStreamingPlaceholders([
       makeStreamingEvent({
         id: "stream:commentary-1",
@@ -135,8 +196,11 @@ describe("collapseActorStreamingPlaceholders", () => {
       },
     ]);
 
-    expect(events).toHaveLength(1);
-    expect(events[0]?.data?.stream_id).toBe("commentary-1");
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => String(event.id || ""))).toEqual([
+      "stream:commentary-1",
+      "pending:evt-1:claude-1",
+    ]);
   });
 
   it("keeps a new local queued placeholder when the actor only has rich streaming from an older reply slot", () => {
@@ -164,6 +228,56 @@ describe("collapseActorStreamingPlaceholders", () => {
 
     expect(events).toHaveLength(2);
     expect(events.map((event) => String(event.id || ""))).toContain("stream:queued-local");
+  });
+
+  it("drops empty same-slot stream variants once real streaming text exists", () => {
+    const events = collapseActorStreamingPlaceholders([
+      makeStreamingEvent({
+        id: "stream:commentary-1",
+        streamId: "commentary-1",
+        pendingEventId: "evt-1",
+        text: "我先继续查前端合并链路",
+      }),
+      makeStreamingEvent({
+        id: "stream:final-empty-1",
+        streamId: "final-empty-1",
+        pendingEventId: "evt-1",
+        text: "",
+      }),
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(String(events[0]?.id || "")).toBe("stream:commentary-1");
+  });
+
+  it("keeps explicit phase streams even when their first frame is queued-only", () => {
+    const events = collapseActorStreamingPlaceholders([
+      {
+        id: "stream:commentary-queued",
+        kind: "chat.message",
+        by: "claude-1",
+        _streaming: true,
+        data: {
+          text: "",
+          to: ["user"],
+          stream_id: "pending:evt-2:claude-1:commentary",
+          pending_event_id: "evt-2",
+          pending_placeholder: false,
+          stream_phase: "commentary",
+          activities: [{ id: "queued:1", kind: "queued", status: "started", summary: "queued" }],
+        },
+      },
+      makeStreamingEvent({
+        id: "stream:final-2",
+        streamId: "final-2",
+        pendingEventId: "evt-2",
+        text: "给出最终结论",
+      }),
+    ]);
+
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => String(event.id || ""))).toContain("stream:commentary-queued");
+    expect(events.map((event) => String(event.id || ""))).toContain("stream:final-2");
   });
 });
 
@@ -227,6 +341,43 @@ describe("sortChatMessages", () => {
     const ordered = sortChatMessages(canonical, buildReplySlotTsMap(streaming));
 
     expect(ordered.map((event) => String(event.id || ""))).toEqual(["evt-a", "evt-b"]);
+  });
+
+  it("anchors assistant placeholders after the user message they are replying to", () => {
+    const pendingUserMessage: LedgerEvent = {
+      id: "local-user-1",
+      ts: "2026-04-08T06:04:10.000Z",
+      kind: "chat.message",
+      by: "user",
+      data: {
+        text: "为什么当前点击启动，但是前端ui没变？",
+        to: ["@foreman"],
+        client_id: "local-user-1",
+        _optimistic: true,
+      },
+    };
+    const assistantPlaceholder: LedgerEvent = {
+      id: "stream:queued-1",
+      ts: "2026-04-08T06:04:09.000Z",
+      kind: "chat.message",
+      by: "requirements-expert",
+      _streaming: true,
+      data: {
+        text: "",
+        to: ["user"],
+        stream_id: "local:local-user-1:requirements-expert",
+        pending_event_id: "local-user-1",
+        pending_placeholder: true,
+        activities: [{ id: "queued:1", kind: "queued", status: "started", summary: "queued" }],
+      },
+    };
+
+    const ordered = sortChatMessages(
+      [assistantPlaceholder, pendingUserMessage],
+      buildReplyAnchorTsMap([pendingUserMessage], [assistantPlaceholder]),
+    );
+
+    expect(ordered.map((event) => String(event.id || ""))).toEqual(["local-user-1", "stream:queued-1"]);
   });
 });
 
@@ -549,9 +700,126 @@ describe("mergeLiveChatMessageEvents", () => {
       "stream:queued-local-2",
     ]);
   });
+
+  it("keeps multiple text-bearing streaming messages from the same actor and pending event", () => {
+    const merged = mergeVisibleChatMessages(
+      [],
+      [
+        {
+          id: "stream:commentary-1",
+          ts: "2026-04-04T15:29:00.000Z",
+          kind: "chat.message",
+          by: "claude-1",
+          _streaming: true,
+          data: {
+            text: "先查一下",
+            pending_event_id: "user-msg-1",
+            stream_id: "commentary-1",
+            to: ["user"],
+          },
+        },
+        {
+          id: "stream:commentary-2",
+          ts: "2026-04-04T15:29:01.000Z",
+          kind: "chat.message",
+          by: "claude-1",
+          _streaming: true,
+          data: {
+            text: "继续看",
+            pending_event_id: "user-msg-1",
+            stream_id: "commentary-2",
+            to: ["user"],
+          },
+        },
+      ],
+      [],
+      { map: new Map(), next: 0 },
+    );
+
+    expect(merged.map((event) => String(event.id || ""))).toEqual([
+      "stream:commentary-1",
+      "stream:commentary-2",
+    ]);
+  });
 });
 
 describe("mergeVisibleChatMessages", () => {
+  it("collapses streaming and final assistant replies for the same reply slot into one bubble", () => {
+    const merged = mergeVisibleChatMessages(
+      [
+        {
+          id: "evt-final-assistant",
+          ts: "2026-04-04T16:43:02.000Z",
+          kind: "chat.message",
+          by: "project-director",
+          data: {
+            text: "这是最终 canonical reply",
+            reply_to: "user-msg-1",
+            stream_id: "stream-reply-1",
+            to: ["user"],
+          },
+        },
+      ],
+      [
+        {
+          id: "stream:partial-assistant",
+          ts: "2026-04-04T16:43:01.000Z",
+          kind: "chat.message",
+          by: "project-director",
+          _streaming: true,
+          data: {
+            text: "还在输出",
+            pending_event_id: "user-msg-1",
+            stream_id: "stream-reply-1",
+            to: ["user"],
+          },
+        },
+      ],
+      [],
+      { map: new Map(), next: 0 },
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(String(merged[0]?.id || "")).toBe("evt-final-assistant");
+    expect(String((merged[0]?.data as { text?: unknown })?.text || "")).toBe("这是最终 canonical reply");
+  });
+
+  it("does not collapse multiple stream-backed replies from the same actor to the same parent", () => {
+    const merged = mergeVisibleChatMessages(
+      [
+        {
+          id: "evt-stream-1",
+          ts: "2026-04-04T16:28:01.000Z",
+          kind: "chat.message",
+          by: "requirements-expert",
+          data: {
+            text: "我先查",
+            reply_to: "user-msg-1",
+            stream_id: "stream-1",
+            to: ["user"],
+          },
+        },
+        {
+          id: "evt-stream-2",
+          ts: "2026-04-04T16:28:05.000Z",
+          kind: "chat.message",
+          by: "requirements-expert",
+          data: {
+            text: "查到了，继续给结论",
+            reply_to: "user-msg-1",
+            stream_id: "stream-2",
+            to: ["user"],
+          },
+        },
+      ],
+      [],
+      [],
+      { map: new Map(), next: 0 },
+    );
+
+    expect(merged.map((event) => String(event.id || ""))).toEqual(["evt-stream-1", "evt-stream-2"]);
+  });
+
   it("keeps an optimistic user reply visible while the matching canonical event is still empty", () => {
     const localId = "local-user-reply-1";
     const merged = mergeVisibleChatMessages(
@@ -672,6 +940,50 @@ describe("mergeVisibleChatMessages", () => {
     const ordered = sortChatMessages(merged, buildReplySlotTsMap(streaming));
 
     expect(ordered.map((event) => String(event.id || ""))).toEqual(["stream:old-slot", "evt-later"]);
+  });
+
+  it("keeps a non-queued activity bubble visible after the canonical reply for the same slot arrives", () => {
+    const merged = mergeVisibleChatMessages(
+      [
+        {
+          id: "evt-final",
+          ts: "2026-04-04T16:43:02.000Z",
+          kind: "chat.message",
+          by: "project-director",
+          data: {
+            text: "这是最终 canonical reply",
+            reply_to: "user-msg-1",
+            stream_id: "stream-reply-1",
+            to: ["user"],
+          },
+        },
+      ],
+      [
+        {
+          id: "pending:user-msg-1:project-director",
+          ts: "2026-04-04T16:43:01.500Z",
+          kind: "chat.message",
+          by: "project-director",
+          _streaming: true,
+          data: {
+            text: "",
+            pending_event_id: "user-msg-1",
+            stream_id: "pending:user-msg-1:project-director",
+            pending_placeholder: true,
+            to: ["user"],
+            activities: [{ id: "cmd-1", kind: "command", status: "started", summary: "rg -n activity" }],
+          },
+        },
+      ],
+      [],
+      { map: new Map(), next: 0 },
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(merged.map((event) => String(event.id || ""))).toEqual([
+      "pending:user-msg-1:project-director",
+      "evt-final",
+    ]);
   });
 });
 

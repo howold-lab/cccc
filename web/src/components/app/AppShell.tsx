@@ -1,11 +1,12 @@
 import { useEffect, type CSSProperties } from "react";
+import { useTranslation } from "react-i18next";
 import { ErrorBoundary } from "../ErrorBoundary";
-import { TabBar } from "../TabBar";
 import { AppHeader } from "../layout/AppHeader";
 import { GroupSidebar } from "../layout/GroupSidebar";
+import { ModalFrame } from "../modals/ModalFrame";
 import { ActorTab } from "../../pages/ActorTab";
 import { ChatTab } from "../../pages/chat";
-import type { Actor, GroupContext, GroupDoc, GroupMeta, TextScale } from "../../types";
+import type { Actor, GroupContext, GroupDoc, GroupMeta, GroupRuntimeStatus, TextScale } from "../../types";
 import { SIDEBAR_COLLAPSED_WIDTH } from "../../stores/useUIStore";
 
 type AppShellProps = {
@@ -31,12 +32,12 @@ type AppShellProps = {
   isSmallScreen: boolean;
   webReadOnly: boolean;
   selectedGroupRunning: boolean;
+  selectedGroupRuntimeStatus: GroupRuntimeStatus | null;
   selectedGroupActorsHydrating: boolean;
   theme: "light" | "dark" | "system";
   textScale: TextScale;
   sseStatus: "connected" | "connecting" | "disconnected";
   groupLabelById: Record<string, string>;
-  chatUnreadCount: number;
   mentionSelectedIndex: number;
   showMentionMenu: boolean;
   composerRef: React.RefObject<HTMLTextAreaElement | null>;
@@ -65,7 +66,6 @@ type AppShellProps = {
   onOpenSettings: () => void;
   onOpenMobileMenu: () => void;
   onTabChange: (tab: string) => void;
-  onAddAgent: (() => void) | undefined;
   appendComposerFiles: (files: File[]) => void;
   setMentionFilter: React.Dispatch<React.SetStateAction<string>>;
   setMentionSelectedIndex: React.Dispatch<React.SetStateAction<number>>;
@@ -104,12 +104,12 @@ export function AppShell({
   isSmallScreen,
   webReadOnly,
   selectedGroupRunning,
+  selectedGroupRuntimeStatus,
   selectedGroupActorsHydrating,
   theme,
   textScale,
   sseStatus,
   groupLabelById,
-  chatUnreadCount,
   mentionSelectedIndex,
   showMentionMenu,
   composerRef,
@@ -138,7 +138,6 @@ export function AppShell({
   onOpenSettings,
   onOpenMobileMenu,
   onTabChange,
-  onAddAgent,
   appendComposerFiles,
   setMentionFilter,
   setMentionSelectedIndex,
@@ -153,6 +152,7 @@ export function AppShell({
   onTouchStart,
   onTouchEnd,
 }: AppShellProps) {
+  const { t } = useTranslation("chat");
   const shellStyle = {
     "--sidebar-width": `${sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}px`,
   } as CSSProperties;
@@ -237,6 +237,7 @@ export function AppShell({
           selectedGroupId={selectedGroupId}
           groupDoc={groupDoc}
           selectedGroupRunning={selectedGroupRunning}
+          selectedGroupRuntimeStatus={selectedGroupRuntimeStatus}
           actors={actors}
           sseStatus={sseStatus}
           busy={busy}
@@ -251,21 +252,6 @@ export function AppShell({
           onOpenMobileMenu={onOpenMobileMenu}
         />
 
-        {selectedGroupId ? (
-          <TabBar
-            groupId={selectedGroupId}
-            actors={runtimeActors}
-            activeTab={activeTab}
-            onTabChange={onTabChange}
-            unreadChatCount={chatUnreadCount}
-            isDark={isDark}
-            selectedGroupRunning={selectedGroupRunning}
-            selectedGroupActorsHydrating={selectedGroupActorsHydrating}
-            onAddAgent={onAddAgent}
-            canAddAgent={!webReadOnly && !!selectedGroupId}
-          />
-        ) : null}
-
         <div
           ref={contentRef}
           className={`relative flex min-h-0 flex-1 flex-col overflow-hidden transition-opacity duration-150 ${
@@ -274,12 +260,7 @@ export function AppShell({
           onTouchStart={onTouchStart}
           onTouchEnd={onTouchEnd}
         >
-          <div
-            className={`absolute inset-0 flex min-h-0 flex-col ${
-              activeTab === "chat" ? "" : "invisible pointer-events-none"
-            }`}
-            aria-hidden={activeTab !== "chat"}
-          >
+          <div className="absolute inset-0 flex min-h-0 flex-col">
             <ErrorBoundary>
               <ChatTab
                 isDark={isDark}
@@ -287,9 +268,12 @@ export function AppShell({
                 readOnly={webReadOnly}
                 selectedGroupId={selectedGroupId}
                 selectedGroupRunning={selectedGroupRunning}
+                selectedGroupActorsHydrating={selectedGroupActorsHydrating}
                 groupLabelById={groupLabelById}
                 actors={actors}
+                runtimeActors={runtimeActors}
                 groups={groups}
+                activeRuntimeActorId={activeTab !== "chat" ? activeTab : undefined}
                 recipientActors={recipientActors}
                 recipientActorsBusy={recipientActorsBusy}
                 destGroupScopeLabel={destGroupScopeLabel}
@@ -299,6 +283,7 @@ export function AppShell({
                 chatAtBottomRef={chatAtBottomRef}
                 appendComposerFiles={appendComposerFiles}
                 onStartGroup={onStartGroup}
+                onOpenRuntimeActor={onTabChange}
                 showMentionMenu={showMentionMenu}
                 setShowMentionMenu={setShowMentionMenu}
                 mentionSelectedIndex={mentionSelectedIndex}
@@ -308,20 +293,24 @@ export function AppShell({
             </ErrorBoundary>
           </div>
 
-          <div
-            className={`absolute inset-0 flex min-h-0 flex-col ${
-              activeTab === "chat" ? "invisible pointer-events-none" : ""
-            }`}
-            aria-hidden={activeTab === "chat"}
-          >
-            {renderedActorIds.map((actorId) => {
-              const actor = runtimeActors.find((item) => item.id === actorId) || null;
-              const isVisible = activeTab === actorId && activeTab !== "chat";
-              const agentState =
-                (groupContext?.agent_states || []).find((item) => item.id === (actor?.id || "")) || null;
+          {renderedActorIds.map((actorId) => {
+            const actor = runtimeActors.find((item) => item.id === actorId) || null;
+            const isVisible = activeTab === actorId && activeTab !== "chat";
+            const agentState =
+              (groupContext?.agent_states || []).find((item) => item.id === (actor?.id || "")) || null;
 
-              return (
-                <div key={actorId} className={isVisible ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+            return (
+              <ModalFrame
+                key={actorId}
+                isOpen={isVisible}
+                isDark={isDark}
+                onClose={() => onTabChange("chat")}
+                titleId={`runtime-inspector-${actorId}`}
+                title={t("runtimeInspectorTitle", { defaultValue: "Runtime inspector" })}
+                closeAriaLabel={t("runtimeInspectorClose", { defaultValue: "Close runtime inspector" })}
+                panelClassName="h-full w-full max-w-none overflow-hidden sm:h-[92vh] sm:w-[min(1480px,98vw)] sm:max-w-[98vw]"
+              >
+                <div className="min-h-0 flex-1 overflow-hidden">
                   <ErrorBoundary>
                     <ActorTab
                       actor={actor}
@@ -342,9 +331,9 @@ export function AppShell({
                     />
                   </ErrorBoundary>
                 </div>
-              );
-            })}
-          </div>
+              </ModalFrame>
+            );
+          })}
         </div>
       </main>
     </div>

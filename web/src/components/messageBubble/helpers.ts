@@ -7,6 +7,76 @@ const EMPTY_STREAMING_EVENTS: LedgerEvent[] = [];
 const STREAMING_PENDING_MIN_MS = 80;
 const STREAMING_ACTIVITY_LOG_LIMIT = 12;
 
+function isMarkdownTableSeparatorCell(cell: string): boolean {
+  return /^:?-{3,}:?$/.test(String(cell || "").trim());
+}
+
+function containsMarkdownTable(text: string): boolean {
+  const lines = String(text || "").split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const header = String(lines[index] || "").trim();
+    const separator = String(lines[index + 1] || "").trim();
+    if (!header || !separator || !header.includes("|") || !separator.includes("-")) continue;
+
+    const headerCells = header.split("|").map((cell) => cell.trim()).filter(Boolean);
+    const separatorCells = separator.split("|").map((cell) => cell.trim()).filter(Boolean);
+    if (headerCells.length < 2) continue;
+    if (separatorCells.length !== headerCells.length) continue;
+    if (separatorCells.every(isMarkdownTableSeparatorCell)) return true;
+  }
+  return false;
+}
+
+export function mayContainMarkdown(text: string): boolean {
+  const value = String(text || "");
+  if (!value.trim()) return false;
+  // Internal delivery manifests should stay compact plain text instead of
+  // picking up prose list spacing from Markdown rendering.
+  if (/^\[cccc\]\s+(Attachments|References):/m.test(value)) return false;
+  if (containsMarkdownTable(value)) return true;
+  return /(```|`[^`\n]+`|\[[^\]]+\]\([^)]+\)|^#{1,6}\s|^\s*[-*+]\s|^\s*\d+\.\s|^\s*>\s)/m.test(value);
+}
+
+export function formatStreamingActivityKind(kind: string): string {
+  const normalized = String(kind || "").trim();
+  switch (normalized) {
+    case "queued":
+      return "queue";
+    case "thinking":
+      return "think";
+    case "plan":
+      return "plan";
+    case "search":
+      return "search";
+    case "command":
+      return "run";
+    case "patch":
+      return "patch";
+    case "tool":
+      return "tool";
+    case "reply":
+      return "reply";
+    default:
+      return normalized || "step";
+  }
+}
+
+export function getStructuredStreamingActivityLabel(activity: StreamingActivity): string {
+  const command = String(activity.command || "").trim();
+  if (command) return command;
+  const filePaths = Array.isArray(activity.file_paths)
+    ? activity.file_paths.map((item) => String(item || "").trim()).filter((item) => item)
+    : [];
+  if (filePaths.length > 0) return filePaths.join(", ");
+  const toolName = String(activity.tool_name || "").trim();
+  const serverName = String(activity.server_name || "").trim();
+  if (toolName && serverName) return `${serverName}:${toolName}`;
+  if (toolName) return toolName;
+  const query = String(activity.query || "").trim();
+  if (query) return query;
+  return String(activity.summary || "").trim();
+}
+
 export function normalizeStreamingActivities(value: unknown): StreamingActivity[] {
   if (!Array.isArray(value)) return EMPTY_STREAMING_ACTIVITIES;
   const normalized = dedupeStreamingActivities(value
@@ -76,6 +146,10 @@ export function getEffectiveStreamingActivities({
   const normalizedFallback = Array.isArray(fallbackActivities) ? fallbackActivities : EMPTY_STREAMING_ACTIVITIES;
   const activitiesByStreamId = bucket?.streamingActivitiesByStreamId || {};
   const direct = streamId ? normalizeStreamingActivities(activitiesByStreamId[streamId]) : EMPTY_STREAMING_ACTIVITIES;
+  if (direct.length > 0) return direct;
+  if (normalizedFallback.length > 0) return normalizeStreamingActivities(normalizedFallback);
+  if (streamId || !pendingEventId) return EMPTY_STREAMING_ACTIVITIES;
+
   const events = Array.isArray(bucket?.streamingEvents) ? (bucket?.streamingEvents || EMPTY_STREAMING_EVENTS) : EMPTY_STREAMING_EVENTS;
 
   const latestCandidate = events
@@ -111,8 +185,7 @@ export function getEffectiveStreamingActivities({
     })[0];
 
   if (latestCandidate?.activities?.length) return latestCandidate.activities;
-  if (direct.length > 0) return direct;
-  return normalizedFallback;
+  return EMPTY_STREAMING_ACTIVITIES;
 }
 
 export function isQueuedOnlyStreamingPlaceholder({

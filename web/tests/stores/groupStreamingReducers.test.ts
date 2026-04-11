@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { reconcileStreamingMessagePatch, upsertStreamingActivityPatch, type StreamingChatBucket } from "../../src/stores/groupStreamingReducers";
+import {
+  reconcileStreamingMessagePatch,
+  removeStreamingEventPatch,
+  upsertStreamingActivityPatch,
+  type StreamingChatBucket,
+} from "../../src/stores/groupStreamingReducers";
 import type { StreamingActivity } from "../../src/types";
 
 function makeBucket(overrides?: Partial<StreamingChatBucket>): StreamingChatBucket {
@@ -117,17 +122,6 @@ describe("upsertStreamingActivityPatch", () => {
           pendingEventId: "evt-1",
           actorId: "coder",
           currentStreamId: "s-1",
-          streamIds: ["s-1"],
-          text: "",
-          activities: [
-            {
-              id: "reasoning:1",
-              kind: "thinking",
-              status: "started",
-              summary: "initial",
-              ts: "2026-04-06T08:00:00.000Z",
-            },
-          ],
           phase: "streaming",
           updatedAt: Date.parse("2026-04-06T08:00:00.000Z"),
         },
@@ -146,23 +140,68 @@ describe("upsertStreamingActivityPatch", () => {
     });
 
     expect(patch).not.toBeNull();
-    expect((patch?.streamingActivitiesByStreamId || {})["s-1"]).toEqual([
-      {
-        id: "reasoning:1",
-        kind: "thinking",
-        status: "completed",
-        summary: "final",
-        ts: "2026-04-06T08:00:01.000Z",
+    const nextActivities = (patch?.streamingActivitiesByStreamId || {})["s-1"] || [];
+    expect(nextActivities).toHaveLength(1);
+    expect(nextActivities[0]).toMatchObject({
+      id: "reasoning:1",
+      kind: "thinking",
+      status: "completed",
+      summary: "final",
+      ts: "2026-04-06T08:00:00.000Z",
+    });
+    const nextEventActivities = (((patch?.streamingEvents || [])[0]?.data as { activities?: StreamingActivity[] } | undefined)?.activities || []);
+    expect(nextEventActivities).toHaveLength(1);
+    expect(nextEventActivities[0]).toMatchObject({
+      id: "reasoning:1",
+      kind: "thinking",
+      status: "completed",
+      summary: "final",
+      ts: "2026-04-06T08:00:00.000Z",
+    });
+    expect((patch?.replySessionsByPendingEventId || {})["evt-1"]).toMatchObject({
+      currentStreamId: "s-1",
+      phase: "streaming",
+    });
+  });
+});
+
+describe("removeStreamingEventPatch", () => {
+  it("clears stale stream caches even when the streaming row is already gone", () => {
+    const bucket = makeBucket({
+      streamingTextByStreamId: {
+        "s-stale": "partial text",
       },
-    ]);
-    expect((((patch?.streamingEvents || [])[0]?.data as { activities?: StreamingActivity[] } | undefined)?.activities || [])).toEqual([
-      {
-        id: "reasoning:1",
-        kind: "thinking",
-        status: "completed",
-        summary: "final",
-        ts: "2026-04-06T08:00:01.000Z",
+      streamingActivitiesByStreamId: {
+        "s-stale": [
+          {
+            id: "activity-1",
+            kind: "thinking",
+            status: "started",
+            summary: "investigate",
+            ts: "2026-04-06T08:00:00.000Z",
+          },
+        ],
       },
-    ]);
+      replySessionsByPendingEventId: {
+        "evt-1": {
+          pendingEventId: "evt-1",
+          actorId: "coder",
+          currentStreamId: "s-stale",
+          phase: "streaming",
+          updatedAt: Date.parse("2026-04-06T08:00:00.000Z"),
+        },
+      },
+      pendingEventIdByStreamId: {
+        "s-stale": "evt-1",
+      },
+    });
+
+    const patch = removeStreamingEventPatch(bucket, "s-stale");
+
+    expect(patch).not.toBeNull();
+    expect(patch?.streamingTextByStreamId || {}).not.toHaveProperty("s-stale");
+    expect(patch?.streamingActivitiesByStreamId || {}).not.toHaveProperty("s-stale");
+    expect(patch?.pendingEventIdByStreamId || {}).not.toHaveProperty("s-stale");
+    expect(patch?.replySessionsByPendingEventId || {}).not.toHaveProperty("evt-1");
   });
 });

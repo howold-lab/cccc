@@ -98,9 +98,52 @@ function mergeStreamingCandidates(primary: LedgerEvent, secondary: LedgerEvent):
   };
 }
 
-function isPlaceholderLikeStreamingEvent(data: ChatMessageData & { pending_placeholder?: unknown; stream_id?: unknown }): boolean {
+function getNormalizedStreamPhase(data: { stream_phase?: unknown } | null | undefined): string {
+  return String(data?.stream_phase || "").trim().toLowerCase();
+}
+
+function hasExplicitStreamingPhase(data: { stream_phase?: unknown } | null | undefined): boolean {
+  const streamPhase = getNormalizedStreamPhase(data);
+  return streamPhase === "commentary" || streamPhase === "final_answer";
+}
+
+function isPlaceholderLikeStreamingEvent(data: ChatMessageData & {
+  pending_placeholder?: unknown;
+  stream_id?: unknown;
+  stream_phase?: unknown;
+  text?: unknown;
+  activities?: unknown;
+}): boolean {
   const streamId = String(data.stream_id || "").trim();
-  return Boolean(data.pending_placeholder) || streamId.startsWith("local:") || streamId.startsWith("pending:");
+  if (data.pending_placeholder) return true;
+
+  if (hasExplicitStreamingPhase(data)) return false;
+
+  const text = typeof data.text === "string" ? data.text.trim() : "";
+  if (text) return false;
+  if (!hasOnlyQueuedActivities(data.activities)) return false;
+
+  return streamId.startsWith("local:") || streamId.startsWith("pending:");
+}
+
+function hasOnlyQueuedActivities(value: unknown): boolean {
+  const activities = Array.isArray(value) ? value : [];
+  return activities.length === 0 || activities.every((item) => {
+    if (!item || typeof item !== "object") return true;
+    const kind = String((item as { kind?: unknown }).kind || "").trim();
+    const summary = String((item as { summary?: unknown }).summary || "").trim();
+    return kind === "queued" && summary === "queued";
+  });
+}
+
+function hasRichActivities(value: unknown): boolean {
+  const activities = Array.isArray(value) ? value : [];
+  return activities.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const kind = String((item as { kind?: unknown }).kind || "").trim();
+    const summary = String((item as { summary?: unknown }).summary || "").trim();
+    return kind !== "queued" || summary !== "queued";
+  });
 }
 
 function getStreamingEventDedupeKey(event: LedgerEvent): string {
@@ -111,11 +154,17 @@ function getStreamingEventDedupeKey(event: LedgerEvent): string {
   const pendingEventId = String(data.pending_event_id || "").trim();
   const streamId = String(data.stream_id || "").trim();
   if (!actorId) return "";
-  if (pendingEventId) {
+  // Placeholder lifecycle events still collapse by pending reply slot, but a
+  // real text-bearing stream must keep stream_id identity or short streaming
+  // messages will overwrite each other before they ever reach the list.
+  if (pendingEventId && (!hasRenderableChatMessageContent(event) || isPlaceholderLikeStreamingEvent(data))) {
     return `pending:${actorId}:${pendingEventId}`;
   }
-  if (streamId && !isPlaceholderLikeStreamingEvent(data)) {
+  if (streamId) {
     return `stream:${actorId}:${streamId}`;
+  }
+  if (pendingEventId) {
+    return `pending:${actorId}:${pendingEventId}`;
   }
   return "";
 }
@@ -203,14 +252,12 @@ export function collapseActorStreamingPlaceholders(streamingEvents: LedgerEvent[
         const slotKey = getReplySlotKey(event);
         if (!slotKey || !richReplySlots.has(slotKey)) continue;
         const data = event.data && typeof event.data === "object"
-          ? event.data as ChatMessageData & { pending_placeholder?: unknown; activities?: unknown[]; stream_id?: unknown }
+          ? event.data as ChatMessageData & { pending_placeholder?: unknown; activities?: unknown[]; stream_id?: unknown; stream_phase?: unknown }
           : {};
         const text = typeof data.text === "string" ? data.text.trim() : "";
-        const isPlaceholderLike =
-          Boolean(data.pending_placeholder) ||
-          String(data.stream_id || "").trim().startsWith("local:") ||
-          String(data.stream_id || "").trim().startsWith("pending:");
-        if (isPlaceholderLike && !text) {
+        const onlyQueuedActivities = hasOnlyQueuedActivities(data.activities);
+        const isPlaceholderLike = isPlaceholderLikeStreamingEvent(data);
+        if (!text && !hasRichActivities(data.activities) && (isPlaceholderLike || (onlyQueuedActivities && !hasExplicitStreamingPhase(data)))) {
           shouldDrop.add(event);
         }
       }
@@ -219,21 +266,14 @@ export function collapseActorStreamingPlaceholders(streamingEvents: LedgerEvent[
 
     const placeholderOnlyEvents = actorEvents.filter((event) => {
       const data = event.data && typeof event.data === "object"
-        ? event.data as ChatMessageData & { pending_placeholder?: unknown; stream_id?: unknown }
+        ? event.data as ChatMessageData & { pending_placeholder?: unknown; stream_id?: unknown; stream_phase?: unknown }
         : {};
       const text = typeof data.text === "string" ? data.text.trim() : "";
       if (text) return false;
-      const activities = Array.isArray(data.activities) ? data.activities : [];
-      const onlyQueuedActivities = activities.length === 0 || activities.every((item) => {
-        if (!item || typeof item !== "object") return true;
-        const kind = String((item as { kind?: unknown }).kind || "").trim();
-        const summary = String((item as { summary?: unknown }).summary || "").trim();
-        return kind === "queued" && summary === "queued";
-      });
-      const streamId = String(data.stream_id || "").trim();
+      const onlyQueuedActivities = hasOnlyQueuedActivities(data.activities);
       return (
         onlyQueuedActivities &&
-        (Boolean(data.pending_placeholder) || streamId.startsWith("local:") || streamId.startsWith("pending:"))
+        isPlaceholderLikeStreamingEvent(data)
       );
     });
     if (placeholderOnlyEvents.length <= 1) continue;
@@ -267,18 +307,12 @@ function dropOrphanQueuedPlaceholders(
     const slotKey = getReplySlotKey(event);
     if (!slotKey || !renderableCanonicalReplySlots.has(slotKey)) return true;
     const data = event.data && typeof event.data === "object"
-      ? event.data as ChatMessageData & { pending_placeholder?: unknown; stream_id?: unknown }
+      ? event.data as ChatMessageData & { pending_placeholder?: unknown; stream_id?: unknown; stream_phase?: unknown }
       : {};
     const text = typeof data.text === "string" ? data.text.trim() : "";
     if (text) return true;
-    // Canonical reply exists and placeholder has no text — drop it even if activities
-    // are non-queued (stale activities are irrelevant once canonical text arrived).
-    const streamId = String(data.stream_id || "").trim();
-    const isPlaceholderLike =
-      Boolean(data.pending_placeholder) ||
-      streamId.startsWith("local:") ||
-      streamId.startsWith("pending:");
-    return !isPlaceholderLike;
+    const isPlaceholderLike = isPlaceholderLikeStreamingEvent(data);
+    return !(isPlaceholderLike && !hasRichActivities(data.activities));
   });
 }
 
@@ -313,6 +347,20 @@ export function getReplySlotKey(event: LedgerEvent): string {
   return `${actorId}:${replyAnchor}`;
 }
 
+function getReplyAnchorId(event: LedgerEvent): string {
+  if (String(event.kind || "").trim() !== "chat.message") return "";
+  const data = event.data && typeof event.data === "object"
+    ? event.data as ChatMessageData & { pending_event_id?: unknown; reply_to?: unknown }
+    : undefined;
+  if (typeof data?.pending_event_id === "string" && data.pending_event_id.trim()) {
+    return data.pending_event_id.trim();
+  }
+  if (typeof data?.reply_to === "string" && data.reply_to.trim()) {
+    return data.reply_to.trim();
+  }
+  return "";
+}
+
 export function buildReplySlotTsMap(streamingEvents: LedgerEvent[]): Map<string, string> {
   const slotTsByKey = new Map<string, string>();
   for (const event of streamingEvents) {
@@ -328,6 +376,45 @@ export function buildReplySlotTsMap(streamingEvents: LedgerEvent[]): Map<string,
   return slotTsByKey;
 }
 
+export function buildReplyAnchorTsMap(
+  messages: LedgerEvent[],
+  streamingEvents: LedgerEvent[],
+): Map<string, string> {
+  const slotTsByKey = buildReplySlotTsMap(streamingEvents);
+  const anchorTsById = new Map<string, string>();
+
+  for (const event of messages) {
+    if (String(event.kind || "").trim() !== "chat.message") continue;
+    const ts = String(event.ts || "").trim();
+    if (!ts) continue;
+    const eventId = String(event.id || "").trim();
+    if (eventId) {
+      const prev = anchorTsById.get(eventId) || "";
+      if (!prev || ts < prev) anchorTsById.set(eventId, ts);
+    }
+    const data = event.data && typeof event.data === "object"
+      ? event.data as ChatMessageData & { client_id?: unknown }
+      : undefined;
+    const clientId = typeof data?.client_id === "string" ? data.client_id.trim() : "";
+    if (clientId) {
+      const prev = anchorTsById.get(clientId) || "";
+      if (!prev || ts < prev) anchorTsById.set(clientId, ts);
+    }
+  }
+
+  for (const event of [...messages, ...streamingEvents]) {
+    const slotKey = getReplySlotKey(event);
+    if (!slotKey) continue;
+    const anchorId = getReplyAnchorId(event);
+    if (!anchorId) continue;
+    const anchorTs = String(anchorTsById.get(anchorId) || "").trim();
+    if (!anchorTs) continue;
+    slotTsByKey.set(slotKey, anchorTs);
+  }
+
+  return slotTsByKey;
+}
+
 export function sortChatMessages(
   messages: LedgerEvent[],
   replySlotTsByKey: Map<string, string>,
@@ -340,6 +427,7 @@ export function sortChatMessages(
       return {
         event,
         index,
+        hasReplySlot: slotKey.length > 0,
         sortTs: slotTs || eventTs,
         eventTs,
       };
@@ -348,6 +436,9 @@ export function sortChatMessages(
       if (a.sortTs && b.sortTs && a.sortTs !== b.sortTs) return a.sortTs.localeCompare(b.sortTs);
       if (a.sortTs && !b.sortTs) return -1;
       if (!a.sortTs && b.sortTs) return 1;
+      if (a.sortTs && b.sortTs && a.sortTs === b.sortTs && a.hasReplySlot !== b.hasReplySlot) {
+        return a.hasReplySlot ? 1 : -1;
+      }
       if (a.eventTs && b.eventTs && a.eventTs !== b.eventTs) return a.eventTs.localeCompare(b.eventTs);
       return a.index - b.index;
     })
@@ -371,11 +462,11 @@ function getLogicalMessageOrderKey(event: LedgerEvent): string {
       : typeof data?.reply_to === "string" && data.reply_to.trim()
         ? data.reply_to.trim()
         : "";
-  if (actorId && actorId !== "user" && replyAnchor) {
+  const streamId = typeof data?.stream_id === "string" ? data.stream_id.trim() : "";
+  if (actorId && actorId !== "user" && replyAnchor && (event._streaming || !hasRenderableChatMessageContent(event) || streamId)) {
     return `reply:${actorId}:${replyAnchor}`;
   }
 
-  const streamId = typeof data?.stream_id === "string" ? data.stream_id.trim() : "";
   if (streamId) return `stream:${streamId}`;
 
   const eventId = String(event.id || "").trim();
@@ -388,25 +479,32 @@ function getLogicalMessageReplacementKey(event: LedgerEvent): string {
     return `event:${String(event.id || "").trim() || String(event.ts || "").trim()}`;
   }
   const data = event.data && typeof event.data === "object"
-    ? event.data as ChatMessageData & { client_id?: unknown; stream_id?: unknown }
+    ? event.data as ChatMessageData & { client_id?: unknown; pending_event_id?: unknown; reply_to?: unknown; stream_id?: unknown }
     : undefined;
   const clientId = typeof data?.client_id === "string" ? data.client_id.trim() : "";
   if (clientId) return `client:${clientId}`;
 
-  if (event._streaming || !hasRenderableChatMessageContent(event)) {
-    const actorId = String(event.by || "").trim();
-    const replyAnchor =
-      typeof data?.pending_event_id === "string" && data.pending_event_id.trim()
-        ? data.pending_event_id.trim()
-        : typeof (data as { reply_to?: unknown } | undefined)?.reply_to === "string" && String((data as { reply_to?: string }).reply_to || "").trim()
-          ? String((data as { reply_to?: string }).reply_to || "").trim()
-          : "";
-    if (actorId && actorId !== "user" && replyAnchor) {
+  const actorId = String(event.by || "").trim();
+  const replyAnchor =
+    typeof data?.pending_event_id === "string" && data.pending_event_id.trim()
+      ? data.pending_event_id.trim()
+      : typeof data?.reply_to === "string" && data.reply_to.trim()
+        ? data.reply_to.trim()
+        : "";
+  const streamId = typeof data?.stream_id === "string" ? data.stream_id.trim() : "";
+  const placeholderLike = isPlaceholderLikeStreamingEvent((data || {}) as ChatMessageData & {
+    pending_placeholder?: unknown;
+    stream_id?: unknown;
+  });
+  if (actorId && actorId !== "user" && replyAnchor) {
+    if (streamId && !placeholderLike) {
+      return `stream:${streamId}`;
+    }
+    if (placeholderLike || !hasRenderableChatMessageContent(event)) {
       return `reply:${actorId}:${replyAnchor}`;
     }
   }
 
-  const streamId = typeof data?.stream_id === "string" ? data.stream_id.trim() : "";
   if (streamId) return `stream:${streamId}`;
 
   const eventId = String(event.id || "").trim();
@@ -484,14 +582,32 @@ export function mergeVisibleChatMessages(
       .map((ev: LedgerEvent) => getReplySlotKey(ev))
       .filter((key: string) => key.length > 0),
   );
+  const renderableStreamingReplySlots = new Set(
+    streamingEvents
+      .filter((ev: LedgerEvent) => hasRenderableChatMessageContent(ev))
+      .map((ev: LedgerEvent) => getReplySlotKey(ev))
+      .filter((key: string) => key.length > 0),
+  );
   const liveStreaming = streamingEvents.filter((ev: LedgerEvent) => {
-    const data = ev.data && typeof ev.data === "object" ? (ev.data as { stream_id?: unknown }) : null;
+    const data = ev.data && typeof ev.data === "object"
+      ? (ev.data as { stream_id?: unknown; pending_placeholder?: unknown; activities?: unknown })
+      : null;
     const streamId = data && typeof data.stream_id === "string" ? data.stream_id.trim() : "";
+    const slotKey = getReplySlotKey(ev);
+    const renderable = hasRenderableChatMessageContent(ev);
     if (streamId && canonicalStreamIds.has(streamId)) return false;
-    // Backup: drop empty streaming events whose reply slot is covered by a canonical event
-    if (!hasRenderableChatMessageContent(ev)) {
-      const slotKey = getReplySlotKey(ev);
-      if (slotKey && canonicalReplySlots.has(slotKey)) return false;
+    const hasRichActivityTimeline = hasRichActivities(data?.activities);
+    // Backup: drop empty streaming events whose reply slot is covered by a canonical event,
+    // but keep non-queued activity bubbles until the activity itself completes.
+    if (!renderable) {
+      if (slotKey && canonicalReplySlots.has(slotKey)) return hasRichActivityTimeline;
+      if (slotKey && renderableStreamingReplySlots.has(slotKey)) {
+        const placeholderLike = isPlaceholderLikeStreamingEvent(((data || {}) as ChatMessageData & {
+          pending_placeholder?: unknown;
+          stream_id?: unknown;
+        }));
+        if (!hasRichActivityTimeline && (placeholderLike || hasOnlyQueuedActivities(data?.activities))) return false;
+      }
     }
     return true;
   });
@@ -604,7 +720,11 @@ export function useChatTab({
     const resolved = new Map<string, Actor>();
     const policy = groupSettings?.default_send_to || "foreman";
     const effectiveTokens = normalized.length > 0 ? normalized : (policy === "foreman" ? ["@foreman"] : ["@all"]);
-    const allActors = actors.filter((actor) => String(actor.id || "").trim() && String(actor.id || "").trim() !== "user");
+    const allActors = actors.filter((actor) => {
+      const actorId = String(actor.id || "").trim();
+      const internalKind = String(actor.internal_kind || "").trim();
+      return actorId && actorId !== "user" && !internalKind;
+    });
     const peers = allActors.filter((actor) => String(actor.role || "").trim() !== "foreman");
     const foremen = allActors.filter((actor) => String(actor.role || "").trim() === "foreman");
 
@@ -720,7 +840,7 @@ export function useChatTab({
     };
   }
 
-  const processedStreamingMessages = useMemo(() => {
+  const liveWorkEvents = useMemo(() => {
     const all = events.filter((ev: LedgerEvent) => ev.kind === "chat.message");
     return dropOrphanQueuedPlaceholders(
       all,
@@ -733,7 +853,6 @@ export function useChatTab({
   // Filtered live chat messages (canonical + optimistic pending merged)
   const liveChatMessages = useMemo(() => {
     const all = events.filter((ev: LedgerEvent) => ev.kind === "chat.message");
-    const replySlotTsByKey = buildReplySlotTsMap(processedStreamingMessages);
     const renderableCanonicalClientIds = new Set(
       all
         .filter((ev: LedgerEvent) => hasRenderableChatMessageContent(ev))
@@ -747,8 +866,8 @@ export function useChatTab({
       .filter((entry) => !renderableCanonicalClientIds.has(entry.localId))
       .map((entry) => entry.event);
     const ordered = sortChatMessages(
-      mergeVisibleChatMessages(all, processedStreamingMessages, pendingEvents, logicalMessageOrderStateRef.current),
-      replySlotTsByKey,
+      mergeVisibleChatMessages(all, [], pendingEvents, logicalMessageOrderStateRef.current),
+      new Map(),
     );
 
     if (chatFilter === "attention") {
@@ -774,7 +893,7 @@ export function useChatTab({
       });
     }
     return ordered;
-  }, [events, processedStreamingMessages, chatFilter, outboxEntries]);
+  }, [events, chatFilter, outboxEntries]);
 
   // Chat messages (window or live)
   const chatMessages = useMemo(() => {
@@ -783,8 +902,8 @@ export function useChatTab({
   }, [chatWindow, inChatWindow, liveChatMessages]);
 
   const hasAnyChatMessages = useMemo(
-    () => events.some((ev: LedgerEvent) => ev.kind === "chat.message") || streamingEvents.length > 0 || outboxEntries.length > 0,
-    [events, streamingEvents, outboxEntries]
+    () => events.some((ev: LedgerEvent) => ev.kind === "chat.message") || outboxEntries.length > 0,
+    [events, outboxEntries]
   );
 
   const chatInitialScrollAnchorId = useMemo(() => {
@@ -1358,6 +1477,7 @@ export function useChatTab({
   return {
     // Chat state
     chatMessages,
+    liveWorkEvents,
     hasAnyChatMessages,
     chatFilter,
     setChatFilter: updateChatFilter,

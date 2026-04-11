@@ -21,11 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..contracts.v1.message import ChatMessageData
+from ..kernel.actors import find_actor
+from ..kernel.blobs import resolve_blob_attachment_path
 from ..kernel.headless_events import append_headless_event
 from ..kernel.group import load_group
-from ..kernel.ledger import append_event
-from ..kernel.message_sender_snapshot import build_sender_snapshot
+from ..kernel.system_prompt import render_system_prompt
+from .messaging.delivery import auto_mark_headless_delivery_started, render_headless_control_text
 from .runner_state_ops import headless_state_path, remove_headless_state
 from ..util.fs import atomic_write_json
 from ..util.process import pid_is_alive
@@ -57,7 +58,10 @@ def _safe_logger_call(method: str, message: str, *args: Any, **kwargs: Any) -> N
 class _PendingTurn:
     text: str
     event_id: str
+    ts: str = ""
     reply_to: Optional[str] = None
+    control_kind: str = ""
+    attachments: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -117,6 +121,8 @@ class ClaudeAppSession:
 
         # Activity tracking
         self._active_tool_activities: Dict[str, str] = {}  # tool_use_id → activity_id
+        self._tool_activity_context: Dict[str, Dict[str, Any]] = {}
+        self._active_control_kind = ""
 
     # ── state persistence ───────────────────────────────────────────────
 
@@ -171,7 +177,9 @@ class ClaudeAppSession:
         tool_name: str = "",
         server_name: str = "",
         command: str = "",
+        cwd: str = "",
         file_paths: Optional[list[str]] = None,
+        query: str = "",
     ) -> None:
         if not status or not activity_id or not kind or not summary:
             return
@@ -191,7 +199,9 @@ class ClaudeAppSession:
                 "tool_name": tool_name or None,
                 "server_name": server_name or None,
                 "command": command or None,
+                "cwd": cwd or None,
                 "file_paths": file_paths or None,
+                "query": query or None,
             },
         )
 
@@ -201,6 +211,236 @@ class ClaudeAppSession:
         if len(text) <= limit:
             return text
         return text[: max(0, limit - 1)].rstrip() + "…"
+
+    @staticmethod
+    def _normalize_string_list(values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = " ".join(str(value or "").split())
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+        return normalized
+
+    def _collect_tool_paths(self, value: Any, out: list[str], *, limit: int = 3) -> None:
+        if len(out) >= limit or value is None:
+            return
+        if isinstance(value, str):
+            text = self._trim(value, limit=100)
+            if text and text not in out:
+                out.append(text)
+            return
+        if isinstance(value, list):
+            for item in value:
+                self._collect_tool_paths(item, out, limit=limit)
+                if len(out) >= limit:
+                    return
+            return
+        if not isinstance(value, dict):
+            return
+        for key in ("file_path", "filePath", "path", "paths", "filename", "output_file", "outputFile"):
+            if key in value:
+                self._collect_tool_paths(value.get(key), out, limit=limit)
+                if len(out) >= limit:
+                    return
+
+    def _tool_display_name(self, tool_name: str) -> tuple[str, str]:
+        name = str(tool_name or "").strip()
+        if not name.startswith("mcp__"):
+            return name, ""
+        parts = name.split("__", 2)
+        server_name = parts[1] if len(parts) > 1 else ""
+        display_name = parts[2] if len(parts) > 2 else name
+        return display_name, server_name
+
+    def _extract_tool_activity_context(
+        self,
+        tool_name: str,
+        tool_input: Any,
+        *,
+        allow_generic_summary: bool,
+    ) -> Dict[str, Any]:
+        kind, generic_summary, classified_server_name = self._classify_tool(tool_name)
+        display_tool_name, parsed_server_name = self._tool_display_name(tool_name)
+        normalized_tool_name = self._trim(display_tool_name or tool_name, limit=80)
+        server_name = self._trim(parsed_server_name or classified_server_name, limit=60)
+        input_dict = tool_input if isinstance(tool_input, dict) else {}
+        lower = normalized_tool_name.lower()
+        command = self._trim(
+            input_dict.get("command")
+            or input_dict.get("cmd")
+            or input_dict.get("command_line")
+            or "",
+            limit=120,
+        )
+        cwd = self._trim(input_dict.get("cwd") or "", limit=120)
+        file_paths: list[str] = []
+        self._collect_tool_paths(input_dict, file_paths)
+        file_paths = self._normalize_string_list(file_paths)
+        query = self._trim(
+            input_dict.get("query")
+            or input_dict.get("url")
+            or input_dict.get("pattern")
+            or "",
+            limit=120,
+        )
+        summary = ""
+        detail = ""
+
+        if lower == "bash":
+            summary = command
+            detail = self._trim(input_dict.get("description") or "", limit=120)
+        elif lower in ("read", "edit", "write", "notebookedit"):
+            summary = ", ".join(file_paths)
+            start_line = self._trim(input_dict.get("start_line") or input_dict.get("startLine") or input_dict.get("offset") or "", limit=40)
+            end_line = self._trim(input_dict.get("end_line") or input_dict.get("endLine") or input_dict.get("limit") or "", limit=40)
+            if start_line and end_line:
+                detail = f"lines {start_line}-{end_line}"
+            elif start_line:
+                detail = f"from {start_line}"
+        elif lower == "glob":
+            summary = self._trim(input_dict.get("pattern") or "", limit=100)
+            base_path = self._trim(input_dict.get("path") or "", limit=100)
+            file_paths = []
+            if base_path:
+                detail = f"in {base_path}"
+            query = summary or query
+        elif lower == "grep":
+            summary = self._trim(input_dict.get("pattern") or "", limit=100)
+            search_path = self._trim(input_dict.get("path") or "", limit=100)
+            glob_pattern = self._trim(input_dict.get("glob") or "", limit=80)
+            file_paths = []
+            detail_parts = []
+            if search_path:
+                detail_parts.append(f"in {search_path}")
+            if glob_pattern:
+                detail_parts.append(f"glob {glob_pattern}")
+            detail = ", ".join(detail_parts)
+            query = summary or query
+        elif lower == "websearch":
+            summary = self._trim(input_dict.get("query") or "", limit=120)
+            query = summary or query
+        elif lower == "webfetch":
+            summary = self._trim(input_dict.get("url") or "", limit=120)
+            detail = self._trim(input_dict.get("prompt") or "", limit=140)
+            query = summary or query
+        elif lower == "task":
+            summary = self._trim(input_dict.get("description") or "", limit=120)
+            detail = self._trim(input_dict.get("prompt") or "", limit=140)
+        elif server_name:
+            if file_paths:
+                summary = ", ".join(file_paths)
+            elif query:
+                summary = query
+
+        if not summary and allow_generic_summary:
+            summary = generic_summary or normalized_tool_name or tool_name
+
+        context: Dict[str, Any] = {
+            "kind": kind,
+            "summary": summary,
+            "detail": detail,
+            "tool_name": normalized_tool_name,
+            "server_name": server_name,
+            "command": command,
+            "cwd": cwd,
+            "file_paths": file_paths,
+            "query": query,
+        }
+        return {
+            key: value
+            for key, value in context.items()
+            if value not in ("", [], None)
+        }
+
+    def _merge_tool_activity_context(
+        self,
+        previous: Optional[Dict[str, Any]],
+        incoming: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        merged = dict(previous or {})
+        for key in ("kind", "summary", "detail", "tool_name", "server_name", "command", "cwd", "query"):
+            value = self._trim(incoming.get(key) or "", limit=160 if key == "detail" else 120)
+            if value:
+                merged[key] = value
+        incoming_paths = incoming.get("file_paths") if isinstance(incoming.get("file_paths"), list) else []
+        if incoming_paths:
+            merged_paths = self._normalize_string_list([
+                *([str(path) for path in (merged.get("file_paths") or [])] if isinstance(merged.get("file_paths"), list) else []),
+                *[str(path) for path in incoming_paths],
+            ])
+            if merged_paths:
+                merged["file_paths"] = merged_paths
+        return merged
+
+    def _emit_tool_activity(
+        self,
+        *,
+        status: str,
+        turn_id: str,
+        tool_use_id: str,
+        tool_name: str,
+        stream_id: str = "",
+        tool_input: Any = None,
+        detail_override: str = "",
+        allow_generic_summary: bool,
+    ) -> None:
+        if not tool_use_id:
+            return
+        incoming = self._extract_tool_activity_context(
+            tool_name,
+            tool_input,
+            allow_generic_summary=allow_generic_summary,
+        )
+        context = self._merge_tool_activity_context(self._tool_activity_context.get(tool_use_id), incoming)
+        if detail_override:
+            context["detail"] = self._trim(detail_override, limit=160)
+        activity_id = self._active_tool_activities.get(tool_use_id) or f"tool:{tool_use_id}"
+        summary = self._trim(
+            context.get("summary")
+            or context.get("tool_name")
+            or tool_name
+            or tool_use_id,
+            limit=120,
+        )
+        if not summary:
+            return
+        self._tool_activity_context[tool_use_id] = context
+        if status != "completed" and tool_use_id not in self._active_tool_activities:
+            self._active_tool_activities[tool_use_id] = activity_id
+        self._emit_activity(
+            status=status,
+            activity_id=activity_id,
+            kind=self._trim(context.get("kind") or "tool", limit=40) or "tool",
+            summary=summary,
+            detail=self._trim(context.get("detail") or "", limit=160) or None,
+            turn_id=turn_id,
+            stream_id=stream_id,
+            raw_item_type="toolUse",
+            tool_name=self._trim(context.get("tool_name") or tool_name, limit=80),
+            server_name=self._trim(context.get("server_name") or "", limit=60),
+            command=self._trim(context.get("command") or "", limit=120),
+            cwd=self._trim(context.get("cwd") or "", limit=120),
+            file_paths=[str(path).strip() for path in (context.get("file_paths") or []) if str(path).strip()] or None,
+            query=self._trim(context.get("query") or "", limit=120),
+        )
+        if status == "completed":
+            self._active_tool_activities.pop(tool_use_id, None)
+            self._tool_activity_context.pop(tool_use_id, None)
+
+    def _tool_result_detail(self, content: Any) -> str:
+        if isinstance(content, str):
+            return self._trim(content, limit=160)
+        if not isinstance(content, list):
+            return ""
+        for block in content:
+            if isinstance(block, dict) and str(block.get("type") or "").strip() == "text":
+                detail = self._trim(block.get("text") or "", limit=160)
+                if detail:
+                    return detail
+        return ""
 
     # ── lifecycle ───────────────────────────────────────────────────────
 
@@ -217,6 +457,7 @@ class ClaudeAppSession:
                 "--input-format", "stream-json",
                 "--output-format", "stream-json",
                 "--include-partial-messages",
+                "--include-hook-events",
                 "--verbose",
                 "--dangerously-skip-permissions",
                 "--no-session-persistence",
@@ -264,6 +505,7 @@ class ClaudeAppSession:
             self._session_state.status = "idle"
             self._session_state.updated_at = utc_now_iso()
         self._persist_state()
+        self._queue_bootstrap_control_turn()
         self._turn_thread.start()
         logger.info("claude headless started: group=%s actor=%s pid=%s", self.group_id, self.actor_id, self._proc.pid if self._proc else "?")
 
@@ -276,6 +518,7 @@ class ClaudeAppSession:
             self._session_state.status = "stopped"
             self._session_state.current_task_id = None
             self._session_state.updated_at = utc_now_iso()
+            self._active_control_kind = ""
         if was_running:
             exit_code = proc.poll() if proc else None
             logger.info("claude headless stopping: group=%s actor=%s exit_code=%s", self.group_id, self.actor_id, exit_code)
@@ -313,12 +556,72 @@ class ClaudeAppSession:
         with self._lock:
             return self._session_state.to_headless_state(group_id=self.group_id, actor_id=self.actor_id)
 
-    # ── user message submission ─────────────────────────────────────────
+    def _control_turn_kind(self) -> str:
+        with self._lock:
+            return str(self._active_control_kind or "").strip().lower()
 
-    def submit_user_message(self, *, text: str, event_id: str, reply_to: Optional[str] = None) -> bool:
+    def _build_bootstrap_control_text(self) -> str:
+        group = load_group(self.group_id)
+        if group is None:
+            return ""
+        actor = find_actor(group, self.actor_id)
+        if not isinstance(actor, dict):
+            return ""
+        prompt = render_system_prompt(group=group, actor=actor)
+        if not prompt.strip():
+            return ""
+        return render_headless_control_text(control_kind="bootstrap", body=prompt)
+
+    def _queue_control_turn(self, *, text: str, control_kind: str, event_id: str = "", ts: str = "") -> bool:
         if not self.is_running():
             return False
-        payload = _PendingTurn(text=str(text or ""), event_id=str(event_id or "").strip(), reply_to=reply_to)
+        payload = _PendingTurn(
+            text=str(text or ""),
+            event_id=str(event_id or "").strip(),
+            ts=str(ts or "").strip(),
+            control_kind=str(control_kind or "").strip().lower(),
+        )
+        if not payload.text.strip() or not payload.control_kind:
+            return False
+        try:
+            self._turn_queue.put_nowait(payload)
+            self._emit(
+                "headless.control.queued",
+                {
+                    "control_kind": payload.control_kind,
+                    "event_id": payload.event_id,
+                },
+            )
+            return True
+        except Exception:
+            return False
+
+    def _queue_bootstrap_control_turn(self) -> bool:
+        return self._queue_control_turn(
+            text=self._build_bootstrap_control_text(),
+            control_kind="bootstrap",
+        )
+
+    # ── user message submission ─────────────────────────────────────────
+
+    def submit_user_message(
+        self,
+        *,
+        text: str,
+        event_id: str,
+        ts: str = "",
+        reply_to: Optional[str] = None,
+        attachments: Optional[list[dict[str, Any]]] = None,
+    ) -> bool:
+        if not self.is_running():
+            return False
+        payload = _PendingTurn(
+            text=str(text or ""),
+            event_id=str(event_id or "").strip(),
+            ts=str(ts or "").strip(),
+            reply_to=reply_to,
+            attachments=[item for item in (attachments or []) if isinstance(item, dict)],
+        )
         try:
             self._turn_queue.put_nowait(payload)
             self._emit(
@@ -331,6 +634,21 @@ class ClaudeAppSession:
             return True
         except Exception:
             return False
+
+    def submit_control_message(
+        self,
+        *,
+        text: str,
+        control_kind: str,
+        event_id: str = "",
+        ts: str = "",
+    ) -> bool:
+        return self._queue_control_turn(
+            text=text,
+            control_kind=control_kind,
+            event_id=event_id,
+            ts=ts,
+        )
 
     # ── stdin writer ────────────────────────────────────────────────────
 
@@ -385,6 +703,36 @@ class ClaudeAppSession:
                 return
             _safe_logger_call("exception", "claude stderr loop failed: %s/%s", self.group_id, self.actor_id)
 
+    def _compose_user_content(self, payload: _PendingTurn) -> str:
+        text = str(payload.text or "")
+        group = load_group(self.group_id)
+        image_paths: list[str] = []
+        if group is not None:
+            for attachment in payload.attachments:
+                if str(attachment.get("kind") or "").strip().lower() != "image":
+                    continue
+                rel_path = str(attachment.get("path") or "").strip()
+                if not rel_path:
+                    continue
+                try:
+                    abs_path = resolve_blob_attachment_path(group, rel_path=rel_path)
+                except Exception:
+                    continue
+                if abs_path.exists() and abs_path.is_file():
+                    image_paths.append(str(abs_path))
+
+        if not image_paths:
+            return text
+
+        lines = [text.rstrip()] if text.strip() else []
+        lines.append("[cccc] 图片附件已保存到本地文件。Claude stream-json 当前仅支持文本输入，不能直接内嵌图片。")
+        lines.append("[cccc] 请优先基于以下图片文件路径继续处理：")
+        for path in image_paths[:8]:
+            lines.append(f"- {path}")
+        if len(image_paths) > 8:
+            lines.append(f"- … ({len(image_paths) - 8} more)")
+        return "\n".join([line for line in lines if line]).strip()
+
     # ── turn loop ───────────────────────────────────────────────────────
 
     def _turn_loop(self) -> None:
@@ -397,6 +745,8 @@ class ClaudeAppSession:
                 return
             self._turn_done.clear()
             turn_id = uuid.uuid4().hex[:12]
+            with self._lock:
+                self._active_control_kind = str(payload.control_kind or "").strip().lower()
 
             # Reset streaming state for new turn
             self._last_text_snapshot = ""
@@ -405,30 +755,24 @@ class ClaudeAppSession:
             self._message_started = False
             self._stream_end_turn_pending = False
             self._active_tool_activities.clear()
+            self._tool_activity_context.clear()
 
             with self._lock:
                 self._active_turn_id = turn_id
                 self._active_event_id = payload.event_id
-                self._session_state.status = "working"
+                if not payload.control_kind:
+                    self._session_state.status = "working"
                 self._session_state.current_task_id = turn_id or payload.event_id or None
                 self._session_state.updated_at = utc_now_iso()
             self._persist_state()
 
-            self._emit(
-                "headless.turn.started",
-                {
-                    "turn_id": turn_id,
-                    "event_id": payload.event_id,
-                    "reply_to": payload.reply_to,
-                },
-            )
-
             # Send user message to claude via stdin
+            user_content = self._compose_user_content(payload)
             ok = self._write_stdin({
                 "type": "user",
                 "message": {
                     "role": "user",
-                    "content": payload.text,
+                    "content": user_content,
                 },
             })
             if not ok:
@@ -436,18 +780,45 @@ class ClaudeAppSession:
                 with self._lock:
                     self._session_state.status = "idle"
                     self._active_event_id = ""
+                    self._active_control_kind = ""
                     self._session_state.current_task_id = None
                     self._session_state.updated_at = utc_now_iso()
                 self._persist_state()
                 self._emit(
-                    "headless.turn.failed",
+                    "headless.control.failed" if payload.control_kind else "headless.turn.failed",
                     {
                         "turn_id": turn_id,
                         "event_id": payload.event_id,
+                        "control_kind": payload.control_kind or None,
                         "error": "failed to write to claude stdin",
                     },
                 )
                 continue
+
+            if payload.control_kind:
+                self._emit(
+                    "headless.control.started",
+                    {
+                        "turn_id": turn_id,
+                        "event_id": payload.event_id,
+                        "control_kind": payload.control_kind,
+                    },
+                )
+            else:
+                auto_mark_headless_delivery_started(
+                    group_id=self.group_id,
+                    actor_id=self.actor_id,
+                    event_id=payload.event_id,
+                    ts=payload.ts,
+                )
+                self._emit(
+                    "headless.turn.started",
+                    {
+                        "turn_id": turn_id,
+                        "event_id": payload.event_id,
+                        "reply_to": payload.reply_to,
+                    },
+                )
 
             # Wait for turn completion (signaled from _handle_event)
             self._turn_done.wait()
@@ -463,8 +834,12 @@ class ClaudeAppSession:
             self._handle_system_event(event)
         elif event_type == "assistant":
             self._handle_assistant_event(event)
+        elif event_type == "tool_progress":
+            self._handle_tool_progress_event(event)
         elif event_type == "tool_result":
             self._handle_tool_result_event(event)
+        elif event_type == "tool_use_summary":
+            self._handle_tool_use_summary_event(event)
         elif event_type == "result":
             self._handle_result_event(event)
         elif event_type == "stream_event":
@@ -485,6 +860,122 @@ class ClaudeAppSession:
                 self.group_id, self.actor_id, session_id,
                 str(event.get("model") or "").strip(),
             )
+            return
+
+        with self._lock:
+            turn_id = str(self._active_turn_id or "").strip()
+            control_kind = str(self._active_control_kind or "").strip().lower()
+
+        if control_kind:
+            return
+
+        if subtype == "hook_started":
+            hook_id = str(event.get("hook_id") or "").strip()
+            hook_name = self._trim(event.get("hook_name") or "hook", limit=80)
+            hook_event = self._trim(event.get("hook_event") or "", limit=100)
+            if hook_id and hook_name:
+                self._emit_activity(
+                    status="started",
+                    activity_id=f"hook:{hook_id}",
+                    kind="tool",
+                    summary=hook_name,
+                    detail=f"event {hook_event}" if hook_event else None,
+                    turn_id=turn_id,
+                    raw_item_type="hook_started",
+                    tool_name=hook_name,
+                )
+            return
+
+        if subtype == "hook_progress":
+            hook_id = str(event.get("hook_id") or "").strip()
+            hook_name = self._trim(event.get("hook_name") or "hook", limit=80)
+            detail = self._trim(
+                event.get("output") or event.get("stdout") or event.get("stderr") or "",
+                limit=160,
+            )
+            if hook_id and hook_name:
+                self._emit_activity(
+                    status="updated",
+                    activity_id=f"hook:{hook_id}",
+                    kind="tool",
+                    summary=hook_name,
+                    detail=detail or None,
+                    turn_id=turn_id,
+                    raw_item_type="hook_progress",
+                    tool_name=hook_name,
+                )
+            return
+
+        if subtype == "hook_response":
+            hook_id = str(event.get("hook_id") or "").strip()
+            hook_name = self._trim(event.get("hook_name") or "hook", limit=80)
+            outcome = self._trim(event.get("outcome") or "", limit=40)
+            detail = self._trim(
+                event.get("output") or event.get("stdout") or event.get("stderr") or outcome,
+                limit=160,
+            )
+            if hook_id and hook_name:
+                self._emit_activity(
+                    status="completed",
+                    activity_id=f"hook:{hook_id}",
+                    kind="tool",
+                    summary=hook_name,
+                    detail=detail or None,
+                    turn_id=turn_id,
+                    raw_item_type="hook_response",
+                    tool_name=hook_name,
+                )
+            return
+
+        if subtype == "task_started":
+            task_id = str(event.get("task_id") or "").strip()
+            description = self._trim(event.get("description") or task_id or "sub-task", limit=120)
+            detail = self._trim(event.get("prompt") or event.get("workflow_name") or event.get("task_type") or "", limit=160)
+            if task_id and description:
+                self._emit_activity(
+                    status="started",
+                    activity_id=f"task:{task_id}",
+                    kind="thinking",
+                    summary=description,
+                    detail=detail or None,
+                    turn_id=turn_id,
+                    raw_item_type="task_started",
+                )
+            return
+
+        if subtype == "task_progress":
+            task_id = str(event.get("task_id") or "").strip()
+            description = self._trim(event.get("description") or "sub-task", limit=120)
+            detail = self._trim(event.get("summary") or event.get("last_tool_name") or "", limit=160)
+            if task_id and description:
+                self._emit_activity(
+                    status="updated",
+                    activity_id=f"task:{task_id}",
+                    kind="thinking",
+                    summary=description,
+                    detail=detail or None,
+                    turn_id=turn_id,
+                    raw_item_type="task_progress",
+                )
+            return
+
+        if subtype == "task_notification":
+            task_id = str(event.get("task_id") or "").strip()
+            summary = self._trim(event.get("summary") or task_id or "sub-task", limit=120)
+            status = self._trim(event.get("status") or "completed", limit=40)
+            output_file = self._trim(event.get("output_file") or "", limit=140)
+            detail = output_file or (status if status and status != "completed" else "")
+            if task_id and summary:
+                self._emit_activity(
+                    status="completed",
+                    activity_id=f"task:{task_id}",
+                    kind="thinking",
+                    summary=summary,
+                    detail=detail or None,
+                    turn_id=turn_id,
+                    raw_item_type="task_notification",
+                )
+            return
 
     def _handle_stream_event(self, event: Dict[str, Any]) -> None:
         """Handle raw Anthropic streaming events from --include-partial-messages."""
@@ -496,6 +987,19 @@ class ClaudeAppSession:
         with self._lock:
             active_event_id = str(self._active_event_id or "").strip()
             turn_id = str(self._active_turn_id or "").strip()
+            control_kind = str(self._active_control_kind or "").strip().lower()
+
+        if control_kind:
+            if inner_type == "message_delta":
+                delta_obj = inner.get("delta") if isinstance(inner.get("delta"), dict) else {}
+                if str(delta_obj.get("stop_reason") or "").strip() == "end_turn":
+                    self._stream_end_turn_pending = True
+                return
+            if inner_type == "message_stop":
+                if self._stream_end_turn_pending:
+                    self._complete_turn_from_stream()
+                return
+            return
 
         if inner_type == "message_start":
             # Extract message id for stream tracking
@@ -515,18 +1019,14 @@ class ClaudeAppSession:
                 tool_use_id = str(block.get("id") or "").strip()
                 tool_name = str(block.get("name") or "").strip()
                 if tool_use_id and tool_name and tool_use_id not in self._active_tool_activities:
-                    activity_id = f"tool:{tool_use_id}"
-                    self._active_tool_activities[tool_use_id] = activity_id
-                    kind, summary, server_name = self._classify_tool(tool_name)
-                    self._emit_activity(
+                    self._emit_tool_activity(
                         status="started",
-                        activity_id=activity_id,
-                        kind=kind,
-                        summary=summary,
                         turn_id=turn_id,
-                        stream_id=self._current_stream_id,
+                        tool_use_id=tool_use_id,
                         tool_name=tool_name,
-                        server_name=server_name,
+                        stream_id=self._current_stream_id,
+                        tool_input=block.get("input"),
+                        allow_generic_summary=True,
                     )
 
         elif inner_type == "content_block_delta":
@@ -577,11 +1077,13 @@ class ClaudeAppSession:
         with self._lock:
             turn_id = str(self._active_turn_id or "").strip()
             active_event_id = str(self._active_event_id or "").strip()
+            control_kind = str(self._active_control_kind or "").strip().lower()
             # Guard: if turn already completed by _handle_result_event, no-op.
             if not turn_id:
                 return
             self._active_turn_id = ""
             self._active_event_id = ""
+            self._active_control_kind = ""
             self._session_state.status = "idle"
             self._session_state.current_task_id = None
             self._session_state.updated_at = now
@@ -591,18 +1093,20 @@ class ClaudeAppSession:
         text = self._last_text_snapshot or ""
 
         # Complete any remaining tool activities
-        for tool_use_id, activity_id in list(self._active_tool_activities.items()):
-            self._emit_activity(
+        for tool_use_id in list(self._active_tool_activities):
+            tool_name = str((self._tool_activity_context.get(tool_use_id) or {}).get("tool_name") or "")
+            self._emit_tool_activity(
                 status="completed",
-                activity_id=activity_id,
-                kind="tool",
-                summary="done",
                 turn_id=turn_id,
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+                allow_generic_summary=False,
             )
         self._active_tool_activities.clear()
+        self._tool_activity_context.clear()
 
-        # Emit message completed + append to ledger if we have text
-        if text and stream_id:
+        # Emit message completed if we have text.
+        if text and stream_id and not control_kind:
             self._emit(
                 "headless.message.completed",
                 {
@@ -612,7 +1116,6 @@ class ClaudeAppSession:
                     "text": text,
                 },
             )
-            self._append_actor_message(stream_id=stream_id, text=text, pending_event_id=active_event_id)
 
         # Reset streaming state so _handle_assistant_event won't re-emit for same turn.
         self._message_started = False
@@ -621,10 +1124,11 @@ class ClaudeAppSession:
         self._current_message_id = ""
 
         self._emit(
-            "headless.turn.completed",
+            "headless.control.completed" if control_kind else "headless.turn.completed",
             {
                 "turn_id": turn_id,
                 "event_id": active_event_id,
+                "control_kind": control_kind or None,
                 "status": "completed",
             },
         )
@@ -640,6 +1144,10 @@ class ClaudeAppSession:
         with self._lock:
             active_event_id = str(self._active_event_id or "").strip()
             turn_id = str(self._active_turn_id or "").strip()
+            control_kind = str(self._active_control_kind or "").strip().lower()
+
+        if control_kind:
+            return
 
         # Track new message — use message_id if present, else generate a fallback per turn.
         # Don't reset streaming state if we already have an active stream (from stream_events).
@@ -697,21 +1205,15 @@ class ClaudeAppSession:
             tool_name = str(block.get("name") or "").strip()
             if not tool_use_id or not tool_name:
                 continue
-            if tool_use_id not in self._active_tool_activities:
-                activity_id = f"tool:{tool_use_id}"
-                self._active_tool_activities[tool_use_id] = activity_id
-                # Determine kind and summary from tool name
-                kind, summary, server_name = self._classify_tool(tool_name)
-                self._emit_activity(
-                    status="started",
-                    activity_id=activity_id,
-                    kind=kind,
-                    summary=summary,
-                    turn_id=turn_id,
-                    stream_id=stream_id,
-                    tool_name=tool_name,
-                    server_name=server_name,
-                )
+            self._emit_tool_activity(
+                status="started" if tool_use_id not in self._active_tool_activities else "updated",
+                turn_id=turn_id,
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+                stream_id=stream_id,
+                tool_input=block.get("input"),
+                allow_generic_summary=tool_use_id not in self._active_tool_activities,
+            )
 
         # If this is a final (non-partial) assistant message with text, emit completed
         if not is_partial and accumulated_text and stream_id and self._message_started:
@@ -724,12 +1226,6 @@ class ClaudeAppSession:
                     "text": accumulated_text,
                 },
             )
-            # Append to ledger as chat.message
-            self._append_actor_message(
-                stream_id=stream_id,
-                text=accumulated_text,
-                pending_event_id=active_event_id,
-            )
             # Reset for potential next message in same turn
             self._last_text_snapshot = ""
             self._current_stream_id = ""
@@ -740,25 +1236,64 @@ class ClaudeAppSession:
         tool_use_id = str(event.get("tool_use_id") or "").strip()
         with self._lock:
             turn_id = str(self._active_turn_id or "").strip()
-        activity_id = self._active_tool_activities.pop(tool_use_id, "")
-        if activity_id:
-            # Summary from tool result
-            content = event.get("content")
-            summary = "done"
-            if isinstance(content, str):
-                summary = self._trim(content, limit=80) or "done"
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        summary = self._trim(block.get("text") or "", limit=80) or "done"
-                        break
-            self._emit_activity(
+            control_kind = str(self._active_control_kind or "").strip().lower()
+        if control_kind:
+            self._active_tool_activities.pop(tool_use_id, "")
+            self._tool_activity_context.pop(tool_use_id, None)
+            return
+        if tool_use_id:
+            tool_name = str((self._tool_activity_context.get(tool_use_id) or {}).get("tool_name") or event.get("tool_name") or "")
+            self._emit_tool_activity(
                 status="completed",
-                activity_id=activity_id,
-                kind="tool",
-                summary=summary,
                 turn_id=turn_id,
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+                detail_override=self._tool_result_detail(event.get("content")),
+                allow_generic_summary=False,
             )
+
+    def _handle_tool_progress_event(self, event: Dict[str, Any]) -> None:
+        tool_use_id = str(event.get("tool_use_id") or "").strip()
+        tool_name = str(event.get("tool_name") or "").strip()
+        with self._lock:
+            turn_id = str(self._active_turn_id or "").strip()
+            control_kind = str(self._active_control_kind or "").strip().lower()
+        if control_kind or not tool_use_id or not tool_name:
+            return
+        elapsed_seconds = event.get("elapsed_time_seconds")
+        detail = ""
+        if isinstance(elapsed_seconds, (int, float)):
+            detail = f"running for {int(elapsed_seconds)}s"
+        self._emit_tool_activity(
+            status="updated",
+            turn_id=turn_id,
+            tool_use_id=tool_use_id,
+            tool_name=tool_name,
+            detail_override=detail,
+            allow_generic_summary=False,
+        )
+
+    def _handle_tool_use_summary_event(self, event: Dict[str, Any]) -> None:
+        summary = self._trim(event.get("summary") or "", limit=140)
+        with self._lock:
+            turn_id = str(self._active_turn_id or "").strip()
+            control_kind = str(self._active_control_kind or "").strip().lower()
+        if control_kind or not summary:
+            return
+        preceding = event.get("preceding_tool_use_ids") if isinstance(event.get("preceding_tool_use_ids"), list) else []
+        detail = ""
+        if preceding:
+            detail = f"after {len(preceding)} tool calls"
+        activity_id = f"tool-summary:{turn_id or str(event.get('uuid') or '').strip() or 'current'}"
+        self._emit_activity(
+            status="updated",
+            activity_id=activity_id,
+            kind="tool",
+            summary=summary,
+            detail=detail or None,
+            turn_id=turn_id,
+            raw_item_type="tool_use_summary",
+        )
 
     def _handle_result_event(self, event: Dict[str, Any]) -> None:
         subtype = str(event.get("subtype") or "").strip()
@@ -767,28 +1302,54 @@ class ClaudeAppSession:
         with self._lock:
             active_event_id = str(self._active_event_id or "").strip()
             turn_id = str(self._active_turn_id or "").strip()
+            control_kind = str(self._active_control_kind or "").strip().lower()
             # Guard: if turn already completed by _complete_turn_from_stream, no-op.
             if not turn_id:
                 return
             self._active_turn_id = ""
             self._active_event_id = ""
+            self._active_control_kind = ""
             self._session_state.status = "idle"
             self._session_state.current_task_id = None
             self._session_state.updated_at = now
         self._persist_state()
 
         # Complete any remaining tool activities
-        for tool_use_id, activity_id in list(self._active_tool_activities.items()):
-            self._emit_activity(
+        for tool_use_id in list(self._active_tool_activities):
+            tool_name = str((self._tool_activity_context.get(tool_use_id) or {}).get("tool_name") or "")
+            self._emit_tool_activity(
                 status="completed",
-                activity_id=activity_id,
-                kind="tool",
-                summary="done",
                 turn_id=turn_id,
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+                allow_generic_summary=False,
             )
         self._active_tool_activities.clear()
+        self._tool_activity_context.clear()
 
-        if subtype in ("success", ""):
+        if control_kind and subtype in ("success", ""):
+            self._emit(
+                "headless.control.completed",
+                {
+                    "turn_id": turn_id,
+                    "event_id": active_event_id,
+                    "control_kind": control_kind,
+                    "status": "completed",
+                },
+            )
+        elif control_kind:
+            error_text = str(event.get("error") or event.get("result") or "unknown error")
+            self._emit(
+                "headless.control.failed",
+                {
+                    "turn_id": turn_id,
+                    "event_id": active_event_id,
+                    "control_kind": control_kind,
+                    "status": subtype or "completed",
+                    "error": {"message": error_text},
+                },
+            )
+        elif subtype in ("success", ""):
             self._emit(
                 "headless.turn.completed",
                 {
@@ -841,30 +1402,6 @@ class ClaudeAppSession:
         return "tool", name, ""
 
     # ── ledger message ──────────────────────────────────────────────────
-
-    def _append_actor_message(self, *, stream_id: str, text: str, pending_event_id: str = "") -> None:
-        group = load_group(self.group_id)
-        if group is None:
-            return
-        try:
-            append_event(
-                group.ledger_path,
-                kind="chat.message",
-                group_id=group.group_id,
-                scope_key=str(group.doc.get("active_scope_key") or "").strip(),
-                by=self.actor_id,
-                data=ChatMessageData(
-                    text=str(text or ""),
-                    format="plain",
-                    to=["user"],
-                    stream_id=str(stream_id or "").strip() or None,
-                    pending_event_id=str(pending_event_id or "").strip() or None,
-                    **build_sender_snapshot(group, by=self.actor_id),
-                ).model_dump(),
-            )
-        except Exception:
-            logger.exception("failed to append claude actor message: %s/%s", self.group_id, self.actor_id)
-
 
 # ── session manager ────────────────────────────────────────────────────
 
@@ -954,14 +1491,38 @@ class ClaudeAppSessionManager:
         actor_id: str,
         text: str,
         event_id: str,
+        ts: str = "",
         reply_to: Optional[str] = None,
+        attachments: Optional[list[dict[str, Any]]] = None,
     ) -> bool:
         key = (str(group_id or "").strip(), str(actor_id or "").strip())
         with self._lock:
             session = self._sessions.get(key)
         if session is None:
             return False
-        return session.submit_user_message(text=text, event_id=event_id, reply_to=reply_to)
+        return session.submit_user_message(text=text, event_id=event_id, ts=ts, reply_to=reply_to, attachments=attachments)
+
+    def submit_control_message(
+        self,
+        *,
+        group_id: str,
+        actor_id: str,
+        text: str,
+        control_kind: str,
+        event_id: str = "",
+        ts: str = "",
+    ) -> bool:
+        key = (str(group_id or "").strip(), str(actor_id or "").strip())
+        with self._lock:
+            session = self._sessions.get(key)
+        if session is None:
+            return False
+        return session.submit_control_message(
+            text=text,
+            control_kind=control_kind,
+            event_id=event_id,
+            ts=ts,
+        )
 
 
 SUPERVISOR = ClaudeAppSessionManager()

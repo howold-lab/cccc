@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   FloatingPortal,
   autoUpdate,
@@ -52,6 +52,7 @@ export function SortableGroupItem({
     attributes,
     listeners,
     setNodeRef,
+    setActivatorNodeRef,
     transform,
     transition,
     isDragging,
@@ -67,7 +68,7 @@ export function SortableGroupItem({
     open: menuOpen,
     onOpenChange: setMenuOpen,
     placement: "bottom-end",
-    middleware: [offset(8), flip(), shift({ padding: 8 })],
+    middleware: [offset(8), flip({ padding: 12 }), shift({ padding: 12 })],
     whileElementsMounted: autoUpdate,
     strategy: "fixed",
   });
@@ -77,6 +78,11 @@ export function SortableGroupItem({
   const { getReferenceProps, getFloatingProps } = useInteractions([click, dismiss, role]);
   const setReference = useCallback((node: HTMLElement | null) => refs.setReference(node), [refs]);
   const setFloating = useCallback((node: HTMLElement | null) => refs.setFloating(node), [refs]);
+  const dragListeners = useMemo(() => listeners ?? {}, [listeners]);
+  const handleDragHandlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    listeners?.onPointerDown?.(event);
+    event.stopPropagation();
+  }, [listeners]);
 
   if (isCollapsed) {
     const initial = (group.title || gid).charAt(0).toUpperCase();
@@ -146,14 +152,16 @@ export function SortableGroupItem({
         {/* Drag handle */}
         {!dragDisabled && (
           <div
-            {...listeners}
+            {...dragListeners}
+            {...attributes}
+            ref={setActivatorNodeRef}
             className={classNames(
               "flex-shrink-0 cursor-grab active:cursor-grabbing p-1 -ml-1 rounded transition-opacity touch-none",
               "hidden md:block md:opacity-0 md:group-hover/item:opacity-100",
               isDragging && "!block !opacity-100",
               "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
             )}
-            onPointerDown={(event) => event.stopPropagation()}
+            onPointerDown={handleDragHandlePointerDown}
             onClick={(event) => event.stopPropagation()}
           >
             <GripIcon size={14} />

@@ -7,6 +7,7 @@ import {
   transferOutboxPreviewUrls,
   useChatOutboxStore,
 } from "../stores/chatOutboxStore";
+import { mergeStreamingActivity } from "../stores/chatStreamingSessions";
 import { beginContextRequest, isLatestContextRequest } from "../stores/groupStoreCore";
 import * as api from "../services/api";
 import type { FetchContextOptions } from "../services/api";
@@ -34,6 +35,8 @@ import {
 } from "../utils/ledgerEventHandlers";
 import { getPresentationMessageRefs, getPresentationRefStatus } from "../utils/presentationRefs";
 import { mergeLedgerEvents } from "../utils/mergeLedgerEvents";
+import { replayHeadlessSnapshotEvents } from "../utils/headlessSnapshotReplay";
+import { isHeadlessActorRunner } from "../utils/headlessRuntimeSupport";
 
 // Re-export for backward compatibility
 export { getRecipientActorIdsForEvent, getAckRecipientIdsForEvent };
@@ -97,6 +100,10 @@ interface UseSSEOptions {
   actorsRef: React.MutableRefObject<Actor[]>;
 }
 
+function headlessActorKey(groupId: string, actorId: string): string {
+  return `${String(groupId || "").trim()}:${String(actorId || "").trim()}`;
+}
+
 export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptions) {
   // Use individual selectors to avoid subscribing to the entire store.
   // Without selectors, every state change (e.g. appendEvent) would trigger
@@ -110,6 +117,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
   const updateActorActivity = useGroupStore((s) => s.updateActorActivity);
   const upsertStreamingActivity = useGroupStore((s) => s.upsertStreamingActivity);
   const promoteStreamingEventToStream = useGroupStore((s) => s.promoteStreamingEventToStream);
+  const promoteStreamingEventsByPrefix = useGroupStore((s) => s.promoteStreamingEventsByPrefix);
   const reconcileStreamingMessage = useGroupStore((s) => s.reconcileStreamingMessage);
   const completeStreamingEventsForActor = useGroupStore((s) => s.completeStreamingEventsForActor);
   const removeStreamingEvent = useGroupStore((s) => s.removeStreamingEvent);
@@ -135,6 +143,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
   const headlessReconnectDelayRef = useRef<number>(1000);
   const headlessReconnectTimerRef = useRef<number | null>(null);
   const hasConnectedOnceRef = useRef<boolean>(false);
+  const headlessThreadIdByActorRef = useRef(new Map<string, string>());
   const pendingHeadlessMessageFlushRef = useRef<number | null>(null);
   const pendingHeadlessActivityFlushRef = useRef<number | null>(null);
   const pendingHeadlessMessagesRef = useRef(new Map<string, {
@@ -383,6 +392,48 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     }
   }
 
+  function clearHeadlessLiveOutput(groupId: string, actorId: string) {
+    const targetGroupId = String(groupId || "").trim();
+    const targetActorId = String(actorId || "").trim();
+    if (!targetGroupId || !targetActorId) return;
+    clearPendingHeadlessBuffers(targetGroupId, targetActorId);
+    clearStreamingEventsForActor(targetActorId, targetGroupId);
+  }
+
+  function reconcileHydratedHeadlessLiveOutput(groupId: string, events: HeadlessStreamEvent[]) {
+    const targetGroupId = String(groupId || "").trim();
+    if (!targetGroupId) return;
+    const snapshotActorIds = new Set<string>();
+    for (const event of Array.isArray(events) ? events : []) {
+      const actorId = String(event?.actor_id || "").trim();
+      if (actorId) snapshotActorIds.add(actorId);
+    }
+    const bucket = useGroupStore.getState().chatByGroup[targetGroupId];
+    const liveActorIds = new Set<string>();
+    for (const actor of actorsRef.current) {
+      if (!isHeadlessActorRunner(actor)) continue;
+      const actorId = String(actor.id || "").trim();
+      if (!actorId) continue;
+      const hasLiveText = Boolean(String(bucket?.latestActorTextByActorId?.[actorId] || "").trim());
+      const hasLiveActivities = Array.isArray(bucket?.latestActorActivitiesByActorId?.[actorId])
+        && (bucket?.latestActorActivitiesByActorId?.[actorId]?.length || 0) > 0;
+      const hasLiveStream = Array.isArray(bucket?.streamingEvents)
+        && bucket.streamingEvents.some((event) => String(event.by || "").trim() === actorId);
+      const hasLiveSession = Object.values(bucket?.replySessionsByPendingEventId || {}).some(
+        (session) => String(session?.actorId || "").trim() === actorId,
+      );
+      if (hasLiveText || hasLiveActivities || hasLiveStream || hasLiveSession) {
+        liveActorIds.add(actorId);
+      }
+    }
+
+    for (const actorId of liveActorIds) {
+      if (snapshotActorIds.has(actorId)) continue;
+      clearHeadlessLiveOutput(targetGroupId, actorId);
+      headlessThreadIdByActorRef.current.delete(headlessActorKey(targetGroupId, actorId));
+    }
+  }
+
   function handleHeadlessEvent(groupId: string, ev: HeadlessStreamEvent) {
     try {
       const actorId = String(ev.actor_id || "").trim();
@@ -392,7 +443,48 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       const pendingEventId = typeof data.event_id === "string" ? data.event_id.trim() : "";
       if (!actorId || !eventType) return;
 
+      if (eventType === "headless.thread.started") {
+        const threadId = typeof data.thread_id === "string" ? data.thread_id.trim() : "";
+        const actorKey = headlessActorKey(groupId, actorId);
+        const previousThreadId = String(headlessThreadIdByActorRef.current.get(actorKey) || "").trim();
+        if (threadId && threadId !== previousThreadId) {
+          clearHeadlessLiveOutput(groupId, actorId);
+        }
+        if (threadId) {
+          headlessThreadIdByActorRef.current.set(actorKey, threadId);
+        }
+        updateActorActivity([{
+          id: actorId,
+          running: true,
+          idle_seconds: null,
+          effective_working_state: "idle",
+          effective_working_reason: "headless_thread_started",
+          effective_working_updated_at: typeof ev.ts === "string" ? ev.ts : null,
+          effective_active_task_id: null,
+        }]);
+        return;
+      }
+
+      if (eventType === "headless.session.stopped") {
+        clearHeadlessLiveOutput(groupId, actorId);
+        headlessThreadIdByActorRef.current.delete(headlessActorKey(groupId, actorId));
+        updateActorActivity([{
+          id: actorId,
+          running: false,
+          idle_seconds: null,
+          effective_working_state: "stopped",
+          effective_working_reason: "headless_session_stopped",
+          effective_working_updated_at: typeof ev.ts === "string" ? ev.ts : null,
+          effective_active_task_id: null,
+        }]);
+        return;
+      }
+
       if (eventType === "headless.turn.started" || eventType === "headless.turn.progress") {
+        updateGroupRuntimeState(groupId, {
+          lifecycle_state: "active",
+          runtime_running: true,
+        });
         updateActorActivity([{
           id: actorId,
           running: true,
@@ -411,6 +503,10 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
         clearPendingHeadlessBuffers(groupId, actorId);
         completeStreamingEventsForActor(actorId, groupId);
         clearTransientStreamingEventsForActor(actorId, groupId);
+        updateGroupRuntimeState(groupId, {
+          lifecycle_state: "idle",
+          runtime_running: true,
+        });
         updateActorActivity([{
           id: actorId,
           running: true,
@@ -454,7 +550,8 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
         const existingActivityBatch = pendingHeadlessActivitiesRef.current.get(activityKey);
         if (existingActivityBatch) {
           existingActivityBatch.match = { pendingEventId, streamId };
-          existingActivityBatch.activities.set(activityId, activity);
+          const existingActivity = existingActivityBatch.activities.get(activityId);
+          existingActivityBatch.activities.set(activityId, mergeStreamingActivity(existingActivity, activity) || activity);
         } else {
           pendingHeadlessActivitiesRef.current.set(activityKey, {
             actorId,
@@ -523,20 +620,10 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     const resp = await api.fetchHeadlessSnapshot(groupId, { noCache: true });
     if (!resp.ok || selectedGroupIdRef.current !== groupId) return;
     const events = Array.isArray(resp.result.events) ? resp.result.events : [];
-    for (const event of events) {
-      const eventType = String(event?.type || "").trim();
-      if (
-        eventType === "headless.activity.started" ||
-        eventType === "headless.activity.updated" ||
-        eventType === "headless.activity.completed" ||
-        eventType === "headless.message.started" ||
-        eventType === "headless.message.delta" ||
-        eventType === "headless.message.completed"
-      ) {
-        continue;
-      }
+    reconcileHydratedHeadlessLiveOutput(groupId, events);
+    replayHeadlessSnapshotEvents(events, (event) => {
       handleHeadlessEvent(groupId, event);
-    }
+    });
     flushPendingHeadlessActivities(groupId);
     flushPendingHeadlessMessages(groupId);
   }
@@ -660,16 +747,15 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
           const actors = ev.data?.actors;
           if (Array.isArray(actors) && actors.length > 0) {
             updateActorActivity(actors);
+            const hasRunningActor = actors.some((actor) => !!actor.running);
             const hasBusyActor = actors.some((actor) => {
               const state = String(actor.effective_working_state || "").trim().toLowerCase();
               return !!actor.running && state !== "idle" && state !== "stopped";
             });
-            if (hasBusyActor && selectedGroupIdRef.current === groupId) {
-              updateGroupRuntimeState(groupId, {
-                lifecycle_state: "active",
-                runtime_running: true,
-              });
-            }
+            updateGroupRuntimeState(groupId, {
+              lifecycle_state: hasBusyActor ? "active" : (hasRunningActor ? "idle" : "stopped"),
+              runtime_running: hasRunningActor,
+            });
           }
           return;
         }
@@ -743,7 +829,11 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
         if (isChatMessageEvent(nextEvent) && String(nextEvent.by || "") === "user" && hasRenderableChatMessageContent(nextEvent)) {
           const msgData = nextEvent.data && typeof nextEvent.data === "object" ? (nextEvent.data as { client_id?: unknown }) : null;
           const clientId = msgData && typeof msgData.client_id === "string" ? msgData.client_id.trim() : "";
+          const canonicalEventId = String(nextEvent.id || "").trim();
           if (clientId) {
+            if (canonicalEventId) {
+              promoteStreamingEventsByPrefix(`local:${clientId}:`, canonicalEventId, groupId);
+            }
             useChatOutboxStore.getState().remove(groupId, clientId);
             releaseTransferredPreviewUrls(reconciled.transferredPreviewUrls);
           }
@@ -855,6 +945,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     }
     pendingHeadlessMessagesRef.current.clear();
     pendingHeadlessActivitiesRef.current.clear();
+    headlessThreadIdByActorRef.current.clear();
     if (contextRefreshTimerRef.current) {
       window.clearTimeout(contextRefreshTimerRef.current);
       contextRefreshTimerRef.current = null;
