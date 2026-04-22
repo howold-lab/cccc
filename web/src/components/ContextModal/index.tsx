@@ -14,17 +14,13 @@ import {
   apiJson,
   contextSync,
   deleteCoordinationTask,
-  fetchGroupPrompts,
   updateCoordinationBrief,
   updateCoordinationTask,
-  updateGroupPrompt,
-  type GroupPromptInfo,
   type ApiResponse,
 } from "../../services/api";
 import { reloadContextAfterWrite } from "../../features/contextModal/contextWriteback";
 import type {
   GroupContext,
-  GroupSettings,
   ProjectMdInfo,
   Task,
 } from "../../types";
@@ -37,13 +33,12 @@ import { classNames } from "../../utils/classNames";
 import { useModalA11y } from "../../hooks/useModalA11y";
 import { ModalFrame } from "../modals/ModalFrame";
 import { settingsDialogBodyClass, settingsDialogPanelClass } from "../modals/settings/types";
-import { parseHelpMarkdown, updatePetHelpNote } from "../../utils/helpMarkdown";
 import { AgentsView } from "./agents/AgentsView";
 import { ProjectPanel } from "./coordination/ProjectPanel";
 import { SteeringPanel } from "./coordination/SteeringPanel";
 import { TaskBoard } from "./coordination/TaskBoard";
 import { TaskEditorPanel } from "./coordination/TaskEditorPanel";
-import { DesktopPetView } from "./desktopPet/DesktopPetView";
+import { CapabilitiesTab } from "../modals/settings/CapabilitiesTab";
 import {
   briefDraftMatches,
   briefToDraft,
@@ -54,9 +49,7 @@ import {
   getTaskDeleteInfo,
   parseChecklist,
   parseLineList,
-  resolvePetPersonaDraft,
   isVisibleContextAgent,
-  petPersonaDraftDirty,
   taskDisplaySummary,
   taskDraftDirty,
   taskDraftMatches,
@@ -77,11 +70,11 @@ interface ContextModalProps {
   onClose: () => void;
   groupId: string;
   context: GroupContext | null;
+  initialTaskId?: string | null;
+  onInitialTaskHandled?: () => void;
   onOpenContext: () => Promise<void>;
   onSyncContext: () => Promise<void>;
   isDark: boolean;
-  settings?: GroupSettings | null;
-  onUpdateSettings?: (settings: Partial<GroupSettings>) => Promise<boolean | void>;
 }
 
 export function ContextModal({
@@ -89,11 +82,11 @@ export function ContextModal({
   onClose,
   groupId,
   context,
+  initialTaskId,
+  onInitialTaskHandled,
   onOpenContext,
   onSyncContext,
   isDark,
-  settings,
-  onUpdateSettings,
 }: ContextModalProps) {
   const { t } = useTranslation("modals");
   const tr = useCallback((key: string, fallback: string, vars?: Record<string, unknown>) =>
@@ -116,7 +109,6 @@ export function ContextModal({
   const [pendingTaskReadback, setPendingTaskReadback] = useState<{ taskId: string; previousUpdatedAt: string } | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState("");
-  const [viewBusy, setViewBusy] = useState(false);
 
   const [projectMd, setProjectMd] = useState<ProjectMdInfo | null>(null);
   const [projectBusy, setProjectBusy] = useState(false);
@@ -128,12 +120,6 @@ export function ContextModal({
   const [notifyAgents, setNotifyAgents] = useState(false);
   const [notifyError, setNotifyError] = useState("");
 
-  const [petHelpPrompt, setPetHelpPrompt] = useState<GroupPromptInfo | null>(null);
-  const [petPersonaDraft, setPetPersonaDraft] = useState("");
-  const [petPersonaBusy, setPetPersonaBusy] = useState(false);
-  const [petPersonaError, setPetPersonaError] = useState("");
-  const [petPersonaNotice, setPetPersonaNotice] = useState("");
-
   const [decisionDraft, setDecisionDraft] = useState<NoteDraft>(emptyNoteDraft());
   const [handoffDraft, setHandoffDraft] = useState<NoteDraft>(emptyNoteDraft());
   const [activityBusyKind, setActivityBusyKind] = useState<"decision" | "handoff" | null>(null);
@@ -141,7 +127,6 @@ export function ContextModal({
   const lastOpenedGroupRef = useRef("");
 
   const brief = context?.coordination?.brief || null;
-  const desktopPetEnabled = Boolean(settings?.desktop_pet_enabled);
   const tasks = useMemo(() => (Array.isArray(context?.coordination?.tasks) ? context.coordination.tasks : []), [context]);
   const agents = useMemo(
     () => (Array.isArray(context?.agent_states) ? context.agent_states.filter((agent) => isVisibleContextAgent(agent)) : []),
@@ -236,15 +221,7 @@ export function ContextModal({
     () => editingProject && projectText !== String(projectMd?.content || ""),
     [editingProject, projectMd?.content, projectText]
   );
-  const savedPetPersona = useMemo(
-    () => (petHelpPrompt ? parseHelpMarkdown(String(petHelpPrompt.content || "")).pet : ""),
-    [petHelpPrompt]
-  );
-  const hasPetPersonaUnsaved = useMemo(
-    () => petPersonaDraftDirty(savedPetPersona, petPersonaDraft, { loaded: petHelpPrompt !== null }),
-    [petHelpPrompt, petPersonaDraft, savedPetPersona]
-  );
-  const hasSteeringUnsaved = hasBriefUnsaved || hasProjectUnsaved || hasPetPersonaUnsaved;
+  const hasSteeringUnsaved = hasBriefUnsaved || hasProjectUnsaved;
   const hasTaskUnsaved = useMemo(() => {
     if (!taskDraft || taskEditorMode === "none") return false;
     if (taskEditorMode === "create") return taskDraftDirty(taskDraft);
@@ -272,33 +249,6 @@ export function ContextModal({
     }
   }, [groupId, projectMd, tr]);
 
-  const loadPetPersona = useCallback(async (force: boolean = false): Promise<GroupPromptInfo | null> => {
-    if (!groupId) return null;
-    if (!force && petHelpPrompt !== null) return petHelpPrompt;
-    setPetPersonaBusy(true);
-    setPetPersonaError("");
-    try {
-      const resp = await fetchGroupPrompts(groupId);
-      if (!resp.ok) {
-        setPetHelpPrompt(null);
-        setPetPersonaError(resp.error?.message || tr("context.failedToLoadPetPersona", "Failed to load pet persona"));
-        return null;
-      }
-      const nextHelp = resp.result?.help ?? null;
-      if (!nextHelp) {
-        setPetHelpPrompt(null);
-        setPetPersonaError(tr("context.failedToLoadPetPersona", "Failed to load pet persona"));
-        return null;
-      }
-      setPetHelpPrompt(nextHelp);
-      const parsedPet = parseHelpMarkdown(String(nextHelp.content || "")).pet;
-      setPetPersonaDraft(resolvePetPersonaDraft(parsedPet));
-      return nextHelp;
-    } finally {
-      setPetPersonaBusy(false);
-    }
-  }, [groupId, petHelpPrompt, tr]);
-
   useEffect(() => {
     if (!isOpen || !groupId) return;
 
@@ -322,11 +272,6 @@ export function ContextModal({
     setEditingProject(false);
     setProjectText("");
     setProjectExpanded(false);
-    setPetHelpPrompt(null);
-    setPetPersonaDraft("");
-    setPetPersonaBusy(false);
-    setPetPersonaError("");
-    setPetPersonaNotice("");
     setNotifyError("");
     setNotifyAgents(false);
     setDecisionDraft(emptyNoteDraft());
@@ -357,13 +302,6 @@ export function ContextModal({
       void loadProjectMd();
     }
   }, [editingProject, groupId, isOpen, loadProjectMd, projectBusy, projectMd, steeringTab]);
-
-  useEffect(() => {
-    if (!isOpen || !groupId || activeView !== "desktop_pet") return;
-    if (petHelpPrompt === null && !petPersonaBusy) {
-      void loadPetPersona();
-    }
-  }, [activeView, groupId, isOpen, loadPetPersona, petHelpPrompt, petPersonaBusy]);
 
   const taskMatches = useCallback(
     (task: Task): boolean => {
@@ -583,6 +521,23 @@ export function ContextModal({
     setActiveView("coordination");
   }, [confirmDiscardTaskChanges, selectedTaskId, taskEditorMode]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const targetTaskId = String(initialTaskId || "").trim();
+    if (!targetTaskId) return;
+    if (selectedTaskId === targetTaskId && taskEditorMode === "edit") return;
+    const task = taskMap.get(targetTaskId);
+    if (!task) return;
+    if (taskStatus(task) === "archived") {
+      setArchivedExpanded(true);
+    }
+    setTaskFilter("all");
+    setAssigneeFilter("__all__");
+    setTaskQuery("");
+    selectTask(task);
+    onInitialTaskHandled?.();
+  }, [initialTaskId, isOpen, onInitialTaskHandled, selectTask, selectedTaskId, taskEditorMode, taskMap]);
+
   const closeTaskEditor = useCallback(() => {
     if (!confirmDiscardTaskChanges()) return;
     setPendingTaskReadback(null);
@@ -640,48 +595,6 @@ export function ContextModal({
   const { modalRef } = useModalA11y(isOpen, handleModalClose);
   const closeProjectExpanded = useCallback(() => setProjectExpanded(false), []);
   const { modalRef: projectExpandedRef } = useModalA11y(projectExpanded, closeProjectExpanded);
-
-  const handleToggleDesktopPet = useCallback(async (enabled: boolean) => {
-    if (!onUpdateSettings) return;
-    setViewBusy(true);
-    try {
-      await onUpdateSettings({ desktop_pet_enabled: enabled });
-    } finally {
-      setViewBusy(false);
-    }
-  }, [onUpdateSettings]);
-
-  const handleSavePetPersona = useCallback(async () => {
-    if (!groupId) return;
-    setPetPersonaBusy(true);
-    setPetPersonaError("");
-    setPetPersonaNotice("");
-    try {
-      const currentHelp = petHelpPrompt ?? await loadPetPersona();
-      if (!currentHelp) return;
-      const actorOrder = Object.keys(parseHelpMarkdown(String(currentHelp.content || "")).actorNotes);
-      const nextContent = updatePetHelpNote(String(currentHelp.content || ""), petPersonaDraft, actorOrder);
-      const resp = await updateGroupPrompt(groupId, "help", nextContent, {
-        editorMode: "structured",
-        changedBlocks: ["pet"],
-      });
-      if (!resp.ok) {
-        setPetPersonaError(resp.error?.message || tr("context.failedToSavePetPersona", "Failed to save pet persona"));
-        return;
-      }
-      setPetHelpPrompt(resp.result);
-      setPetPersonaDraft(resolvePetPersonaDraft(parseHelpMarkdown(String(resp.result.content || "")).pet));
-      setPetPersonaNotice(tr("context.petPersonaSaved", "Pet persona saved."));
-    } finally {
-      setPetPersonaBusy(false);
-    }
-  }, [groupId, loadPetPersona, petHelpPrompt, petPersonaDraft, tr]);
-
-  const handleDiscardPetPersona = useCallback(() => {
-    setPetPersonaDraft(resolvePetPersonaDraft(savedPetPersona));
-    setPetPersonaError("");
-    setPetPersonaNotice("");
-  }, [savedPetPersona]);
 
   const handleSaveBrief = useCallback(async () => {
     if (!groupId) return;
@@ -921,12 +834,6 @@ export function ContextModal({
     }
   }, [applyContextWriteback, decisionDraft, groupId, handoffDraft, tr]);
 
-  const handlePetPersonaChange = useCallback((value: string) => {
-    setPetPersonaDraft(value);
-    setPetPersonaError("");
-    setPetPersonaNotice("");
-  }, []);
-
   const startBriefEdit = useCallback(() => {
     openSteeringTab("summary");
     setEditingBrief(true);
@@ -970,8 +877,8 @@ export function ContextModal({
   const viewButtonClass = (active: boolean) => classNames(
     "rounded-xl px-3 py-2 text-sm font-medium transition-colors",
     active
-      ? "bg-[var(--glass-accent-bg)] text-[var(--color-accent-primary)]"
-      : "text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]"
+      ? "border border-black/10 bg-[rgb(35,36,37)] text-white shadow-[0_10px_24px_-20px_rgba(15,23,42,0.34)] dark:border-white/12 dark:bg-white dark:text-[rgb(20,20,22)]"
+      : "text-[var(--color-text-secondary)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
   );
 
   return (
@@ -985,15 +892,29 @@ export function ContextModal({
         panelClassName="h-full w-full overflow-hidden rounded-none sm:h-[94vh] sm:max-w-[96vw]"
         modalRef={modalRef}
       >
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div
+          className={classNames(
+            "min-h-0 flex-1 overflow-y-auto",
+            isDark
+              ? "bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),transparent_34%),linear-gradient(180deg,rgba(17,18,22,0.98),rgba(11,12,15,1))]"
+              : "bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.92),rgba(255,255,255,0)_30%),linear-gradient(180deg,rgb(251,250,247),rgb(245,244,241))]"
+          )}
+        >
           <div className="flex min-h-full flex-col gap-4 p-4 sm:p-5">
             {syncError ? <div className={classNames("rounded-xl border px-3 py-2 text-sm", "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400")}>{syncError}</div> : null}
 
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className={classNames("inline-flex w-fit rounded-2xl border p-1", isDark ? "border-slate-800 bg-slate-950/70" : "border-gray-200 bg-gray-100/80")}>
+              <div
+                className={classNames(
+                  "inline-flex w-fit rounded-[22px] border p-1.5 shadow-[0_14px_40px_-28px_rgba(15,23,42,0.18)]",
+                  isDark
+                    ? "border-white/10 bg-[linear-gradient(180deg,rgba(24,26,31,0.92),rgba(14,15,19,0.96))]"
+                    : "border-black/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,246,242,0.94))]"
+                )}
+              >
                 <button type="button" onClick={() => handleSwitchActiveView("coordination")} className={viewButtonClass(activeView === "coordination")}>{tr("context.coordination", "Coordination")}</button>
                 <button type="button" onClick={() => handleSwitchActiveView("agents")} className={viewButtonClass(activeView === "agents")}>{tr("context.agents", "Agents")}</button>
-                <button type="button" onClick={() => handleSwitchActiveView("desktop_pet")} className={viewButtonClass(activeView === "desktop_pet")}>{tr("context.desktopPetTab", "Web Pet")}<span className="ml-1.5 rounded-md bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-cyan-400">Beta</span></button>
+                <button type="button" onClick={() => handleSwitchActiveView("self_evolving_skills")} className={viewButtonClass(activeView === "self_evolving_skills")}>{tr("context.selfEvolvingSkillsTab", "Self-Evolving Skills")}</button>
               </div>
             </div>
 
@@ -1068,23 +989,11 @@ export function ContextModal({
             ) : activeView === "agents" ? (
               <AgentsView agents={agents} tr={tr} ui={ui} />
             ) : (
-              <DesktopPetView
-                tr={tr}
-                ui={ui}
-                onUpdateSettings={onUpdateSettings}
-                desktopPetEnabled={desktopPetEnabled}
-                viewBusy={viewBusy}
-                petHelpPrompt={petHelpPrompt}
-                petPersonaBusy={petPersonaBusy}
-                petPersonaError={petPersonaError}
-                petPersonaNotice={petPersonaNotice}
-                petPersonaDraft={petPersonaDraft}
-                hasPetPersonaUnsaved={hasPetPersonaUnsaved}
-                onToggleDesktopPet={(enabled) => void handleToggleDesktopPet(enabled)}
-                onLoadPetPersona={loadPetPersona}
-                onSavePetPersona={() => void handleSavePetPersona()}
-                onDiscardPetPersona={handleDiscardPetPersona}
-                onPetPersonaChange={handlePetPersonaChange}
+              <CapabilitiesTab
+                isDark={isDark}
+                isActive={isOpen && activeView === "self_evolving_skills"}
+                groupId={groupId}
+                surface="selfEvolving"
               />
             )}
           </div>
@@ -1102,35 +1011,37 @@ export function ContextModal({
               <div className="absolute inset-0 glass-overlay" onPointerDown={closeTaskEditor} />
               <div className="absolute inset-y-0 right-0 flex w-full justify-end">
                 <div className="h-full w-full sm:w-[min(860px,calc(100vw-1.5rem))]">
-                  <div className="h-full overflow-y-auto border-l border-[var(--glass-border-subtle)] shadow-2xl glass-modal">
+                  <div className="flex h-full flex-col border-l border-[var(--glass-border-subtle)] shadow-2xl glass-modal">
                     <div className="sr-only" id="context-task-drawer-title">
                       {taskEditorMode === "create" ? tr("context.newTask", "New task") : tr("context.taskDetails", "Task editor")}
                     </div>
-                    <TaskEditorPanel
-                      tr={tr}
-                      ui={ui}
-                      taskEditorMode={taskEditorMode}
-                      taskDraft={taskDraft}
-                      hasTaskUnsaved={hasTaskUnsaved}
-                      syncBusy={syncBusy}
-                      selectedTask={selectedTask}
-                      selectedTaskDeleteInfo={selectedTaskDeleteInfo}
-                      selectedTaskDeleteHint={selectedTaskDeleteHint}
-                      taskWorkflowCoverage={taskWorkflowCoverage}
-                      taskTypeId={taskDraft?.taskType || "standard"}
-                      selectedTaskType={selectedTaskType}
-                      setTaskDraft={setTaskDraft}
-                      onTaskTypeChange={(nextTaskTypeId) => setTaskDraft((prev) => (prev ? {
-                        ...prev,
-                        taskType: nextTaskTypeId,
-                      } : prev))}
-                      onResetTask={handleResetTask}
-                      onClose={closeTaskEditor}
-                      onDeleteSelectedTask={() => {
-                        if (selectedTask) void handleDeleteTask(selectedTask);
-                      }}
-                      onSaveTask={() => void handleSaveTask()}
-                    />
+                    <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
+                      <TaskEditorPanel
+                        tr={tr}
+                        ui={ui}
+                        taskEditorMode={taskEditorMode}
+                        taskDraft={taskDraft}
+                        hasTaskUnsaved={hasTaskUnsaved}
+                        syncBusy={syncBusy}
+                        selectedTask={selectedTask}
+                        selectedTaskDeleteInfo={selectedTaskDeleteInfo}
+                        selectedTaskDeleteHint={selectedTaskDeleteHint}
+                        taskWorkflowCoverage={taskWorkflowCoverage}
+                        taskTypeId={taskDraft?.taskType || "standard"}
+                        selectedTaskType={selectedTaskType}
+                        setTaskDraft={setTaskDraft}
+                        onTaskTypeChange={(nextTaskTypeId) => setTaskDraft((prev) => (prev ? {
+                          ...prev,
+                          taskType: nextTaskTypeId,
+                        } : prev))}
+                        onResetTask={handleResetTask}
+                        onClose={closeTaskEditor}
+                        onDeleteSelectedTask={() => {
+                          if (selectedTask) void handleDeleteTask(selectedTask);
+                        }}
+                        onSaveTask={() => void handleSaveTask()}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>

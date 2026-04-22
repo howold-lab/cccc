@@ -148,19 +148,43 @@ export async function fetchSettings(groupId: string, init?: RequestInit & { noCa
   return apiJson<{ settings: GroupSettings }>(`/api/v1/groups/${encodeURIComponent(groupId)}/settings`, init);
 }
 
-export async function fetchCapabilityOverview(opts?: { query?: string; limit?: number; includeIndexed?: boolean }) {
+export async function fetchCapabilityOverview(opts?: {
+  query?: string;
+  limit?: number;
+  offset?: number;
+  includeIndexed?: boolean;
+  kind?: "all" | "pack" | "mcp" | "skill";
+  policy?: "all" | "actionable" | "blocked" | "indexed";
+  sourceId?: string;
+}) {
   const params = new URLSearchParams();
   if (String(opts?.query || "").trim()) params.set("query", String(opts?.query || "").trim());
   if (typeof opts?.limit === "number" && Number.isFinite(opts.limit)) {
     params.set("limit", String(Math.max(1, Math.trunc(opts.limit))));
   }
+  if (typeof opts?.offset === "number" && Number.isFinite(opts.offset)) {
+    params.set("offset", String(Math.max(0, Math.trunc(opts.offset))));
+  }
   if (typeof opts?.includeIndexed === "boolean") {
     params.set("include_indexed", opts.includeIndexed ? "true" : "false");
+  }
+  if (String(opts?.kind || "").trim() && String(opts?.kind || "").trim() !== "all") {
+    params.set("kind", String(opts?.kind || "").trim());
+  }
+  if (String(opts?.policy || "").trim() && String(opts?.policy || "").trim() !== "all") {
+    params.set("policy", String(opts?.policy || "").trim());
+  }
+  if (String(opts?.sourceId || "").trim() && String(opts?.sourceId || "").trim() !== "all") {
+    params.set("source_id", String(opts?.sourceId || "").trim());
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return apiJson<{
     items: CapabilityOverviewItem[];
     count: number;
+    total_count: number;
+    offset: number;
+    limit: number;
+    has_more: boolean;
     query?: string;
     sources?: Record<string, CapabilitySourceState>;
     blocked_capabilities?: CapabilityBlockEntry[];
@@ -226,11 +250,19 @@ export async function blockCapabilityGlobal(capabilityId: string, blocked: boole
   });
 }
 
-export async function fetchGroupCapabilityState(groupId: string, actorId: string = "user") {
+export async function fetchGroupCapabilityState(
+  groupId: string,
+  actorId: string = "user",
+  opts?: { capabilityId?: string; noCache?: boolean; signal?: AbortSignal },
+) {
   const params = new URLSearchParams();
   if (actorId) params.set("actor_id", actorId);
+  if (String(opts?.capabilityId || "").trim()) params.set("capability_id", String(opts?.capabilityId || "").trim());
+  if (opts?.noCache) params.set("_", String(Date.now()));
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  return apiJson<CapabilityStateResult>(`/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/state${suffix}`);
+  return apiJson<CapabilityStateResult>(`/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/state${suffix}`, {
+    signal: opts?.signal,
+  });
 }
 
 export async function enableGroupCapability(
@@ -280,6 +312,17 @@ export async function importCapability(
       scope: opts?.scope || "session",
       actor_id: opts?.actorId || "user",
       ttl_seconds: opts?.ttlSeconds || 3600,
+      reason: opts?.reason || "",
+    }),
+  });
+}
+
+export async function uninstallCapability(groupId: string, capabilityId: string, opts?: { actorId?: string; reason?: string }) {
+  return apiJson<Record<string, unknown>>(`/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/uninstall`, {
+    method: "POST",
+    body: JSON.stringify({
+      capability_id: capabilityId,
+      actor_id: opts?.actorId || "user",
       reason: opts?.reason || "",
     }),
   });
@@ -380,6 +423,45 @@ export async function sendMessage(
       reply_required: replyRequired,
       client_id: clientId,
       refs: refs || [],
+    }),
+  });
+}
+
+export async function trackedSendMessage(
+  groupId: string,
+  payload: {
+    title: string;
+    text: string;
+    to: string[];
+    outcome?: string;
+    checklist?: Array<{ text: string; status?: string }>;
+    assignee?: string;
+    waiting_on?: "none" | "user" | "actor" | "external" | string;
+    handoff_to?: string;
+    notes?: string;
+    priority?: "normal" | "attention";
+    reply_required?: boolean;
+    idempotency_key?: string;
+    refs?: MessageRef[];
+  },
+) {
+  return apiJson(`/api/v1/groups/${encodeURIComponent(groupId)}/tracked_send`, {
+    method: "POST",
+    body: JSON.stringify({
+      title: payload.title,
+      text: payload.text,
+      by: "user",
+      to: payload.to || [],
+      outcome: payload.outcome || "",
+      checklist: payload.checklist || [],
+      assignee: payload.assignee || "",
+      waiting_on: payload.waiting_on || "actor",
+      handoff_to: payload.handoff_to || "",
+      notes: payload.notes || "",
+      priority: payload.priority || "normal",
+      reply_required: payload.reply_required !== false,
+      idempotency_key: payload.idempotency_key || "",
+      refs: payload.refs || [],
     }),
   });
 }

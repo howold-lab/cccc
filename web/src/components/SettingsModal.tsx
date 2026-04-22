@@ -14,6 +14,7 @@ import { ModalFrame } from "./modals/ModalFrame";
 import { SettingsNavigation } from "./modals/settings/SettingsNavigation";
 import { IMConfigDraft, saveAndStartIMBridge, saveIMConfigDraft } from "./modals/settings/imBridgeConfig";
 import { useModalA11y } from "../hooks/useModalA11y";
+import { copyTextToClipboard } from "../utils/copy";
 
 const AutomationTab = lazy(() => import("./modals/settings/AutomationTab").then((module) => ({ default: module.AutomationTab })));
 const DeliveryTab = lazy(() => import("./modals/settings/DeliveryTab").then((module) => ({ default: module.DeliveryTab })));
@@ -21,6 +22,7 @@ const MessagingTab = lazy(() => import("./modals/settings/MessagingTab").then((m
 const IMBridgeTab = lazy(() => import("./modals/settings/IMBridgeTab").then((module) => ({ default: module.IMBridgeTab })));
 const TranscriptTab = lazy(() => import("./modals/settings/TranscriptTab").then((module) => ({ default: module.TranscriptTab })));
 const GuidanceTab = lazy(() => import("./modals/settings/GuidanceTab").then((module) => ({ default: module.GuidanceTab })));
+const AssistantsTab = lazy(() => import("./modals/settings/AssistantsTab").then((module) => ({ default: module.AssistantsTab })));
 const GroupSpaceTab = lazy(() => import("./modals/settings/GroupSpaceTab").then((module) => ({ default: module.GroupSpaceTab })));
 const BlueprintTab = lazy(() => import("./modals/settings/BlueprintTab").then((module) => ({ default: module.BlueprintTab })));
 const CapabilitiesTab = lazy(() => import("./modals/settings/CapabilitiesTab").then((module) => ({ default: module.CapabilitiesTab })));
@@ -83,7 +85,7 @@ export function SettingsModal({
   const [idleSeconds, setIdleSeconds] = useState(0);
   const [keepaliveSeconds, setKeepaliveSeconds] = useState(120);
   const [keepaliveMax, setKeepaliveMax] = useState(3);
-  const [silenceSeconds, setSilenceSeconds] = useState(600);
+  const [silenceSeconds, setSilenceSeconds] = useState(0);
   const [helpNudgeIntervalSeconds, setHelpNudgeIntervalSeconds] = useState(600);
   const [helpNudgeMinMessages, setHelpNudgeMinMessages] = useState(10);
   const [autoMarkOnDelivery, setAutoMarkOnDelivery] = useState(false);
@@ -125,7 +127,6 @@ export function SettingsModal({
   const [imWecomSecret, setImWecomSecret] = useState("");
   // Weixin fields
   const [imWeixinAccountId, setImWeixinAccountId] = useState("");
-  const [imWeixinCommand, setImWeixinCommand] = useState("");
   const [weixinLoginStatus, setWeixinLoginStatus] = useState<WeixinLoginStatus | null>(null);
   const [imBusy, setImBusy] = useState(false);
   const imLoadSeq = useRef(0);
@@ -234,7 +235,6 @@ export function SettingsModal({
     setImWecomBotId("");
     setImWecomSecret("");
     setImWeixinAccountId("");
-    setImWeixinCommand("");
   };
 
   const loadIMStatus = useCallback(async (opts?: { resetFirst?: boolean }) => {
@@ -276,7 +276,6 @@ export function SettingsModal({
         setImWecomBotId(im.wecom_bot_id || "");
         setImWecomSecret(im.wecom_secret || "");
         setImWeixinAccountId(im.weixin_account_id || "");
-        setImWeixinCommand(im.weixin_command || "");
       }
     } catch (e) {
       console.error("Failed to load IM status:", e);
@@ -320,6 +319,9 @@ export function SettingsModal({
       }
     };
     void loadWeixinStatus();
+    // Only poll while waiting for QR scan; stop once logged in or idle
+    const needsPoll = weixinLoginStatus?.status === "waiting_scan";
+    if (!needsPoll) return () => { cancelled = true; };
     const timer = window.setInterval(() => {
       void loadWeixinStatus();
     }, 3000);
@@ -327,7 +329,7 @@ export function SettingsModal({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [isOpen, groupId, imPlatform, t, toWeixinErrorStatus]);
+  }, [isOpen, groupId, imPlatform, weixinLoginStatus?.status, t, toWeixinErrorStatus]);
 
   useEffect(() => {
     if (imPlatform !== "weixin") {
@@ -337,6 +339,10 @@ export function SettingsModal({
     if (!groupId) return;
     if (!weixinLoginStatus?.logged_in) return;
     if (!imStatus?.configured || String(imStatus.platform || "") !== "weixin") return;
+    if (!imStatus.enabled) {
+      weixinAutoStartRef.current = false;
+      return;
+    }
     if (imStatus.running) {
       weixinAutoStartRef.current = false;
       return;
@@ -460,6 +466,22 @@ export function SettingsModal({
     });
   };
 
+  const handleResetAutomationSettingsDraft = () => {
+    setNudgeSeconds(300);
+    setReplyRequiredNudgeSeconds(300);
+    setAttentionAckNudgeSeconds(600);
+    setUnreadNudgeSeconds(900);
+    setNudgeDigestMinIntervalSeconds(120);
+    setNudgeMaxRepeatsPerObligation(3);
+    setNudgeEscalateAfterRepeats(2);
+    setIdleSeconds(0);
+    setKeepaliveSeconds(120);
+    setKeepaliveMax(3);
+    setSilenceSeconds(0);
+    setHelpNudgeIntervalSeconds(600);
+    setHelpNudgeMinMessages(10);
+  };
+
   const handleAutoSave = async (field: string, value: number | boolean) => {
     await onUpdateSettings({ [field]: value });
   };
@@ -491,31 +513,8 @@ export function SettingsModal({
       window.setTimeout(() => setTailCopyInfo(""), 1200);
     };
 
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-        await navigator.clipboard.writeText(payload);
-        setToast(t("automation.copiedLines", { n }));
-        return;
-      }
-    } catch {
-      // fallback
-    }
-
-    try {
-      const el = document.createElement("textarea");
-      el.value = payload;
-      el.style.position = "fixed";
-      el.style.left = "-9999px";
-      el.style.top = "0";
-      document.body.appendChild(el);
-      el.focus();
-      el.select();
-      const ok = document.execCommand("copy");
-      document.body.removeChild(el);
-      setToast(ok ? t("automation.copiedLines", { n }) : t("common:copyFailed"));
-    } catch {
-      setToast(t("common:copyFailed"));
-    }
+    const ok = await copyTextToClipboard(payload);
+    setToast(ok ? t("automation.copiedLines", { n }) : t("common:copyFailed"));
   };
 
   const loadTerminalTail = async () => {
@@ -573,7 +572,6 @@ export function SettingsModal({
     wecomBotId: imWecomBotId,
     wecomSecret: imWecomSecret,
     weixinAccountId: imWeixinAccountId,
-    weixinCommand: imWeixinCommand,
   });
 
   // Apply a draft to current IM config fields
@@ -589,7 +587,6 @@ export function SettingsModal({
     setImWecomBotId(draft.wecomBotId);
     setImWecomSecret(draft.wecomSecret);
     setImWeixinAccountId(draft.weixinAccountId);
-    setImWeixinCommand(draft.weixinCommand);
   };
 
   const getCurrentIMSaveRequest = () => ({
@@ -625,7 +622,6 @@ export function SettingsModal({
       setImWecomBotId("");
       setImWecomSecret("");
       setImWeixinAccountId("");
-      setImWeixinCommand("");
     }
 
     // 3. Set new platform
@@ -662,7 +658,6 @@ export function SettingsModal({
         setImWecomBotId("");
         setImWecomSecret("");
         setImWeixinAccountId("");
-        setImWeixinCommand("");
         await loadIMStatus();
       }
     } catch (e) {
@@ -951,6 +946,7 @@ export function SettingsModal({
 
   const groupTabs: { id: GroupTabId; label: string }[] = [
     { id: "guidance", label: t("tabs.guidance") },
+    { id: "assistants", label: t("tabs.assistants") },
     { id: "automation", label: t("tabs.automation") },
     { id: "delivery", label: t("tabs.delivery") },
     { id: "space", label: t("tabs.space") },
@@ -992,9 +988,35 @@ export function SettingsModal({
       isDark={isDark}
       onClose={onClose}
       titleId="settings-modal-title"
-      title={`⚙️ ${t("title")}`}
+      title={(
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]">
+            Workspace Settings
+          </div>
+          <h2 className="mt-1 truncate text-[1.15rem] font-semibold text-[var(--color-text-primary)]">
+            {t("title")}
+          </h2>
+          <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+            {scope === "group"
+              ? t("navigation.groupScopeContent", { scopeRoot: scopeRootUrl || groupId || "—" })
+              : (globalScopeEnabled ? t("navigation.globalScopeContent") : t("navigation.globalLockedContent"))}
+          </div>
+        </div>
+      )}
       closeAriaLabel={t("closeAriaLabel")}
-      panelClassName="w-full h-full sm:h-[640px] sm:max-w-4xl sm:max-h-[85vh]"
+      panelClassName="w-full h-full sm:h-[min(90dvh,920px)] sm:max-w-[min(1280px,calc(100vw-2rem))] sm:max-h-[90dvh]"
+      headerActions={(
+        <div className="hidden sm:flex items-center gap-2">
+          <span className="rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]">
+            {scope === "group" ? t("navigation.thisGroup") : t("navigation.global")}
+          </span>
+          {groupDoc?.title && scope === "group" ? (
+            <span className="max-w-[18rem] truncate rounded-full border border-[var(--glass-border-subtle)] bg-transparent px-3 py-1 text-[11px] font-medium text-[var(--color-text-tertiary)]">
+              {groupDoc.title}
+            </span>
+          ) : null}
+        </div>
+      )}
       modalRef={modalRef}
     >
       <div className="min-h-0 flex-1 flex flex-col sm:flex-row overflow-hidden">
@@ -1013,9 +1035,13 @@ export function SettingsModal({
         {/* Main Content Area */}
         <div
           ref={contentScrollRef}
-          className="min-h-0 flex-1 overflow-y-auto scrollbar-subtle flex flex-col [scrollbar-gutter:stable]"
+          className={`min-h-0 flex-1 overflow-y-auto scrollbar-subtle flex flex-col [scrollbar-gutter:stable] ${
+            isDark
+              ? "bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),transparent_32%),linear-gradient(180deg,rgba(17,18,22,0.98),rgba(11,12,15,1))]"
+              : "bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.96),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgb(255,255,255),rgb(246,248,251))]"
+          }`}
         >
-          <div className="p-5 pb-8 sm:p-8 sm:pb-10 space-y-6">
+          <div className="p-4 pb-6 sm:p-5 lg:p-6 sm:pb-7 space-y-4 lg:space-y-5">
             {scope === "global" && !globalSettingsEnabled && !currentBrowserSignedIn ? (
               <div className={`rounded-xl border p-6 ${isDark ? "border-amber-700/40 bg-amber-900/10 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
                 <div className="text-sm font-semibold">{t("navigation.globalLockedTitle")}</div>
@@ -1065,6 +1091,7 @@ export function SettingsModal({
                   helpNudgeMinMessages={helpNudgeMinMessages}
                   setHelpNudgeMinMessages={setHelpNudgeMinMessages}
                   onSavePolicies={handleSaveAutomationSettings}
+                  onResetPolicies={handleResetAutomationSettingsDraft}
                 />
               )}
 
@@ -1118,8 +1145,6 @@ export function SettingsModal({
                   setImWecomSecret={setImWecomSecret}
                   imWeixinAccountId={imWeixinAccountId}
                   setImWeixinAccountId={setImWeixinAccountId}
-                  imWeixinCommand={imWeixinCommand}
-                  setImWeixinCommand={setImWeixinCommand}
                   weixinLoginStatus={weixinLoginStatus}
                   onStartWeixinLogin={handleStartWeixinLogin}
                   onLogoutWeixin={handleLogoutWeixin}
@@ -1165,6 +1190,17 @@ export function SettingsModal({
 
               {activeTab === "guidance" && <GuidanceTab isDark={isDark} groupId={groupId} />}
 
+              {activeTab === "assistants" && (
+                <AssistantsTab
+                  isDark={isDark}
+                  groupId={groupId}
+                  isActive={scope === "group" && activeTab === "assistants"}
+                  petEnabled={Boolean(settings?.desktop_pet_enabled)}
+                  busy={busy}
+                  onUpdatePetEnabled={(enabled) => onUpdateSettings({ desktop_pet_enabled: enabled })}
+                />
+              )}
+
               {activeTab === "space" && (
                 <GroupSpaceTab
                   isDark={isDark}
@@ -1179,6 +1215,7 @@ export function SettingsModal({
                 <CapabilitiesTab
                   isDark={isDark}
                   isActive={scope === "global" && activeTab === "capabilities"}
+                  groupId={groupId}
                 />
               )}
 

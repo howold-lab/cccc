@@ -1,7 +1,9 @@
-import { memo, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
+import { memo, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from "react";
 import type { MutableRefObject } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { LedgerEvent, Actor, AgentState, PresentationMessageRef } from "../types";
+import { useTranslation } from "react-i18next";
+import { LedgerEvent, Actor, AgentState, PresentationMessageRef, TaskMessageRef, Task } from "../types";
+import { ArrowDownIcon, MessageSquareTextIcon } from "./Icons";
 import { MessageBubble } from "./MessageBubble";
 import { useActorDisplayNameMap } from "../hooks/useActorDisplayName";
 import {
@@ -13,6 +15,8 @@ import type { ChatFollowMode } from "../stores/useUIStore";
 import {
   getAutoFollowTrigger,
   getStableMessageKey,
+  shouldAutoScrollToBottom,
+  shouldDetachChatFollowOnScroll,
   shouldUseVirtualizedMessageList,
 } from "./virtualMessageListHelpers";
 
@@ -37,6 +41,7 @@ export interface VirtualMessageListProps {
   messages: LedgerEvent[];
   actors: Actor[];
   agentStates: AgentState[];
+  taskById: Map<string, Task>;
   isDark: boolean;
   readOnly?: boolean;
   groupId: string;
@@ -54,6 +59,7 @@ export interface VirtualMessageListProps {
   onRelay?: (ev: LedgerEvent) => void;
   onOpenSource?: (srcGroupId: string, srcEventId: string) => void;
   onOpenPresentationRef?: (ref: PresentationMessageRef, event: LedgerEvent) => void;
+  onOpenTaskRef?: (ref: TaskMessageRef, event: LedgerEvent) => void;
   showScrollButton: boolean;
   onScrollButtonClick: () => void;
   chatUnreadCount: number;
@@ -79,6 +85,7 @@ type VirtualMessageRowProps = {
   actors: Actor[];
   displayNameMap: Map<string, string>;
   agentState: AgentState | null;
+  taskById: Map<string, Task>;
   isDark: boolean;
   readOnly?: boolean;
   groupId: string;
@@ -91,6 +98,8 @@ type VirtualMessageRowProps = {
   onRelay?: (ev: LedgerEvent) => void;
   onOpenSource?: (srcGroupId: string, srcEventId: string) => void;
   onOpenPresentationRef?: (ref: PresentationMessageRef, event: LedgerEvent) => void;
+  onOpenTaskRef?: (ref: TaskMessageRef, event: LedgerEvent) => void;
+  onOpenReplyTarget?: (replyToEventId: string) => void;
   measureElement: (node: Element | null) => void;
 };
 
@@ -103,6 +112,7 @@ const VirtualMessageRow = memo(function VirtualMessageRow({
   actors,
   displayNameMap,
   agentState,
+  taskById,
   isDark,
   readOnly,
   groupId,
@@ -115,6 +125,8 @@ const VirtualMessageRow = memo(function VirtualMessageRow({
   onRelay,
   onOpenSource,
   onOpenPresentationRef,
+  onOpenTaskRef,
+  onOpenReplyTarget,
   measureElement,
 }: VirtualMessageRowProps) {
   const attachMeasuredRow = useCallback((node: HTMLDivElement | null) => {
@@ -142,6 +154,7 @@ const VirtualMessageRow = memo(function VirtualMessageRow({
         actors={actors}
         displayNameMap={displayNameMap}
         agentState={agentState}
+        taskById={taskById}
         isDark={isDark}
         readOnly={readOnly}
         groupId={groupId}
@@ -159,6 +172,8 @@ const VirtualMessageRow = memo(function VirtualMessageRow({
         onRelay={onRelay}
         onOpenSource={onOpenSource}
         onOpenPresentationRef={onOpenPresentationRef}
+        onOpenTaskRef={onOpenTaskRef}
+        onOpenReplyTarget={onOpenReplyTarget}
       />
     </div>
   );
@@ -168,6 +183,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   messages,
   actors,
   agentStates,
+  taskById,
   isDark,
   readOnly,
   groupId,
@@ -185,6 +201,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   onRelay,
   onOpenSource,
   onOpenPresentationRef,
+  onOpenTaskRef,
   showScrollButton,
   onScrollButtonClick,
   chatUnreadCount,
@@ -196,9 +213,14 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   onLoadMore,
   resetKey,
 }: VirtualMessageListInnerProps) {
+  const { t } = useTranslation("chat");
   const parentRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const remeasureRafRef = useRef<number | null>(null);
+  const replyJumpClearTimerRef = useRef<number | null>(null);
+  const replyJumpNoticeTimerRef = useRef<number | null>(null);
+  const [replyJumpHighlightId, setReplyJumpHighlightId] = useState("");
+  const [replyJumpNotice, setReplyJumpNotice] = useState("");
   // Message ordering is resolved upstream in useChatTab. The virtual list
   // should render that order verbatim instead of maintaining a second,
   // divergent streaming-order cache locally.
@@ -258,7 +280,12 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   const snapshotFlushTimerRef = useRef<number | null>(null);
   // For history loading scroll position preservation (prepend older messages)
   const topLoadArmedRef = useRef(true);
-  const pendingPrependCompensationRef = useRef<{ previousOffset: number; previousTotalSize: number } | null>(null);
+  const pendingPrependCompensationRef = useRef<{
+    previousOffset: number;
+    previousTotalSize: number;
+    anchorId: string;
+    anchorOffsetPx: number;
+  } | null>(null);
   const lastScrollTopRef = useRef(0);
   // 标记容器正在处理 resize（如 footer 回复栏出现/消失），
   // 防止 handleScroll 将浏览器裁剪 scrollTop 误判为用户上滑
@@ -395,6 +422,15 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     return forceStickToBottomUntilRef.current > performance.now();
   }, []);
 
+  const shouldAutoScrollNow = useCallback(() => {
+    if (shouldForceStickToBottom()) return true;
+    return shouldAutoScrollToBottom({
+      followMode: followModeRef.current,
+      isAtBottom: isAtBottomRef.current,
+      forceStickToBottom: false,
+    });
+  }, [shouldForceStickToBottom]);
+
   const scheduleForceStickToBottom = useCallback(() => {
     forceStickToBottomUntilRef.current = performance.now() + 900;
     cancelScheduledScroll();
@@ -457,6 +493,68 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     [cancelScheduledScroll, virtualizer]
   );
 
+  const showReplyJumpNotice = useCallback((message: string) => {
+    if (replyJumpNoticeTimerRef.current != null) {
+      window.clearTimeout(replyJumpNoticeTimerRef.current);
+      replyJumpNoticeTimerRef.current = null;
+    }
+    setReplyJumpNotice(message);
+    replyJumpNoticeTimerRef.current = window.setTimeout(() => {
+      replyJumpNoticeTimerRef.current = null;
+      setReplyJumpNotice("");
+    }, 2200);
+  }, []);
+
+  const handleOpenReplyTarget = useCallback((replyToEventId: string) => {
+    const targetId = String(replyToEventId || "").trim();
+    if (!targetId) return;
+
+    const idx = displayMessages.findIndex((message) => String(message?.id || "") === targetId);
+    if (idx < 0) {
+      showReplyJumpNotice(t("replyTargetNotLoaded"));
+      return;
+    }
+
+    setAtBottom(false);
+    setFollowMode("detached");
+    forceStickToBottomUntilRef.current = 0;
+    cancelScheduledScroll();
+    setReplyJumpHighlightId(targetId);
+    if (replyJumpClearTimerRef.current != null) {
+      window.clearTimeout(replyJumpClearTimerRef.current);
+      replyJumpClearTimerRef.current = null;
+    }
+    replyJumpClearTimerRef.current = window.setTimeout(() => {
+      replyJumpClearTimerRef.current = null;
+      setReplyJumpHighlightId((current) => (current === targetId ? "" : current));
+    }, 2200);
+
+    if (shouldVirtualize) {
+      scrollToIndexStable(idx);
+      return;
+    }
+
+    const el = parentRef.current;
+    const row = getMessageRowById(targetId);
+    if (!el || !row) {
+      showReplyJumpNotice(t("replyTargetNotLoaded"));
+      return;
+    }
+    const top = Math.max(0, row.offsetTop - Math.max(0, (el.clientHeight - row.offsetHeight) / 2));
+    el.scrollTo({ top, behavior: "auto" });
+    lastScrollTopRef.current = top;
+  }, [
+    cancelScheduledScroll,
+    displayMessages,
+    getMessageRowById,
+    scrollToIndexStable,
+    setAtBottom,
+    setFollowMode,
+    shouldVirtualize,
+    showReplyJumpNotice,
+    t,
+  ]);
+
   const handleScroll = useCallback(() => {
     if (scrollRafScheduledRef.current) return;
     scrollRafScheduledRef.current = true;
@@ -467,17 +565,25 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     const el = parentRef.current;
     if (!el) return;
 
+    const topTriggerPx = 80;
+    const topRearmPx = 240;
     const curTop = el.scrollTop;
     const previousTop = lastScrollTopRef.current;
-    const userScrolledUp = curTop < previousTop - 4;
-    if (userScrolledUp && !isContainerResizingRef.current) {
+    const atBottom = checkIsAtBottom();
+    if (shouldDetachChatFollowOnScroll({
+      followMode: followModeRef.current,
+      previousTop,
+      currentTop: curTop,
+      atBottom,
+      isContainerResizing: isContainerResizingRef.current,
+      topLoadThresholdPx: topTriggerPx,
+    })) {
       setFollowMode("detached");
       forceStickToBottomUntilRef.current = 0;
       cancelScheduledScroll();
     }
     lastScrollTopRef.current = curTop;
 
-    const atBottom = checkIsAtBottom();
     if (atBottom && followModeRef.current === "detached") {
       setFollowMode("follow");
     }
@@ -517,16 +623,21 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     // Use a hysteresis "arm/disarm" gate instead of relying on scroll direction.
     // This prevents repeated loads when the scroll position jitters near the top
     // (e.g. due to browser scroll anchoring or dynamic row measurement).
-    const topTriggerPx = 80;
-    const topRearmPx = 240;
     if (curTop > topRearmPx) topLoadArmedRef.current = true;
 
     const atTop = curTop < topTriggerPx;
     if (atTop && topLoadArmedRef.current && hasMoreHistory && !isLoadingHistory && onLoadMore) {
       topLoadArmedRef.current = false;
+      setFollowMode("detached");
+      setAtBottom(false);
+      forceStickToBottomUntilRef.current = 0;
+      cancelScheduledScroll();
+      const anchor = getAnchorSnapshot(curTop);
       pendingPrependCompensationRef.current = {
         previousOffset: curTop,
         previousTotalSize: getCurrentContentSize(),
+        anchorId: anchor?.anchorId || "",
+        anchorOffsetPx: Number(anchor?.offsetPx || 0),
       };
 
       onLoadMore();
@@ -598,7 +709,6 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     const textLength = typeof data?.text === "string" ? data.text.length : 0;
     const clientId = typeof data?.client_id === "string" ? data.client_id.trim() : "";
     return [
-      displayMessages.length,
       String(lastMessage.id || "").trim(),
       String(lastMessage.by || "").trim(),
       String(lastMessage.ts || "").trim(),
@@ -690,7 +800,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     prevTailMutationSnapshotRef.current = nextSnapshot;
     if (!didInitialScrollRef.current) return;
     if (isLoadingHistory) return;
-    if (followModeRef.current !== "follow" && !shouldForceStickToBottom()) return;
+    if (!shouldAutoScrollNow()) return;
     if (
       !getAutoFollowTrigger({
         previousTailSnapshot: prevTailSnapshot,
@@ -703,12 +813,25 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     }
 
     scheduleScroll(() => {
-      if (followModeRef.current !== "follow" && !shouldForceStickToBottom()) return;
+      if (!shouldAutoScrollNow()) return;
       scrollToBottom();
     });
-  }, [displayMessages, isLoadingHistory, scheduleScroll, scrollToBottom, shouldForceStickToBottom, tailMutationSignature]);
+  }, [displayMessages, isLoadingHistory, scheduleScroll, scrollToBottom, shouldAutoScrollNow, tailMutationSignature]);
 
   useEffect(() => cancelScheduledScroll, [cancelScheduledScroll]);
+
+  useEffect(() => {
+    return () => {
+      if (replyJumpClearTimerRef.current != null) {
+        window.clearTimeout(replyJumpClearTimerRef.current);
+        replyJumpClearTimerRef.current = null;
+      }
+      if (replyJumpNoticeTimerRef.current != null) {
+        window.clearTimeout(replyJumpNoticeTimerRef.current);
+        replyJumpNoticeTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const scrollEl = parentRef.current;
@@ -722,9 +845,9 @@ const VirtualMessageListInner = function VirtualMessageListInner({
       isContainerResizingRef.current = true;
       lastScrollTopRef.current = scrollEl.scrollTop;
 
-      if (followModeRef.current === "follow" || shouldForceStickToBottom()) {
+      if (shouldAutoScrollNow()) {
         scheduleScroll(() => {
-          if (followModeRef.current !== "follow" && !shouldForceStickToBottom()) return;
+          if (!shouldAutoScrollNow()) return;
           scrollToBottom();
         });
       }
@@ -739,7 +862,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     });
     observer.observe(observedEl);
     return () => observer.disconnect();
-  }, [scheduleScroll, scrollToBottom, shouldForceStickToBottom]);
+  }, [scheduleScroll, scrollToBottom, shouldAutoScrollNow]);
 
   useEffect(() => {
     return () => {
@@ -778,6 +901,12 @@ const VirtualMessageListInner = function VirtualMessageListInner({
 
     pendingPrependCompensationRef.current = null;
 
+    if (pending.anchorId && scrollToMessageAnchor(pending.anchorId, pending.anchorOffsetPx)) {
+      lastScrollTopRef.current = el.scrollTop;
+      topLoadArmedRef.current = false;
+      return;
+    }
+
     const nextTotalSize = getCurrentContentSize();
     const delta = Math.max(0, nextTotalSize - pending.previousTotalSize);
     if (delta <= 0) return;
@@ -790,7 +919,9 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     }
     lastScrollTopRef.current = nextTop;
     topLoadArmedRef.current = false;
-  }, [displayMessages, getCurrentContentSize, isLoadingHistory, shouldVirtualize, virtualizer]);
+  }, [displayMessages, getCurrentContentSize, isLoadingHistory, scrollToMessageAnchor, shouldVirtualize, virtualizer]);
+
+  const effectiveHighlightEventId = replyJumpHighlightId || highlightEventId;
 
   return (
     <div
@@ -816,14 +947,39 @@ const VirtualMessageListInner = function VirtualMessageListInner({
             </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center justify-center h-full text-center pb-20 opacity-50">
-            <div className="text-4xl mb-4 grayscale">💬</div>
+          <div className="flex flex-col items-center justify-center h-full text-center pb-20">
+            <div
+              className={`mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border ${
+                isDark
+                  ? "border-white/10 bg-white/[0.04] text-white/55"
+                  : "border-black/[0.08] bg-white/80 text-[rgb(35,36,37)]/55"
+              }`}
+            >
+              <MessageSquareTextIcon size={28} />
+            </div>
             <p className={`text-sm font-medium ${isDark ? "text-slate-400" : "text-gray-500"}`}>
-              No messages yet
+              {t("emptyStateTitle")}
             </p>
-            <p className={`text-xs mt-1 ${isDark ? "text-slate-600" : "text-gray-400"}`}>
-              Start the conversation with your AI team.
+            <p className={`text-xs mt-1 ${isDark ? "text-slate-500" : "text-gray-400"}`}>
+              {t("emptyStateSubtitle")}
             </p>
+            <div className={`mt-4 w-full max-w-sm space-y-2 text-left text-xs ${isDark ? "text-slate-500" : "text-gray-500"}`}>
+              {[
+                [t("emptyStateQuickNoteTitle"), t("emptyStateQuickNoteBody")],
+                [t("emptyStateAskForemanTitle"), t("emptyStateAskForemanBody")],
+                [t("emptyStateDurableTitle"), t("emptyStateDurableBody")],
+              ].map(([title, body]) => (
+                <div
+                  key={title}
+                  className={`flex gap-2 border-t pt-2 ${
+                    isDark ? "border-white/[0.08]" : "border-black/[0.06]"
+                  }`}
+                >
+                  <span className={isDark ? "text-slate-300" : "text-gray-700"}>{title}</span>
+                  <span>{body}</span>
+                </div>
+              ))}
+            </div>
           </div>
         )
       ) : (
@@ -844,6 +1000,19 @@ const VirtualMessageListInner = function VirtualMessageListInner({
               )}
             </div>
           )}
+
+          {replyJumpNotice ? (
+            <div className="pointer-events-none absolute inset-x-0 top-12 z-20 flex justify-center px-4">
+              <div
+                className={`rounded-full px-3 py-1 text-xs shadow-sm ${isDark
+                  ? "bg-slate-900/90 text-slate-300 ring-1 ring-white/10"
+                  : "bg-white/95 text-gray-600 ring-1 ring-gray-200"
+                  }`}
+              >
+                {replyJumpNotice}
+              </div>
+            </div>
+          ) : null}
 
           {shouldVirtualize ? (
             <div
@@ -870,11 +1039,12 @@ const VirtualMessageListInner = function VirtualMessageListInner({
                     actors={actors}
                     displayNameMap={displayNameMap}
                     agentState={agentStateById.get(String(message.by || "")) || null}
+                    taskById={taskById}
                     isDark={isDark}
                     readOnly={readOnly}
                     groupId={groupId}
                     groupLabelById={groupLabelById}
-                    highlightEventId={highlightEventId}
+                    highlightEventId={effectiveHighlightEventId}
                     onReply={onReply}
                     onShowRecipients={onShowRecipients}
                     onCopyLink={onCopyLink}
@@ -882,6 +1052,8 @@ const VirtualMessageListInner = function VirtualMessageListInner({
                     onRelay={onRelay}
                     onOpenSource={onOpenSource}
                     onOpenPresentationRef={onOpenPresentationRef}
+                    onOpenTaskRef={onOpenTaskRef}
+                    onOpenReplyTarget={handleOpenReplyTarget}
                     measureElement={measureElement}
                   />
                 );
@@ -905,11 +1077,12 @@ const VirtualMessageListInner = function VirtualMessageListInner({
                       actors={actors}
                       displayNameMap={displayNameMap}
                       agentState={agentStateById.get(String(message.by || "")) || null}
+                      taskById={taskById}
                       isDark={isDark}
                       readOnly={readOnly}
                       groupId={groupId}
                       groupLabelById={groupLabelById}
-                      isHighlighted={!!highlightEventId && String(message.id || "") === String(highlightEventId)}
+                      isHighlighted={!!effectiveHighlightEventId && String(message.id || "") === String(effectiveHighlightEventId)}
                       collapseHeader={grouping.collapseHeader}
                       onReply={() => onReply(message)}
                       onShowRecipients={() => {
@@ -922,6 +1095,8 @@ const VirtualMessageListInner = function VirtualMessageListInner({
                       onRelay={onRelay}
                       onOpenSource={onOpenSource}
                       onOpenPresentationRef={onOpenPresentationRef}
+                      onOpenTaskRef={onOpenTaskRef}
+                      onOpenReplyTarget={handleOpenReplyTarget}
                     />
                   </div>
                 );
@@ -932,7 +1107,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
           {/* Scroll Button */}
           {!readOnly && showScrollButton && (
             <button
-              className={`fixed bottom-36 right-6 p-3 rounded-full shadow-xl transition-all z-10 ${isDark
+              className={`fixed bottom-52 right-5 sm:bottom-44 sm:right-6 p-3 rounded-full shadow-xl transition-all z-30 ${isDark
                 ? "bg-slate-800 text-white hover:bg-slate-700 border border-slate-700"
                 : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-100"
                 }`}
@@ -942,9 +1117,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
               }}
               aria-label="Scroll to bottom"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-              </svg>
+              <ArrowDownIcon className="w-5 h-5" aria-hidden="true" />
               {chatUnreadCount > 0 && (
                 <span className="absolute -top-1 -right-1 flex h-4 w-4">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-60"></span>

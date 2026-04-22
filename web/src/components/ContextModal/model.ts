@@ -9,7 +9,6 @@ import type {
   TaskWaitingOn,
 } from "../../types";
 import { formatTime } from "../../utils/time";
-import { getDefaultPetPersonaSeed } from "../../utils/rolePresets";
 import { getTaskDisplaySummary, resolveTaskType, type TaskTypeId } from "../../utils/taskWorkflow";
 
 export interface BriefDraft {
@@ -48,7 +47,7 @@ export interface BoardColumns {
 }
 
 export type BoardStatus = keyof BoardColumns;
-export type ContextModalView = "coordination" | "agents" | "desktop_pet";
+export type ContextModalView = "coordination" | "agents" | "self_evolving_skills";
 export type SteeringTab = "summary" | "project" | "log";
 export type TaskFilterValue = "all" | "blocked" | "waiting_user" | "handoff" | "unassigned";
 export type ContextTranslator = (key: string, defaultValue: string, options?: Record<string, unknown>) => string;
@@ -71,31 +70,10 @@ export function getWaitingOnOptions(tr: ContextTranslator): Array<{ value: TaskW
   ];
 }
 
-export function resolvePetPersonaDraft(savedPetPersona: string): string {
-  const saved = String(savedPetPersona || "").trim();
-  if (saved) return saved;
-  return getDefaultPetPersonaSeed();
-}
-
 export function isVisibleContextAgent(agent: AgentState | null | undefined): boolean {
   const id = String(agent?.id || "").trim();
   if (!id) return false;
   return id !== "pet-peer";
-}
-
-export function petPersonaDraftMatches(savedPetPersona: string, draft: string): boolean {
-  return String(draft || "") === resolvePetPersonaDraft(savedPetPersona);
-}
-
-export function petPersonaDraftDirty(
-  savedPetPersona: string,
-  draft: string,
-  options?: { loaded?: boolean | null },
-): boolean {
-  const loaded = options?.loaded === true;
-  const draftText = String(draft || "");
-  if (!loaded && draftText.trim() === "") return false;
-  return !petPersonaDraftMatches(savedPetPersona, draftText);
 }
 
 export function taskTitle(task: Task | null | undefined): string {
@@ -451,7 +429,7 @@ export function buildBoard(tasks: Task[], board: GroupContext["board"] | null | 
 
 export function statusTone(status: string): string {
   if (status === "active") return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30";
-  if (status === "done") return "bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30";
+  if (status === "done") return "border-black/10 bg-[rgb(245,245,245)] text-[rgb(35,36,37)] dark:border-white/12 dark:bg-white/[0.08] dark:text-white";
   if (status === "archived") return "bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)] border-[var(--glass-border-subtle)]";
   return "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30";
 }

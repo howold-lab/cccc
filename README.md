@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="screenshots/logo.png" width="160" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="web/public/logo-dark.svg">
+  <img src="web/public/logo.svg" width="160" alt="CCCC logo" />
+</picture>
 
 # CCCC
 
@@ -84,6 +87,14 @@ pip install -U --pre \
 
 > **Requirements**: Python 3.9+, macOS / Linux / Windows
 
+### Upgrade
+
+```bash
+cccc update
+```
+
+Use `cccc update --check` to inspect the detected install type and the command that would run.
+
 ### Launch
 
 ```bash
@@ -99,9 +110,13 @@ cd /path/to/your/repo
 cccc attach .                              # bind this directory as a scope
 cccc setup --runtime claude                # configure MCP for your runtime
 cccc actor add foreman --runtime claude    # first actor becomes foreman
-cccc actor add reviewer --runtime codex    # add a peer
+cccc actor add implementer --runtime codex # add a peer
 cccc group start                           # start all actors
-cccc send "Split the task and begin." --to @all
+cccc send "Please inspect the repo and propose the first safe task." --to foreman
+cccc tracked-send "Please take the first concrete task and reply with validation evidence." \
+  --to implementer \
+  --title "First concrete task" \
+  --outcome "The change and validation evidence are reported"
 ```
 
 You now have two agents collaborating in a persistent group with full message history, delivery tracking, and a web dashboard. The daemon owns delivery and coordination, and runtime state stays in `CCCC_HOME` rather than inside your repo.
@@ -151,6 +166,8 @@ graph TB
         DC["Discord"]
         FS["Feishu"]
         DT["DingTalk"]
+        WC["WeCom"]
+        WX["Weixin"]
     end
 
     Agents <-->|MCP tools| Daemon
@@ -188,6 +205,8 @@ cccc runtime list --all        # show all available runtimes
 cccc doctor                    # verify environment and runtime availability
 ```
 
+Actors can run as **PTY** (embedded terminal) or **headless** (structured I/O without a terminal). Claude Code and Codex CLI support both modes; headless gives the daemon tighter delivery and streaming control.
+
 ## Messaging & Coordination
 
 CCCC implements IM-grade messaging semantics, not just "paste text into a terminal":
@@ -198,6 +217,8 @@ CCCC implements IM-grade messaging semantics, not just "paste text into a termin
 - **Attention ACK** — priority messages require explicit acknowledgment
 - **Reply-required obligations** — tracked until the recipient responds
 - **Auto-wake** — disabled agents are automatically started when they receive a message
+
+Use ordinary `send` for chat, questions, and quick requests. Use `tracked-send` when delegated work needs a durable owner, outcome, evidence, handoff, or acceptance trail. `@all` remains available for announcements or urgent shared coordination, but it should not be the default way to start concrete work.
 
 Messages are delivered to actor runtimes through the daemon-managed delivery pipeline, and the daemon tracks delivery state for every message.
 
@@ -229,8 +250,10 @@ The built-in Web UI at `http://127.0.0.1:8848` provides:
 - **Group & actor management** — create, configure, start, stop, restart
 - **Automation rule editor** — configure triggers, schedules, and actions visually
 - **Context panel** — shared vision, sketch, milestones, and tasks
-- **IM bridge configuration** — connect to Telegram/Slack/Discord/Feishu/DingTalk
+- **Group Space** — NotebookLM integration for shared knowledge management
+- **IM bridge configuration** — connect to Telegram/Slack/Discord/Feishu/DingTalk/WeCom/Weixin
 - **Settings** — messaging policies, delivery tuning, terminal transcript controls
+- **Text scale** — 90% / 100% / 125% font size with per-browser persistence
 - **Light / Dark / System themes**
 
 | Chat | Terminal |
@@ -266,8 +289,12 @@ cccc im start
 | Discord | ✅ Supported |
 | Feishu / Lark | ✅ Supported |
 | DingTalk | ✅ Supported |
+| WeCom / 企业微信 | ✅ Supported |
+| Weixin / 微信 | ✅ Supported |
 
-From any supported platform, use `/send @all <message>` to talk to your agents, `/status` to check group health, and `/pause` / `/resume` to control operations — all from your phone.
+> DingTalk and WeCom support streaming replies (AI Card and aibot streaming respectively); other platforms deliver final messages.
+
+From any supported platform, use plain text or `/send @foreman <message>` for normal coordination, reserve `/send @all <message>` for true broadcasts, use `/status` to check group health, and use `/pause` / `/resume` to control operations — all from your phone.
 
 ## CLI Reference
 
@@ -287,7 +314,9 @@ cccc actor add <id> --runtime <runtime>
 cccc actor start|stop|restart <id>
 
 # Messaging
-cccc send "message" --to @all
+cccc send "message" --to foreman
+cccc tracked-send "delegated work" --to implementer --title "Task title" --outcome "Done criterion"
+cccc send "announcement" --to @all  # explicit broadcast
 cccc reply <event_id> "response"
 cccc tail -n 50 -f             # follow the ledger
 
@@ -339,6 +368,7 @@ CCCC is a **collaboration kernel** — it owns the coordination layer and stays 
 - **Daemon IPC has no authentication.** It binds to localhost by default.
 - **IM bot tokens** are read from environment variables, never stored in config files.
 - **Runtime state** lives in `CCCC_HOME` (`~/.cccc/`), not in your repository.
+- **Capability allowlist** governs which optional MCP surfaces agents can enable. Policy is composed from a packaged default and an optional user overlay in `CCCC_HOME/config/`.
 
 For detailed security guidance, see [SECURITY.md](SECURITY.md).
 
@@ -351,7 +381,11 @@ For detailed security guidance, see [SECURITY.md](SECURITY.md).
 | [Getting Started](https://chesterra.github.io/cccc/guide/getting-started/) | Install, launch, create your first group |
 | [Use Cases](https://chesterra.github.io/cccc/guide/use-cases) | Practical multi-agent scenarios |
 | [Web UI Guide](https://chesterra.github.io/cccc/guide/web-ui) | Navigating the dashboard |
-| [IM Bridge Setup](https://chesterra.github.io/cccc/guide/im-bridge/) | Connect Telegram, Slack, Discord, Feishu, DingTalk, WeCom |
+| [IM Bridge Setup](https://chesterra.github.io/cccc/guide/im-bridge/) | Connect Telegram, Slack, Discord, Feishu, DingTalk, WeCom, Weixin |
+| [Group Space](https://chesterra.github.io/cccc/guide/group-space-notebooklm) | NotebookLM knowledge integration |
+| [Capability Allowlist](https://chesterra.github.io/cccc/guide/capability-allowlist) | MCP capability governance |
+| [Best Practices](https://chesterra.github.io/cccc/guide/best-practices) | Recommended patterns and workflows |
+| [FAQ](https://chesterra.github.io/cccc/guide/faq) | Frequently asked questions |
 | [Operations Runbook](https://chesterra.github.io/cccc/guide/operations) | Recovery, troubleshooting, maintenance |
 | [CLI Reference](https://chesterra.github.io/cccc/reference/cli) | Complete command reference |
 | [SDK (Python/TypeScript)](https://github.com/ChesterRa/cccc-sdk) | Integrate apps/services with official daemon clients |

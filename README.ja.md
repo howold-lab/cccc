@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="screenshots/logo.png" width="160" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="web/public/logo-dark.svg">
+  <img src="web/public/logo.svg" width="160" alt="CCCC logo" />
+</picture>
 
 # CCCC
 
@@ -83,6 +86,14 @@ pip install -U --pre \
 
 > **要件**: Python 3.9+、macOS / Linux / Windows
 
+### アップグレード
+
+```bash
+cccc update
+```
+
+インストール種別と実行予定のコマンドを事前確認するには `cccc update --check` を使用してください。
+
 ### 起動
 
 ```bash
@@ -150,6 +161,8 @@ graph TB
         DC["Discord"]
         FS["Feishu"]
         DT["DingTalk"]
+        WC["WeCom"]
+        WX["Weixin"]
     end
 
     Agents <-->|MCP ツール| Daemon
@@ -186,6 +199,8 @@ cccc setup --runtime claude    # ランタイムの MCP を自動設定
 cccc runtime list --all        # 利用可能なランタイムを表示
 cccc doctor                    # 環境とランタイムの可用性を検証
 ```
+
+Actor は **PTY**（埋め込みターミナル）または **headless**（ターミナルなしの構造化 I/O）モードで実行できます。Claude Code と Codex CLI は両モードに対応。headless モードでは daemon が配信とストリーミングをより精密に制御します。
 
 ## メッセージングと協調
 
@@ -228,8 +243,10 @@ CCCC は IM グレードのメッセージングセマンティクスを実装 �
 - **グループ & actor 管理** — 作成、設定、起動、停止、再起動
 - **オートメーションルールエディター** — トリガー、スケジュール、アクションを視覚的に設定
 - **Context パネル** — 共有ビジョン、スケッチ、マイルストーン、タスク
-- **IM ブリッジ設定** — Telegram/Slack/Discord/Feishu/DingTalk に接続
+- **Group Space** — NotebookLM 統合による共有ナレッジ管理
+- **IM ブリッジ設定** — Telegram/Slack/Discord/Feishu/DingTalk/WeCom/Weixin に接続
 - **設定** — メッセージングポリシー、配信チューニング、ターミナルトランスクリプト制御
+- **テキストスケール** — 90% / 100% / 125% フォントサイズ、ブラウザごとに永続化
 - **ライト / ダーク / システムテーマ**
 
 | チャット | ターミナル |
@@ -240,9 +257,14 @@ CCCC は IM グレードのメッセージングセマンティクスを実装 �
 
 localhost 外から Web UI にアクセスする場合：
 
+- **LAN / プライベートネットワーク** — 全ローカルインターフェースにバインド：`CCCC_WEB_HOST=0.0.0.0 cccc`
 - **Cloudflare Tunnel**（推奨）— `cloudflared tunnel --url http://127.0.0.1:8848`
 - **Tailscale** — tailnet IP にバインド：`CCCC_WEB_HOST=$TAILSCALE_IP cccc`
 - ローカル以外へ公開する前に、まず **Settings > Web Access** で **Admin Access Token** を作成し、その完了まではネットワーク境界で保護してください。
+- **Settings > Web Access** で `127.0.0.1` はローカルのみ、`0.0.0.0` は localhost + LAN IP を意味します。CCCC が WSL2 のデフォルト NAT ネットワーク内で動作している場合、`0.0.0.0` は WSL 内部にのみ公開されます。LAN デバイスからのアクセスには WSL mirrored networking または Windows portproxy/ファイアウォールルールが必要です。
+- `Save` はターゲットバインディングを保存します。Web が `cccc` または `cccc web` で起動された場合は、**Settings > Web Access** の `Apply now` で短い監視付き再起動を実行してください。Docker、systemd 等の外部スーパーバイザが管理している場合は、そのサービスを再起動してください。
+- `Start` / `Stop` は Tailscale リモートアクセス専用で、既に稼働中の Web ソケットのリバインドは行いません。
+- トークンポリシーは意図的に階層化されています：localhost のみの場合はシンプルに、LAN/プライベート公開ではデフォルトで Access Token が必要、公開 URL/トンネル公開では Access Token が必須です。
 
 ## IM ブリッジ
 
@@ -260,6 +282,10 @@ cccc im start
 | Discord | ✅ 対応済み |
 | Feishu / Lark | ✅ 対応済み |
 | DingTalk | ✅ 対応済み |
+| WeCom / 企業微信 | ✅ 対応済み |
+| Weixin / 微信 | ✅ 対応済み |
+
+> DingTalk と WeCom はストリーミング返信に対応（それぞれ AI Card と aibot ストリーミング）。他のプラットフォームは最終メッセージを配信。
 
 任意の対応プラットフォームから `/send @all <メッセージ>` でエージェントに指示、`/status` でグループ状態を確認、`/pause` / `/resume` で運用を制御 — すべてスマートフォンから。
 
@@ -333,6 +359,7 @@ CCCC は**協調カーネル** — 協調レイヤーを担い、外部の CI/CD
 - **Daemon IPC は認証なし。** デフォルトで localhost にのみバインド。
 - **IM ボットトークン** は環境変数から読み取り、設定ファイルには保存しない。
 - **ランタイム状態** は `CCCC_HOME`（`~/.cccc/`）に保持、リポジトリ内には置かない。
+- **Capability allowlist** がエージェントの有効化できるオプション MCP サーフェスを管理。ポリシーはパッケージ内のデフォルトと `CCCC_HOME/config/` のユーザーオーバーレイで構成。
 
 詳細なセキュリティガイダンスは [SECURITY.md](SECURITY.md) を参照。
 
@@ -345,7 +372,11 @@ CCCC は**協調カーネル** — 協調レイヤーを担い、外部の CI/CD
 | [クイックスタート](https://chesterra.github.io/cccc/guide/getting-started/) | インストール、起動、最初のグループ作成 |
 | [ユースケース](https://chesterra.github.io/cccc/guide/use-cases) | 実践的なマルチエージェントシナリオ |
 | [Web UI ガイド](https://chesterra.github.io/cccc/guide/web-ui) | ダッシュボードのナビゲーション |
-| [IM ブリッジ設定](https://chesterra.github.io/cccc/guide/im-bridge/) | Telegram、Slack、Discord、Feishu、DingTalk の接続 |
+| [IM ブリッジ設定](https://chesterra.github.io/cccc/guide/im-bridge/) | Telegram、Slack、Discord、Feishu、DingTalk、WeCom、Weixin の接続 |
+| [Group Space](https://chesterra.github.io/cccc/guide/group-space-notebooklm) | NotebookLM ナレッジ統合 |
+| [Capability Allowlist](https://chesterra.github.io/cccc/guide/capability-allowlist) | MCP 機能ガバナンス |
+| [ベストプラクティス](https://chesterra.github.io/cccc/guide/best-practices) | 推奨パターンとワークフロー |
+| [FAQ](https://chesterra.github.io/cccc/guide/faq) | よくある質問 |
 | [運用ランブック](https://chesterra.github.io/cccc/guide/operations) | 復旧、トラブルシューティング、メンテナンス |
 | [CLI リファレンス](https://chesterra.github.io/cccc/reference/cli) | 完全なコマンドリファレンス |
 | [SDK（Python/TypeScript）](https://github.com/ChesterRa/cccc-sdk) | 公式クライアントでアプリ/サービスから daemon を利用 |
@@ -386,6 +417,12 @@ uv venv -p 3.11 .venv
 uv pip install -e .
 uv run cccc --help
 ```
+
+### Windows ネイティブ
+
+- ローカル開発には、リポジトリルートの `start.ps1` を推奨します。
+- `cccc doctor` が `Windows PTY: NOT READY` を表示した場合は、先に `python -m pip install pywinpty` を実行するか、`uv pip install -e .` で再インストールしてください。
+- Web バンドルには `scripts/build_web.ps1`、完全パッケージビルドには `scripts/build_package.ps1` を使用してください。
 
 ### Docker
 

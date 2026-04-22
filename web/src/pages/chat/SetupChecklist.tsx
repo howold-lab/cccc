@@ -1,5 +1,6 @@
 // SetupChecklist renders the setup guidance steps.
 import { classNames } from "../../utils/classNames";
+import { useCopyFeedback } from "../../hooks/useCopyFeedback";
 import { useTranslation } from 'react-i18next';
 
 export interface SetupChecklistProps {
@@ -15,15 +16,6 @@ export interface SetupChecklistProps {
   variant?: "compact" | "full";
 }
 
-// Copy a command to clipboard.
-async function copyCommand(cmd: string) {
-  try {
-    await navigator.clipboard.writeText(cmd);
-  } catch {
-    window.prompt("Copy command:", cmd);
-  }
-}
-
 export function SetupChecklist({
   isDark,
   selectedGroupId,
@@ -37,6 +29,7 @@ export function SetupChecklist({
 }: SetupChecklistProps) {
   const isCompact = variant === "compact";
   const { t } = useTranslation('chat');
+  const copyWithFeedback = useCopyFeedback();
   const attachCmd = `cccc attach . --group ${selectedGroupId}`;
 
   // Nothing to show.
@@ -81,7 +74,12 @@ export function SetupChecklist({
                 "flex-shrink-0 rounded-lg px-2 py-1 min-h-[36px] flex items-center text-[11px] font-medium border",
                 isDark ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-gray-200 text-gray-700 hover:bg-gray-50"
               )}
-              onClick={() => copyCommand(attachCmd)}
+              onClick={() => {
+                void copyWithFeedback(attachCmd, {
+                  successMessage: t("common:copied"),
+                  errorMessage: t("common:copyFailed"),
+                });
+              }}
             >
               {t('common:copy')}
             </button>
@@ -116,7 +114,7 @@ export function SetupChecklist({
           <button
             type="button"
             className={classNames(
-              "flex-shrink-0 font-semibold bg-blue-600 hover:bg-blue-500 text-white",
+              "flex-shrink-0 font-semibold border border-[rgb(35,36,37)] bg-[rgb(35,36,37)] text-white hover:border-black hover:bg-black dark:border-white dark:bg-white dark:text-[rgb(35,36,37)] dark:hover:border-white dark:hover:bg-white/92",
               isCompact ? "rounded-xl px-3 py-1.5 min-h-[36px] flex items-center text-[11px]" : "mt-3 w-full rounded-xl px-4 py-2 text-sm"
             )}
             onClick={onAddAgent}
@@ -153,7 +151,7 @@ export function SetupChecklist({
           <button
             type="button"
             className={classNames(
-              "flex-shrink-0 font-semibold bg-emerald-600 hover:bg-emerald-500 text-white",
+              "flex-shrink-0 font-semibold border border-[rgb(35,36,37)] bg-[rgb(35,36,37)] text-white hover:border-black hover:bg-black dark:border-white dark:bg-white dark:text-[rgb(35,36,37)] dark:hover:border-white dark:hover:bg-white/92",
               isCompact ? "rounded-xl px-3 py-1.5 min-h-[36px] flex items-center text-[11px]" : "mt-3 w-full rounded-xl px-4 py-2 text-sm",
               busy === "group-start" ? "opacity-60" : ""
             )}
