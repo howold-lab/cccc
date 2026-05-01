@@ -232,6 +232,10 @@ export type Actor = {
   profile_revision_applied?: number;
   updated_at?: string;
   unread_count?: number;
+  web_model_queued_count?: number;
+  web_model_queued_after_event_id?: string;
+  web_model_queued_latest_event_id?: string;
+  web_model_queued_latest_ts?: string;
 };
 
 export type ActorProfile = {
@@ -685,6 +689,49 @@ export type BuiltinAssistant = {
   ui?: Record<string, unknown>;
 };
 
+export type AssistantServiceModel = {
+  model_id: string;
+  kind?: string;
+  runtime_id?: string;
+  title?: string;
+  description?: string;
+  status?: "not_installed" | "downloading" | "ready" | "failed" | "unknown" | string;
+  available?: boolean;
+  installed?: boolean;
+  install_dir?: string;
+  installed_at?: string;
+  updated_at?: string;
+  command_ready?: boolean;
+  streaming_ready?: boolean;
+  diarization_ready?: boolean;
+  streaming?: Record<string, unknown>;
+  diarization?: Record<string, unknown>;
+  manifest_sha256?: string;
+  downloaded_bytes?: number;
+  total_size_bytes?: number;
+  progress_percent?: number;
+  current_artifact_path?: string;
+  artifact_index?: number;
+  artifact_count?: number;
+  error?: Record<string, unknown>;
+  artifacts?: Array<{ path?: string; size_bytes?: number }>;
+};
+
+export type AssistantServiceRuntime = {
+  runtime_id: string;
+  status?: "not_installed" | "installing" | "ready" | "failed" | string;
+  available?: boolean;
+  installed?: boolean;
+  install_dir?: string;
+  python?: string;
+  packages?: string[];
+  modules?: Record<string, boolean>;
+  missing_modules?: string[];
+  installed_at?: string;
+  updated_at?: string;
+  error?: Record<string, unknown>;
+};
+
 export type AssistantStateResult = {
   group_id: string;
   assistants?: BuiltinAssistant[];
@@ -701,6 +748,11 @@ export type AssistantStateResult = {
   prompt_draft?: AssistantVoicePromptDraft;
   ask_requests?: AssistantVoiceAskFeedback[];
   latest_ask_request?: AssistantVoiceAskFeedback;
+  service_models?: AssistantServiceModel[];
+  service_models_by_id?: Record<string, AssistantServiceModel>;
+  service_runtime?: AssistantServiceRuntime;
+  service_runtimes?: AssistantServiceRuntime[];
+  service_runtimes_by_id?: Record<string, AssistantServiceRuntime>;
 };
 
 export type AssistantVoiceTrigger = {
@@ -760,6 +812,31 @@ export type AssistantVoiceTranscriptSegmentResult = {
   input_event?: Record<string, unknown>;
   input_event_created?: boolean;
   input_notify_emitted?: boolean;
+  input_notify_error?: string;
+  actor_woken?: boolean;
+  actor_wake_error?: string;
+  actor_notify_delivered?: boolean;
+  actor_notify_delivery_error?: string;
+};
+
+export type AssistantVoiceMeetingSession = {
+  schema?: number;
+  group_id?: string;
+  session_id: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  sample_rate?: number;
+  audio_duration_ms?: number;
+  language?: string;
+  document_path?: string;
+  latest_partial?: string;
+  last_final_text?: string;
+  diarization_ready?: boolean;
+  diarization_artifact_path?: string;
+  segments?: Record<string, unknown>[];
+  diarization?: Record<string, unknown>;
+  error?: Record<string, unknown> | null;
 };
 
 export type AssistantVoiceDocumentMutationResult = {
@@ -769,6 +846,11 @@ export type AssistantVoiceDocumentMutationResult = {
   input_event?: Record<string, unknown>;
   input_event_created?: boolean;
   input_notify_emitted?: boolean;
+  input_notify_error?: string;
+  actor_woken?: boolean;
+  actor_wake_error?: string;
+  actor_notify_delivered?: boolean;
+  actor_notify_delivery_error?: string;
   event?: unknown;
   request_id?: string;
 };
@@ -814,6 +896,11 @@ export type AssistantVoiceInputResult = {
   input_event?: Record<string, unknown>;
   input_event_created?: boolean;
   input_notify_emitted?: boolean;
+  input_notify_error?: string;
+  actor_woken?: boolean;
+  actor_wake_error?: string;
+  actor_notify_delivered?: boolean;
+  actor_notify_delivery_error?: string;
   event?: unknown;
   request_id?: string;
 };
@@ -1228,6 +1315,7 @@ export const SUPPORTED_RUNTIMES = [
   "neovate",
   "gemini",
   "kimi",
+  "web_model",
   "custom",
 ] as const;
 
@@ -1242,6 +1330,7 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   gemini: { label: "Gemini CLI", desc: "" },
   kimi: { label: "Kimi CLI", desc: "" },
   neovate: { label: "Neovate Code", desc: "" },
+  web_model: { label: "Browser Web Model", desc: "Remote MCP connector; no local process" },
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
 };
 
@@ -1291,6 +1380,10 @@ export const RUNTIME_COLORS: Record<string, {
   neovate: {
     bg: "bg-fuchsia-900/30", text: "text-fuchsia-300", border: "border-fuchsia-600/50", dot: "bg-fuchsia-400",
     bgLight: "bg-fuchsia-50", textLight: "text-fuchsia-700", borderLight: "border-fuchsia-300", dotLight: "bg-fuchsia-500"
+  },
+  web_model: {
+    bg: "bg-indigo-900/30", text: "text-indigo-300", border: "border-indigo-600/50", dot: "bg-indigo-400",
+    bgLight: "bg-indigo-50", textLight: "text-indigo-700", borderLight: "border-indigo-300", dotLight: "bg-indigo-500"
   },
   custom: {
     bg: "bg-zinc-800/50", text: "text-zinc-300", border: "border-zinc-500/50", dot: "bg-zinc-400",

@@ -17,7 +17,7 @@ from ...runners import headless as headless_runner
 from ...runners import pty as pty_runner
 from ...runners.platform_support import pty_support_error_message
 from ...util.conv import coerce_bool
-from .actor_runtime_ops import resolve_actor_launch_spec
+from .actor_runtime_ops import model_from_runtime_command, resolve_actor_launch_spec
 from .actor_profile_runtime import (
     PROFILE_CONTROLLED_FIELDS,
     actor_profile_id,
@@ -301,12 +301,18 @@ def handle_actor_update(
                         return _error("runtime_unavailable", runtime_error)
 
                 if runner_effective == "headless":
-                    if runtime == "codex":
+                    if runtime == "web_model":
+                        try:
+                            write_headless_state(group.group_id, actor_id)
+                        except Exception:
+                            pass
+                    elif runtime == "codex":
                         codex_app_supervisor.start_actor(
                             group_id=group.group_id,
                             actor_id=actor_id,
                             cwd=cwd,
                             env=dict(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=actor_id)),
+                            model=model_from_runtime_command(launch_spec["effective_command"]),
                         )
                     elif runtime == "claude":
                         claude_app_supervisor.start_actor(
@@ -314,6 +320,7 @@ def handle_actor_update(
                             actor_id=actor_id,
                             cwd=cwd,
                             env=dict(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=actor_id)),
+                            model=model_from_runtime_command(launch_spec["effective_command"]),
                         )
                     else:
                         headless_runner.SUPERVISOR.start_actor(
@@ -347,7 +354,10 @@ def handle_actor_update(
             runner_kind = str(actor.get("runner") or "pty").strip() or "pty"
             runner_effective = effective_runner_kind(runner_kind)
             runtime = str(actor.get("runtime") or "codex").strip() or "codex"
-            if runtime == "codex" and runner_effective == "headless":
+            if runtime == "web_model" and runner_effective == "headless":
+                remove_headless_state(group.group_id, actor_id)
+                remove_pty_state_if_pid(group.group_id, actor_id, pid=0)
+            elif runtime == "codex" and runner_effective == "headless":
                 codex_app_supervisor.stop_actor(group_id=group.group_id, actor_id=actor_id)
                 remove_headless_state(group.group_id, actor_id)
                 remove_pty_state_if_pid(group.group_id, actor_id, pid=0)

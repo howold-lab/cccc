@@ -630,16 +630,24 @@ export function ChatComposer({
               <div
                 key={`${f.name}:${idx}`}
                 className={classNames(
-                  "inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-xs max-w-full shadow-sm transition-all",
-                  isDark ? "border-white/10 bg-slate-900/50 text-slate-300" : "border-black/5 bg-gray-50 text-gray-700"
+                  "inline-flex max-w-full items-center gap-2 rounded-xl border px-3 py-1.5 text-xs shadow-sm transition-all",
+                  "border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)]"
                 )}
               >
-                <AttachmentIcon size={12} className="opacity-60" />
-                <span className="truncate">{f.name}</span>
+                <AttachmentIcon
+                  size={12}
+                  className="flex-shrink-0 text-[var(--color-text-tertiary)]"
+                />
+                <span
+                  className="truncate font-medium text-[var(--color-text-primary)]"
+                  title={f.name}
+                >
+                  {f.name}
+                </span>
                 <button
                   className={classNames(
                     "flex-shrink-0 p-1.5 -mr-1 rounded-full",
-                    isDark ? "text-[var(--color-text-tertiary)] hover:bg-white/10 hover:text-[var(--color-text-primary)]" : "hover:bg-black/10 text-gray-400 hover:text-gray-700"
+                    "text-[var(--color-text-tertiary)] hover:bg-[var(--glass-tab-bg-hover)] hover:text-[var(--color-text-primary)]"
                   )}
                   onClick={() => onRemoveComposerFile(idx)}
                   aria-label={t('removeAttachment', { name: f.name })}
@@ -710,8 +718,8 @@ export function ChatComposer({
                   value={destGroupId || selectedGroupId || ""}
                   onChange={setDestGroupId}
                   placeholder={t('destinationGroup')}
-                  searchPlaceholder={t('searchDestinationGroup', { defaultValue: '搜索 group...' })}
-                  emptyText={t('noMatchingGroups', { defaultValue: '没有匹配的 group' })}
+                  searchPlaceholder={t('searchDestinationGroup', { defaultValue: 'Search groups...' })}
+                  emptyText={t('noMatchingGroups', { defaultValue: 'No matching groups' })}
                   ariaLabel={t('destinationGroup')}
                   triggerClassName={classNames(
                     "inline-flex w-auto min-w-[68px] max-w-[148px] sm:max-w-[196px]",
@@ -880,10 +888,10 @@ export function ChatComposer({
             {/* Row 3 — Action bar */}
             <div
               className={classNames(
-                "flex items-center justify-between gap-2 px-2 pb-2 pt-1",
+                "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-2 pb-2 pt-1",
               )}
             >
-              <div className="flex items-center gap-1.5">
+              <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto pr-1 scrollbar-hide touch-pan-x">
                 <button
                   className={classNames(
                     "glass-btn flex h-9 w-9 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:opacity-60",
@@ -950,7 +958,7 @@ export function ChatComposer({
                 />
               </div>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex shrink-0 items-center gap-1.5">
                 <div ref={modeMenuRef} className="relative z-20">
                   <button
                     type="button"

@@ -109,11 +109,15 @@ function profileScopeLabel(profile: ActorProfile, t: (key: string, options?: Rec
   return t("profileScopeGlobal");
 }
 
+function isWebModelProfile(profile: ActorProfile): boolean {
+  return String(profile.runtime || "").trim().toLowerCase() === "web_model";
+}
+
 function modeButtonClass(selected: boolean): string {
   return [
     "px-3 py-2.5 rounded-xl border text-sm min-h-[44px] font-medium transition-colors",
     selected
-      ? "border-[rgb(35,36,37)] bg-[rgb(35,36,37)] text-white dark:border-white dark:bg-white dark:text-[rgb(35,36,37)]"
+      ? "border-[rgb(35,36,37)] bg-[rgb(35,36,37)] text-white hover:bg-[rgb(35,36,37)] dark:border-white dark:bg-white dark:text-[rgb(35,36,37)] dark:hover:bg-white"
       : "border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]",
   ].join(" ");
 }
@@ -190,9 +194,13 @@ export function EditActorModal({
 
   const linked = Boolean(String(linkedProfileId || "").trim());
   const effectiveLinked = linked && !pendingConvertToCustom;
-  const selectedProfile = useMemo(
-    () => actorProfiles.find((profile) => actorProfileIdentityKey(profile) === String(attachProfileId || "").trim()),
+  const selectableActorProfiles = useMemo(
+    () => actorProfiles.filter((profile) => !isWebModelProfile(profile) || actorProfileIdentityKey(profile) === String(attachProfileId || "").trim()),
     [actorProfiles, attachProfileId]
+  );
+  const selectedProfile = useMemo(
+    () => selectableActorProfiles.find((profile) => actorProfileIdentityKey(profile) === String(attachProfileId || "").trim()),
+    [selectableActorProfiles, attachProfileId]
   );
   const selectedProfileName = String(selectedProfile?.name || "").trim();
   const selectedProfileRunner = normalizeActorRunner(selectedProfile?.runner || runner);
@@ -332,7 +340,6 @@ export function EditActorModal({
     setSecretsClearAll(false);
     setSecretKeys([]);
     setSecretSource("none");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupId, actorId, isOpen, linkedProfileId, linkedProfileOwner, linkedProfileScope]);
 
   useEffect(() => {
@@ -530,6 +537,7 @@ export function EditActorModal({
     (editMode === "profile" && !String(attachProfileId || "").trim());
   const showRuntimeSetup = !effectiveLinked && editMode === "custom" && runtime === "custom";
   const customRunnerLockedToPty = !supportsStandardWebHeadlessRuntime(runtime);
+  const webModelRunnerLockedToHeadless = runtime === "web_model";
 
   return (
     <div
@@ -632,7 +640,7 @@ export function EditActorModal({
                       setEditMode("profile");
                       setPendingConvertToCustom(false);
                       setLocalNotice("");
-                      if (!actorProfilesBusy && actorProfiles.length <= 0) {
+                      if (!actorProfilesBusy && selectableActorProfiles.length <= 0) {
                         void onRequestActorProfiles?.();
                       }
                     }}
@@ -654,12 +662,17 @@ export function EditActorModal({
                         disabled={actorProfilesBusy || busy === "actor-update"}
                       >
                         <option value="">{actorProfilesBusy ? t("loadingProfiles") : t("selectActorProfile")}</option>
-                        {actorProfiles.map((profile) => (
+                        {selectableActorProfiles.map((profile) => (
                           <option key={actorProfileIdentityKey(profile)} value={actorProfileIdentityKey(profile)}>
                             {(profile.name || profile.id) + " · " + profileScopeLabel(profile, t)}
                           </option>
                         ))}
                       </select>
+                      {!actorProfilesBusy && actorProfiles.length > 0 && selectableActorProfiles.length === 0 ? (
+                        <div className="mt-1.5 text-[10px] text-[var(--color-text-muted)]">
+                          Browser Web Model profiles are actor-bound and are managed in Settings &gt; Web Models.
+                        </div>
+                      ) : null}
                     </div>
 
                     {selectedProfile ? (
@@ -703,7 +716,8 @@ export function EditActorModal({
                         onChange={(e) => {
                           const next = e.target.value as SupportedRuntime;
                           onChangeRuntime(next);
-                          if (!supportsStandardWebHeadlessRuntime(next)) onChangeRunner("pty");
+                          if (next === "web_model") onChangeRunner("headless");
+                          else if (!supportsStandardWebHeadlessRuntime(next)) onChangeRunner("pty");
                           const nextInfo = runtimes.find((r) => r.name === next);
                           const nextDefault = String(nextInfo?.recommended_command || "").trim();
                           onChangeCommand(nextDefault);
@@ -724,10 +738,10 @@ export function EditActorModal({
                       </select>
                     </div>
 
-                    {supportsStandardWebHeadlessRuntime(runtime) ? (
-                      <div>
-                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
-                          {t("runnerMode", { defaultValue: "运行模式" })}
+	                    {supportsStandardWebHeadlessRuntime(runtime) ? (
+	                      <div>
+	                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                          {t("runnerMode", { defaultValue: "Runner mode" })}
                         </label>
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                           <Button
@@ -735,6 +749,7 @@ export function EditActorModal({
                             variant="outline"
                             className={modeButtonClass(runner === "pty")}
                             onClick={() => onChangeRunner("pty")}
+                            disabled={webModelRunnerLockedToHeadless}
                           >
                             {t("pty", { defaultValue: "PTY" })}
                           </Button>
@@ -749,14 +764,30 @@ export function EditActorModal({
                           </Button>
                         </div>
                         <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
-                          {customRunnerLockedToPty
-                            ? t("runnerModeHeadlessNote", { defaultValue: "仅部分运行时（如 codex、claude）支持 Headless 模式，其他运行时固定为 PTY。" })
-                            : t("runnerModeHint", { defaultValue: "PTY 走终端交互；Headless 走结构化事件流。" })}
-                        </div>
-                      </div>
-                    ) : null}
+                          {webModelRunnerLockedToHeadless
+                            ? t("runnerModeWebModelNote", { defaultValue: "Browser Web Model runs through a remote MCP connector, so it is fixed to Headless." })
+                            : customRunnerLockedToPty
+                            ? t("runnerModeHeadlessNote", { defaultValue: "Only some runtimes, such as codex and claude, support Headless mode. Other runtimes are fixed to PTY." })
+                            : t("runnerModeHint", { defaultValue: "PTY uses terminal interaction; Headless uses structured event flow." })}
+	                        </div>
+	                      </div>
+	                    ) : null}
 
-                    <div>
+	                    {runtime === "web_model" ? (
+	                      <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/25 bg-sky-500/10 text-sky-800 dark:text-sky-200">
+	                        <div className="font-medium">
+	                          {t("webModelActorBoundConnectorTitle", { defaultValue: "Actor-bound connector" })}
+	                        </div>
+	                        <div className="mt-1">
+	                          {t("webModelActorBoundConnectorHint", {
+	                            defaultValue:
+	                              "Manage this actor's remote MCP connector in Settings > Web Models. One connector represents one actor; rotate there to create a new secret.",
+	                          })}
+	                        </div>
+	                      </div>
+	                    ) : null}
+
+	                    <div>
                       <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("command")}</label>
                       <Input
                         className="font-mono"
@@ -928,7 +959,11 @@ export function EditActorModal({
                   </div>
                 </details>
 
-                {editMode === "custom" ? (
+                {editMode === "custom" && runtime === "web_model" ? (
+                  <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/25 bg-sky-500/10 text-sky-800 dark:text-sky-200">
+                    Browser Web Model setup is actor-bound. Manage its connector and ChatGPT chat in Settings &gt; Web Models instead of saving it as a Runtime Profile.
+                  </div>
+                ) : editMode === "custom" ? (
                   <details className={nestedCardClass}>
                     <summary className={collapsibleSummaryClass}>
                       <div>

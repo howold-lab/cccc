@@ -1193,6 +1193,7 @@ Result:
   state: "ready"
   removed_record: boolean
   removed_bindings: number
+  removed_blocked?: number
   removed_installation: boolean
   removed_runtime_bindings?: number
   removed_actor_autoload: number
@@ -1403,6 +1404,7 @@ Args:
       auto_document_quiet_ms?: number
       auto_document_min_chars?: number
       auto_document_max_window_seconds?: number
+      service_model_id?: string
       tts_enabled?: boolean
     }
   }
@@ -1411,11 +1413,12 @@ Args:
 
 `browser_asr` means browser-managed speech recognition and does not guarantee
 browser-device-local model execution. `assistant_service_local_asr` means ASR
-runs on the daemon host through the first-party Voice Secretary service and
-requires `CCCC_VOICE_SECRETARY_ASR_COMMAND` unless an explicit test/mock env is
-configured. The returned assistant health may include `health.service` with
-`status`, `alive`, `asr_command_configured`, `asr_mock_configured`, and
-`last_error` so Web can show whether service-local ASR is actually usable.
+runs on the daemon host through the first-party Voice Secretary service and uses
+an installed local ASR model. The returned assistant health may include `health.service` with
+`status`, `alive`, `asr_command_configured`, `asr_mock_configured`,
+`selected_model_id`, `managed_model`, and `last_error` so Web can show whether
+service-local ASR is actually usable. `service_model_id` is optional and
+selects a daemon-managed local ASR model for on-demand install/use.
 `recognition_language="auto"` means the browser/client chooses the best language
 hint; otherwise callers should pass a BCP-47-like tag such as `zh-CN`, `en-US`,
 or `ja-JP`. `auto_document_enabled=true` is the default path: stable transcript
@@ -1450,6 +1453,39 @@ Result:
 { group_id: string; assistant: Record<string, unknown>; event: CCCSEventV1 }
 ```
 
+#### `assistant_voice_model_install`
+
+Download and verify a daemon-managed local Voice Secretary ASR model into
+CCCC-owned cache storage. Built-in releases include a default model manifest;
+tests and local development may add a local overlay at
+`CCCC_HOME/config/voice-models.json`. Each artifact entry must include a fixed
+URL and `sha256`.
+
+Args:
+```ts
+{
+  group_id: string
+  by?: string
+  model_id: string
+}
+```
+
+Result:
+```ts
+{
+  group_id: string
+  assistant: Record<string, unknown>
+  model: {
+    model_id: string
+    status: "not_installed" | "downloading" | "ready" | "failed" | "unknown"
+    install_dir?: string
+    installed_at?: string
+    updated_at?: string
+    error?: Record<string, unknown>
+  }
+}
+```
+
 #### `assistant_voice_transcribe`
 
 Transcribe a push-to-talk audio payload through the daemon-managed first-party
@@ -1473,11 +1509,9 @@ Args:
 Preconditions:
 - `voice_secretary` is enabled for the group.
 - `recognition_backend` is `assistant_service_local_asr`.
-- The daemon host has `CCCC_VOICE_SECRETARY_ASR_COMMAND` configured. The command
-  receives the audio path as the final argument unless it includes
-  `{audio_path}` / `{input_path}` / `{input}`. It may also use
-  `CCCC_VOICE_AUDIO_PATH`, `CCCC_VOICE_MIME_TYPE`, and
-  `CCCC_VOICE_LANGUAGE`.
+- The selected `service_model_id` is installed and exposes a managed command via
+  the manifest. The effective command receives the audio path as the final
+  argument unless it includes `{audio_path}` / `{input_path}` / `{input}`.
 
 Result:
 ```ts
@@ -1504,10 +1538,16 @@ by default appends a semantic input event for the current Voice Secretary
 markdown working document. The working document is a user-facing repo artifact;
 raw transcript/source/revision sidecars remain in CCCC_HOME. When new input is
 available, the daemon emits a targeted `system.notify` to `voice-secretary` with
-`context.kind="voice_secretary_input"`. The notify is only a lightweight pointer;
-the runtime actor pulls unread text through
+`context.kind="voice_secretary_input"` and a daemon-owned `input_envelope`. The
+envelope is the canonical work item delivered to both PTY and headless runtimes;
 `assistant_voice_document_input_read` /
-`cccc_voice_secretary_document(action="read_new_input")`.
+`cccc_voice_secretary_document(action="read_new_input")` remains a legacy,
+recovery, and debugging entrypoint. Input append is durable before runtime actor
+wake-up; if wake-up fails, the input remains readable and the API reports the
+best-effort wake error separately. If wake-up succeeds after the notify was
+created while the actor was stopped, the daemon re-dispatches that same notify:
+headless runtimes receive it as a control turn, and PTY runtimes receive it
+through the pending delivery queue so lazy preamble delivery is triggered.
 
 The public document identity for Voice Secretary APIs is `document_path`, a
 repository-relative markdown path. `document_id` may exist in daemon sidecar
@@ -1551,6 +1591,11 @@ Result:
   input_event?: Record<string, unknown>
   input_event_created: boolean
   input_notify_emitted: boolean
+  input_notify_error?: string
+  actor_woken?: boolean
+  actor_wake_error?: string
+  actor_notify_delivered?: boolean
+  actor_notify_delivery_error?: string
 }
 ```
 
@@ -1643,7 +1688,7 @@ Result:
 
 Append a user instruction into the same Voice Secretary input stream used for
 ASR transcript. The daemon emits a targeted `voice_secretary_input` notify; the
-runtime actor pulls it with `read_new_input` and saves the full revised markdown.
+runtime actor works from the inline `input_envelope` and saves the full revised markdown.
 The daemon does not directly append the instruction to the document. Cross-peer
 handoff is intentionally handled only by `assistant_voice_request`, and only when
 the Voice Secretary decides the work belongs to foreman or one concrete peer.
@@ -1669,6 +1714,11 @@ Result:
   input_event?: Record<string, unknown>
   input_event_created?: boolean
   input_notify_emitted?: boolean
+  input_notify_error?: string
+  actor_woken?: boolean
+  actor_wake_error?: string
+  actor_notify_delivered?: boolean
+  actor_notify_delivery_error?: string
   event?: CCCSEventV1
 }
 ```
