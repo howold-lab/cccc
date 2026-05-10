@@ -29,6 +29,7 @@ VOICE_MODEL_KIND_ASR = "asr"
 VOICE_MODEL_KIND_DIARIZATION = "diarization"
 VOICE_MODEL_STATUS_NOT_INSTALLED = "not_installed"
 VOICE_MODEL_STATUS_DOWNLOADING = "downloading"
+VOICE_MODEL_STATUS_INSTALLING = "installing"
 VOICE_MODEL_STATUS_READY = "ready"
 VOICE_MODEL_STATUS_FAILED = "failed"
 _INSTALL_STATE_FILENAME = "install-state.json"
@@ -57,6 +58,35 @@ class VoiceModelError(Exception):
 
 def _voice_models_root() -> Path:
     return ensure_home() / "cache" / "voice-models"
+
+
+def _directory_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return total
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += int(item.stat().st_size)
+        except OSError:
+            continue
+    return total
+
+
+def _clear_voice_model_dir(model_id: str) -> None:
+    root = voice_model_dir(model_id)
+    if not root.exists():
+        return
+    for child in root.iterdir():
+        if child.name == _INSTALL_LOCK_FILENAME:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            try:
+                child.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _local_manifest_path() -> Path:
@@ -221,6 +251,7 @@ def _normalize_model_entry(item: Any) -> Dict[str, Any]:
     title = str(item.get("title") or model_id).strip()
     kind = str(item.get("kind") or VOICE_MODEL_KIND_ASR).strip() or VOICE_MODEL_KIND_ASR
     command_template = item.get("command_template")
+    offline = item.get("offline")
     streaming = item.get("streaming")
     diarization = item.get("diarization")
     if not model_id:
@@ -229,12 +260,13 @@ def _normalize_model_entry(item: Any) -> Dict[str, Any]:
         raise VoiceModelError("voice_model_manifest_invalid", f"unsupported voice model kind: {kind}")
     if (
         (not isinstance(command_template, (str, list)) or not command_template)
+        and not isinstance(offline, dict)
         and not isinstance(streaming, dict)
         and not isinstance(diarization, dict)
     ):
         raise VoiceModelError(
             "voice_model_manifest_invalid",
-            f"model {model_id} requires command_template, streaming config, or diarization config",
+            f"model {model_id} requires command_template, offline config, streaming config, or diarization config",
         )
     artifacts = item.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
@@ -251,6 +283,25 @@ def _normalize_model_entry(item: Any) -> Dict[str, Any]:
         "command_template": command_template,
         "artifacts": [_normalize_artifact(entry) for entry in artifacts],
     }
+    if isinstance(offline, dict):
+        engine = str(offline.get("engine") or "").strip()
+        model = _normalize_rel_model_path(offline.get("model"), field=f"model {model_id} offline.model")
+        tokens = _normalize_rel_model_path(offline.get("tokens"), field=f"model {model_id} offline.tokens")
+        if not engine or not model or not tokens:
+            raise VoiceModelError(
+                "voice_model_manifest_invalid",
+                f"model {model_id} offline config requires engine, model and tokens",
+            )
+        normalized["offline"] = {
+            "engine": engine,
+            "model": model,
+            "tokens": tokens,
+            "sample_rate": int(offline.get("sample_rate") or 16000),
+            "num_threads": int(offline.get("num_threads") or 2),
+            "provider": str(offline.get("provider") or "cpu").strip() or "cpu",
+            "language": str(offline.get("language") or "auto").strip() or "auto",
+            "use_itn": bool(offline.get("use_itn", True)),
+        }
     if isinstance(streaming, dict):
         engine = str(streaming.get("engine") or "").strip()
         tokens = _normalize_rel_model_path(streaming.get("tokens"), field=f"model {model_id} streaming.tokens")
@@ -724,6 +775,10 @@ def get_voice_model_status(model_id: str, *, source: str = "") -> Dict[str, Any]
     install_dir = voice_model_dir(model_id)
     artifacts_ready = True
     required_paths = [str(path) for path in (entry.get("required_files") or [])]
+    if not required_paths and isinstance(entry.get("offline"), dict):
+        offline = entry["offline"]
+        required_paths = [str(offline.get(key) or "") for key in ("model", "tokens")]
+        required_paths = [path for path in required_paths if path]
     if not required_paths and isinstance(entry.get("streaming"), dict):
         streaming = entry["streaming"]
         required_paths = [str(streaming.get(key) or "") for key in ("tokens", "model", "encoder", "decoder", "joiner", "bpe_vocab")]
@@ -757,8 +812,10 @@ def get_voice_model_status(model_id: str, *, source: str = "") -> Dict[str, Any]
         "error": state.get("error") if isinstance(state.get("error"), dict) else {},
         "manifest_sha256": str(entry.get("manifest_sha256") or ""),
         "command_ready": bool(status == VOICE_MODEL_STATUS_READY and entry.get("command_template")),
+        "offline_ready": bool(status == VOICE_MODEL_STATUS_READY and entry.get("offline")),
         "streaming_ready": bool(status == VOICE_MODEL_STATUS_READY and entry.get("streaming")),
         "diarization_ready": bool(status == VOICE_MODEL_STATUS_READY and entry.get("diarization")),
+        "offline": entry.get("offline") if isinstance(entry.get("offline"), dict) else {},
         "streaming": entry.get("streaming") if isinstance(entry.get("streaming"), dict) else {},
         "diarization": entry.get("diarization") if isinstance(entry.get("diarization"), dict) else {},
         "downloaded_bytes": int(state.get("downloaded_bytes") or 0),
@@ -767,6 +824,7 @@ def get_voice_model_status(model_id: str, *, source: str = "") -> Dict[str, Any]
         "current_artifact_path": str(state.get("current_artifact_path") or ""),
         "artifact_index": int(state.get("artifact_index") or 0),
         "artifact_count": int(state.get("artifact_count") or 0),
+        "disk_usage_bytes": _directory_size_bytes(install_dir),
         "artifacts": [
             {
                 "path": str(artifact["path"]),
@@ -835,6 +893,19 @@ def install_voice_model(model_id: str, *, source: str = "") -> Dict[str, Any]:
                 artifact,
                 output_path=install_dir / artifact_path,
                 progress=on_progress,
+            )
+            _write_install_state(
+                model_id,
+                _install_progress_state(
+                    model_id=model_id,
+                    entry=entry,
+                    status=VOICE_MODEL_STATUS_INSTALLING,
+                    downloaded_bytes=total_bytes + int(result.get("size_bytes") or 0),
+                    total_bytes=total_expected_bytes,
+                    current_artifact_path=artifact_path,
+                    artifact_index=index,
+                    artifact_count=artifact_count,
+                ),
             )
             if artifact.get("archive"):
                 _safe_extract_tar(install_dir / artifact_path, install_dir)
@@ -933,6 +1004,50 @@ def begin_voice_model_install(model_id: str, *, source: str = "") -> Dict[str, A
     return get_voice_model_status(model_id, source=source)
 
 
+def remove_voice_model(model_id: str, *, source: str = "") -> Dict[str, Any]:
+    model_id = str(model_id or "").strip()
+    catalog = load_voice_model_catalog(source)
+    entry = catalog.get(model_id)
+    if entry is None:
+        raise VoiceModelError(
+            "voice_model_not_found",
+            f"voice model not found: {model_id}",
+            details={"model_id": model_id},
+        )
+    status = get_voice_model_status(model_id, source=source)
+    if str(status.get("status") or "") == VOICE_MODEL_STATUS_DOWNLOADING:
+        raise VoiceModelError(
+            "voice_model_busy",
+            f"voice model is currently downloading: {model_id}",
+            details={"model_id": model_id},
+        )
+    lock_handle = acquire_lockfile(_install_lock_path(model_id))
+    try:
+        _clear_voice_model_dir(model_id)
+        _write_install_state(
+            model_id,
+            {
+                "model_id": model_id,
+                "status": VOICE_MODEL_STATUS_NOT_INSTALLED,
+                "updated_at": utc_now_iso(),
+                "installed_at": "",
+                "error": {},
+                "manifest_sha256": entry.get("manifest_sha256"),
+                "artifacts": [],
+                "total_size_bytes": sum(int(artifact.get("size_bytes") or 0) for artifact in (entry.get("artifacts") or [])),
+                "downloaded_bytes": 0,
+                "progress_percent": 0.0,
+                "current_artifact_path": "",
+                "artifact_index": 0,
+                "artifact_count": len(entry.get("artifacts") or []),
+                "command": "",
+            },
+        )
+        return get_voice_model_status(model_id, source=source)
+    finally:
+        release_lockfile(lock_handle)
+
+
 def resolve_installed_voice_model_command(model_id: str) -> str:
     model_id = str(model_id or "").strip()
     if not model_id:
@@ -948,6 +1063,36 @@ def resolve_installed_voice_model_command(model_id: str) -> str:
         if entry is not None:
             return _render_command_template(entry.get("command_template"), model_id=model_id, model_dir=voice_model_dir(model_id))
     return command
+
+
+def resolve_installed_voice_model_offline_config(model_id: str, *, source: str = "") -> Dict[str, Any]:
+    model_id = str(model_id or "").strip()
+    if not model_id:
+        return {}
+    status = get_voice_model_status(model_id, source=source)
+    if str(status.get("status") or "") != VOICE_MODEL_STATUS_READY:
+        return {}
+    catalog = load_voice_model_catalog(source)
+    entry = catalog.get(model_id) or {}
+    offline = entry.get("offline") if isinstance(entry.get("offline"), dict) else {}
+    if not offline:
+        return {}
+    model_dir = voice_model_dir(model_id)
+    resolved: Dict[str, Any] = {
+        "model_id": model_id,
+        "model_dir": str(model_dir),
+        "engine": str(offline.get("engine") or ""),
+        "sample_rate": int(offline.get("sample_rate") or 16000),
+        "num_threads": int(offline.get("num_threads") or 2),
+        "provider": str(offline.get("provider") or "cpu").strip() or "cpu",
+        "language": str(offline.get("language") or "auto").strip() or "auto",
+        "use_itn": bool(offline.get("use_itn", True)),
+    }
+    for key in ("model", "tokens"):
+        value = str(offline.get(key) or "").strip()
+        if value:
+            resolved[key] = str(model_dir / value)
+    return resolved
 
 
 def resolve_installed_voice_model_streaming_config(model_id: str, *, source: str = "") -> Dict[str, Any]:

@@ -190,13 +190,16 @@ function normalizeAssistantServiceModel(value: unknown): AssistantServiceModel |
     installed_at: asOptionalString(record.installed_at) || undefined,
     updated_at: asOptionalString(record.updated_at) || undefined,
     command_ready: typeof record.command_ready === "boolean" ? record.command_ready : undefined,
+    offline_ready: typeof record.offline_ready === "boolean" ? record.offline_ready : undefined,
     streaming_ready: typeof record.streaming_ready === "boolean" ? record.streaming_ready : undefined,
-    diarization_ready: typeof record.diarization_ready === "boolean" ? record.diarization_ready : undefined,
+    ...(typeof record.diarization_ready === "boolean" ? { diarization_ready: record.diarization_ready } : {}),
+    offline: asRecord(record.offline) ?? undefined,
     streaming: asRecord(record.streaming) ?? undefined,
     diarization: asRecord(record.diarization) ?? undefined,
     manifest_sha256: asOptionalString(record.manifest_sha256) || undefined,
     downloaded_bytes: Number.isFinite(Number(record.downloaded_bytes)) ? Number(record.downloaded_bytes) : undefined,
     total_size_bytes: Number.isFinite(Number(record.total_size_bytes)) ? Number(record.total_size_bytes) : undefined,
+    disk_usage_bytes: Number.isFinite(Number(record.disk_usage_bytes)) ? Number(record.disk_usage_bytes) : undefined,
     progress_percent: Number.isFinite(Number(record.progress_percent)) ? Number(record.progress_percent) : undefined,
     current_artifact_path: asOptionalString(record.current_artifact_path) || undefined,
     artifact_index: Number.isFinite(Number(record.artifact_index)) ? Number(record.artifact_index) : undefined,
@@ -228,6 +231,7 @@ function normalizeAssistantServiceRuntime(value: unknown): AssistantServiceRunti
     missing_modules: asStringArray(record.missing_modules),
     installed_at: asOptionalString(record.installed_at) || undefined,
     updated_at: asOptionalString(record.updated_at) || undefined,
+    disk_usage_bytes: Number.isFinite(Number(record.disk_usage_bytes)) ? Number(record.disk_usage_bytes) : undefined,
     error: asRecord(record.error) ?? undefined,
   };
 }
@@ -247,10 +251,11 @@ function normalizeAssistantVoiceMeetingSession(value: unknown): AssistantVoiceMe
     sample_rate: Number.isFinite(Number(record.sample_rate)) ? Number(record.sample_rate) : undefined,
     audio_duration_ms: Number.isFinite(Number(record.audio_duration_ms)) ? Number(record.audio_duration_ms) : undefined,
     language: asOptionalString(record.language) || undefined,
+    capture_mode: asOptionalString(record.capture_mode) || undefined,
     document_path: asOptionalString(record.document_path) || undefined,
     latest_partial: asOptionalString(record.latest_partial) || undefined,
     last_final_text: asOptionalString(record.last_final_text) || undefined,
-    diarization_ready: typeof record.diarization_ready === "boolean" ? record.diarization_ready : undefined,
+    ...(typeof record.diarization_ready === "boolean" ? { diarization_ready: record.diarization_ready } : {}),
     diarization_artifact_path: asOptionalString(record.diarization_artifact_path) || undefined,
     segments: Array.isArray(record.segments) ? record.segments.map((item) => asRecord(item)).filter((item): item is Record<string, unknown> => !!item) : [],
     diarization: asRecord(record.diarization) ?? undefined,
@@ -618,6 +623,26 @@ export async function fetchLatestVoiceAssistantMeetingSession(
   };
 }
 
+export async function fetchVoiceAssistantMeetingSession(
+  groupId: string,
+  sessionId: string,
+): Promise<ApiResponse<{ group_id: string; session?: AssistantVoiceMeetingSession }>> {
+  const gid = String(groupId || "").trim();
+  const sid = String(sessionId || "").trim();
+  const resp = await apiJson<unknown>(
+    `/api/v1/groups/${encodeURIComponent(gid)}/assistants/voice_secretary/sessions/${encodeURIComponent(sid)}`,
+  );
+  if (!resp.ok) return resp as ApiResponse<{ group_id: string; session?: AssistantVoiceMeetingSession }>;
+  const record = asRecord(resp.result) ?? {};
+  return {
+    ok: true,
+    result: {
+      group_id: asString(record.group_id).trim() || gid,
+      session: normalizeAssistantVoiceMeetingSession(record.session),
+    },
+  };
+}
+
 export async function installVoiceAssistantModel(
   groupId: string,
   payload: { modelId: string; by?: string; background?: boolean },
@@ -649,6 +674,36 @@ export async function installVoiceAssistantModel(
   };
 }
 
+export async function removeVoiceAssistantModel(
+  groupId: string,
+  payload: { modelId: string; by?: string },
+): Promise<ApiResponse<AssistantMutationResult & { model?: AssistantServiceModel; service_runtime?: AssistantServiceRuntime }>> {
+  const gid = String(groupId || "").trim();
+  clearAssistantStateRequest(gid);
+  const resp = await apiJson<unknown>(
+    `/api/v1/groups/${encodeURIComponent(gid)}/assistants/voice_secretary/models/remove`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        model_id: String(payload.modelId || "").trim(),
+        by: String(payload.by || "user").trim() || "user",
+      }),
+    },
+  );
+  clearAssistantStateRequest(gid);
+  if (!resp.ok) return resp as ApiResponse<AssistantMutationResult & { model?: AssistantServiceModel; service_runtime?: AssistantServiceRuntime }>;
+  const normalized = normalizeAssistantMutationResult(gid, resp.result);
+  const resultRecord = asRecord(resp.result) ?? {};
+  return {
+    ok: true,
+    result: {
+      ...normalized,
+      model: normalizeAssistantServiceModel(resultRecord.model) || undefined,
+      service_runtime: normalizeAssistantServiceRuntime(resultRecord.service_runtime),
+    },
+  };
+}
+
 export async function installVoiceAssistantRuntime(
   groupId: string,
   payload: { runtimeId?: string; by?: string; background?: boolean } = {},
@@ -663,6 +718,35 @@ export async function installVoiceAssistantRuntime(
         runtime_id: String(payload.runtimeId || "").trim(),
         by: String(payload.by || "user").trim() || "user",
         background: payload.background !== false,
+      }),
+    },
+  );
+  clearAssistantStateRequest(gid);
+  if (!resp.ok) return resp as ApiResponse<AssistantMutationResult & { service_runtime?: AssistantServiceRuntime }>;
+  const normalized = normalizeAssistantMutationResult(gid, resp.result);
+  const resultRecord = asRecord(resp.result) ?? {};
+  return {
+    ok: true,
+    result: {
+      ...normalized,
+      service_runtime: normalizeAssistantServiceRuntime(resultRecord.service_runtime),
+    },
+  };
+}
+
+export async function removeVoiceAssistantRuntime(
+  groupId: string,
+  payload: { runtimeId?: string; by?: string } = {},
+): Promise<ApiResponse<AssistantMutationResult & { service_runtime?: AssistantServiceRuntime }>> {
+  const gid = String(groupId || "").trim();
+  clearAssistantStateRequest(gid);
+  const resp = await apiJson<unknown>(
+    `/api/v1/groups/${encodeURIComponent(gid)}/assistants/voice_secretary/runtime/remove`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        runtime_id: String(payload.runtimeId || "").trim(),
+        by: String(payload.by || "user").trim() || "user",
       }),
     },
   );
@@ -1244,21 +1328,89 @@ export async function createGroup(title: string, topic: string = "") {
   });
 }
 
-export async function createGroupFromTemplate(path: string, title: string, topic: string, file: File) {
-  clearGroupsReadRequest();
-  const form = new FormData();
-  form.append("path", path);
-  form.append("title", title);
-  form.append("topic", topic || "");
-  form.append("by", "user");
-  form.append("file", file);
-  return apiForm<{ group_id: string }>("/api/v1/groups/from_template", form);
+export type GroupCopyPreviewActor = {
+  id?: string;
+  title?: string;
+  runtime?: string;
+  runner?: string;
+  enabled?: boolean;
+};
+
+export type GroupCopyPreview = {
+  manifest?: Record<string, unknown>;
+  source_group_id?: string;
+  source_title?: string;
+  actor_count?: number;
+  actors?: GroupCopyPreviewActor[];
+  source_workspace_root?: string;
+  workspace_root_exists?: boolean;
+  group_id_conflict?: boolean;
+  target_default_scope_conflict?: boolean;
+  requires_reconnect?: {
+    chatgpt_web_model?: boolean;
+    notebooklm_group_space?: boolean;
+  };
+  workspace_included?: boolean;
+  contains_secrets?: boolean;
+  runtime_reset?: {
+    actors_stopped?: boolean;
+    group_running?: boolean;
+    group_state?: string;
+    browser_sessions_cleared?: boolean;
+    runtime_sessions_cleared?: boolean;
+  };
+};
+
+export type GroupCopyImportResult = {
+  group_id: string;
+  source_group_id?: string;
+  group_id_conflict?: boolean;
+  workspace_root?: string;
+  active_scope_key?: string;
+};
+
+export async function exportGroupCopy(groupId: string): Promise<ApiResponse<{ blob: Blob; filename: string }>> {
+  try {
+    const resp = await fetch(withAuthToken(`/api/v1/groups/${encodeURIComponent(groupId)}/copy/export`));
+    if (!resp.ok) {
+      let message = `Server returned ${resp.status}`;
+      try {
+        const data = await resp.json();
+        message = String(data?.error?.message || data?.detail?.message || message);
+      } catch {
+        void 0;
+      }
+      return { ok: false, error: { code: "COPY_EXPORT_FAILED", message } };
+    }
+    const header = resp.headers.get("content-disposition") || "";
+    const match = /filename="?([^";]+)"?/i.exec(header);
+    const filename = match?.[1] || `cccc-group-${groupId}.zip`;
+    return { ok: true, result: { blob: await resp.blob(), filename } };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: "NETWORK_ERROR",
+        message: error instanceof Error ? error.message : "Network request failed",
+      },
+    };
+  }
 }
 
-export async function previewTemplate(file: File) {
+export async function previewGroupCopy(file: File) {
   const form = new FormData();
   form.append("file", file);
-  return apiForm<{ template: unknown }>("/api/v1/templates/preview", form);
+  return apiForm<{ preview: GroupCopyPreview }>("/api/v1/groups/copy/preview_import", form);
+}
+
+export async function importGroupCopy(file: File, workspaceRoot: string, title: string) {
+  clearGroupsReadRequest();
+  const form = new FormData();
+  form.append("workspace_root", workspaceRoot);
+  form.append("title", title || "");
+  form.append("by", "user");
+  form.append("file", file);
+  return apiForm<GroupCopyImportResult>("/api/v1/groups/copy/import", form);
 }
 
 export async function updateGroup(groupId: string, title: string, topic: string) {
@@ -1306,33 +1458,6 @@ export async function setGroupState(groupId: string, state: "active" | "idle" | 
   return apiJson(
     `/api/v1/groups/${encodeURIComponent(groupId)}/state?state=${encodeURIComponent(state)}&by=user`,
     { method: "POST" },
-  );
-}
-
-export async function exportGroupTemplate(groupId: string) {
-  return apiJson<{ template: string; filename: string }>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/template/export`,
-  );
-}
-
-export async function previewGroupTemplate(groupId: string, file: File) {
-  const form = new FormData();
-  form.append("by", "user");
-  form.append("file", file);
-  return apiForm<{ template: unknown; diff: unknown }>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/template/preview_upload`,
-    form,
-  );
-}
-
-export async function importGroupTemplateReplace(groupId: string, file: File) {
-  const form = new FormData();
-  form.append("confirm", groupId);
-  form.append("by", "user");
-  form.append("file", file);
-  return apiForm<{ applied: boolean }>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/template/import_replace`,
-    form,
   );
 }
 

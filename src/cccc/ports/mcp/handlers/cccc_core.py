@@ -580,8 +580,27 @@ def _append_runtime_help_addenda(markdown: str, *, group_id: str, actor_id: str)
                     "`cccc_runtime_wait_next_turn` to get work.",
                     "- Web chat text alone is not a visible CCCC reply. Use `cccc_message_send` or "
                     "`cccc_message_reply` for peer/user-visible communication.",
-                    "- For local workspace work, use `cccc_repo`, `cccc_repo_edit`, `cccc_shell`, and "
-                    "`cccc_git` through the same connector.",
+                    "- If CCCC MCP tools are not visible in the selected ChatGPT model, you do not have CCCC local access "
+                    "in this chat. Do not claim local execution; tell the user to switch to a GPT-5.x ChatGPT session "
+                    "that can see the CCCC connector.",
+                    "- For non-trivial local workspace work, default to `cccc_code_exec`: use JavaScript `tools.*` "
+                    "calls to compose repo reads, patches, shell/test commands, git diff, and visible reports in one focused flow.",
+                    "- Use direct repo/shell/git tools for simple one-step actions; use `cccc_code_exec` when the work needs "
+                    "more than one local operation or when patch/test/diff feedback should stay together.",
+                    "- Direct tools remain available for simple steps: `cccc_repo`, `cccc_apply_patch`, `cccc_repo_edit`, "
+                    "`cccc_exec_command`, `cccc_write_stdin`, `cccc_shell`, and `cccc_git`.",
+                    "- Delivered CCCC attachments are blob references, not browser uploads. Read text attachments with "
+                    "`cccc_file(action=\"read\", rel_path=...)`; use `blob_path` for binary files or local inspection.",
+                    "- When you create a file that the user or a peer should receive, keep it under the active scope and "
+                    "send it back with `cccc_file(action=\"send\", path=..., text=...)` instead of only mentioning a path.",
+                    "- Inside `cccc_code_exec`, call nested tools as `await tools.cccc_repo({...})`, "
+                    "`await tools.cccc_apply_patch({...})`; inspect `COMMON_WORK_LOOPS`, `tool_names(\"repo\")`, "
+                    "`list_tools(\"repo\")`, or `tool_help(\"repo\")` if a tool name or loop is unclear; "
+                    "use `tool_help(\"repo\", {detail:\"schema\"})` only when needed.",
+                    "- Prefer the Codex-style loop: read with line ranges, patch, run focused validation, then inspect `cccc_git(action=\"diff\")`.",
+                    "- For exact small edits, use `cccc_repo_edit(action=\"replace\"|\"multi_replace\", "
+                    "expected_sha256=...)`; use `write` only for deliberate full-file writes.",
+                    "- Prefer `cccc_exec_command`/`cccc_write_stdin` for long-running commands; `cccc_shell` is for short one-shot commands.",
                     "- Finish each processed turn with `cccc_runtime_complete_turn` for status/evidence. "
                     "Browser-injected turns are already delivery-committed, so missing completion should not block later turns.",
                 ]
@@ -711,7 +730,7 @@ def _append_runtime_help_addenda(markdown: str, *, group_id: str, actor_id: str)
             [
                 "- Capsule skill is runtime capsule activation, not a full local skill-package install.",
                 "- Runtime success is mainly visible via `capability_state.active_capsule_skills`; `dynamic_tools` may stay unchanged.",
-                "- If you need full local skill scripts or assets, install a normal skill package into Codex's skills directory (`$CODEX_HOME/skills` if `CODEX_HOME` is explicitly set).",
+                "- Install repository, URL, and local `SKILL.md` sources through `cccc_capability_install` so they remain CCCC capability records.",
             ]
         )
         sections.append("\n".join(lines).rstrip())
@@ -730,7 +749,11 @@ def inbox_list(*, group_id: str, actor_id: str, limit: int = 50, kind_filter: st
 def inbox_mark_read(*, group_id: str, actor_id: str, event_id: str) -> Dict[str, Any]:
     eid = str(event_id or "").strip()
     if not eid:
-        raise MCPError(code="missing_event_id", message="missing event_id")
+        raise MCPError(
+            code="missing_event_id",
+            message="missing event_id",
+            details={"recommended_action": "Use cccc_inbox_list to get the unread event id, then mark that exact id read."},
+        )
     return _call_daemon_or_raise(
         {"op": "inbox_mark_read", "args": {"group_id": group_id, "actor_id": actor_id, "event_id": eid, "by": actor_id}},
     )

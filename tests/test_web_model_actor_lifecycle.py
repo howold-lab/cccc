@@ -76,6 +76,299 @@ class TestWebModelActorLifecycle(unittest.TestCase):
         finally:
             cleanup()
 
+    def test_chatgpt_web_model_actor_is_singleton_per_home(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            root_one = Path(home) / "repo-one"
+            root_two = Path(home) / "repo-two"
+            root_one.mkdir(parents=True, exist_ok=True)
+            root_two.mkdir(parents=True, exist_ok=True)
+            group_one = self._create_attached_group(root_one)
+            group_two = self._create_attached_group(root_two)
+
+            first, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_one,
+                    "actor_id": "chatgpt-web",
+                    "title": "ChatGPT Web Model",
+                    "runtime": "web_model",
+                    "runner": "headless",
+                    "by": "user",
+                },
+            )
+            self.assertTrue(first.ok, getattr(first, "error", None))
+
+            second, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_two,
+                    "actor_id": "chatgpt-web-2",
+                    "title": "Second ChatGPT Web Model",
+                    "runtime": "web_model",
+                    "runner": "headless",
+                    "by": "user",
+                },
+            )
+            self.assertFalse(second.ok)
+            self.assertEqual(second.error.code, "actor_add_failed")
+            self.assertIn("limited to one actor", second.error.message)
+            self.assertIn(group_one, second.error.message)
+        finally:
+            cleanup()
+
+    def test_chatgpt_web_model_singleton_ignores_deleting_quarantine_group(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            quarantine = Path(home) / "groups" / ".deleting-g_old-abcd1234"
+            quarantine.mkdir(parents=True, exist_ok=True)
+            (quarantine / "group.yaml").write_text(
+                "\n".join(
+                    [
+                        "v: 1",
+                        "group_id: g_old",
+                        "title: deleted",
+                        "actors:",
+                        "  - id: chatgpt-web",
+                        "    title: Deleted ChatGPT Web Model",
+                        "    runtime: web_model",
+                        "    runner: headless",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            root = Path(home) / "repo"
+            root.mkdir(parents=True, exist_ok=True)
+            group_id = self._create_attached_group(root)
+
+            added, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_id,
+                    "actor_id": "chatgpt-web",
+                    "title": "ChatGPT Web Model",
+                    "runtime": "web_model",
+                    "runner": "headless",
+                    "by": "user",
+                },
+            )
+
+            self.assertTrue(added.ok, getattr(added, "error", None))
+        finally:
+            cleanup()
+
+    def test_chatgpt_web_model_singleton_ignores_internal_actor_runtime_residue(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            from cccc.kernel.actors import INTERNAL_KIND_VOICE_SECRETARY
+            from cccc.kernel.group import load_group
+
+            root = Path(home) / "repo"
+            root.mkdir(parents=True, exist_ok=True)
+            group_id = self._create_attached_group(root)
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+            group.doc.setdefault("actors", []).append(
+                {
+                    "id": "voice-secretary",
+                    "title": "Voice Secretary",
+                    "runtime": "web_model",
+                    "runner": "headless",
+                    "internal_kind": INTERNAL_KIND_VOICE_SECRETARY,
+                    "enabled": True,
+                }
+            )
+            group.save()
+
+            added, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_id,
+                    "actor_id": "chatgpt-web",
+                    "title": "ChatGPT Web Model",
+                    "runtime": "web_model",
+                    "runner": "headless",
+                    "by": "user",
+                },
+            )
+
+            self.assertTrue(added.ok, getattr(added, "error", None))
+        finally:
+            cleanup()
+
+    def test_internal_actor_cannot_use_chatgpt_web_model_runtime_or_profile(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            from cccc.kernel.actors import INTERNAL_KIND_VOICE_SECRETARY, add_actor
+            from cccc.kernel.group import load_group
+
+            root = Path(home) / "repo"
+            root.mkdir(parents=True, exist_ok=True)
+            group_id = self._create_attached_group(root)
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+            add_actor(
+                group,
+                actor_id="voice-secretary",
+                title="Voice Secretary",
+                runtime="codex",
+                runner="headless",
+                internal_kind=INTERNAL_KIND_VOICE_SECRETARY,
+            )
+
+            direct, _ = self._call(
+                "actor_update",
+                {
+                    "group_id": group_id,
+                    "actor_id": "voice-secretary",
+                    "patch": {"runtime": "web_model", "runner": "headless"},
+                    "by": "user",
+                },
+            )
+            self.assertFalse(direct.ok)
+            self.assertIn("standard actors", direct.error.message)
+
+            profile, _ = self._call(
+                "actor_profile_upsert",
+                {
+                    "by": "user",
+                    "profile": {
+                        "id": "web-profile",
+                        "name": "ChatGPT Web",
+                        "runtime": "web_model",
+                        "runner": "headless",
+                    },
+                },
+            )
+            self.assertTrue(profile.ok, getattr(profile, "error", None))
+
+            apply_profile, _ = self._call(
+                "actor_update",
+                {
+                    "group_id": group_id,
+                    "actor_id": "voice-secretary",
+                    "profile_id": "web-profile",
+                    "by": "user",
+                },
+            )
+            self.assertFalse(apply_profile.ok)
+            self.assertIn("standard actors", apply_profile.error.message)
+        finally:
+            cleanup()
+
+    def test_voice_secretary_seed_does_not_inherit_web_model_runtime(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            from cccc.kernel.group import load_group
+            from cccc.kernel.voice_secretary_actor import build_voice_secretary_actor_seed
+
+            root = Path(home) / "repo"
+            root.mkdir(parents=True, exist_ok=True)
+            group_id = self._create_attached_group(root)
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+
+            seed = build_voice_secretary_actor_seed(
+                group,
+                runtime="web_model",
+                runner="headless",
+                command=[],
+                env={},
+                default_scope_key="",
+                submit="enter",
+            )
+
+            self.assertEqual(seed.get("runtime"), "codex")
+            self.assertEqual(seed.get("runner"), "headless")
+            self.assertTrue(seed.get("command"))
+        finally:
+            cleanup()
+
+    def test_pet_seed_does_not_inherit_web_model_runtime(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            from cccc.kernel.group import load_group
+            from cccc.kernel.pet_actor import build_pet_actor_seed
+
+            root = Path(home) / "repo"
+            root.mkdir(parents=True, exist_ok=True)
+            group_id = self._create_attached_group(root)
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+
+            seed = build_pet_actor_seed(
+                group,
+                runtime="web_model",
+                runner="headless",
+                command=[],
+                env={},
+                default_scope_key="",
+                submit="enter",
+            )
+
+            self.assertEqual(seed.get("runtime"), "codex")
+            self.assertEqual(seed.get("runner"), "headless")
+            self.assertTrue(seed.get("command"))
+            self.assertEqual(seed.get("internal_kind"), "pet")
+        finally:
+            cleanup()
+
+    def test_actor_update_to_chatgpt_web_model_is_singleton_guarded(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            root_one = Path(home) / "repo-one"
+            root_two = Path(home) / "repo-two"
+            root_one.mkdir(parents=True, exist_ok=True)
+            root_two.mkdir(parents=True, exist_ok=True)
+            group_one = self._create_attached_group(root_one)
+            group_two = self._create_attached_group(root_two)
+
+            first, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_one,
+                    "actor_id": "chatgpt-web",
+                    "title": "ChatGPT Web Model",
+                    "runtime": "web_model",
+                    "runner": "headless",
+                    "by": "user",
+                },
+            )
+            self.assertTrue(first.ok, getattr(first, "error", None))
+
+            codex_actor, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_two,
+                    "actor_id": "peer1",
+                    "title": "Peer",
+                    "runtime": "codex",
+                    "runner": "headless",
+                    "by": "user",
+                },
+            )
+            self.assertTrue(codex_actor.ok, getattr(codex_actor, "error", None))
+
+            update, _ = self._call(
+                "actor_update",
+                {
+                    "group_id": group_two,
+                    "actor_id": "peer1",
+                    "patch": {"runtime": "web_model", "runner": "headless"},
+                    "by": "user",
+                },
+            )
+            self.assertFalse(update.ok)
+            self.assertEqual(update.error.code, "actor_update_failed")
+            self.assertIn("limited to one actor", update.error.message)
+            self.assertIn(group_one, update.error.message)
+        finally:
+            cleanup()
+
     def test_group_start_for_web_model_does_not_spawn_headless_supervisor(self) -> None:
         from cccc.daemon.runner_state_ops import headless_state_running
 

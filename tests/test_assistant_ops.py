@@ -190,6 +190,27 @@ class TestAssistantOps(unittest.TestCase):
                 _download_artifact(artifact, output_path=Path(td) / "model.pt")
         self.assertEqual(cm.exception.code, "voice_model_manifest_hash_invalid")
 
+    def test_voice_model_install_marks_post_download_installing_phase(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            from cccc.daemon.assistants import voice_models
+
+            self._write_voice_model_manifest(home)
+            states = []
+            original_write = voice_models._write_install_state
+
+            def capture_state(model_id: str, state: dict) -> None:
+                states.append(dict(state))
+                original_write(model_id, state)
+
+            with patch("cccc.daemon.assistants.voice_models._write_install_state", side_effect=capture_state):
+                installed = voice_models.install_voice_model("mock_asr")
+
+            self.assertEqual(str(installed.get("status") or ""), "ready")
+            self.assertTrue(any(str(state.get("status") or "") == "installing" for state in states))
+        finally:
+            cleanup()
+
     def test_voice_model_manifest_rejects_unsafe_install_paths(self) -> None:
         from cccc.daemon.assistants.voice_models import VoiceModelError, load_voice_model_catalog
 
@@ -242,18 +263,26 @@ class TestAssistantOps(unittest.TestCase):
                 _safe_extract_tar(archive_path, Path(td) / "out")
         self.assertEqual(cm.exception.code, "voice_model_archive_invalid")
 
-    def test_default_voice_catalog_prefers_zipformer_transducer_model(self) -> None:
+    def test_default_voice_catalog_prefers_final_and_live_service_models(self) -> None:
+        from cccc.daemon.assistants.local_asr_model_selection import (
+            DEFAULT_FINAL_SERVICE_MODEL_ID,
+            DEFAULT_LIVE_SERVICE_MODEL_ID,
+        )
         from cccc.daemon.assistants.voice_models import load_voice_model_catalog
 
         catalog = load_voice_model_catalog()
         model_ids = list(catalog.keys())
         self.assertGreater(len(model_ids), 0)
-        self.assertEqual(model_ids[0], "sherpa_onnx_streaming_zipformer_zh_int8")
-        streaming = catalog[model_ids[0]].get("streaming") or {}
-        self.assertEqual(streaming.get("engine"), "transducer")
+        self.assertEqual(model_ids[0], DEFAULT_FINAL_SERVICE_MODEL_ID)
+        offline = catalog[DEFAULT_FINAL_SERVICE_MODEL_ID].get("offline") or {}
+        self.assertEqual(offline.get("engine"), "sense_voice")
+        self.assertTrue(str(offline.get("model") or "").endswith("model.int8.onnx"))
+        self.assertTrue(str(offline.get("tokens") or "").endswith("tokens.txt"))
+
+        streaming = catalog[DEFAULT_LIVE_SERVICE_MODEL_ID].get("streaming") or {}
+        self.assertEqual(streaming.get("engine"), "paraformer")
         self.assertTrue(str(streaming.get("encoder") or "").endswith("encoder.int8.onnx"))
-        self.assertTrue(str(streaming.get("decoder") or "").endswith("decoder.onnx"))
-        self.assertTrue(str(streaming.get("joiner") or "").endswith("joiner.int8.onnx"))
+        self.assertTrue(str(streaming.get("decoder") or "").endswith("decoder.int8.onnx"))
         self.assertTrue(str(streaming.get("tokens") or "").endswith("tokens.txt"))
 
     def test_sherpa_streaming_model_resolution_falls_back_from_invalid_selection(self) -> None:
@@ -264,6 +293,7 @@ class TestAssistantOps(unittest.TestCase):
                 return {
                     "model_id": model_id,
                     "runtime_id": "sherpa_onnx_streaming",
+                    "streaming": {"engine": "paraformer"},
                     "streaming_ready": True,
                 }
             return {"model_id": model_id, "status": "unknown", "available": False}
@@ -275,6 +305,7 @@ class TestAssistantOps(unittest.TestCase):
                 {
                     "model_id": "ready_streaming",
                     "runtime_id": "sherpa_onnx_streaming",
+                    "streaming": {"engine": "paraformer"},
                     "streaming_ready": True,
                 }
             ],
@@ -309,7 +340,7 @@ class TestAssistantOps(unittest.TestCase):
             self.assertFalse(bool(assistants_by_id["voice_secretary"].get("enabled")))
             self.assertEqual(assistants_by_id["voice_secretary"].get("lifecycle"), "disabled")
             self.assertEqual((assistants_by_id["voice_secretary"].get("config") or {}).get("recognition_backend"), "browser_asr")
-            self.assertEqual((assistants_by_id["voice_secretary"].get("config") or {}).get("recognition_language"), "mixed")
+            self.assertEqual((assistants_by_id["voice_secretary"].get("config") or {}).get("recognition_language"), "auto")
         finally:
             cleanup()
 
@@ -449,7 +480,7 @@ class TestAssistantOps(unittest.TestCase):
             self.assertIn("Voice Secretary Runtime Actor", prompt)
             self.assertIn("not the foreman", prompt)
             self.assertIn("secretary-scope", prompt)
-            self.assertIn("call cccc_bootstrap first, then cccc_help", prompt)
+            self.assertIn("use MCP tools cccc_bootstrap, then cccc_help", prompt)
             self.assertIn("daemon-delivered input_envelope", prompt)
             self.assertIn("Work order", prompt)
             self.assertIn("Context (not task)", prompt)
@@ -596,6 +627,178 @@ class TestAssistantOps(unittest.TestCase):
             self.assertEqual(actor.get("submit"), "newline")
             private_env = load_actor_private_env(group_id, VOICE_SECRETARY_ACTOR_ID)
             self.assertEqual(private_env.get("API_KEY"), "voice-secret")
+        finally:
+            cleanup()
+
+    def test_voice_settings_sync_preserves_linked_voice_profile_runtime_config(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            group_id = self._create_group()
+            self._enable_voice_secretary(group_id)
+
+            profile_upsert, _ = self._call(
+                "actor_profile_upsert",
+                {
+                    "by": "user",
+                    "profile": {
+                        "id": "voice-profile",
+                        "name": "Voice PTY",
+                        "scope": "global",
+                        "runtime": "codex",
+                        "runner": "pty",
+                        "command": ["codex", "-m", "gpt-5.3-codex-spark"],
+                        "submit": "newline",
+                    },
+                },
+            )
+            self.assertTrue(profile_upsert.ok, getattr(profile_upsert, "error", None))
+
+            from cccc.kernel.group import load_group
+            from cccc.kernel.actors import INTERNAL_KIND_VOICE_SECRETARY
+            from cccc.kernel.voice_secretary_actor import get_voice_secretary_actor
+
+            link, _ = self._call(
+                "actor_update",
+                {
+                    "group_id": group_id,
+                    "by": "user",
+                    "actor_id": "voice-secretary",
+                    "profile_id": "voice-profile",
+                },
+            )
+            self.assertTrue(link.ok, getattr(link, "error", None))
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+            actor = get_voice_secretary_actor(group)
+            self.assertIsInstance(actor, dict)
+            assert isinstance(actor, dict)
+            self.assertEqual(actor.get("profile_id"), "voice-profile")
+            self.assertEqual(actor.get("internal_kind"), INTERNAL_KIND_VOICE_SECRETARY)
+            self.assertEqual(actor.get("runtime"), "codex")
+            self.assertEqual(actor.get("runner"), "pty")
+            self.assertEqual(actor.get("command"), ["codex", "-m", "gpt-5.3-codex-spark"])
+            self.assertEqual(actor.get("submit"), "newline")
+
+            update, _ = self._call(
+                "assistant_settings_update",
+                {
+                    "group_id": group_id,
+                    "by": "user",
+                    "assistant_id": "voice_secretary",
+                    "patch": {"config": {"recognition_language": "zh-CN"}},
+                },
+            )
+            self.assertTrue(update.ok, getattr(update, "error", None))
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+            actor = get_voice_secretary_actor(group)
+            self.assertIsInstance(actor, dict)
+            assert isinstance(actor, dict)
+            self.assertEqual(actor.get("profile_id"), "voice-profile")
+            self.assertEqual(actor.get("profile_scope"), "global")
+            self.assertEqual(actor.get("internal_kind"), INTERNAL_KIND_VOICE_SECRETARY)
+            self.assertEqual(actor.get("runtime"), "codex")
+            self.assertEqual(actor.get("runner"), "pty")
+            self.assertEqual(actor.get("command"), ["codex", "-m", "gpt-5.3-codex-spark"])
+            self.assertEqual(actor.get("submit"), "newline")
+        finally:
+            cleanup()
+
+    def test_voice_actor_update_allows_runtime_profile_link_without_losing_voice_tools(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            group_id = self._create_group()
+            self._enable_voice_secretary(group_id)
+
+            profile_upsert, _ = self._call(
+                "actor_profile_upsert",
+                {
+                    "by": "user",
+                    "profile": {
+                        "id": "voice-pty-profile",
+                        "name": "Voice PTY",
+                        "scope": "global",
+                        "runtime": "codex",
+                        "runner": "pty",
+                        "command": ["codex"],
+                        "submit": "enter",
+                    },
+                },
+            )
+            self.assertTrue(profile_upsert.ok, getattr(profile_upsert, "error", None))
+
+            from cccc.kernel.group import load_group
+            from cccc.kernel.voice_secretary_actor import get_voice_secretary_actor
+            from cccc.ports.mcp.server import list_tools_for_caller
+
+            update_profile, _ = self._call(
+                "actor_update",
+                {
+                    "group_id": group_id,
+                    "by": "user",
+                    "actor_id": "voice-secretary",
+                    "profile_id": "voice-pty-profile",
+                },
+            )
+            self.assertTrue(update_profile.ok, getattr(update_profile, "error", None))
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+            actor = get_voice_secretary_actor(group)
+            self.assertIsInstance(actor, dict)
+            assert isinstance(actor, dict)
+            self.assertEqual(actor.get("profile_id"), "voice-pty-profile")
+            self.assertEqual(actor.get("runtime"), "codex")
+            self.assertEqual(actor.get("runner"), "pty")
+            self.assertEqual(actor.get("internal_kind"), "voice_secretary")
+
+            with patch.dict(os.environ, {"CCCC_GROUP_ID": group_id, "CCCC_ACTOR_ID": "voice-secretary"}, clear=False), patch(
+                "cccc.ports.mcp.server._call_daemon_or_raise",
+                side_effect=RuntimeError("daemon unavailable"),
+            ):
+                tools = list_tools_for_caller()
+            names = {str(item.get("name") or "") for item in tools if isinstance(item, dict)}
+            self.assertIn("cccc_voice_secretary_document", names)
+            self.assertIn("cccc_voice_secretary_request", names)
+            self.assertIn("cccc_voice_secretary_composer", names)
+
+            convert, _ = self._call(
+                "actor_update",
+                {
+                    "group_id": group_id,
+                    "by": "user",
+                    "actor_id": "voice-secretary",
+                    "profile_action": "convert_to_custom",
+                },
+            )
+            self.assertTrue(convert.ok, getattr(convert, "error", None))
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+            actor = get_voice_secretary_actor(group)
+            self.assertIsInstance(actor, dict)
+            assert isinstance(actor, dict)
+            self.assertNotIn("profile_id", actor)
+
+            update_runtime, _ = self._call(
+                "actor_update",
+                {
+                    "group_id": group_id,
+                    "by": "user",
+                    "actor_id": "voice-secretary",
+                    "patch": {"runner": "pty", "runtime": "codex"},
+                },
+            )
+            self.assertTrue(update_runtime.ok, getattr(update_runtime, "error", None))
+            actor = (update_runtime.result or {}).get("actor") if isinstance(update_runtime.result, dict) else {}
+            self.assertEqual(actor.get("runtime"), "codex")
+            self.assertEqual(actor.get("runner"), "pty")
         finally:
             cleanup()
 
@@ -829,6 +1032,146 @@ class TestAssistantOps(unittest.TestCase):
             else:
                 os.environ.pop("CCCC_VOICE_SECRETARY_ASR_COMMAND", None)
             cleanup()
+
+    def test_voice_model_remove_clears_installed_artifacts(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            self._write_voice_model_manifest(home)
+            group_id = self._create_group()
+            self._ensure_foreman(group_id)
+
+            install, _ = self._call(
+                "assistant_voice_model_install",
+                {"group_id": group_id, "model_id": "mock_asr", "by": "user"},
+            )
+            self.assertTrue(install.ok, getattr(install, "error", None))
+            installed_model = (install.result or {}).get("model") if isinstance(install.result, dict) else {}
+            install_dir = Path(str(installed_model.get("install_dir") or ""))
+            self.assertTrue(install_dir.joinpath("adapter.py").exists())
+            self.assertGreater(int(installed_model.get("disk_usage_bytes") or 0), 0)
+
+            remove, _ = self._call(
+                "assistant_voice_model_remove",
+                {"group_id": group_id, "model_id": "mock_asr", "by": "user"},
+            )
+            self.assertTrue(remove.ok, getattr(remove, "error", None))
+            removed_model = (remove.result or {}).get("model") if isinstance(remove.result, dict) else {}
+            self.assertEqual(str(removed_model.get("status") or ""), "not_installed")
+            self.assertFalse(install_dir.joinpath("adapter.py").exists())
+            self.assertEqual(int(removed_model.get("downloaded_bytes", -1)), 0)
+        finally:
+            cleanup()
+
+    def test_voice_runtime_remove_clears_runtime_cache(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            group_id = self._create_group()
+            self._ensure_foreman(group_id)
+            runtime_root = Path(home) / "cache" / "voice-runtimes" / "sherpa_onnx_streaming"
+            runtime_root.joinpath(".venv").mkdir(parents=True, exist_ok=True)
+            runtime_root.joinpath(".venv", "dummy.bin").write_bytes(b"runtime-cache")
+
+            remove, _ = self._call(
+                "assistant_voice_runtime_remove",
+                {"group_id": group_id, "runtime_id": "sherpa_onnx_streaming", "by": "user"},
+            )
+            self.assertTrue(remove.ok, getattr(remove, "error", None))
+            runtime = (remove.result or {}).get("service_runtime") if isinstance(remove.result, dict) else {}
+            self.assertEqual(str(runtime.get("status") or ""), "not_installed")
+            self.assertFalse(runtime_root.joinpath(".venv", "dummy.bin").exists())
+        finally:
+            cleanup()
+
+    def test_voice_runtime_remove_rejects_installing_runtime(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            from cccc.daemon.assistants.voice_runtime_deps import (
+                VOICE_RUNTIME_STATUS_INSTALLING,
+                VoiceRuntimeDepsError,
+                begin_voice_runtime_install,
+                remove_voice_runtime_deps,
+            )
+
+            started = begin_voice_runtime_install("sherpa_onnx_streaming")
+            self.assertEqual(str(started.get("status") or ""), VOICE_RUNTIME_STATUS_INSTALLING)
+
+            with self.assertRaises(VoiceRuntimeDepsError) as cm:
+                remove_voice_runtime_deps("sherpa_onnx_streaming")
+            self.assertEqual(cm.exception.code, "voice_runtime_busy")
+        finally:
+            cleanup()
+
+    def test_voice_runtime_install_rechecks_modules_after_pip_install(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            from cccc.daemon.assistants import voice_runtime_deps
+
+            runtime_id = "sherpa_onnx_streaming"
+            python_path = Path(home) / "cache" / "voice-runtimes" / runtime_id / ".venv" / "bin" / "python"
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            voice_runtime_deps._write_state(
+                runtime_id,
+                {
+                    "runtime_id": runtime_id,
+                    "status": "installing",
+                    "updated_at": "now",
+                    "packages": ["sherpa-onnx", "numpy"],
+                },
+            )
+            voice_runtime_deps._STATUS_CACHE[runtime_id] = (
+                time.monotonic(),
+                {
+                    "runtime_id": runtime_id,
+                    "status": "installing",
+                    "missing_modules": ["sherpa_onnx", "numpy"],
+                },
+            )
+            with patch.object(voice_runtime_deps, "_ensure_venv", return_value=python_path), patch.object(
+                voice_runtime_deps.subprocess,
+                "run",
+                return_value=type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+            ), patch.object(
+                voice_runtime_deps,
+                "_module_status",
+                return_value={"sherpa_onnx": True, "numpy": True},
+            ):
+                installed = voice_runtime_deps.install_voice_runtime_deps(runtime_id)
+
+            self.assertEqual(str(installed.get("status") or ""), "ready")
+            self.assertEqual(installed.get("missing_modules"), [])
+        finally:
+            cleanup()
+
+    def test_voice_runtime_python_selects_current_python_39_or_newer(self) -> None:
+        from cccc.daemon.assistants import voice_runtime_deps
+
+        with patch.object(voice_runtime_deps.sys, "version_info", (3, 14, 0)):
+            self.assertEqual(voice_runtime_deps._select_base_python(), voice_runtime_deps.sys.executable)
+
+    def test_voice_runtime_python_falls_back_to_python_314(self) -> None:
+        from cccc.daemon.assistants import voice_runtime_deps
+
+        with patch.object(voice_runtime_deps.sys, "version_info", (3, 8, 20)), patch.object(
+            voice_runtime_deps.shutil,
+            "which",
+            side_effect=lambda name: "/opt/homebrew/bin/python3.14" if name == "python3.14" else None,
+        ), patch.object(voice_runtime_deps, "_python_version", return_value=(3, 14)):
+            self.assertEqual(voice_runtime_deps._select_base_python(), "/opt/homebrew/bin/python3.14")
+
+    def test_voice_runtime_python_rejects_below_39(self) -> None:
+        from cccc.daemon.assistants import voice_runtime_deps
+        from cccc.daemon.assistants.voice_runtime_deps import VoiceRuntimeDepsError
+
+        with patch.object(voice_runtime_deps.sys, "version_info", (3, 8, 20)), patch.object(
+            voice_runtime_deps.shutil,
+            "which",
+            return_value=None,
+        ):
+            with self.assertRaises(VoiceRuntimeDepsError) as cm:
+                voice_runtime_deps._select_base_python()
+        self.assertEqual(cm.exception.code, "voice_runtime_python_missing")
+        self.assertIn("Python 3.9+", cm.exception.message)
 
     def test_voice_document_create_requires_attached_repo_scope(self) -> None:
         _, cleanup = self._with_home()
@@ -1879,6 +2222,9 @@ class TestAssistantOps(unittest.TestCase):
             self.assertIn("重点看看风险和副作用", input_text)
             self.assertIn("Recent context", input_text)
             self.assertIn("需要补验收标准", input_text)
+            self.assertIn("Use MCP tool cccc_voice_secretary_composer", input_text)
+            self.assertIn("draft_text must contain only the text to add", input_text)
+            self.assertNotIn("Return only the composer text to insert", input_text)
             self.assertNotIn("Execution rules:", input_text)
             self.assertNotIn("Do not write meta lead-ins", input_text)
 
@@ -1888,7 +2234,6 @@ class TestAssistantOps(unittest.TestCase):
                     "group_id": group_id,
                     "by": "assistant:voice_secretary",
                     "request_id": "voice-prompt-test",
-                    "composer_snapshot_hash": "abc123",
                     "draft_text": "请基于第一性原理检查这套方案，重点评估风险、副作用和验证路径。",
                     "summary": "Clarified the review ask.",
                 },
@@ -2057,7 +2402,8 @@ class TestAssistantOps(unittest.TestCase):
             self.assertTrue(read.ok, getattr(read, "error", None))
             input_text = str((read.result or {}).get("input_text") or "")
             self.assertIn("Operation: replace_with_refined_prompt", input_text)
-            self.assertIn("Return a complete replacement prompt", input_text)
+            self.assertIn("Use MCP tool cccc_voice_secretary_composer", input_text)
+            self.assertIn("draft_text must contain the complete replacement prompt", input_text)
             self.assertNotIn("Do not return only an incremental addition", input_text)
             self.assertNotIn("Append mode", input_text)
 
@@ -2110,7 +2456,7 @@ class TestAssistantOps(unittest.TestCase):
             self.assertIn("Operation: replace_with_refined_prompt", input_text)
             self.assertIn("帮我让大家汇报进展", input_text)
             self.assertIn("optimize current composer draft directly", input_text)
-            self.assertIn("Return a complete replacement prompt", input_text)
+            self.assertIn("draft_text must contain the complete replacement prompt", input_text)
         finally:
             cleanup()
 
@@ -3216,7 +3562,7 @@ class TestAssistantOps(unittest.TestCase):
             self.assertIn("Target: secretary", input_text)
             self.assertIn(f"Request id: {request_id}", input_text)
             self.assertIn("Required output:", input_text)
-            self.assertIn("cccc_voice_secretary_request(action=\"report\"", input_text)
+            self.assertIn("Use MCP tool cccc_voice_secretary_request(action=\"report\"", input_text)
             self.assertIn("Task:", input_text)
             self.assertIn("刚才的总结有没有遗漏", input_text)
             self.assertEqual((read.result or {}).get("documents"), [])
@@ -3684,6 +4030,35 @@ class TestAssistantOps(unittest.TestCase):
             self.assertTrue(browser.ok, getattr(browser, "error", None))
             assistant = (browser.result or {}).get("assistant") if isinstance(browser.result, dict) else {}
             self.assertEqual((assistant.get("config") or {}).get("recognition_backend"), "browser_asr")
+            self.assertEqual((assistant.get("config") or {}).get("recognition_language"), "auto")
+
+            local_mixed, _ = self._call(
+                "assistant_settings_update",
+                {
+                    "group_id": group_id,
+                    "by": "user",
+                    "assistant_id": "voice_secretary",
+                    "patch": {"config": {"recognition_backend": "assistant_service_local_asr", "recognition_language": "mixed"}},
+                },
+            )
+            self.assertTrue(local_mixed.ok, getattr(local_mixed, "error", None))
+            assistant = (local_mixed.result or {}).get("assistant") if isinstance(local_mixed.result, dict) else {}
+            self.assertEqual((assistant.get("config") or {}).get("recognition_backend"), "assistant_service_local_asr")
+            self.assertEqual((assistant.get("config") or {}).get("recognition_language"), "mixed")
+
+            browser_mixed, _ = self._call(
+                "assistant_settings_update",
+                {
+                    "group_id": group_id,
+                    "by": "user",
+                    "assistant_id": "voice_secretary",
+                    "patch": {"config": {"recognition_backend": "browser_asr", "recognition_language": "mixed"}},
+                },
+            )
+            self.assertTrue(browser_mixed.ok, getattr(browser_mixed, "error", None))
+            assistant = (browser_mixed.result or {}).get("assistant") if isinstance(browser_mixed.result, dict) else {}
+            self.assertEqual((assistant.get("config") or {}).get("recognition_backend"), "browser_asr")
+            self.assertEqual((assistant.get("config") or {}).get("recognition_language"), "auto")
 
             update, _ = self._call(
                 "assistant_settings_update",
@@ -4045,7 +4420,7 @@ class TestAssistantOps(unittest.TestCase):
             document_input_text = str((read.result or {}).get("input_text") or "")
             self.assertIn("Mode: document", document_input_text)
             self.assertIn("Required output:", document_input_text)
-            self.assertIn("Edit the repository markdown directly, then cccc_voice_secretary_request", document_input_text)
+            self.assertIn("Edit the repository markdown directly, then use MCP tool cccc_voice_secretary_request", document_input_text)
             self.assertIn("Task:", document_input_text)
             self.assertIn("concise launch-risk summary", document_input_text)
             batches = (read.result or {}).get("input_batches") if isinstance(read.result, dict) else []

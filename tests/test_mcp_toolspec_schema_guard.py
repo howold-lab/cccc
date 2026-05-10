@@ -90,6 +90,12 @@ class TestMcpToolspecSchemaGuard(unittest.TestCase):
         action = file_props.get("action") if isinstance(file_props, dict) else {}
         self.assertEqual(action.get("enum"), ["send", "blob_path", "info", "read"])
         self.assertIn("max_bytes", file_props)
+        file_desc = str(file_spec.get("description") or "") if isinstance(file_spec, dict) else ""
+        self.assertIn("chat attachment", file_desc)
+        self.assertIn("delivered state/blobs attachments", file_desc)
+        self.assertIn("active-scope local file", file_desc)
+        self.assertIn("UTF-8 text", str((file_props.get("rel_path") or {}).get("description") or ""))
+        self.assertIn("active scope", str((file_props.get("path") or {}).get("description") or ""))
 
     def test_task_toolspec_exposes_type_enum(self) -> None:
         spec = next((item for item in MCP_TOOLS if str(item.get("name") or "") == "cccc_task"), None)
@@ -115,19 +121,45 @@ class TestMcpToolspecSchemaGuard(unittest.TestCase):
         self.assertIsInstance(repo_annotations, dict)
         self.assertTrue(repo_annotations.get("readOnlyHint"))
         repo_props = ((repo.get("inputSchema") or {}).get("properties") or {}) if isinstance(repo, dict) else {}
-        self.assertEqual((repo_props.get("action") or {}).get("enum"), ["info", "list", "read"])
+        self.assertEqual((repo_props.get("action") or {}).get("enum"), ["info", "list", "list_dir", "read"])
+        self.assertIn("start_line", repo_props)
+        self.assertIn("end_line", repo_props)
 
         edit_annotations = repo_edit.get("annotations") if isinstance(repo_edit, dict) else {}
         self.assertIsInstance(edit_annotations, dict)
         self.assertFalse(edit_annotations.get("readOnlyHint"))
         self.assertTrue(edit_annotations.get("destructiveHint"))
         edit_props = ((repo_edit.get("inputSchema") or {}).get("properties") or {}) if isinstance(repo_edit, dict) else {}
-        self.assertEqual((edit_props.get("action") or {}).get("enum"), ["write", "apply_patch", "mkdir", "delete", "move"])
+        self.assertEqual((edit_props.get("action") or {}).get("enum"), ["replace", "multi_replace", "write", "mkdir", "delete", "move"])
+        self.assertIn("old_text", edit_props)
+        self.assertIn("replacements", edit_props)
+        self.assertIn("expected_sha256", edit_props)
+        self.assertNotIn("patch", edit_props)
+        apply_patch = next((item for item in MCP_TOOLS if str(item.get("name") or "") == "cccc_apply_patch"), None)
+        self.assertIsInstance(apply_patch, dict)
+        self.assertIn("Codex-style", str(apply_patch.get("description") or ""))
+
+    def test_capability_search_defaults_to_local_sources(self) -> None:
+        search = next((item for item in MCP_TOOLS if str(item.get("name") or "") == "cccc_capability_search"), None)
+        self.assertIsInstance(search, dict)
+        props = ((search.get("inputSchema") or {}).get("properties") or {}) if isinstance(search, dict) else {}
+        self.assertEqual((props.get("include_external") or {}).get("default"), False)
 
     def test_web_model_local_power_tools_are_not_generic_core_tools(self) -> None:
         from cccc.kernel.capabilities import CORE_BASIC_TOOLS, WEB_MODEL_CORE_TOOLS, resolve_core_tool_names
 
-        web_model_only_tools = {"cccc_runtime_wait_next_turn", "cccc_runtime_complete_turn", "cccc_shell", "cccc_git"}
+        web_model_only_tools = {
+            "cccc_runtime_wait_next_turn",
+            "cccc_runtime_complete_turn",
+            "cccc_code_exec",
+            "cccc_code_wait",
+            "cccc_repo_edit",
+            "cccc_apply_patch",
+            "cccc_shell",
+            "cccc_exec_command",
+            "cccc_write_stdin",
+            "cccc_git",
+        }
         self.assertFalse(web_model_only_tools & set(CORE_BASIC_TOOLS))
         self.assertTrue(web_model_only_tools <= set(WEB_MODEL_CORE_TOOLS))
         self.assertFalse(web_model_only_tools & resolve_core_tool_names(actor_role="peer"))
@@ -144,6 +176,17 @@ class TestMcpToolspecSchemaGuard(unittest.TestCase):
         self.assertIn("when no turn was browser-delivered", wait_desc)
         self.assertIn("does not mark messages read", wait_desc)
         self.assertIn("whether it was browser-delivered or pulled", complete_desc)
+
+    def test_code_exec_schema_advertises_discovery_helpers(self) -> None:
+        code_exec = next((item for item in MCP_TOOLS if str(item.get("name") or "") == "cccc_code_exec"), None)
+        self.assertIsInstance(code_exec, dict)
+        desc = str(code_exec.get("description") or "") if isinstance(code_exec, dict) else ""
+        self.assertIn("COMMON_WORK_LOOPS", desc)
+        self.assertIn("tool_help(query", desc)
+        self.assertIn("tool_names(query)", desc)
+        self.assertIn("list_tools(query)", desc)
+        self.assertIn("detail:'schema'", desc)
+        self.assertIn("max_output_tokens up to 50000", desc)
 
 
 if __name__ == "__main__":

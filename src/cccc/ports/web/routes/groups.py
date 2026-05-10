@@ -20,18 +20,32 @@ from ....contracts.v1.automation import AutomationRuleSet
 from ....daemon.codex_app_sessions import SUPERVISOR as codex_app_supervisor
 from ....daemon.server import get_daemon_endpoint
 from ....daemon.group.presentation_ops import load_presentation_snapshot, resolve_workspace_asset_path
+from ....daemon.ops.group_copy_ops import (
+    group_copy_export as run_group_copy_export,
+    group_copy_import as run_group_copy_import,
+    group_copy_preview_import as run_group_copy_preview_import,
+)
 from ....daemon.assistants.sherpa_streaming_asr import (
     SherpaStreamingAsrError,
     open_sherpa_streaming_session,
-    transcribe_sherpa_streaming_pcm16,
+)
+from ....daemon.assistants.local_streaming_asr import LocalStreamingAsrError
+from ....daemon.assistants.local_asr_model_selection import (
+    effective_final_service_model_id,
+    effective_live_service_model_id,
 )
 from ....daemon.assistants.sherpa_diarization import (
     SherpaDiarizationError,
-    run_sherpa_diarization,
-    run_sherpa_diarization_file,
     sherpa_diarization_status,
 )
-from ....daemon.assistants.voice_speaker_transcripts import build_speaker_transcript_segments
+from ....daemon.assistants.voice_speaker_identity import (
+    diarization_result_segments,
+    diarization_result_speaker_embeddings,
+    run_final_diarization_file,
+    run_provisional_diarization_prefix,
+)
+from ....daemon.assistants.voice_final_document_apply import apply_final_speaker_transcript_to_document
+from ....daemon.assistants.voice_speaker_transcripts import build_offline_speaker_transcript_segments
 from ....daemon.context.context_ops import _get_summary_context_fast, _rebuild_summary_snapshot
 from ....runners import headless as headless_runner
 from ....runners import pty as pty_runner
@@ -41,7 +55,6 @@ from ....kernel.group import get_group_state, load_group
 from ....kernel.context import ContextStorage
 from ....kernel.query_projections import get_groups_projection
 from ....daemon.runner_state_ops import headless_state_path, pty_state_path, web_model_actor_running
-from ....kernel.group_template import parse_group_template
 from ....kernel.ledger import append_event, read_last_lines
 from ....kernel.prompt_files import (
     DEFAULT_PREAMBLE_BODY,
@@ -76,8 +89,11 @@ from ..schemas import (
     AssistantVoiceDocumentSaveRequest,
     AssistantVoiceInputRequest,
     AssistantVoiceModelInstallRequest,
+    AssistantVoiceModelRemoveRequest,
     AssistantVoiceRuntimeInstallRequest,
+    AssistantVoiceRuntimeRemoveRequest,
     AssistantVoicePromptDraftAckRequest,
+    AssistantVoiceTranscriptClearRequest,
     AssistantVoiceTranscriptSegmentRequest,
     AssistantVoiceTranscriptionRequest,
     CreateGroupRequest,
@@ -89,13 +105,11 @@ from ..schemas import (
     GroupPresentationPublishRequest,
     GroupPresentationPublishWorkspaceRequest,
     GroupSettingsRequest,
-    GroupTemplatePreviewRequest,
     GroupUpdateRequest,
     PetDecisionOutcomeRequest,
     ProjectMdUpdateRequest,
     RepoPromptUpdateRequest,
     RouteContext,
-    WEB_MAX_TEMPLATE_BYTES,
     WEB_MAX_FILE_BYTES,
     _safe_int,
     check_group,
@@ -106,12 +120,31 @@ from ..schemas import (
     resolve_websocket_principal,
     websocket_tokens_active,
 )
+from .browser_surface_proxy import (
+    open_daemon_stream,
+    proxy_daemon_raw_stream_to_websocket,
+    send_daemon_attach_request,
+)
 
-_VOICE_DIARIZATION_WINDOW_MS = 30_000
 _VOICE_DIARIZATION_INTERVAL_MS = 8_000
 _VOICE_DIARIZATION_MIN_AUDIO_MS = 10_000
-_VOICE_DIARIZATION_ENABLE_PROVISIONAL = False
+_VOICE_DIARIZATION_ENABLE_PROVISIONAL = True
 _VOICE_PCM16_BYTES_PER_SAMPLE = 2
+WEB_MAX_GROUP_COPY_PACKAGE_BYTES = 100 * 1024 * 1024
+
+
+def _response_to_dict(resp: Any) -> Dict[str, Any]:
+    if isinstance(resp, dict):
+        return resp
+    try:
+        model_dump = getattr(resp, "model_dump", None)
+        if callable(model_dump):
+            out = model_dump()
+            if isinstance(out, dict):
+                return out
+    except Exception:
+        pass
+    return {"ok": False, "error": {"code": "internal_error", "message": f"invalid response type: {type(resp).__name__}"}}
 
 
 def _safe_voice_session_id(value: Any) -> str:
@@ -298,18 +331,22 @@ def _append_voice_meeting_session_event(
 
 async def _run_voice_meeting_diarization_background(
     *,
+    daemon: Any,
     group_id: str,
     session_id: str,
     pcm16_path: Path,
+    document_path: str,
     selected_model_id: str,
     sample_rate: int,
     audio_duration_ms: int,
+    language: str = "",
     selected_asr_model_id: str = "",
 ) -> None:
+    final_asr_model_id = effective_final_service_model_id(selected_asr_model_id)
     speaker_transcript_segments: list[dict[str, Any]] = []
     speaker_transcript_error: dict[str, Any] | None = None
     try:
-        diarization = await run_sherpa_diarization_file(
+        diarization = await run_final_diarization_file(
             pcm16_path,
             selected_model_id=selected_model_id,
             sample_rate=sample_rate,
@@ -317,37 +354,70 @@ async def _run_voice_meeting_diarization_background(
         speaker_segments = diarization.get("segments") if isinstance(diarization.get("segments"), list) else []
         try:
             pcm16_audio = pcm16_path.read_bytes()
-            speaker_transcript_segments = await build_speaker_transcript_segments(
+            speaker_transcript_segments = await build_offline_speaker_transcript_segments(
                 pcm16_audio,
                 speaker_segments,
                 sample_rate=sample_rate,
-                transcribe_segment=lambda audio, rate: transcribe_sherpa_streaming_pcm16(
-                    audio,
-                    selected_model_id=selected_asr_model_id,
-                    sample_rate=rate,
-                ),
+                selected_model_id=final_asr_model_id,
             )
-        except SherpaStreamingAsrError as exc:
+        except LocalStreamingAsrError as exc:
             speaker_transcript_error = {"code": exc.code, "message": exc.message, "details": exc.details}
         except Exception as exc:
             speaker_transcript_error = {"code": "speaker_transcript_failed", "message": str(exc), "details": {}}
+        final_apply_result: dict[str, Any] = {"ok": True, "result": {"applied": False}}
+        if speaker_transcript_segments and not speaker_transcript_error and str(document_path or "").strip():
+            final_apply_result = await apply_final_speaker_transcript_to_document(
+                daemon,
+                group_id=group_id,
+                session_id=session_id,
+                document_path=document_path,
+                speaker_transcript_segments=speaker_transcript_segments,
+                sample_rate=sample_rate,
+                language=language,
+                final_asr_model_id=final_asr_model_id,
+                audio_duration_ms=audio_duration_ms,
+            )
+            if not bool(final_apply_result.get("ok")):
+                error = final_apply_result.get("error") if isinstance(final_apply_result.get("error"), dict) else {}
+                speaker_transcript_error = {
+                    "code": str(error.get("code") or "final_transcript_apply_failed"),
+                    "message": str(error.get("message") or "final transcript could not be applied"),
+                    "details": error.get("details") if isinstance(error.get("details"), dict) else {},
+                }
+            elif not bool((final_apply_result.get("result") or {}).get("applied")):
+                result = final_apply_result.get("result") if isinstance(final_apply_result.get("result"), dict) else {}
+                speaker_transcript_error = {
+                    "code": str(result.get("reason") or "final_transcript_not_applied"),
+                    "message": "final transcript was not applied to the target document",
+                    "details": {},
+                }
+        elif speaker_transcript_segments and not speaker_transcript_error:
+            final_apply_result = {"ok": True, "result": {"applied": False, "reason": "non_document_capture"}}
+        elif not speaker_transcript_error:
+            speaker_transcript_error = {
+                "code": "empty_speaker_transcript",
+                "message": "final audio analysis produced no transcript",
+                "details": {},
+            }
         artifact_path = _write_voice_speaker_transcript_artifact(
             group_id,
             session_id,
             {
-                "status": "ready",
+                "status": "failed" if speaker_transcript_error else "ready",
                 "sample_rate": sample_rate,
                 "audio_duration_ms": audio_duration_ms,
                 "segments": speaker_segments,
                 "speaker_transcript_segments": speaker_transcript_segments,
                 "speaker_transcript_error": speaker_transcript_error,
+                "speaker_transcript_model_id": final_asr_model_id,
+                "final_apply_result": final_apply_result,
             },
         )
         _write_voice_meeting_session(
             group_id,
             session_id,
             {
-                "status": "closed",
+                "status": "failed" if speaker_transcript_error else "closed",
                 "audio_duration_ms": audio_duration_ms,
                 "audio_path": str(pcm16_path),
                 "diarization_artifact_path": artifact_path,
@@ -355,18 +425,21 @@ async def _run_voice_meeting_diarization_background(
                     **diarization,
                     "speaker_transcript_segments": speaker_transcript_segments,
                     "speaker_transcript_error": speaker_transcript_error,
+                    "speaker_transcript_model_id": final_asr_model_id,
+                    "final_apply_result": final_apply_result,
                     "artifact_path": artifact_path,
                     "provisional": False,
                 },
-                "error": None,
+                "error": speaker_transcript_error,
             },
         )
         _append_voice_meeting_session_event(
             group_id,
             session_id,
-            status="ready",
-            action="diarization_ready",
+            status="failed" if speaker_transcript_error else "ready",
+            action="diarization_failed" if speaker_transcript_error else "diarization_ready",
             artifact_path=artifact_path,
+            error=speaker_transcript_error,
         )
     except SherpaDiarizationError as exc:
         error = {"code": exc.code, "message": exc.message, "details": exc.details}
@@ -441,28 +514,6 @@ def _pcm16_duration_ms(byte_count: int, sample_rate: int) -> int:
     rate = max(1, int(sample_rate or 16000))
     return int(max(0, byte_count) / (_VOICE_PCM16_BYTES_PER_SAMPLE * rate) * 1000)
 
-
-def _trim_pcm16_window(audio: bytearray, *, sample_rate: int, window_ms: int) -> None:
-    rate = max(1, int(sample_rate or 16000))
-    max_bytes = int(rate * _VOICE_PCM16_BYTES_PER_SAMPLE * max(0, window_ms) / 1000)
-    if max_bytes <= 0 or len(audio) <= max_bytes:
-        return
-    del audio[: len(audio) - max_bytes]
-
-
-def _offset_diarization_segments(result: dict[str, Any], offset_ms: int) -> dict[str, Any]:
-    if offset_ms <= 0:
-        return result
-    segments = result.get("segments") if isinstance(result.get("segments"), list) else []
-    adjusted: list[dict[str, Any]] = []
-    for item in segments:
-        if not isinstance(item, dict):
-            continue
-        next_item = dict(item)
-        next_item["start_ms"] = int(next_item.get("start_ms") or 0) + offset_ms
-        next_item["end_ms"] = int(next_item.get("end_ms") or 0) + offset_ms
-        adjusted.append(next_item)
-    return {**result, "segments": adjusted, "offset_ms": offset_ms}
 
 _PRESENTATION_BROWSER_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
 _CONTEXT_INFLIGHT: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
@@ -805,6 +856,14 @@ def _collect_ledger_event_statuses(
             except Exception:
                 logger.debug("ledger_status_cache_store_failed group_id=%s", str(getattr(group, "group_id", "") or ""), exc_info=True)
 
+    delivery_statuses = _collect_web_model_delivery_statuses(
+        group,
+        [str(event.get("id") or "").strip() for event in chat_events],
+    )
+    for event_id, delivery_status in delivery_statuses.items():
+        if delivery_status:
+            status_by_event_id.setdefault(str(event_id), {})["web_model_delivery_status"] = delivery_status
+
     logger.debug(
         "ledger_statuses group_id=%s total=%d chat=%d cache_hit=%d cache_miss=%d elapsed_ms=%.1f",
         str(getattr(group, "group_id", "") or ""),
@@ -816,6 +875,98 @@ def _collect_ledger_event_statuses(
     )
 
     return status_by_event_id
+
+
+_WEB_MODEL_DELIVERY_KIND_TO_STATE = {
+    "web_model.browser_delivery.submitting": "submitting",
+    "web_model.browser_delivery.submitted": "submitted",
+    "web_model.browser_delivery.pending": "pending",
+    "web_model.browser_delivery.ambiguous": "ambiguous",
+    "web_model.browser_delivery.failed": "failed",
+}
+_WEB_MODEL_DELIVERY_STATUS_LOOKBACK = 2000
+
+
+def _web_model_delivery_event_ids(data: dict[str, Any]) -> list[str]:
+    ids = [
+        str(item or "").strip()
+        for item in (data.get("event_ids") if isinstance(data.get("event_ids"), list) else [])
+        if str(item or "").strip()
+    ]
+    if ids:
+        return ids
+    trigger_id = str(data.get("trigger_event_id") or "").strip()
+    return [trigger_id] if trigger_id else []
+
+
+def _web_model_delivery_detail(data: dict[str, Any]) -> str:
+    browser = data.get("browser") if isinstance(data.get("browser"), dict) else {}
+    evidence = str((browser or {}).get("submission_evidence") or data.get("submission_evidence") or "").strip()
+    if evidence:
+        return evidence
+    return str(data.get("error") or data.get("commit_error") or "").strip()
+
+
+def _web_model_delivery_status_payload(event: dict[str, Any]) -> dict[str, Any] | None:
+    kind = str(event.get("kind") or "").strip()
+    state = _WEB_MODEL_DELIVERY_KIND_TO_STATE.get(kind)
+    if not state:
+        return None
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    return {
+        "state": state,
+        "actor_id": str(data.get("actor_id") or "").strip(),
+        "delivery_id": str(data.get("delivery_id") or "").strip(),
+        "updated_at": str(event.get("ts") or "").strip(),
+        "detail": _web_model_delivery_detail(data),
+    }
+
+
+def _collect_web_model_delivery_statuses(group: Any, event_ids: list[str]) -> dict[str, dict[str, Any]]:
+    normalized_ids = [str(event_id or "").strip() for event_id in event_ids if str(event_id or "").strip()]
+    if not normalized_ids:
+        return {}
+    wanted = set(normalized_ids)
+    try:
+        from ....kernel.ledger_index import lookup_events_by_ids, search_event_ids_indexed
+    except Exception:
+        return {}
+
+    try:
+        candidate_ids, _has_more = search_event_ids_indexed(
+            group.ledger_path,
+            allowed_kinds=set(_WEB_MODEL_DELIVERY_KIND_TO_STATE.keys()),
+            query="",
+            limit=_WEB_MODEL_DELIVERY_STATUS_LOOKBACK,
+        )
+    except Exception:
+        return {}
+
+    if not candidate_ids:
+        return {}
+
+    candidates = [
+        event
+        for event in lookup_events_by_ids(group.ledger_path, candidate_ids)
+        if isinstance(event, dict)
+    ]
+    statuses: dict[str, dict[str, Any]] = {}
+    for event in candidates:
+        kind = str(event.get("kind") or "").strip()
+        if kind not in _WEB_MODEL_DELIVERY_KIND_TO_STATE:
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        target_ids = [event_id for event_id in _web_model_delivery_event_ids(data) if event_id in wanted]
+        if not target_ids:
+            continue
+        payload = _web_model_delivery_status_payload(event)
+        if not payload:
+            continue
+        for event_id in target_ids:
+            statuses.setdefault(event_id, payload)
+        if len(statuses) >= len(wanted):
+            break
+    return statuses
 
 
 def _apply_ledger_event_statuses(events: list[dict[str, Any]], status_by_event_id: dict[str, dict[str, Any]]) -> None:
@@ -834,6 +985,8 @@ def _apply_ledger_event_statuses(events: list[dict[str, Any]], status_by_event_i
             ev["_ack_status"] = payload["ack_status"]
         if "obligation_status" in payload:
             ev["_obligation_status"] = payload["obligation_status"]
+        if "web_model_delivery_status" in payload:
+            ev["_web_model_delivery_status"] = payload["web_model_delivery_status"]
 
 
 def create_routers(ctx: RouteContext) -> list[APIRouter]:
@@ -993,82 +1146,36 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
     async def group_create(req: CreateGroupRequest) -> Dict[str, Any]:
         return await ctx.daemon({"op": "group_create", "args": {"title": req.title, "topic": req.topic, "by": req.by}})
 
-    @global_router.post("/groups/from_template", dependencies=[Depends(require_admin)])
-    async def group_create_from_template(
-        path: str = Form(...),
-        title: str = Form("working-group"),
-        topic: str = Form(""),
+    @global_router.post("/groups/copy/preview_import", dependencies=[Depends(require_admin)])
+    async def group_copy_preview_import(file: UploadFile = File(...)) -> Dict[str, Any]:
+        raw = await file.read()
+        if len(raw) > WEB_MAX_GROUP_COPY_PACKAGE_BYTES:
+            raise HTTPException(status_code=413, detail={"code": "copy_package_too_large", "message": "group copy too large"})
+        package_b64 = base64.b64encode(raw).decode("ascii")
+        resp = await run_in_threadpool(run_group_copy_preview_import, {"package_b64": package_b64})
+        return _response_to_dict(resp)
+
+    @global_router.post("/groups/copy/import", dependencies=[Depends(require_admin)])
+    async def group_copy_import(
+        workspace_root: str = Form(""),
+        title: str = Form(""),
         by: str = Form("user"),
         file: UploadFile = File(...),
     ) -> Dict[str, Any]:
         raw = await file.read()
-        if len(raw) > WEB_MAX_TEMPLATE_BYTES:
-            raise HTTPException(status_code=413, detail={"code": "template_too_large", "message": "template too large"})
-        template_text = raw.decode("utf-8", errors="replace")
-        return await ctx.daemon(
+        if len(raw) > WEB_MAX_GROUP_COPY_PACKAGE_BYTES:
+            raise HTTPException(status_code=413, detail={"code": "copy_package_too_large", "message": "group copy too large"})
+        package_b64 = base64.b64encode(raw).decode("ascii")
+        resp = await run_in_threadpool(
+            run_group_copy_import,
             {
-                "op": "group_create_from_template",
-                "args": {"path": path, "title": title, "topic": topic, "by": by, "template": template_text},
+                "package_b64": package_b64,
+                "workspace_root": workspace_root,
+                "title": title,
+                "by": by,
             }
         )
-
-    @global_router.post("/templates/preview", dependencies=[Depends(require_admin)])
-    async def template_preview(file: UploadFile = File(...)) -> Dict[str, Any]:
-        raw = await file.read()
-        if len(raw) > WEB_MAX_TEMPLATE_BYTES:
-            return {"ok": False, "error": {"code": "template_too_large", "message": "template too large"}}
-        template_text = raw.decode("utf-8", errors="replace")
-        try:
-            tpl = parse_group_template(template_text)
-        except Exception as e:
-            return {"ok": False, "error": {"code": "invalid_template", "message": str(e)}}
-
-        def _prompt_preview(value: Any, limit: int = 2000) -> Dict[str, Any]:
-            if value is None:
-                return {"source": "builtin"}
-            raw_text = str(value)
-            if not raw_text.strip():
-                return {"source": "builtin"}
-            out = raw_text.strip()
-            if len(out) > limit:
-                out = out[:limit] + "\n…"
-            # Templates now map prompt overrides to CCCC_HOME/group prompts.
-            return {"source": "home", "chars": len(raw_text), "preview": out}
-
-        return {
-            "ok": True,
-            "result": {
-                "template": {
-                    "kind": tpl.kind,
-                    "v": tpl.v,
-                    "title": tpl.title,
-                    "topic": tpl.topic,
-                    "exported_at": tpl.exported_at,
-                    "cccc_version": tpl.cccc_version,
-                    "actors": [
-                        {
-                            "id": a.actor_id,
-                            "title": a.title,
-                            "runtime": a.runtime,
-                            "runner": a.runner,
-                            "command": a.command,
-                            "submit": a.submit,
-                            "enabled": bool(a.enabled),
-                        }
-                        for a in tpl.actors
-                    ],
-                    "settings": tpl.settings.model_dump(),
-                    "automation": {
-                        "rules": len(tpl.automation.rules),
-                        "snippets": len(tpl.automation.snippets),
-                    },
-                    "prompts": {
-                        "preamble": _prompt_preview(tpl.prompts.preamble),
-                        "help": _prompt_preview(tpl.prompts.help),
-                    },
-                }
-            },
-        }
+        return _response_to_dict(resp)
 
     @global_router.get("/events/stream", dependencies=[Depends(require_user)])
     async def global_events_stream() -> StreamingResponse:
@@ -1111,6 +1218,11 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 status_code=400,
                 detail={"code": "confirmation_required", "message": f"confirm must equal group_id: {group_id}"}
             )
+        group = load_group(group_id)
+        if group is not None:
+            from ..streams import close_sse_tailers_under
+
+            await close_sse_tailers_under(group.path)
         return await ctx.daemon({"op": "group_delete", "args": {"group_id": group_id, "by": by}})
 
     @group_router.get("/context")
@@ -1138,44 +1250,22 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             return await run_in_threadpool(_read_context_summary_local, gid)
         return await _deduped_context_get(gid, detail_mode, _fetch)
 
-    @group_router.get("/template/export")
-    async def group_template_export(group_id: str) -> Dict[str, Any]:
-        return await ctx.daemon({"op": "group_template_export", "args": {"group_id": group_id}})
-
-    @group_router.post("/template/preview")
-    async def group_template_preview(group_id: str, req: GroupTemplatePreviewRequest) -> Dict[str, Any]:
-        return await ctx.daemon({"op": "group_template_preview", "args": {"group_id": group_id, "template": req.template, "by": req.by}})
-
-    @group_router.post("/template/preview_upload")
-    async def group_template_preview_upload(
-        group_id: str,
-        by: str = Form("user"),
-        file: UploadFile = File(...),
-    ) -> Dict[str, Any]:
-        raw = await file.read()
-        if len(raw) > WEB_MAX_TEMPLATE_BYTES:
-            raise HTTPException(status_code=413, detail={"code": "template_too_large", "message": "template too large"})
-        template_text = raw.decode("utf-8", errors="replace")
-        return await ctx.daemon({"op": "group_template_preview", "args": {"group_id": group_id, "template": template_text, "by": by}})
-
-    @group_router.post("/template/import_replace")
-    async def group_template_import_replace(
-        group_id: str,
-        confirm: str = Form(""),
-        by: str = Form("user"),
-        file: UploadFile = File(...),
-    ) -> Dict[str, Any]:
-        raw = await file.read()
-        if len(raw) > WEB_MAX_TEMPLATE_BYTES:
-            raise HTTPException(status_code=413, detail={"code": "template_too_large", "message": "template too large"})
-        template_text = raw.decode("utf-8", errors="replace")
-        await invalidate_context_read(group_id)
-        return await ctx.daemon(
-            {
-                "op": "group_template_import_replace",
-                "args": {"group_id": group_id, "confirm": confirm, "by": by, "template": template_text},
-            }
-        )
+    @group_router.get("/copy/export", response_model=None)
+    async def group_copy_export(group_id: str, request: Request) -> Any:
+        require_admin(request)
+        resp_obj = await run_in_threadpool(run_group_copy_export, {"group_id": group_id, "by": "user"})
+        resp = _response_to_dict(resp_obj)
+        if not bool(resp.get("ok")):
+            return resp
+        result = resp.get("result") if isinstance(resp.get("result"), dict) else {}
+        package_b64 = str((result or {}).get("package_b64") or "")
+        try:
+            package_bytes = base64.b64decode(package_b64.encode("ascii"), validate=True)
+        except Exception:
+            return {"ok": False, "error": {"code": "copy_export_invalid", "message": "daemon returned invalid copy package"}}
+        filename = str((result or {}).get("filename") or f"cccc-group--{group_id}.zip")
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return StreamingResponse(iter([package_bytes]), media_type="application/zip", headers=headers)
 
     @group_router.get("/tasks")
     async def group_tasks(group_id: str, task_id: Optional[str] = None) -> Dict[str, Any]:
@@ -2181,11 +2271,17 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         streaming_pcm16_path: Path | None = None
         streaming_pcm16_bytes = 0
         streaming_sample_rate = 16000
+        streaming_final_asr_model_id = ""
         streaming_diarization_model_id = ""
+        streaming_capture_mode = "document"
+        streaming_document_path = ""
+        streaming_language = ""
         streaming_diarization_ready = False
         streaming_diarization_task: asyncio.Task[dict[str, Any]] | None = None
         streaming_last_diarization_ms = 0
         streaming_diarization_seq = 0
+        streaming_stable_diarization_segments: list[dict[str, Any]] = []
+        streaming_stable_speaker_embeddings: list[dict[str, Any]] = []
         streaming_client_session_id = ""
 
         def cleanup_streaming_pcm16() -> None:
@@ -2243,8 +2339,19 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     assistants = group.doc.get("assistants") if isinstance(group.doc.get("assistants"), dict) else {}
                     assistant = assistants.get("voice_secretary") if isinstance(assistants.get("voice_secretary"), dict) else {}
                     config = assistant.get("config") if isinstance(assistant.get("config"), dict) else {}
-                    selected_model_id = str(config.get("service_model_id") or "").strip()
+                    configured_service_model_id = str(config.get("service_model_id") or "").strip()
+                    selected_model_id = effective_live_service_model_id(configured_service_model_id)
+                    streaming_final_asr_model_id = effective_final_service_model_id(configured_service_model_id)
                     streaming_diarization_model_id = str(config.get("service_diarization_model_id") or "").strip()
+                    streaming_capture_mode = str(payload.get("capture_mode") or payload.get("captureMode") or "document").strip().lower()
+                    if streaming_capture_mode not in {"document", "instruction", "prompt"}:
+                        streaming_capture_mode = "document"
+                    streaming_document_path = (
+                        str(payload.get("document_path") or payload.get("documentPath") or "").strip()
+                        if streaming_capture_mode == "document"
+                        else ""
+                    )
+                    streaming_language = str(payload.get("language") or config.get("recognition_language") or "").strip()
                     cleanup_streaming_pcm16()
                     streaming_pcm16_audio = bytearray()
                     streaming_sample_rate = int(payload.get("sample_rate") or 16000)
@@ -2252,6 +2359,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     streaming_diarization_task = None
                     streaming_last_diarization_ms = 0
                     streaming_diarization_seq = 0
+                    streaming_stable_diarization_segments = []
+                    streaming_stable_speaker_embeddings = []
                     _write_voice_speaker_transcript_artifact(
                         group_id,
                         streaming_client_session_id,
@@ -2262,6 +2371,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                             "segments": [],
                             "speaker_transcript_segments": [],
                             "speaker_transcript_error": None,
+                            "speaker_transcript_model_id": streaming_final_asr_model_id,
                         },
                     )
                     _write_voice_meeting_session(
@@ -2271,6 +2381,10 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                             "status": "recording",
                             "sample_rate": streaming_sample_rate,
                             "diarization_ready": streaming_diarization_ready,
+                            "final_asr_model_id": streaming_final_asr_model_id,
+                            "capture_mode": streaming_capture_mode,
+                            "document_path": streaming_document_path,
+                            "language": streaming_language,
                             "latest_partial": "",
                             "error": None,
                         },
@@ -2303,17 +2417,14 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                                 pcm16_chunk = base64.b64decode(audio_base64, validate=True)
                                 append_streaming_pcm16(pcm16_chunk)
                                 streaming_pcm16_audio.extend(pcm16_chunk)
-                                _trim_pcm16_window(
-                                    streaming_pcm16_audio,
-                                    sample_rate=sample_rate,
-                                    window_ms=_VOICE_DIARIZATION_WINDOW_MS,
-                                )
                                 streaming_sample_rate = sample_rate
                             except Exception:
                                 pass
                         if _VOICE_DIARIZATION_ENABLE_PROVISIONAL and streaming_diarization_task is not None and streaming_diarization_task.done():
                             try:
                                 delta_result = streaming_diarization_task.result()
+                                streaming_stable_diarization_segments = diarization_result_segments(delta_result)
+                                streaming_stable_speaker_embeddings = diarization_result_speaker_embeddings(delta_result)
                                 await websocket.send_json({
                                     "type": "diarization_delta",
                                     "ok": True,
@@ -2348,29 +2459,24 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                             and audio_duration_ms - streaming_last_diarization_ms >= _VOICE_DIARIZATION_INTERVAL_MS
                             and streaming_diarization_task is None
                         ):
-                            window_audio = bytes(streaming_pcm16_audio)
-                            window_offset_ms = _pcm16_duration_ms(
-                                max(0, streaming_pcm16_bytes - len(streaming_pcm16_audio)),
-                                streaming_sample_rate,
-                            )
+                            prefix_audio = bytes(streaming_pcm16_audio)
+                            previous_segments = list(streaming_stable_diarization_segments)
+                            previous_speaker_embeddings = list(streaming_stable_speaker_embeddings)
                             streaming_diarization_seq += 1
                             task_seq = streaming_diarization_seq
                             streaming_last_diarization_ms = audio_duration_ms
 
-                            async def _run_delta(audio: bytes, offset_ms: int, run_seq: int) -> dict[str, Any]:
-                                result = await run_sherpa_diarization(
-                                    audio,
+                            streaming_diarization_task = asyncio.create_task(
+                                run_provisional_diarization_prefix(
+                                    prefix_audio,
                                     selected_model_id=streaming_diarization_model_id,
                                     sample_rate=streaming_sample_rate,
+                                    run_seq=task_seq,
+                                    audio_duration_ms=audio_duration_ms,
+                                    previous_segments=previous_segments,
+                                    previous_speaker_embeddings=previous_speaker_embeddings,
                                 )
-                                return {
-                                    **_offset_diarization_segments(result, offset_ms),
-                                    "run_seq": run_seq,
-                                    "window_ms": _VOICE_DIARIZATION_WINDOW_MS,
-                                    "provisional": True,
-                                }
-
-                            streaming_diarization_task = asyncio.create_task(_run_delta(window_audio, window_offset_ms, task_seq))
+                            )
                         await streaming_session.send(
                             {
                                 "type": "audio",
@@ -2472,6 +2578,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                                         "segments": [],
                                         "speaker_transcript_segments": [],
                                         "speaker_transcript_error": None,
+                                        "speaker_transcript_model_id": streaming_final_asr_model_id,
                                     },
                                 )
                                 _write_voice_meeting_session(
@@ -2482,6 +2589,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                                         "audio_duration_ms": audio_duration_ms,
                                         "audio_path": str(persisted_pcm16_path),
                                         "diarization_artifact_path": artifact_path,
+                                        "final_asr_model_id": streaming_final_asr_model_id,
+                                        "capture_mode": streaming_capture_mode,
                                     },
                                 )
                                 await websocket.send_json({
@@ -2492,13 +2601,16 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                                     "artifact_path": artifact_path,
                                 })
                                 asyncio.create_task(_run_voice_meeting_diarization_background(
+                                    daemon=ctx.daemon,
                                     group_id=group_id,
                                     session_id=streaming_client_session_id,
                                     pcm16_path=persisted_pcm16_path,
+                                    document_path=streaming_document_path if streaming_capture_mode == "document" else "",
                                     selected_model_id=streaming_diarization_model_id,
-                                    selected_asr_model_id=selected_model_id,
+                                    selected_asr_model_id=streaming_final_asr_model_id,
                                     sample_rate=streaming_sample_rate,
                                     audio_duration_ms=audio_duration_ms,
+                                    language=streaming_language,
                                 ))
                             else:
                                 _write_voice_meeting_session(
@@ -2569,6 +2681,29 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             }
         )
 
+    @group_router.post("/assistants/voice_secretary/models/remove")
+    async def group_voice_secretary_model_remove(
+        group_id: str,
+        req: AssistantVoiceModelRemoveRequest,
+    ) -> Dict[str, Any]:
+        return await ctx.daemon(
+            {
+                "op": "assistant_voice_model_remove",
+                "args": {
+                    "group_id": group_id,
+                    "model_id": req.model_id,
+                    "by": req.by,
+                },
+            }
+        )
+
+    @group_router.delete("/assistants/voice_secretary/models")
+    async def group_voice_secretary_model_remove_legacy(
+        group_id: str,
+        req: AssistantVoiceModelRemoveRequest,
+    ) -> Dict[str, Any]:
+        return await group_voice_secretary_model_remove(group_id, req)
+
     @group_router.post("/assistants/voice_secretary/runtime/install")
     async def group_voice_secretary_runtime_install(
         group_id: str,
@@ -2586,6 +2721,22 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             }
         )
 
+    @group_router.post("/assistants/voice_secretary/runtime/remove")
+    async def group_voice_secretary_runtime_remove(
+        group_id: str,
+        req: AssistantVoiceRuntimeRemoveRequest,
+    ) -> Dict[str, Any]:
+        return await ctx.daemon(
+            {
+                "op": "assistant_voice_runtime_remove",
+                "args": {
+                    "group_id": group_id,
+                    "runtime_id": req.runtime_id,
+                    "by": req.by,
+                },
+            }
+        )
+
     @group_router.get("/assistants/voice_secretary/sessions/latest")
     async def group_voice_secretary_latest_session_get(group_id: str, document_path: str = "") -> Dict[str, Any]:
         return {
@@ -2599,6 +2750,24 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
     @group_router.get("/assistants/voice_secretary/sessions/{session_id}")
     async def group_voice_secretary_session_get(group_id: str, session_id: str) -> Dict[str, Any]:
         return {"ok": True, "result": {"group_id": group_id, "session": _read_voice_meeting_session(group_id, session_id)}}
+
+    @group_router.delete("/assistants/voice_secretary/sessions/latest/transcript")
+    async def group_voice_secretary_latest_session_transcript_clear(group_id: str, req: AssistantVoiceTranscriptClearRequest) -> Dict[str, Any]:
+        session = _read_latest_voice_meeting_session(group_id, document_path=req.document_path)
+        session_id = str(session.get("session_id") or "").strip()
+        cleared = False
+        if session_id:
+            path = _voice_meeting_segments_path(group_id, session_id)
+            if path.exists():
+                try:
+                    path.unlink()
+                    cleared = True
+                except FileNotFoundError:
+                    cleared = True
+            else:
+                cleared = True
+            _write_voice_meeting_session(group_id, session_id, {"latest_partial": ""})
+        return {"ok": True, "result": {"group_id": group_id, "session_id": session_id, "cleared": cleared}}
 
     @group_router.post("/assistants/voice_secretary/transcript_segments")
     async def group_voice_secretary_transcript_segment_append(
@@ -3283,6 +3452,32 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             await websocket.close(code=1008)
             return
 
+        mode = str(websocket.query_params.get("mode") or "").strip().lower()
+        if mode == "vnc":
+            try:
+                reader, writer = await open_daemon_stream(home=ctx.home, limit=_PRESENTATION_BROWSER_STREAM_LIMIT_BYTES)
+            except Exception:
+                await websocket.close(code=1011)
+                return
+            try:
+                resp = await send_daemon_attach_request(
+                    reader,
+                    writer,
+                    op="presentation_browser_vnc_attach",
+                    args={"group_id": group_id, "slot": slot_id, "by": "user"},
+                )
+                if not isinstance(resp, dict) or not resp.get("ok"):
+                    await websocket.close(code=1008)
+                    return
+                await proxy_daemon_raw_stream_to_websocket(websocket, reader, writer)
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+            return
+
         try:
             ep = get_daemon_endpoint()
             transport = str(ep.get("transport") or "").strip().lower()
@@ -3300,7 +3495,15 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             return
 
         try:
-            req = {"op": "presentation_browser_attach", "args": {"group_id": group_id, "slot": slot_id, "by": "user"}}
+            req = {
+                "op": "presentation_browser_attach",
+                "args": {
+                    "group_id": group_id,
+                    "slot": slot_id,
+                    "by": "user",
+                    "viewer_mode": str(websocket.query_params.get("viewer_mode") or "auto"),
+                },
+            }
             writer.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
             await writer.drain()
             line = await reader.readline()

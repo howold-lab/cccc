@@ -188,6 +188,7 @@ export type LedgerEvent = {
   _read_status?: Record<string, boolean>;
   _ack_status?: Record<string, boolean>;
   _obligation_status?: Record<string, ObligationStatus>;
+  _web_model_delivery_status?: WebModelDeliveryStatusPayload;
 };
 
 export type HeadlessStreamEvent = {
@@ -203,6 +204,15 @@ export type LedgerEventStatusPayload = {
   read_status?: Record<string, boolean>;
   ack_status?: Record<string, boolean>;
   obligation_status?: Record<string, ObligationStatus>;
+  web_model_delivery_status?: WebModelDeliveryStatusPayload;
+};
+
+export type WebModelDeliveryStatusPayload = {
+  state?: "submitting" | "submitted" | "pending" | "ambiguous" | "failed" | string;
+  actor_id?: string;
+  delivery_id?: string;
+  updated_at?: string;
+  detail?: string;
 };
 
 export type Actor = {
@@ -222,6 +232,7 @@ export type Actor = {
   command?: string[];
   env?: Record<string, string>;
   capability_autoload?: string[];
+  capability_hidden?: string[];
   runner?: string;
   runner_effective?: string;
   runtime?: string;
@@ -343,6 +354,17 @@ export type CapabilitySourceState = {
   error?: string;
 };
 
+export type CapabilitySourceInstance = {
+  source_instance_key: string;
+  source_id: string;
+  label?: string;
+  source_uri?: string;
+  record_count?: number;
+  capability_ids?: string[];
+  last_synced_at?: string;
+  sync_state?: string;
+};
+
 export type CapabilityBlockEntry = {
   capability_id: string;
   scope?: string;
@@ -369,7 +391,13 @@ export type CapabilityStateResult = {
   actor_id: string;
   enabled: CapabilityEnabledEntry[];
   enabled_capabilities?: string[];
-  dynamic_tools?: Array<{ name: string; capability_id: string; description?: string }>;
+  dynamic_tools?: Array<{
+    name: string;
+    capability_id: string;
+    description?: string;
+    real_tool_name?: string;
+    inputSchema?: Record<string, unknown>;
+  }>;
   active_capsule_skills?: Array<{
     capability_id: string;
     name?: string;
@@ -380,6 +408,7 @@ export type CapabilityStateResult = {
     source_uri?: string;
     policy_level?: string;
   }>;
+  actor_hidden_capabilities?: string[];
   capability_usage?: CapabilityUsageSummary;
 };
 
@@ -404,6 +433,7 @@ export type CapabilityUsageSummary = {
   session_enabled?: CapabilityUsageActorEntry[];
   actor_autoload?: CapabilityUsageActorEntry[];
   profile_autoload?: CapabilityUsageActorEntry[];
+  actor_hidden?: CapabilityUsageActorEntry[];
   blocked?: boolean;
   blocked_scope?: string;
   blocked_reason?: string;
@@ -604,6 +634,14 @@ export type PresentationBrowserSurfaceState = {
   last_frame_seq?: number;
   last_frame_at?: string | null;
   controller_attached?: boolean;
+  viewer?: {
+    kind?: string | null;
+    vnc?: {
+      available?: boolean;
+      error?: string | null;
+      started_at?: string | null;
+    } | null;
+  } | null;
 };
 
 export type ContextAttention = {
@@ -695,20 +733,23 @@ export type AssistantServiceModel = {
   runtime_id?: string;
   title?: string;
   description?: string;
-  status?: "not_installed" | "downloading" | "ready" | "failed" | "unknown" | string;
+  status?: "not_installed" | "downloading" | "installing" | "ready" | "failed" | "unknown" | string;
   available?: boolean;
   installed?: boolean;
   install_dir?: string;
   installed_at?: string;
   updated_at?: string;
   command_ready?: boolean;
+  offline_ready?: boolean;
   streaming_ready?: boolean;
   diarization_ready?: boolean;
+  offline?: Record<string, unknown>;
   streaming?: Record<string, unknown>;
   diarization?: Record<string, unknown>;
   manifest_sha256?: string;
   downloaded_bytes?: number;
   total_size_bytes?: number;
+  disk_usage_bytes?: number;
   progress_percent?: number;
   current_artifact_path?: string;
   artifact_index?: number;
@@ -729,6 +770,7 @@ export type AssistantServiceRuntime = {
   missing_modules?: string[];
   installed_at?: string;
   updated_at?: string;
+  disk_usage_bytes?: number;
   error?: Record<string, unknown>;
 };
 
@@ -829,6 +871,7 @@ export type AssistantVoiceMeetingSession = {
   sample_rate?: number;
   audio_duration_ms?: number;
   language?: string;
+  capture_mode?: string;
   document_path?: string;
   latest_partial?: string;
   last_final_text?: string;
@@ -1330,7 +1373,7 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   gemini: { label: "Gemini CLI", desc: "" },
   kimi: { label: "Kimi CLI", desc: "" },
   neovate: { label: "Neovate Code", desc: "" },
-  web_model: { label: "Browser Web Model", desc: "Remote MCP connector; no local process" },
+  web_model: { label: "ChatGPT Web Model", desc: "ChatGPT browser delivery + remote MCP connector" },
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
 };
 

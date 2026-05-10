@@ -13,6 +13,7 @@ import { useModalA11y } from "../../hooks/useModalA11y";
 import { CapabilityPicker } from "../CapabilityPicker";
 import { RolePresetPicker } from "../RolePresetPicker";
 import { ActorAvatarField } from "../ActorAvatarField";
+import { SelectCombobox } from "../SelectCombobox";
 import { formatCapabilityIdInput, parseCapabilityIdInput } from "../../utils/capabilityAutoload";
 import { actorProfileIdentityKey } from "../../utils/actorProfiles";
 import { supportsStandardWebHeadlessRuntime } from "../../utils/headlessRuntimeSupport";
@@ -364,22 +365,24 @@ export function AddActorModal({
                   <>
                     <div>
                       <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("actorProfile")}</label>
-                      <select
+                      <SelectCombobox
                         className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)]"
                         value={newActorProfileId}
-                        onChange={(e) => setNewActorProfileId(e.target.value)}
+                        onChange={setNewActorProfileId}
                         disabled={actorProfilesBusy}
-                      >
-                        <option value="">{actorProfilesBusy ? t("loadingProfiles") : t("selectActorProfile")}</option>
-                        {selectableActorProfiles.map((profile) => (
-                          <option key={actorProfileIdentityKey(profile)} value={actorProfileIdentityKey(profile)}>
-                            {(profile.name || profile.id) + " · " + profileScopeLabel(profile, t)}
-                          </option>
-                        ))}
-                      </select>
+                        ariaLabel={t("actorProfile")}
+                        items={[
+                          { value: "", label: actorProfilesBusy ? t("loadingProfiles") : t("selectActorProfile") },
+                          ...selectableActorProfiles.map((profile) => ({
+                            value: actorProfileIdentityKey(profile),
+                            label: `${profile.name || profile.id} · ${profileScopeLabel(profile, t)}`,
+                          })),
+                        ]}
+                        searchable
+                      />
                       {!actorProfilesBusy && actorProfiles.length > 0 && selectableActorProfiles.length === 0 ? (
                         <div className="mt-1.5 text-[10px] text-[var(--color-text-muted)]">
-                          Browser Web Model profiles are actor-bound and are managed in Settings &gt; Web Models.
+                          ChatGPT Web Model is managed directly in Settings &gt; ChatGPT Web Model.
                         </div>
                       ) : null}
                     </div>
@@ -407,31 +410,30 @@ export function AddActorModal({
                   <>
                     <div>
                       <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("aiRuntime")}</label>
-                      <select
+                      <SelectCombobox
                         className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)]"
                         value={newActorRuntime}
-                        onChange={(e) => {
-                          const next = e.target.value as SupportedRuntime;
+                        onChange={(value) => {
+                          const next = value as SupportedRuntime;
                           setNewActorRuntime(next);
                           if (next === "web_model") setNewActorRunner("headless");
                           else if (!supportsStandardWebHeadlessRuntime(next)) setNewActorRunner("pty");
                           setNewActorCommand("");
                           setNewActorUseDefaultCommand(next !== "custom");
                         }}
-                      >
-                        {SUPPORTED_RUNTIMES.map((rt) => {
+                        ariaLabel={t("aiRuntime")}
+                        items={SUPPORTED_RUNTIMES.map((rt) => {
                           const info = RUNTIME_INFO[rt];
                           const rtInfo = runtimes.find((r) => r.name === rt);
                           const available = rtInfo?.available ?? false;
                           const selectable = available || rt === "custom";
-                          return (
-                            <option key={rt} value={rt} disabled={!selectable}>
-                              {info?.label || rt}
-                              {!available && rt !== "custom" ? ` ${t("notInstalled")}` : ""}
-                            </option>
-                          );
+                          return {
+                            value: rt,
+                            label: `${info?.label || rt}${!available && rt !== "custom" ? ` ${t("notInstalled")}` : ""}`,
+                            disabled: !selectable,
+                          };
                         })}
-                      </select>
+                      />
                       {RUNTIME_INFO[newActorRuntime]?.desc ? (
                         <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
                           {RUNTIME_INFO[newActorRuntime].desc}
@@ -481,7 +483,7 @@ export function AddActorModal({
                         </div>
                         <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
                           {webModelRunnerLockedToHeadless
-                            ? t("runnerModeWebModelNote", { defaultValue: "Browser Web Model runs through a remote MCP connector, so it is fixed to Headless." })
+                            ? t("runnerModeWebModelNote", { defaultValue: "ChatGPT Web Model runs through browser delivery and a remote MCP connector, so it is fixed to Headless." })
                             : customRunnerLockedToPty
                             ? t("runnerModeHeadlessNote", { defaultValue: "Only some runtimes, such as codex and claude, support Headless mode. Other runtimes are fixed to PTY." })
                             : t("runnerModeHint", { defaultValue: "PTY uses terminal interaction; Headless uses structured event flow." })}
@@ -492,12 +494,12 @@ export function AddActorModal({
 	                    {newActorRuntime === "web_model" ? (
 	                      <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/25 bg-sky-500/10 text-sky-800 dark:text-sky-200">
 	                        <div className="font-medium">
-	                          {t("webModelActorBoundConnectorTitle", { defaultValue: "Actor-bound connector" })}
+	                          {t("webModelActorBoundConnectorTitle", { defaultValue: "Single ChatGPT Web Model actor" })}
 	                        </div>
 	                        <div className="mt-1">
 	                          {t("webModelActorBoundConnectorHint", {
 	                            defaultValue:
-	                              "Create this actor first, then open Settings > Web Models to generate its remote MCP connector. One connector represents one actor.",
+	                              "CCCC supports one ChatGPT Web Model actor in this instance. Create it first, then open Settings > ChatGPT Web Model to copy the MCP URL and bind a ChatGPT conversation.",
 	                          })}
 	                        </div>
 	                      </div>
@@ -650,7 +652,7 @@ export function AddActorModal({
 
                   {webModelSetupIsActorBound ? (
                     <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/25 bg-sky-500/10 text-sky-800 dark:text-sky-200">
-                      Browser Web Model setup is actor-bound. Create the actor, then manage its connector and ChatGPT chat in Settings &gt; Web Models.
+                      ChatGPT Web Model is a single actor for this CCCC instance. Create it, then manage the MCP URL and target ChatGPT chat in Settings &gt; ChatGPT Web Model.
                     </div>
                   ) : (
                     <details className={`group ${nestedCardClass}`}>

@@ -31,6 +31,7 @@ import {
 } from "./stores";
 import { useChatOutboxStore } from "./stores/chatOutboxStore";
 import type { ChatMessageData, LedgerEvent } from "./types";
+import { publishCapabilityChanged } from "./utils/capabilityEvents";
 import { filterVisibleRuntimeActors } from "./utils/runtimeVisibility";
 
 // ============ Main App Component ============
@@ -102,8 +103,7 @@ export default function App() {
     replyTarget,
     setDestGroupId,
     setReplyTarget,
-    setToText,
-    switchGroup,
+    setReplyToText,
   } = useComposerStore();
 
   const { setEditGroupTitle, setEditGroupTopic, setDirSuggestions } = useFormStore();
@@ -240,7 +240,7 @@ export default function App() {
           : policy === "foreman"
             ? ["@foreman"]
             : [];
-      setToText(defaultTo.join(", "));
+      setReplyToText(defaultTo.join(", "));
 
       setReplyTarget({
         eventId: String(ev.id),
@@ -249,7 +249,7 @@ export default function App() {
       });
       requestAnimationFrame(() => composerRef.current?.focus());
     },
-    [selectedGroupId, actors, composerRef, groupSettings, setDestGroupId, setReplyTarget, setToText]
+    [selectedGroupId, actors, composerRef, groupSettings, setDestGroupId, setReplyTarget, setReplyToText]
   );
 
   const { parseUrlDeepLink } = useDeepLink({
@@ -265,6 +265,9 @@ export default function App() {
     refreshGroups,
     refreshActors,
     selectedGroupId,
+    refreshCapabilities: (groupId) => {
+      publishCapabilityChanged(groupId);
+    },
   });
 
   const { canManageGroups, ccccHome, fetchDirSuggestions } = useAppChrome({
@@ -317,7 +320,6 @@ export default function App() {
     hasReplyTarget,
     hasComposerFiles,
     setDestGroupId,
-    switchGroup,
     fileInputRef,
     resetDragDrop,
     resetMountedActorIds,

@@ -26,6 +26,7 @@ export type WebModelConnector = {
   last_error?: string;
   connector_url?: string;
   connector_url_with_token?: string;
+  connector_url_path_token?: string;
   secret_available?: boolean;
 };
 
@@ -33,6 +34,39 @@ export type WebModelConnectorCreateResult = {
   connector: WebModelConnector;
   secret: string;
   replaced_connector_ids?: string[];
+};
+
+export type NomcpSession = {
+  sid: string;
+  schema?: string;
+  token_preview?: string;
+  created_at?: string;
+  updated_at?: string;
+  expires_at?: string;
+  revoked_at?: string;
+  revoked?: boolean;
+  expired?: boolean;
+  group_id?: string;
+  scope_key?: string;
+  repo_root?: string;
+  title?: string;
+  brief?: string;
+  reply_to_event_id?: string;
+  recipient?: string;
+  allowed_paths?: string[];
+  sent_message_ids?: string[];
+  advisory_count?: number;
+  latest_advisory_event_id?: string;
+  resource_count?: number;
+  changed_file_count?: number;
+  session_url?: string;
+  session_url_with_token?: string;
+  secret_available?: boolean;
+};
+
+export type NomcpSessionCreateResult = {
+  session: NomcpSession;
+  secret: string;
 };
 
 export type WebModelBrowserSession = {
@@ -46,6 +80,10 @@ export type WebModelBrowserSession = {
   tab_url?: string;
   last_tab_url?: string;
   conversation_url?: string;
+  pending_new_chat_bind?: boolean;
+  pending_new_chat_url?: string;
+  pending_new_chat_bind_started_at?: string;
+  new_chat_bound_at?: string;
   bootstrap_seed_delivered_at?: string;
   auto_confirm_scan_at?: string;
   auto_confirm_pages_seen?: number;
@@ -56,15 +94,84 @@ export type WebModelBrowserSession = {
   auto_confirm_last_page_url?: string;
   auto_confirm_last_details?: Array<Record<string, unknown>>;
   auto_confirm_last_errors?: Array<Record<string, unknown>>;
+  auto_reload_active?: boolean;
+  auto_reload_window_started_at?: string;
+  auto_reload_window_expires_at?: string;
+  auto_reload_last_progress_at?: string;
+  auto_reload_last_progress_reason?: string;
+  auto_reload_last_progress_detail?: string;
+  auto_reload_last_delivery_id?: string;
+  auto_reload_last_turn_id?: string;
+  auto_reload_last_event_ids?: string[];
+  auto_reload_target_url?: string;
+  auto_reload_last_reload_at?: string;
+  auto_reload_last_reload_reason?: string;
+  auto_reload_last_page_url?: string;
+  auto_reload_count?: number;
+  auto_reload_completed_at?: string;
+  auto_reload_completed_reason?: string;
+  auto_reload_expired_at?: string;
+  auto_reload_last_error?: string;
   last_delivery_at?: string;
+  last_delivery_id?: string;
+  last_delivery_status?: string;
+  last_submission_evidence?: string;
+  last_send_selector?: string;
   last_turn_id?: string;
+  last_event_ids?: string[];
+  last_error?: string;
   error?: string;
   message?: string;
+  health_snapshot?: WebModelHealthSnapshot;
+};
+
+export type WebModelHealthSnapshot = {
+  schema?: string;
+  group_id?: string;
+  actor_id?: string;
+  tone?: "ready" | "needs" | "neutral" | "error" | string;
+  summary?: string;
+  browser?: {
+    state?: string;
+    label?: string;
+    reason?: string;
+    active?: boolean;
+    ready?: boolean;
+    logged_in_guess?: boolean;
+    url?: string;
+    viewer_attached?: boolean;
+    last_frame_at?: string;
+  };
+  target?: {
+    state?: string;
+    label?: string;
+    reason?: string;
+    url?: string;
+  };
+  delivery?: {
+    state?: string;
+    label?: string;
+    reason?: string;
+    last_delivery_id?: string;
+    last_turn_id?: string;
+    last_event_ids?: string[];
+    last_delivery_at?: string;
+    last_submission_evidence?: string;
+    last_send_selector?: string;
+    last_error?: string;
+    cursor_committed?: boolean;
+  };
+  next_action?: {
+    recommended?: string;
+    label?: string;
+    reason?: string;
+  };
 };
 
 export type WebModelBrowserSurfaceResult = {
   browser_session: WebModelBrowserSession;
   browser_surface: PresentationBrowserSurfaceState;
+  health_snapshot?: WebModelHealthSnapshot;
 };
 
 export async function fetchWebModelConnectors() {
@@ -95,22 +202,64 @@ export async function revokeWebModelConnector(connectorId: string) {
   );
 }
 
-export async function fetchWebModelBrowserSession(groupId: string, actorId: string) {
+export async function fetchNomcpSessions(args?: { groupId?: string }) {
+  const params = new URLSearchParams();
+  if (args?.groupId) params.set("group_id", String(args.groupId || "").trim());
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return apiJson<{ sessions: NomcpSession[] }>(`/api/v1/nomcp/sessions${suffix}`);
+}
+
+export async function createNomcpSession(args: {
+  groupId: string;
+  title?: string;
+  brief?: string;
+  recipient?: string;
+  replyToEventId?: string;
+  allowedPaths?: string[];
+}) {
+  return apiJson<NomcpSessionCreateResult>("/api/v1/nomcp/sessions", {
+    method: "POST",
+    body: JSON.stringify({
+      group_id: String(args.groupId || "").trim(),
+      title: String(args.title || "No-MCP advisory session").trim(),
+      brief: String(args.brief || "Review the linked CCCC project context and return advisory findings.").trim(),
+      recipient: String(args.recipient || "user").trim() || "user",
+      reply_to_event_id: String(args.replyToEventId || "").trim(),
+      allowed_paths: Array.isArray(args.allowedPaths) ? args.allowedPaths : [],
+    }),
+  });
+}
+
+export async function revokeNomcpSession(sid: string) {
+  return apiJson<{ sid: string; revoked: boolean }>(
+    `/api/v1/nomcp/sessions/${encodeURIComponent(String(sid || "").trim())}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function fetchWebModelBrowserSession(
+  groupId: string,
+  actorId: string,
+  options?: { inspect?: boolean },
+) {
   const params = new URLSearchParams({
     group_id: String(groupId || "").trim(),
     actor_id: String(actorId || "").trim(),
   });
+  if (typeof options?.inspect === "boolean") params.set("inspect", options.inspect ? "true" : "false");
   return apiJson<{ browser_session: WebModelBrowserSession }>(`/api/v1/web-model/browser-session?${params.toString()}`);
 }
 
 export async function fetchWebModelBrowserSurfaceSession(
   groupId: string,
   actorId: string,
+  options?: { inspect?: boolean },
 ): Promise<ApiResponse<WebModelBrowserSurfaceResult>> {
   const params = new URLSearchParams({
     group_id: String(groupId || "").trim(),
     actor_id: String(actorId || "").trim(),
   });
+  if (typeof options?.inspect === "boolean") params.set("inspect", options.inspect ? "true" : "false");
   const resp = await apiJson<WebModelBrowserSurfaceResult>(`/api/v1/web-model/browser-session?${params.toString()}`);
   if (!resp.ok) return resp;
   return {
@@ -118,6 +267,7 @@ export async function fetchWebModelBrowserSurfaceSession(
     result: {
       browser_session: resp.result.browser_session || {},
       browser_surface: normalizePresentationBrowserSurfaceState(resp.result.browser_surface),
+      health_snapshot: resp.result.health_snapshot,
     },
   };
 }
@@ -142,8 +292,12 @@ export async function openWebModelBrowserSurfaceSession(args: {
   actorId: string;
   width?: number;
   height?: number;
+  inspect?: boolean;
 }): Promise<ApiResponse<WebModelBrowserSurfaceResult>> {
-  const resp = await apiJson<WebModelBrowserSurfaceResult>("/api/v1/web-model/browser-session/open", {
+  const params = new URLSearchParams();
+  if (typeof args.inspect === "boolean") params.set("inspect", args.inspect ? "true" : "false");
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const resp = await apiJson<WebModelBrowserSurfaceResult>(`/api/v1/web-model/browser-session/open${suffix}`, {
     method: "POST",
     body: JSON.stringify({
       group_id: String(args.groupId || "").trim(),
@@ -158,6 +312,7 @@ export async function openWebModelBrowserSurfaceSession(args: {
     result: {
       browser_session: resp.result.browser_session || {},
       browser_surface: normalizePresentationBrowserSurfaceState(resp.result.browser_surface),
+      health_snapshot: resp.result.health_snapshot,
     },
   };
 }
@@ -189,6 +344,7 @@ export async function closeWebModelBrowserSurfaceSession(
     result: {
       browser_session: resp.result.browser_session || {},
       browser_surface: normalizePresentationBrowserSurfaceState(resp.result.browser_surface),
+      health_snapshot: resp.result.health_snapshot,
     },
   };
 }
@@ -197,6 +353,7 @@ export async function bindCurrentWebModelBrowserConversation(args: {
   groupId: string;
   actorId: string;
   conversationUrl?: string;
+  newChat?: boolean;
   clear?: boolean;
 }): Promise<ApiResponse<WebModelBrowserSurfaceResult>> {
   const resp = await apiJson<WebModelBrowserSurfaceResult>("/api/v1/web-model/browser-session/bind-current", {
@@ -205,6 +362,7 @@ export async function bindCurrentWebModelBrowserConversation(args: {
       group_id: String(args.groupId || "").trim(),
       actor_id: String(args.actorId || "").trim(),
       conversation_url: String(args.conversationUrl || "").trim(),
+      new_chat: Boolean(args.newChat),
       clear: Boolean(args.clear),
     }),
   });
@@ -214,6 +372,7 @@ export async function bindCurrentWebModelBrowserConversation(args: {
     result: {
       browser_session: resp.result.browser_session || {},
       browser_surface: normalizePresentationBrowserSurfaceState(resp.result.browser_surface),
+      health_snapshot: resp.result.health_snapshot,
     },
   };
 }

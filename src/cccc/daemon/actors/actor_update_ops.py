@@ -28,10 +28,21 @@ from .actor_profile_runtime import (
     resolve_linked_actor_before_start,
 )
 from .actor_profile_store import ProfileResolver, get_actor_profile_by_ref, normalize_actor_profile_ref
+from .web_model_actor_policy import require_no_other_chatgpt_web_model_actor, require_standard_chatgpt_web_model_actor
 
 
 def _error(code: str, message: str, *, details: Optional[Dict[str, Any]] = None) -> DaemonResponse:
     return DaemonResponse(ok=False, error=DaemonError(code=code, message=message, details=(details or {})))
+
+
+def _normalize_capability_id_list(raw: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            value = str(item or "").strip()
+            if value and value not in out:
+                out.append(value)
+    return out[:128]
 
 
 def handle_actor_update(
@@ -83,6 +94,7 @@ def handle_actor_update(
         "default_scope_key",
         "submit",
         "capability_autoload",
+        "capability_hidden",
         "enabled",
         "runner",
         "runtime",
@@ -124,9 +136,17 @@ def handle_actor_update(
     applied_profile_id = ""
     applied_profile_ref: Any = None
     profile_converted = False
+    if "capability_autoload" in patch:
+        patch["capability_autoload"] = _normalize_capability_id_list(patch.get("capability_autoload"))
+    if "capability_hidden" in patch:
+        patch["capability_hidden"] = _normalize_capability_id_list(patch.get("capability_hidden"))
     actor: Dict[str, Any]
     try:
         require_actor_permission(group, by=by, action="actor.update", target_actor_id=actor_id)
+        current_actor = find_actor(group, actor_id) or {}
+        if str(patch.get("runtime") or "").strip().lower() == "web_model":
+            require_standard_chatgpt_web_model_actor(current_actor)
+            require_no_other_chatgpt_web_model_actor(group_id=group.group_id, actor_id=actor_id)
         if profile_action == "convert_to_custom":
             current = find_actor(group, actor_id)
             if not isinstance(current, dict) or not is_actor_profile_linked(current):
@@ -136,6 +156,9 @@ def handle_actor_update(
             profile = get_actor_profile_by_ref(current_profile_ref) if current_profile_ref is not None else get_actor_profile(current_profile_id)
             if not isinstance(profile, dict):
                 raise ValueError(f"profile not found: {current_profile_id}")
+            if str(profile.get("runtime") or "").strip().lower() == "web_model":
+                require_standard_chatgpt_web_model_actor(current)
+                require_no_other_chatgpt_web_model_actor(group_id=group.group_id, actor_id=actor_id)
             apply_profile_link_to_actor(
                 group,
                 actor_id,
@@ -168,6 +191,9 @@ def handle_actor_update(
                 profile = resolved.model_dump(exclude_none=True) if resolved is not None else None
             if not isinstance(profile, dict):
                 raise ValueError(f"profile not found: {profile_id_arg}")
+            if str(profile.get("runtime") or "").strip().lower() == "web_model":
+                require_standard_chatgpt_web_model_actor(current_actor)
+                require_no_other_chatgpt_web_model_actor(group_id=group.group_id, actor_id=actor_id)
             apply_profile_link_to_actor(
                 group,
                 actor_id,

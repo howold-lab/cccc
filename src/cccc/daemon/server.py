@@ -33,6 +33,7 @@ from ..paths import ensure_home
 from ..runners import pty as pty_runner
 from ..runners import headless as headless_runner
 from ..util.conv import coerce_bool
+from ..util.node_env import with_node_deprecation_warnings_suppressed
 from ..util.obslog import apply_logger_levels, setup_root_json_logging
 from ..util.process import best_effort_signal_pid, pid_is_alive
 from ..util.fs import atomic_write_json, atomic_write_text, read_json
@@ -126,12 +127,7 @@ from .space.group_space_sync import process_due_space_syncs, sync_group_space_fi
 from .space.group_space_store import get_space_provider_state
 from .group.presentation_browser_runtime import close_all_browser_surface_sessions
 from .space.notebooklm_auth_browser_runtime import close_all_notebooklm_auth_browser_sessions
-from .ops.template_ops import (
-    group_create_from_template,
-    group_template_export,
-    group_template_import_replace,
-    group_template_preview,
-)
+from .actors.web_model_browser_session import close_all_web_model_chatgpt_browser_sessions
 
 _OBS_LOCK = threading.Lock()
 _OBSERVABILITY: Dict[str, Any] = {}
@@ -386,8 +382,8 @@ def _prepare_pty_env(env: Dict[str, Any]) -> Dict[str, str]:
         result["INPUTRC"] = str(inputrc_path)
     except Exception:
         pass
-    
-    return result
+
+    return with_node_deprecation_warnings_suppressed(result)
 
 
 def _inject_actor_context_env(env: Dict[str, Any], *, group_id: str, actor_id: str) -> Dict[str, Any]:
@@ -773,10 +769,6 @@ def _request_dispatch_deps() -> RequestDispatchDeps:
             target_actor_id=actor_id,
         ),
         pty_backlog_bytes=_pty_backlog_bytes,
-        group_create_from_template=group_create_from_template,
-        group_template_export=group_template_export,
-        group_template_preview=group_template_preview,
-        group_template_import_replace=group_template_import_replace,
         foreman_id=_foreman_id,
         maybe_reset_automation_on_foreman_change=lambda group, before_foreman_id: _maybe_reset_automation_on_foreman_change(
             group,
@@ -1216,6 +1208,10 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
         pass
     try:
         close_all_notebooklm_auth_browser_sessions()
+    except Exception:
+        pass
+    try:
+        close_all_web_model_chatgpt_browser_sessions()
     except Exception:
         pass
     _SPACE_SYNC_RUN_QUEUE = None

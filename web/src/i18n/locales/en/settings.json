@@ -11,12 +11,13 @@
     "messaging": "Messaging",
     "im": "IM Bridge",
     "transcript": "Transcript",
-    "blueprint": "Blueprint",
+    "copyGroups": "Copy Groups",
     "actorProfiles": "Actor Profiles",
     "myProfiles": "My Profiles",
     "branding": "Branding",
     "developer": "Developer",
-    "webAccess": "Web Access"
+    "webAccess": "Web Access",
+    "webModels": "Web Models"
   },
   "navigation": {
     "targetScope": "Target Scope",
@@ -122,11 +123,17 @@
   },
   "capabilities": {
     "title": "Capability Governance",
-    "subtitle": "Global rules, sources, and registry for built-in and external capabilities.",
-    "pageGuide": "Global governance only. Configure external policy, manage sources, and inspect registry state. The Self-Evolving Skills card below manages generated skill records across groups.",
+    "subtitle": "Self-evolving skill governance with a dedicated Capability Center for the full registry.",
+    "pageGuide": "Use Capability Center for sources and full registry browsing. This tab only manages generated self-evolving skill records across groups.",
     "refresh": "Refresh",
+    "openCenter": "Open Capability Center",
     "revision": "Revision",
     "failedLoad": "Failed to load capabilities overview.",
+    "failedSlashVisibility": "Failed to update slash command visibility.",
+    "slashCommandVisible": "/ visible",
+    "slashCommandHidden": "/ hidden",
+    "showInSlashCommands": "Show in slash commands",
+    "hideFromSlashCommands": "Hide from slash commands",
     "selfProposedTitle": "Self-Evolving Skills Library",
     "selfProposedHint": "Manage agent-generated procedural skill records across groups. Use this view to edit them, remove them, or choose which actors use them in the current group.",
     "selfEvolvingGroupTitle": "Self-Evolving Skills",
@@ -146,6 +153,9 @@
     "selfProposedManage": "Manage",
     "manageTitle": "Manage Self-Proposed Skill",
     "manageSubtitle": "Edit the generated skill text and choose which actors use it automatically.",
+    "manageSkillAssignments": "Manage assignments",
+    "manageAssignmentsTitle": "Manage Skill Assignments",
+    "manageAssignmentsSubtitle": "Review provenance and choose which actors use this skill automatically.",
     "manageClose": "Close",
     "manageName": "Name",
     "manageDescription": "Description",
@@ -154,7 +164,7 @@
     "manageSave": "Save skill",
     "manageSaved": "Skill record saved.",
     "manageSaveFailed": "Failed to save skill record.",
-    "manageRequiresGroup": "Open this panel from a group before saving or enabling a self-proposed skill.",
+    "manageRequiresGroup": "Open this panel from a group before saving or enabling a skill.",
     "manageMissingCandidate": "The selected self-proposed skill is no longer available.",
     "manageInvalidNamespace": "Self-proposed skill ids must start with skill:agent_self_proposed:.",
     "manageCapsuleRequired": "Capsule text is required.",
@@ -181,6 +191,7 @@
     "manageUsageSession": "{{actor}} · session · {{ttl}} left",
     "manageUsageActorAutoload": "{{actor}} · direct actor assignment",
     "manageUsageProfileAutoload": "{{actor}} · via profile {{profile}}",
+    "manageUsageActorHidden": "{{actor}} · hidden from menus",
     "manageUsageUnknownProfile": "unknown profile",
     "manageUsageBlocked": "Blocked skills cannot be used by agents until unblocked.",
     "manageUsageTtlSeconds": "less than 1 minute",
@@ -191,7 +202,9 @@
     "manageActorAssignmentProfileBadge": "via profile",
     "manageActorAssignmentTemporaryBadge": "temporary",
     "manageActorAssignmentActorScopeBadge": "runtime scope",
+    "manageActorAssignmentHiddenBadge": "hidden",
     "manageNoActors": "No actors in this group.",
+    "manageHideInMenus": "Hide",
     "manageSaveActorAssignments": "Save actor assignments",
     "manageActorAssignmentsSaved": "Actor assignments saved.",
     "manageActorAssignmentsFailed": "Failed to save actor assignments.",
@@ -215,107 +228,208 @@
     "manageDuplicateTitle": "Possible duplicate",
     "manageDuplicateHint": "Another self-proposed skill has the same name or slug. Prefer updating the existing record instead of creating near-duplicates.",
     "manageNoGroupHint": "Viewing is available here, but save/enable/autoload actions require a concrete group.",
-    "sourcesTitle": "Sources",
-    "sourcesHint": "Manage external capability feeds and inspect their sync health.",
-    "sourcesSummary": "{{total}} total · {{enabled}} enabled · {{disabled}} disabled",
-    "levelDistribution": "Level: indexed={{indexed}} · mounted={{mounted}} · pinned={{pinned}}",
-    "sourceEnabled": "enabled",
-    "sourceDisabled": "disabled",
-    "sourceEnableAction": "Enable",
-    "sourceDisableAction": "Disable",
-    "sourceMeta": "level={{level}}, sync={{sync}}, records={{count}}",
-    "sourceRationale": "rationale: {{text}}",
-    "sourceSearchPlaceholder": "Filter sources by id/sync/rationale...",
-    "sourcesVisibilityAll": "All",
-    "sourcesVisibilityEnabled": "Enabled",
-    "sourcesVisibilityDisabled": "Disabled",
-    "showMoreSources": "Show {{count}} more",
-    "showLessSources": "Show less",
-    "libraryTitle": "Capability Registry",
-    "libraryHint": "Browse known capabilities, inspect readiness, and manage global block rules.",
-    "searchPlaceholder": "Search by id/name/tag/source...",
-    "filterKindAll": "All kinds",
-    "filterKindPack": "Packs",
-    "filterKindMcp": "MCP",
-    "filterKindSkill": "Skills",
-    "filterPolicyAll": "All policies",
-    "filterPolicyActionable": "Actionable",
-    "filterPolicyBlocked": "Blocked",
-    "filterPolicyIndexed": "Indexed only",
-    "filterSourceAll": "All sources",
-    "resultsSummary": "{{count}} results",
-    "showingRange": "showing {{from}}-{{to}}",
-    "pageSize": "Page size",
-    "pagePrev": "Prev",
-    "pageNext": "Next",
-    "pageLabel": "Page {{page}} / {{total}}",
     "recentCount": "recent {{count}}",
     "useWhen": "Use when",
     "avoidWhen": "Avoid when",
     "gotcha": "Gotcha",
     "verifyWith": "Verify",
     "blocked": "blocked",
-    "block": "Block",
-    "unblock": "Unblock",
     "requireGroup": "Open this tab from a group to update block/unblock.",
-    "blockReasonPrompt": "Optional block reason",
-    "failedBlock": "Failed to update block state.",
-    "failedSourceToggle": "Failed to update source state.",
-    "blockedListTitle": "Blocked Items",
-    "blockedListHint": "Capabilities blocked at the global level.",
-    "noBlocked": "No blocked capabilities.",
     "noneSelected": "No capabilities selected.",
     "noCandidates": "No autoload candidates found.",
-    "noLibraryMatches": "No capabilities match current filters.",
     "loading": "Loading capabilities...",
     "removeFromAutoload": "Remove from autoload",
-    "enable": "Enable",
-    "enableForGroup": "Enable",
-    "disableForGroup": "Disable",
-    "failedEnable": "Failed to enable capability.",
-    "operationFailedReason": "Operation did not apply ({{reason}}).",
-    "enableScope": {
-      "session": "Session",
-      "actor": "Actor",
-      "group": "Group"
-    },
-    "failedSafetyMode": "Failed to update external capability safety mode.",
-    "safetyModeTitle": "External Capability Policy",
-    "safetyModeHint": "Controls the default actionability of external capabilities. Built-in packs are unaffected.",
-    "safetyModeCurrent": "Current policy: {{mode}}",
-    "safetyModeCurrentRule": "External sources currently follow the {{mode}} posture.",
-    "safetyMode": {
-      "normal": {
-        "label": "Standard",
-        "hint": "External sources are usable by default, subject to per-source and per-capability overrides."
+    "enable": "Enable"
+  },
+  "capabilityCenter": {
+    "title": "Capability Center",
+    "subtitle": "Skills, MCP, and packs",
+    "headerHint": "Global workspace for browsing, filtering, and managing capabilities.",
+    "refresh": "Refresh",
+    "close": "Close",
+    "backToApp": "Back to app",
+    "searchPlaceholder": "Search capability id, name, source, tag, or tool...",
+    "typeFilter": "Type filter",
+    "stateFilter": "State filter",
+    "failedLoad": "Failed to load capability center.",
+    "failedLoadState": "Failed to load current capability state.",
+    "failedSlashVisibility": "Failed to update slash command visibility.",
+    "sectionNavigation": "Capability sections",
+    "sections": {
+      "library": {
+        "label": "Library",
+        "hint": "All capabilities"
       },
-      "conservative": {
-        "label": "Conservative",
-        "hint": "External sources default to a stricter indexed posture until explicitly relaxed."
+      "skill": {
+        "label": "Skills",
+        "hint": "Procedural skills"
+      },
+      "mcp": {
+        "label": "MCP",
+        "hint": "Tool servers"
+      },
+      "sources": {
+        "label": "Sources",
+        "hint": "Feeds and origins"
       }
     },
-    "readiness": {
-      "nextLabel": "Next",
-      "missingEnv": "Missing env: {{names}}",
-      "blockedBySafetyMode": "Blocked by conservative external import safety mode.",
-      "status": {
-        "blocked": "Blocked",
-        "enableable": "Enableable",
-        "needs_inspect": "Needs Inspect"
+    "typeOptions": {
+      "all": "All",
+      "skill": "Skills",
+      "mcp": "MCP",
+      "pack": "Packs"
+    },
+    "stateOptions": {
+      "all": "All states",
+      "enabled": "Enabled",
+      "slash_visible": "/ visible",
+      "slash_hidden": "/ hidden",
+      "blocked": "Blocked",
+      "needs_setup": "Needs setup"
+    },
+    "stats": {
+      "skills": "Skills",
+      "mcp": "MCP",
+      "packs": "Packs",
+      "enabled": "Enabled"
+    },
+    "sidebarSummary": "{{capabilities}} capabilities · {{sources}} sources",
+    "loading": "Loading...",
+    "emptyDash": "-",
+    "noCapabilities": "No capabilities match the current filters.",
+    "slashVisible": "/ visible",
+    "slashHidden": "/ hidden",
+    "showInSlashCommands": "Show in / commands",
+    "hideFromSlashCommands": "Hide from / commands",
+    "table": {
+      "capability": "Capability",
+      "type": "Type",
+      "state": "State",
+      "source": "Source",
+      "actions": "Actions"
+    },
+    "status": {
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "blocked": "Blocked",
+      "setup": "Setup",
+      "needsSetup": "Needs setup",
+      "ready": "Ready"
+    },
+    "pagination": {
+      "showing": "Showing {{from}}-{{to}} / {{total}}",
+      "noResults": "No results",
+      "moreAvailable": "More available",
+      "rows": "Rows",
+      "prev": "Prev",
+      "next": "Next"
+    },
+    "sources": {
+      "records": "{{count}} records",
+      "sync": "sync={{state}}",
+      "empty": "No sources loaded.",
+      "total": "Total",
+      "enable": "Enable",
+      "disable": "Disable",
+      "delete": "Delete",
+      "deleting": "Deleting",
+      "instances": "Source instances",
+      "instanceMeta": "{{source}} · {{count}} records",
+      "deleteInstance": "Delete this source instance",
+      "deleteInstanceConfirm": "Delete source instance {{name}}?\n\nThis removes {{count}} capability records imported by this instance and clears related bindings.",
+      "deleteInstanceConfirmTitle": "Delete source instance {{name}}?",
+      "deleteInstanceConfirmDescription": "This removes {{count}} capability records imported by this instance and clears related bindings.",
+      "toggleFailed": "Failed to update source.",
+      "deleteFailed": "Failed to delete source.",
+      "deleteConfirm": "Delete source {{id}}?\n\nThis removes {{count}} registry records from this source and clears related bindings.",
+      "deleteConfirmTitle": "Delete source {{id}}?",
+      "deleteConfirmDescription": "This removes {{count}} registry records from this source and clears related bindings."
+    },
+    "details": {
+      "selectCapability": "Select a capability.",
+      "description": "Description",
+      "noDescription": "No description.",
+      "source": "Source",
+      "policy": "Policy",
+      "readiness": "Readiness",
+      "tools": "Tools",
+      "useWhen": "Use when",
+      "gotchas": "Gotchas",
+      "openGroupForSlash": "Open a group to change / command visibility."
+    },
+    "controls": {
+      "title": "Controls",
+      "skillHint": "Group use, slash visibility, block state, and removal.",
+      "mcpHint": "Group use, block state, runtime install binding, and removal.",
+      "enabledMeta": "Currently active in this group",
+      "disabledMeta": "Not active in this group",
+      "slashVisibleMeta": "Shown in / commands",
+      "slashHiddenMeta": "Hidden from / commands",
+      "blockMeta": "Policy-block enablement and use",
+      "blockedMeta": "Policy-blocked until unblocked",
+      "openGroup": "Open a group to use these controls."
+    },
+    "remove": {
+      "busy": "Working",
+      "failed": "Failed to remove capability.",
+      "label": {
+        "delete": "Delete",
+        "remove": "Remove",
+        "uninstall": "Uninstall",
+        "disable": "Disable"
       },
-      "next": {
-        "enable": "Enable",
-        "inspect": "Inspect",
-        "fix_known_blocker": "Fix blocker",
-        "switch_external_capability_safety_mode_or_adjust_allowlist": "Relax safety mode or adjust allowlist"
+      "title": {
+        "delete": "Delete this skill",
+        "remove": "Remove this skill from the current group",
+        "uninstall": "Uninstall this MCP",
+        "disable": "Disable this built-in capability"
       },
-      "reason": {
-        "policy_level_indexed": "Policy keeps this capability indexed.",
-        "qualification_blocked": "Qualification blocks enablement.",
-        "capability_unavailable": "Capability is currently unavailable.",
-        "missing_required_env": "Required environment is missing."
+      "confirm": {
+        "delete": "Delete {{name}}?\n\nThis removes the registry record for {{id}} and related bindings.",
+        "remove": "Remove {{name}}?\n\nThis clears current-group enablement and autoload references for {{id}}.",
+        "uninstall": "Uninstall {{name}}?\n\nThis clears current-group bindings and runtime installation references for {{id}}.",
+        "disable": "Disable {{name}}?\n\nThis only clears current-group enablement for {{id}}. The built-in capability itself is not deleted."
+      },
+      "confirmTitle": {
+        "delete": "Delete {{name}}?",
+        "remove": "Remove {{name}}?",
+        "uninstall": "Uninstall {{name}}?",
+        "disable": "Disable {{name}} for this group?"
+      },
+      "confirmDescription": {
+        "delete": "This removes the registry record for {{id}} and related bindings.",
+        "remove": "This clears current-group enablement and autoload references for {{id}}.",
+        "uninstall": "This clears current-group bindings and runtime installation references for {{id}}.",
+        "disable": "This only turns off {{id}} for the current group. It can be enabled again later."
       }
-    }
+    },
+    "block": {
+      "block": "Block",
+      "unblock": "Unblock",
+      "blockTitle": "Block this capability from being enabled",
+      "unblockTitle": "Allow this capability to be enabled again",
+      "failed": "Failed to update block state.",
+      "confirmBlock": "Block {{name}}?\n\nAgents cannot use {{id}} until it is unblocked.",
+      "confirmUnblock": "Unblock {{name}}?\n\nAgents can use {{id}} again if it is enabled and allowed by policy.",
+      "confirmBlockTitle": "Block {{name}}?",
+      "confirmBlockDescription": "This adds a policy block for {{id}}. It cannot be enabled or used until the block is removed.",
+      "confirmUnblockTitle": "Unblock {{name}}?",
+      "confirmUnblockDescription": "This removes the policy block for {{id}}. Agents can use it again if it is enabled and allowed by policy."
+    },
+    "enable": {
+      "enable": "Enable",
+      "disable": "Disable",
+      "enableTitle": "Enable for this group",
+      "disableTitle": "Disable in the current group only",
+      "failed": "Failed to update enablement.",
+      "confirmDisableTitle": "Disable {{name}} for this group?",
+      "confirmDisableDescription": "This turns off {{id}} only in the current group. It does not block future enablement."
+    },
+    "confirm": {
+      "cancel": "Cancel",
+      "confirm": "Confirm"
+    },
+    "showSystem": "System"
   },
   "assistants": {
     "openFromGroup": "Open this tab from a group.",
@@ -333,7 +447,7 @@
     "voiceRecognitionTitle": "Capture and recognition",
     "voiceRecognitionHint": "Choose where transcription runs and how Browser ASR batches transcript.",
     "recognitionBackend": "Recognition location",
-    "recognitionBackendHint": "Browser ASR works immediately. Assistant service local ASR supports dynamic install for the streaming runtime.",
+    "recognitionBackendHint": "Browser ASR works immediately with the browser/default microphone. Local ASR runs on this device, supports selectable microphones, and can add optional speaker labels.",
     "recognitionBackendUnavailable": "This backend is already configured but is not selectable in this UI yet. Saving will preserve it unless you switch to Browser ASR.",
     "serviceAsrStatus": "Assistant service ASR",
     "serviceAsrStatusValue": "Service: {{status}}",
@@ -349,7 +463,47 @@
     "streamingRuntimeInstallFailed": "Failed to install streaming ASR runtime.",
     "streamingRuntimeNotConnected": "Streaming ASR runtime is installed, but the current recording flow is not connected to the live transcription backend yet. Use Browser ASR for now.",
     "serviceRuntimeStatusShort": "Runtime: {{status}}",
+    "componentStatusShort": "{{status}}",
     "serviceRuntimeError": "Runtime error: {{message}}",
+    "localAsrTitle": "Local ASR",
+    "localAsrHint": "Install the local speech engine and the default streaming model for private live transcription on this device.",
+    "localAsrReady": "Ready",
+    "localAsrSetupNeeded": "Setup needed",
+    "localAsrFailed": "Needs repair",
+    "localAsrInstalling": "Installing",
+    "localAsrInstall": "Install local ASR",
+    "localAsrInstalled": "Installed",
+    "localAsrRepair": "Repair local ASR",
+    "localAsrInstallStarted": "Local ASR setup started.",
+    "localAsrInstallFailed": "Failed to install local ASR.",
+    "localAsrEngineLabel": "Engine",
+    "localAsrEngineHint": "sherpa-onnx runtime environment.",
+    "localAsrModelLabel": "ASR model",
+    "speakerLabelsTitle": "Speaker labels",
+    "speakerLabelsHint": "Adds anonymous Speaker 1 / Speaker 2 turns after local ASR recordings. Local transcription works without this model.",
+    "optional": "Optional",
+    "localAsrMaintenanceTitle": "Advanced maintenance",
+    "localAsrCacheLabel": "Local ASR cache",
+    "speakerLabelsCacheLabel": "Speaker-label cache",
+    "none": "none",
+    "localAsrRuntimePath": "Runtime path",
+    "localAsrModelPath": "Model path",
+    "localAsrReinstall": "Reinstall local ASR",
+    "localAsrRemove": "Remove local ASR",
+    "localAsrRemoveConfirm": "Remove the local ASR engine and default ASR model from this device?",
+    "localAsrRemoveFailed": "Failed to remove local ASR.",
+    "localAsrRemoved": "Local ASR cache removed.",
+    "localAsrReinstallConfirm": "Reinstall the local ASR engine and default ASR model?",
+    "localAsrReinstallFailed": "Failed to reinstall local ASR.",
+    "localAsrReinstallStarted": "Local ASR reinstall started.",
+    "diarizationModelRemove": "Remove speaker labels",
+    "diarizationModelRemoveConfirm": "Remove the speaker-label model from this device?",
+    "diarizationModelRemoveFailed": "Failed to remove speaker-label model.",
+    "diarizationModelRemoved": "Speaker-label model removed.",
+    "diarizationModelReinstall": "Reinstall speaker labels",
+    "diarizationModelReinstallConfirm": "Reinstall the speaker-label model?",
+    "diarizationModelReinstallFailed": "Failed to reinstall speaker-label model.",
+    "diarizationModelReinstallStarted": "Speaker-label model reinstall started.",
     "transcriptBatchingTitle": "Transcript batching",
     "transcriptBatchingHint": "Controls when Browser ASR text is batched for the secretary. Smaller values respond faster; larger values reduce fragmentation.",
     "transcriptQuietWindow": "Quiet window",
@@ -888,23 +1042,38 @@
     "legacyRoleNotesHint": "Legacy role notes were detected and mapped into the structured fields. Saving here will normalize them into scoped help blocks.",
     "noScopeWarning": "No scope attached to this group yet. Guidance overrides still work because they are stored under CCCC_HOME, but repo-linked features may stay unavailable until a scope is attached."
   },
-  "blueprint": {
+  "copyGroups": {
     "openFromGroup": "Open this tab from a group.",
-    "exportTitle": "Export",
-    "exportDescription": "Save this group's actors, settings, automation rules, and guidance as a single portable file.",
-    "exportBlueprint": "Export Blueprint",
+    "title": "Copy Groups",
+    "description": "Export or import durable group state. Workspace files, system credentials, browser sessions, and live runtime state are not included.",
+    "exportHeading": "Export group",
+    "exportDescription": "Download this group's ledger, actors, memory, attachments, automation, and durable settings as a zip file.",
+    "exportButton": "Export Group",
+    "importHeading": "Import group",
+    "importDescription": "Preview a group copy package, choose the workspace root, then import it as a stopped group.",
+    "untitled": "Imported group",
+    "sourceId": "Source group: {{groupId}}",
+    "workspaceRoot": "Workspace root",
+    "workspacePlaceholder": "Choose or paste a workspace path",
+    "groupTitle": "Group title",
+    "workspaceNote": "The copy package does not include repository files. Provide a local clone or project folder for this group.",
+    "actors": "Actors: {{count}}",
+    "conflictCopy": "Group id already exists; import will create a new copy.",
+    "conflictPreserve": "Group id is available; import will preserve it.",
+    "runtimeReset": "Actors import stopped; browser and runtime sessions are cleared.",
+    "workspaceExcluded": "Workspace files are not included.",
+    "secretsExcluded": "System credentials, cookies, and auth sessions are not included. Chat history, memory, and attachments may still contain sensitive user content.",
+    "reconnectChatGPT": "ChatGPT Web Model setup must be reconnected after import.",
+    "reconnectNotebookLM": "NotebookLM / Group Space may need reconnect after import.",
+    "importButton": "Import Group",
+    "importConfirm": "Import group copy package \"{{filename}}\"?",
+    "imported": "Imported",
+    "failedToPreview": "Failed to preview group copy package",
+    "failedToExport": "Failed to export group copy package",
+    "failedToImport": "Failed to import group copy package",
     "downloaded": "Downloaded",
-    "applied": "Applied",
-    "importTitle": "Import (Replace)",
-    "importDescription": "Applies a blueprint by replacing actors, settings, automation rules/snippets, and group guidance overrides (CCCC_HOME). Ledger history is never modified.",
-    "blueprintFile": "Blueprint file",
     "working": "Working…",
-    "applyReplace": "Apply (Replace)",
-    "pickFileFirst": "Pick a file to preview first",
-    "replaceConfirm": "Replace this group's actors, settings, automation rules, and guidance using \"{{filename}}\"?\n\nThis will stop running agents and then apply group guidance overrides under CCCC_HOME:\n- CCCC_PREAMBLE.md\n- CCCC_HELP.md",
-    "failedToPreview": "Failed to preview template",
-    "failedToExport": "Failed to export template",
-    "failedToImport": "Failed to import template"
+    "pickFileFirst": "Pick a file to preview first"
   },
   "developer": {
     "title": "Developer Mode (Global)",
@@ -956,6 +1125,242 @@
     "clearTruncate": "Clear (truncate)",
     "refresh": "Refresh",
     "clear": "Clear"
+  },
+  "webModels": {
+    "chatgpt": {
+      "header": {
+        "kicker": "ChatGPT Runtime",
+        "title": "ChatGPT Web Model setup",
+        "description": "Connect one ChatGPT conversation to CCCC as a real actor: public CCCC endpoint, one ChatGPT MCP URL, ChatGPT sign-in, then one target conversation."
+      },
+      "owner": {
+        "title": "Current owner",
+        "none": "No ChatGPT Web Model actor configured",
+        "hint": "ChatGPT Web Model is a single CCCC runtime seat. It belongs to one group/actor identity and is configured here globally."
+      },
+      "prerequisites": {
+        "title": "Global prerequisites",
+        "description": "ChatGPT connects from the cloud, so CCCC needs a public HTTPS Web URL. The copied MCP URL already contains the actor token; set ChatGPT Authentication to No Auth. ChatGPT Web Model requires a GPT-5.x chat that can see and use the CCCC MCP connector.",
+        "setupOrderTitle": "Setup order",
+        "setupOrder": {
+          "publicAccess": "Set public HTTPS Web Access and an Admin Access Token.",
+          "actor": "Create/start the ChatGPT Web Model actor and copy its MCP URL.",
+          "chatgptSettings": "In ChatGPT, open Settings > Apps > Advanced settings > Create app.",
+          "createApp": "Create an app named CCCC with that MCP URL and Authentication set to No Auth.",
+          "signInAndTarget": "Sign in below, then bind the current ChatGPT chat or select a new chat for the next delivery."
+        },
+        "noPublicUrl": "No public Web URL configured",
+        "publicHttpsReady": "Public HTTPS ready",
+        "publicHttpsNeeded": "Public HTTPS needed",
+        "accessTokenReady": "Access token ready",
+        "accessTokenNeeded": "Access token needed"
+      },
+      "actorSection": {
+        "title": "ChatGPT Web Model actor",
+        "description": "One ChatGPT MCP app maps to one CCCC actor. Create another CCCC actor only after removing this one.",
+        "multipleWarning": "Multiple ChatGPT Web Model actors exist in this group. This setup supports one; keep one actor and remove the extras."
+      },
+      "target": {
+        "existingChat": "Existing ChatGPT chat",
+        "newChatNextDelivery": "New chat on next delivery",
+        "noneSelected": "No target selected",
+        "newChatDetail": "CCCC will create and bind the /c/... URL after the next message is sent.",
+        "noneDetail": "Choose an existing chat or select new-chat delivery before sending work.",
+        "bound": "Target chat bound",
+        "newChatArmed": "New chat armed",
+        "needed": "Target chat needed",
+        "newPending": "new pending {{url}}",
+        "deliveryTarget": "Delivery target",
+        "futureMessagesPrefix": "Future messages go to",
+        "futureMessagesSuffix": "until you choose another target.",
+        "browserAtDifferentTarget": "The browser is currently at {{current}}; delivery still uses the bound target above.",
+        "chatgptHome": "ChatGPT home",
+        "manualFallback": "Manual fallback: paste a ChatGPT URL",
+        "conversationUrl": "ChatGPT conversation URL"
+      },
+      "browser": {
+        "ready": "ChatGPT ready",
+        "signInNeeded": "Sign-in needed",
+        "notOpen": "Not open",
+        "signedIn": "Signed in",
+        "open": "Browser open",
+        "openSignInNeeded": "Open, sign-in needed"
+      },
+      "mcp": {
+        "connected": "Connected",
+        "urlReady": "URL ready",
+        "needsRotation": "Needs rotation",
+        "notCreated": "Not created",
+        "noAppUrl": "No MCP app URL yet"
+      },
+      "chatSetup": {
+        "summarySignIn": "Sign in to ChatGPT, then choose where this actor should deliver messages.",
+        "summaryChooseTarget": "Choose the ChatGPT conversation where this actor should deliver messages.",
+        "title": "ChatGPT setup for {{actor}}",
+        "ready": "Ready",
+        "setupNeeded": "Setup needed",
+        "accountTitle": "1. ChatGPT account",
+        "accountReadyHint": "CCCC can use this browser profile for ChatGPT delivery.",
+        "accountOpenHint": "Open ChatGPT here and sign in once.",
+        "deliveryTargetTitle": "2. Delivery target"
+      },
+      "cardStatus": {
+        "needsPublicUrl": "Needs public URL",
+        "needsStart": "Needs start",
+        "needsMcpUrl": "Needs MCP URL",
+        "connectInChatGpt": "Connect in ChatGPT",
+        "needsSignIn": "Needs sign-in",
+        "openChatGpt": "Open ChatGPT",
+        "needsTargetChat": "Needs target chat",
+        "ready": "Ready"
+      },
+      "next": {
+        "prefix": "Next: {{action}}",
+        "setPublicHttps": "Set the public HTTPS URL in Web Access.",
+        "startActor": "Start the ChatGPT Web Model actor.",
+        "rotateConnector": "Rotate the connector once to generate the ChatGPT MCP URL.",
+        "createConnector": "Create the ChatGPT MCP URL.",
+        "pasteMcpUrl": "Paste the MCP URL into ChatGPT New App with Authentication set to No Auth.",
+        "signIn": "Open the embedded browser and sign in to ChatGPT.",
+        "bindTarget": "Bind an existing ChatGPT conversation or arm new-chat auto-bind.",
+        "verifyProfile": "Open ChatGPT to verify the existing browser profile.",
+        "ready": "Ready for browser delivery."
+      },
+      "queue": {
+        "queued": "{{count}} queued"
+      },
+      "setupLine": {
+        "mcpApp": "MCP app",
+        "chatgptSession": "ChatGPT session",
+        "targetChat": "Target chat"
+      },
+      "warnings": {
+        "rotateOldConnector": "Rotate this older connector once to generate a copyable ChatGPT MCP URL.",
+        "localMcpUrl": "MCP URL is local-only. Browser-hosted models need a public HTTPS URL.",
+        "nonHttpsMcpUrl": "MCP URL is not HTTPS. Use a public HTTPS tunnel or reverse proxy."
+      },
+      "details": {
+        "summary": "Details and controls",
+        "chatgptApp": "ChatGPT app",
+        "targetChat": "Target chat",
+        "mcpUrlId": "MCP URL id",
+        "remote": "Remote",
+        "lastMcpError": "Last MCP error",
+        "lastTurn": "Last turn",
+        "profile": "Profile"
+      },
+      "empty": {
+        "title": "Create the ChatGPT Web Model actor here",
+        "description": "This creates the single CCCC actor identity that the ChatGPT MCP app will use. After creation, continue here to create the MCP URL, sign in to ChatGPT, and choose the target chat.",
+        "browserTitle": "ChatGPT browser",
+        "browserDescription": "You can sign in before creating the actor. CCCC keeps this one global ChatGPT page and reuses it later.",
+        "ownerGroup": "Owner group",
+        "noGroupAvailable": "No group available",
+        "createGroupFirst": "Create a CCCC group first, then return here to add ChatGPT Web Model."
+      },
+      "embedded": {
+        "title": "Embedded ChatGPT browser",
+        "reloadDescription": "Reload restarts the embedded ChatGPT browser while preserving this actor, group, browser profile, and delivery target."
+      },
+      "advanced": {
+        "summary": "Advanced",
+        "status": "Status",
+        "recommended": "Recommended",
+        "currentBrowserTab": "Current browser tab",
+        "lastBrowserTab": "Last browser tab",
+        "deliveryTarget": "Delivery target",
+        "lastDelivery": "Last delivery",
+        "recorded": "recorded",
+        "lastError": "Last error",
+        "pendingNewChat": "Pending new chat",
+        "mode": "Mode"
+      },
+      "browserSurface": {
+        "starting": "Opening ChatGPT...",
+        "waiting": "Waiting for ChatGPT...",
+        "ready": "ChatGPT surface ready",
+        "failed": "ChatGPT surface failed",
+        "closed": "ChatGPT surface closed.",
+        "reconnecting": "Reconnecting ChatGPT surface...",
+        "reconnect": "Reconnect",
+        "frameAlt": "ChatGPT browser frame"
+      },
+      "buttons": {
+        "refresh": "Refresh",
+        "openWebAccess": "Open Web Access",
+        "rotateMcpUrl": "Rotate MCP URL",
+        "revokeMcpUrl": "Revoke MCP URL",
+        "startActor": "Start actor",
+        "copyMcpUrl": "Copy MCP URL",
+        "createMcpUrl": "Create MCP URL",
+        "setupChatGpt": "Set up ChatGPT",
+        "openChatGpt": "Open ChatGPT",
+        "createActor": "Create actor",
+        "hide": "Hide",
+        "useCurrentChat": "Use current ChatGPT chat",
+        "newChatSelected": "New ChatGPT chat selected",
+        "startNewChat": "Start a new ChatGPT chat",
+        "saveTargetUrl": "Save target URL",
+        "reloadChatGpt": "Reload ChatGPT page",
+        "checkStatus": "Check status",
+        "closeBrowser": "Close browser"
+      },
+      "activity": {
+        "notSeenYet": "not seen yet",
+        "lastCallFailed": "last call failed",
+        "wait": "wait: {{status}}",
+        "complete": "complete: {{status}}",
+        "seen": "seen",
+        "seenAt": "seen {{time}}"
+      },
+      "copyLabels": {
+        "mcpUrl": "MCP URL"
+      },
+      "notices": {
+        "actorCreated": "ChatGPT Web Model actor created.",
+        "connectorRotated": "Connector rotated. Previous connector revoked.",
+        "connectorCreated": "Connector created.",
+        "actorStarted": "Actor started.",
+        "signInSurfaceOpened": "ChatGPT sign-in surface opened below.",
+        "browserRestarted": "ChatGPT browser restarted.",
+        "browserClosed": "ChatGPT browser session closed.",
+        "newChatSelected": "New ChatGPT chat selected for next delivery.",
+        "conversationBound": "ChatGPT conversation bound to this actor.",
+        "copied": "{{label}} copied.",
+        "copyFailed": "Copy failed."
+      },
+      "errors": {
+        "loadConnectorFailed": "Failed to load ChatGPT Web Model MCP URL.",
+        "loadBrowserSessionFailed": "Failed to load ChatGPT browser session.",
+        "openBrowserFailed": "Failed to open ChatGPT browser.",
+        "loadActorsFailed": "Failed to load actors.",
+        "loadGroupsFailed": "Failed to load groups.",
+        "loadSettingsFailed": "Failed to load ChatGPT Web Model settings.",
+        "createOrSelectGroup": "Create or select a group before adding ChatGPT Web Model.",
+        "createActorFailed": "Failed to create ChatGPT Web Model actor.",
+        "selectActorFirst": "Select a group with the ChatGPT Web Model actor first.",
+        "createConnectorFailed": "Failed to create connector.",
+        "startActorFailed": "Failed to start actor.",
+        "revokeConnectorFailed": "Failed to revoke connector.",
+        "restartBrowserFailed": "Failed to restart ChatGPT browser.",
+        "closeBrowserFailed": "Failed to close ChatGPT browser session.",
+        "bindConversationFailed": "Failed to bind ChatGPT conversation."
+      },
+      "nextAction": {
+        "open_chatgpt": "Open ChatGPT",
+        "restart_browser": "Restart browser",
+        "reload_page": "Reload page",
+        "wait_for_chat_bind": "Wait for chat binding",
+        "bind_current_chat": "Bind current chat",
+        "retry_delivery": "Retry delivery",
+        "inspect_error": "Inspect error",
+        "login_chatgpt": "Sign in to ChatGPT"
+      },
+      "common": {
+        "none": "none",
+        "notSet": "Not set"
+      }
+    }
   },
   "webAccess": {
     "title": "Web Access",

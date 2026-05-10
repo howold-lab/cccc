@@ -3,13 +3,17 @@ import { lazy, Suspense, useState, useEffect, useRef, useMemo, useCallback } fro
 import { useTranslation } from "react-i18next";
 import { Actor, GroupDoc, GroupSettings, IMStatus, IMPlatform, WebAccessSession, WeixinLoginStatus } from "../types";
 import * as api from "../services/api";
-import { useObservabilityStore } from "../stores";
+import { useModalStore, useObservabilityStore } from "../stores";
 import type { RuntimeVisibilityMode } from "../utils/runtimeVisibility";
 import {
   SettingsScope,
   GroupTabId,
   GlobalTabId,
 } from "./modals/settings/types";
+import {
+  readSettingsLastLocation,
+  writeSettingsLastLocation,
+} from "./modals/settings/settingsLastLocation";
 import { ModalFrame } from "./modals/ModalFrame";
 import { SettingsNavigation } from "./modals/settings/SettingsNavigation";
 import { IMConfigDraft, saveAndStartIMBridge, saveIMConfigDraft } from "./modals/settings/imBridgeConfig";
@@ -24,7 +28,7 @@ const TranscriptTab = lazy(() => import("./modals/settings/TranscriptTab").then(
 const GuidanceTab = lazy(() => import("./modals/settings/GuidanceTab").then((module) => ({ default: module.GuidanceTab })));
 const AssistantsTab = lazy(() => import("./modals/settings/AssistantsTab").then((module) => ({ default: module.AssistantsTab })));
 const GroupSpaceTab = lazy(() => import("./modals/settings/GroupSpaceTab").then((module) => ({ default: module.GroupSpaceTab })));
-const BlueprintTab = lazy(() => import("./modals/settings/BlueprintTab").then((module) => ({ default: module.BlueprintTab })));
+const CopyGroupsTab = lazy(() => import("./modals/settings/CopyGroupsTab").then((module) => ({ default: module.CopyGroupsTab })));
 const CapabilitiesTab = lazy(() => import("./modals/settings/CapabilitiesTab").then((module) => ({ default: module.CapabilitiesTab })));
 const ActorProfilesTab = lazy(() => import("./modals/settings/ActorProfilesTab").then((module) => ({ default: module.ActorProfilesTab })));
 const BrandingTab = lazy(() => import("./modals/settings/BrandingTab").then((module) => ({ default: module.BrandingTab })));
@@ -71,11 +75,14 @@ export function SettingsModal({
 }: SettingsModalProps) {
   const { t } = useTranslation("settings");
   const { modalRef } = useModalA11y(isOpen, onClose);
-  const [scope, setScope] = useState<SettingsScope>(groupId ? "group" : "global");
-  const [groupTab, setGroupTab] = useState<GroupTabId>("guidance");
-  const [globalTab, setGlobalTab] = useState<GlobalTabId>("capabilities");
+  const [initialLocation] = useState(() => readSettingsLastLocation(Boolean(groupId)));
+  const [scope, setScope] = useState<SettingsScope>(() => initialLocation.scope);
+  const [groupTab, setGroupTab] = useState<GroupTabId>(() => initialLocation.groupTab);
+  const [globalTab, setGlobalTab] = useState<GlobalTabId>(() => initialLocation.globalTab);
   const [canAccessGlobalSettings, setCanAccessGlobalSettings] = useState<boolean | null>(null);
   const [webAccessSession, setWebAccessSession] = useState<WebAccessSession | null>(null);
+  const settingsTarget = useModalStore((state) => state.settingsTarget);
+  const clearSettingsTarget = useModalStore((state) => state.clearSettingsTarget);
 
   // Automation + delivery settings state
   const [nudgeSeconds, setNudgeSeconds] = useState(300);
@@ -935,7 +942,7 @@ export function SettingsModal({
     ...(globalSettingsEnabled ? [
       { id: "branding" as const, label: t("tabs.branding") },
       { id: "webAccess" as const, label: t("tabs.webAccess") },
-      { id: "webModels" as const, label: t("tabs.webModels", { defaultValue: "Web Models" }) },
+      { id: "webModels" as const, label: t("tabs.webModels", { defaultValue: "ChatGPT Web Model" }) },
       { id: "developer" as const, label: t("tabs.developer") },
     ] : []),
   ], [globalSettingsEnabled, currentBrowserSignedIn, t]);
@@ -948,6 +955,20 @@ export function SettingsModal({
     }
   }, [globalTab, globalTabs, scope]);
 
+  useEffect(() => {
+    if (!isOpen || !settingsTarget) return;
+    const nextScope = settingsTarget.scope === "global" ? "global" : settingsTarget.scope === "group" ? "group" : "";
+    const nextTab = String(settingsTarget.tab || "").trim();
+    if (nextScope === "global") {
+      setScope("global");
+      if (nextTab) setGlobalTab(nextTab as GlobalTabId);
+    } else if (nextScope === "group") {
+      setScope("group");
+      if (nextTab) setGroupTab(nextTab as GroupTabId);
+    }
+    clearSettingsTarget();
+  }, [clearSettingsTarget, isOpen, settingsTarget]);
+
   const groupTabs: { id: GroupTabId; label: string }[] = [
     { id: "guidance", label: t("tabs.guidance") },
     { id: "assistants", label: t("tabs.assistants") },
@@ -957,7 +978,7 @@ export function SettingsModal({
     { id: "messaging", label: t("tabs.messaging") },
     { id: "im", label: t("tabs.im") },
     { id: "transcript", label: t("tabs.transcript") },
-    { id: "blueprint", label: t("tabs.blueprint") },
+    { id: "copyGroups", label: t("tabs.copyGroups") },
   ];
   const tabs = scope === "group" ? groupTabs : (globalScopeEnabled ? globalTabs : []);
   const activeTab = scope === "group" ? groupTab : globalTab;
@@ -965,6 +986,11 @@ export function SettingsModal({
     if (scope === "group") setGroupTab(tab as GroupTabId);
     else setGlobalTab(tab as GlobalTabId);
   };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    writeSettingsLastLocation({ scope, groupTab, globalTab });
+  }, [globalTab, groupTab, isOpen, scope]);
 
   useEffect(() => {
     const el = contentScrollRef.current;
@@ -1213,7 +1239,7 @@ export function SettingsModal({
                 />
               )}
 
-              {activeTab === "blueprint" && <BlueprintTab isDark={isDark} groupId={groupId} groupTitle={groupDoc?.title || ""} />}
+              {activeTab === "copyGroups" && <CopyGroupsTab isDark={isDark} groupId={groupId} groupTitle={groupDoc?.title || ""} />}
 
               {activeTab === "capabilities" && (
                 <CapabilitiesTab

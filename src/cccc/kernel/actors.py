@@ -91,6 +91,8 @@ def generate_actor_id(group: Group, prefix: str = "agent", runtime: str = "") ->
     # Use runtime as prefix if provided and valid
     if runtime:
         prefix = runtime
+    if runtime == "web_model":
+        prefix = "chatgpt-web"
     
     existing = {str(a.get("id", "")) for a in list_actors(group)}
     for i in range(1, 1000):
@@ -192,6 +194,7 @@ def add_actor(
     default_scope_key: str = "",
     submit: ActorSubmit = "enter",
     capability_autoload: Optional[List[str]] = None,
+    capability_hidden: Optional[List[str]] = None,
     enabled: bool = True,
     runner: RunnerKind = "pty",
     runtime: AgentRuntime = "codex",
@@ -213,7 +216,10 @@ def add_actor(
     runtime_name = str(runtime or "codex").strip() or "codex"
     runner_kind = str(runner or "pty").strip() or "pty"
     command_list = list(command or [])
-    if runtime_name == "web_model":
+    runtime_key = runtime_name.lower()
+    if runtime_key == "web_model" and str(internal_kind or "").strip():
+        raise ValueError("internal actors cannot use runtime=web_model")
+    if runtime_key == "web_model":
         runner_kind = "headless"
         command_list = []
 
@@ -227,6 +233,7 @@ def add_actor(
         default_scope_key=default_scope_key.strip(),
         submit=submit,
         capability_autoload=_normalize_capability_id_list(capability_autoload or []),
+        capability_hidden=_normalize_capability_id_list(capability_hidden or []),
         enabled=coerce_bool(enabled, default=True),
         runner=runner_kind,  # type: ignore[arg-type]
         runtime=runtime_name,  # type: ignore[arg-type]
@@ -302,6 +309,19 @@ def update_actor(group: Group, actor_id: str, patch: Dict[str, Any]) -> Dict[str
     if item is None:
         raise ValueError(f"actor not found: {actor_id.strip()}")
 
+    current_internal_kind = str(item.get("internal_kind") or "").strip()
+    patch_runtime_key = str(patch.get("runtime") or "").strip().lower()
+    effective_runtime_key = str(patch.get("runtime") or item.get("runtime") or "").strip().lower()
+    if "runtime" in patch and patch_runtime_key == "web_model" and current_internal_kind:
+        raise ValueError("internal actors cannot use runtime=web_model")
+    if (
+        "internal_kind" in patch
+        and str(patch.get("internal_kind") or "").strip()
+        and str(patch.get("internal_kind") or "").strip() != current_internal_kind
+        and effective_runtime_key == "web_model"
+    ):
+        raise ValueError("internal actors cannot use runtime=web_model")
+
     # Note: 'role' in patch is ignored - role is auto-determined by position
     if "role" in patch:
         pass  # Silently ignore for backward compatibility
@@ -351,6 +371,9 @@ def update_actor(group: Group, actor_id: str, patch: Dict[str, Any]) -> Dict[str
 
     if "capability_autoload" in patch:
         item["capability_autoload"] = _normalize_capability_id_list(patch.get("capability_autoload"))
+
+    if "capability_hidden" in patch:
+        item["capability_hidden"] = _normalize_capability_id_list(patch.get("capability_hidden"))
 
     if "enabled" in patch:
         item["enabled"] = coerce_bool(patch.get("enabled"), default=False)

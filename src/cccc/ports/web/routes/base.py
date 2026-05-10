@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -24,8 +23,10 @@ from ....kernel.web_model_connectors import (
     revoke_web_model_connector,
     verify_web_model_connector_secret,
 )
+from ....daemon.actors.web_model_actor_policy import require_no_other_chatgpt_web_model_actor
 from ....daemon.runner_state_ops import headless_state_running
 from ....util.conv import coerce_bool
+from ....util.time import parse_utc_iso, utc_now_iso
 from ..branding import (
     build_branding_payload,
     delete_branding_asset,
@@ -33,7 +34,9 @@ from ..branding import (
     resolve_branding_asset_path,
     store_branding_asset,
 )
-from ...mcp.common import runtime_context_override
+from ...mcp.common import MCPError, runtime_context_override
+from ...mcp.handlers.cccc_capability import capability_install as mcp_capability_install
+from ...mcp.handlers.cccc_capability import capability_use as mcp_capability_use
 from ..schemas import (
     BrandingUpdateRequest,
     DebugClearLogsRequest,
@@ -50,8 +53,14 @@ from ..schemas import (
     resolve_websocket_principal,
     websocket_tokens_active,
 )
+from .browser_surface_proxy import (
+    open_daemon_stream,
+    proxy_daemon_raw_stream_to_websocket,
+    send_daemon_attach_request,
+)
 
 _WEB_MODEL_BROWSER_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
+_WEB_MODEL_CONNECTOR_GET_ACTIVITY_MIN_SECONDS = 30.0
 
 
 class WebModelConnectorCreateRequest(BaseModel):
@@ -73,6 +82,7 @@ class WebModelBrowserBindRequest(BaseModel):
     group_id: str
     actor_id: str
     conversation_url: str = ""
+    new_chat: bool = False
     clear: bool = False
 
 
@@ -215,6 +225,15 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
         return f"{url}{sep}{urlencode({'token': token})}"
 
+    def _connector_path_token_url(connector_url: str, secret: str) -> str:
+        url = str(connector_url or "").strip().rstrip("/")
+        token = str(secret or "").strip()
+        if not url or not token:
+            return ""
+        from urllib.parse import quote
+
+        return f"{url}/token/{quote(token, safe='')}"
+
     def _web_model_connector_web_payload(request: Request, item: Dict[str, Any]) -> Dict[str, Any]:
         connector_id = str(item.get("connector_id") or "").strip()
         entry = mask_web_model_connector(item)
@@ -225,11 +244,19 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         token_url = _connector_url_with_token(connector_url, secret)
         if token_url:
             entry["connector_url_with_token"] = token_url
+        path_token_url = _connector_path_token_url(connector_url, secret)
+        if path_token_url:
+            entry["connector_url_path_token"] = path_token_url
         return entry
 
-    def _require_web_model_browser_actor(group_id: str, actor_id: str) -> None:
+    def _is_global_web_model_browser_setup(group_id: str, actor_id: str) -> bool:
+        return not str(group_id or "").strip() and not str(actor_id or "").strip()
+
+    def _require_web_model_browser_actor(group_id: str, actor_id: str, *, allow_global_setup: bool = False) -> None:
         gid = str(group_id or "").strip()
         aid = str(actor_id or "").strip()
+        if allow_global_setup and _is_global_web_model_browser_setup(gid, aid):
+            return
         if not gid:
             raise HTTPException(status_code=400, detail={"code": "missing_group_id", "message": "missing group_id", "details": {}})
         if not aid:
@@ -250,14 +277,36 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 },
             )
 
+    def _daemon_http_status_for_error(code: str, default: int = 500) -> int:
+        normalized = str(code or "").strip()
+        if normalized in {"missing_group_id", "missing_actor_id", "invalid_actor_runtime", "chatgpt_tab_not_found"}:
+            return 400
+        if normalized in {"group_not_found", "actor_not_found"}:
+            return 404
+        return int(default)
+
+    async def _call_web_model_browser_daemon(op: str, args: Dict[str, Any], *, default_status: int = 500) -> Dict[str, Any]:
+        resp = await ctx.daemon({"op": str(op or "").strip(), "args": dict(args or {})})
+        if not isinstance(resp, dict) or not resp.get("ok"):
+            err = resp.get("error") if isinstance(resp, dict) and isinstance(resp.get("error"), dict) else {}
+            code = str(err.get("code") or "daemon_error")
+            message = str(err.get("message") or "daemon request failed")
+            details = err.get("details") if isinstance(err.get("details"), dict) else {}
+            raise HTTPException(
+                status_code=_daemon_http_status_for_error(code, default_status),
+                detail={"code": code, "message": message, "details": details},
+            )
+        result = resp.get("result")
+        return dict(result) if isinstance(result, dict) else {}
+
     def _extract_bearer_or_query_token(request: Request) -> str:
         auth = str(request.headers.get("authorization") or "").strip()
         if auth.lower().startswith("bearer "):
             return str(auth[7:] or "").strip()
         return str(request.query_params.get("token") or "").strip()
 
-    def _resolve_web_model_connector(request: Request, connector_id: str) -> Dict[str, Any]:
-        secret = _extract_bearer_or_query_token(request)
+    def _resolve_web_model_connector(request: Request, connector_id: str, *, secret_override: str = "") -> Dict[str, Any]:
+        secret = str(secret_override or "").strip() or _extract_bearer_or_query_token(request)
         connector = verify_web_model_connector_secret(connector_id, secret)
         if connector is None:
             raise HTTPException(
@@ -306,6 +355,32 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             _reject_live_binding("connector_actor_stopped", "web-model connector actor is stopped")
         return connector
 
+    def _record_web_model_connector_probe_activity(connector_id: str) -> None:
+        cid = str(connector_id or "").strip()
+        if not cid:
+            return
+        connectors = load_web_model_connectors()
+        entry = connectors.get(cid)
+        if not isinstance(entry, dict) or bool(entry.get("revoked")):
+            return
+        last_activity_raw = str(entry.get("last_activity_at") or "").strip()
+        last_method = str(entry.get("last_method") or "").strip().upper()
+        if last_activity_raw and last_method != "GET":
+            return
+        last_activity = parse_utc_iso(last_activity_raw)
+        now = parse_utc_iso(utc_now_iso())
+        if (
+            last_activity is not None
+            and now is not None
+            and (now - last_activity).total_seconds() < _WEB_MODEL_CONNECTOR_GET_ACTIVITY_MIN_SECONDS
+        ):
+            return
+        record_web_model_connector_activity(
+            cid,
+            method="GET",
+            call_status="ok",
+        )
+
     async def _handle_remote_mcp_payload(payload: Any, *, connector: Optional[Dict[str, Any]] = None) -> Response:
         from ...mcp.main import handle_request as handle_mcp_request
 
@@ -353,6 +428,28 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             if not isinstance(item, dict):
                 return _mcp_jsonrpc_error(None, -32600, "Invalid Request")
 
+            method = str(item.get("method") or "").strip()
+            params = item.get("params") if isinstance(item.get("params"), dict) else {}
+            requested_tool_name = str(params.get("name") or "").strip() if method == "tools/call" else ""
+
+            async def _record_browser_progress(reason: str, detail: str) -> None:
+                if not isinstance(connector, dict):
+                    return
+                if method != "tools/call" or not requested_tool_name or requested_tool_name == "cccc_runtime_complete_turn":
+                    return
+                try:
+                    from ....daemon.actors.web_model_tool_confirm_watcher import record_web_model_browser_progress
+
+                    await run_in_threadpool(
+                        record_web_model_browser_progress,
+                        str(connector.get("group_id") or ""),
+                        str(connector.get("actor_id") or ""),
+                        reason=reason,
+                        detail=detail,
+                    )
+                except Exception:
+                    pass
+
             def _run() -> Dict[str, Any]:
                 if not isinstance(connector, dict):
                     return handle_mcp_request(item)
@@ -363,6 +460,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 ):
                     return handle_mcp_request(item)
 
+            await _record_browser_progress("mcp_tool_start", requested_tool_name)
             resp = await run_in_threadpool(_run)
             if isinstance(connector, dict):
                 connector_id = str(connector.get("connector_id") or "").strip()
@@ -378,6 +476,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                         turn_id=activity["turn_id"],
                         error=activity["error"],
                     )
+                    await _record_browser_progress("mcp_tool", activity["tool_name"])
             return resp
 
         if isinstance(payload, list):
@@ -438,6 +537,13 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 },
             )
         try:
+            require_no_other_chatgpt_web_model_actor(group_id=group_id, actor_id=actor_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "chatgpt_web_model_singleton", "message": str(exc), "details": {"group_id": group_id, "actor_id": actor_id}},
+            ) from exc
+        try:
             connector = create_web_model_connector(
                 group_id=group_id,
                 actor_id=actor_id,
@@ -464,58 +570,82 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             raise HTTPException(status_code=404, detail={"code": "not_found", "message": "web-model connector not found", "details": {}})
         return {"ok": True, "result": {"revoked": True, "connector_id": str(connector_id or "").strip()}}
 
-    async def _web_model_browser_payload(group_id: str, actor_id: str, browser_surface: Dict[str, Any]) -> Dict[str, Any]:
-        from ....daemon.actors.web_model_browser_session import get_web_model_chatgpt_browser_session_state
-        from ...web_model_browser_sidecar import chatgpt_browser_session_status
+    async def _web_model_browser_payload(group_id: str, actor_id: str, browser_surface: Dict[str, Any], *, inspect: bool = False) -> Dict[str, Any]:
+        from ...web_model_browser_sidecar import (
+            build_chatgpt_web_model_health_snapshot,
+            chatgpt_browser_session_cached_status,
+            chatgpt_browser_session_status,
+        )
 
-        surface = browser_surface or await run_in_threadpool(
-            get_web_model_chatgpt_browser_session_state,
+        surface = browser_surface
+        if not isinstance(surface, dict) or not surface:
+            info = await _call_web_model_browser_daemon(
+                "web_model_browser_info",
+                {"group_id": group_id, "actor_id": actor_id},
+                default_status=500,
+            )
+            surface = info.get("browser_surface") if isinstance(info.get("browser_surface"), dict) else {}
+        status_fn = chatgpt_browser_session_status if inspect else chatgpt_browser_session_cached_status
+        browser = await run_in_threadpool(status_fn, group_id, actor_id)
+        if isinstance(surface, dict) and surface.get("active") and not browser.get("active"):
+            browser = {
+                **browser,
+                "active": True,
+                "state": surface.get("state") or browser.get("state") or "ready",
+                "url": surface.get("url") or browser.get("url") or "",
+            }
+            metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+            if metadata.get("cdp_port") and not browser.get("cdp_port"):
+                browser["cdp_port"] = metadata.get("cdp_port")
+        health_snapshot = build_chatgpt_web_model_health_snapshot(
             group_id=group_id,
             actor_id=actor_id,
+            browser_session=browser,
+            browser_surface=surface if isinstance(surface, dict) else {},
         )
-        browser = await run_in_threadpool(chatgpt_browser_session_status, group_id, actor_id)
-        return {"ok": True, "result": {"browser_session": browser, "browser_surface": surface}}
+        browser = {**browser, "health_snapshot": health_snapshot}
+        return {"ok": True, "result": {"browser_session": browser, "browser_surface": surface, "health_snapshot": health_snapshot}}
 
     @global_router.get("/api/v1/web-model/browser-session", dependencies=[Depends(require_admin)])
-    async def web_model_browser_session_status(group_id: str, actor_id: str) -> Dict[str, Any]:
-        _require_web_model_browser_actor(group_id, actor_id)
-        return await _web_model_browser_payload(group_id, actor_id, {})
+    async def web_model_browser_session_status(group_id: str, actor_id: str, inspect: bool = False) -> Dict[str, Any]:
+        _require_web_model_browser_actor(group_id, actor_id, allow_global_setup=True)
+        info = await _call_web_model_browser_daemon(
+            "web_model_browser_info",
+            {"group_id": group_id, "actor_id": actor_id},
+            default_status=500,
+        )
+        surface = info.get("browser_surface") if isinstance(info.get("browser_surface"), dict) else {}
+        return await _web_model_browser_payload(group_id, actor_id, surface, inspect=bool(inspect))
 
     @global_router.post("/api/v1/web-model/browser-session/open", dependencies=[Depends(require_admin)])
-    async def web_model_browser_session_open(req: WebModelBrowserSessionRequest) -> Dict[str, Any]:
+    async def web_model_browser_session_open(req: WebModelBrowserSessionRequest, inspect: bool = False) -> Dict[str, Any]:
         group_id = str(req.group_id or "").strip()
         actor_id = str(req.actor_id or "").strip()
-        _require_web_model_browser_actor(group_id, actor_id)
-        from ....daemon.actors.web_model_browser_session import open_web_model_chatgpt_browser_session
-
-        try:
-            surface = await run_in_threadpool(
-                open_web_model_chatgpt_browser_session,
-                group_id=group_id,
-                actor_id=actor_id,
-                width=int(req.width or 1366),
-                height=int(req.height or 900),
-            )
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail={"code": "web_model_browser_open_failed", "message": str(exc), "details": {}},
-            ) from exc
-        return await _web_model_browser_payload(group_id, actor_id, surface)
+        _require_web_model_browser_actor(group_id, actor_id, allow_global_setup=True)
+        info = await _call_web_model_browser_daemon(
+            "web_model_browser_open",
+            {
+                "group_id": group_id,
+                "actor_id": actor_id,
+                "width": int(req.width or 1366),
+                "height": int(req.height or 900),
+            },
+            default_status=500,
+        )
+        surface = info.get("browser_surface") if isinstance(info.get("browser_surface"), dict) else {}
+        return await _web_model_browser_payload(group_id, actor_id, surface, inspect=bool(inspect))
 
     @global_router.post("/api/v1/web-model/browser-session/close", dependencies=[Depends(require_admin)])
     async def web_model_browser_session_close(req: WebModelBrowserSessionRequest) -> Dict[str, Any]:
         group_id = str(req.group_id or "").strip()
         actor_id = str(req.actor_id or "").strip()
-        _require_web_model_browser_actor(group_id, actor_id)
-        from ....daemon.actors.web_model_browser_session import close_web_model_chatgpt_browser_session
-
-        result = await run_in_threadpool(
-            close_web_model_chatgpt_browser_session,
-            group_id=group_id,
-            actor_id=actor_id,
+        _require_web_model_browser_actor(group_id, actor_id, allow_global_setup=True)
+        result = await _call_web_model_browser_daemon(
+            "web_model_browser_close",
+            {"group_id": group_id, "actor_id": actor_id},
+            default_status=500,
         )
-        surface = result.get("browser_surface") if isinstance(result, dict) else {}
+        surface = result.get("browser_surface") if isinstance(result.get("browser_surface"), dict) else {}
         return await _web_model_browser_payload(group_id, actor_id, surface if isinstance(surface, dict) else {})
 
     @global_router.post("/api/v1/web-model/browser-session/bind-current", dependencies=[Depends(require_admin)])
@@ -523,7 +653,14 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         group_id = str(req.group_id or "").strip()
         actor_id = str(req.actor_id or "").strip()
         _require_web_model_browser_actor(group_id, actor_id)
-        from ...web_model_browser_sidecar import _normalize_chatgpt_url, chatgpt_browser_session_status, record_chatgpt_browser_state
+        from ...web_model_browser_sidecar import (
+            CHATGPT_URL,
+            _conversation_url_from_tab,
+            _normalize_chatgpt_url,
+            chatgpt_browser_session_cached_status,
+            chatgpt_browser_session_status,
+            record_chatgpt_browser_state,
+        )
 
         if bool(req.clear):
             await run_in_threadpool(
@@ -532,34 +669,74 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 actor_id,
                 {
                     "conversation_url": "",
+                    "pending_new_chat_bind": False,
+                    "pending_new_chat_url": "",
+                    "pending_new_chat_bind_started_at": "",
+                    "pending_new_chat_submitted": False,
+                    "pending_new_chat_submitted_at": "",
+                    "pending_new_chat_delivery_id": "",
+                    "pending_new_chat_last_turn_id": "",
+                    "pending_new_chat_last_event_ids": [],
+                    "pending_new_chat_last_tab_url": "",
+                    "new_chat_bound_at": "",
                     "bootstrap_seed_delivered_at": "",
                     "bootstrap_seed_version": "",
                     "bootstrap_seed_digest": "",
                     "bootstrap_seed_conversation_url": "",
+                    "last_error": "",
                 },
             )
             return await _web_model_browser_payload(group_id, actor_id, {})
 
-        browser = await run_in_threadpool(chatgpt_browser_session_status, group_id, actor_id)
-        url = _normalize_chatgpt_url(
-            req.conversation_url or browser.get("tab_url") or browser.get("last_tab_url") or "",
-            require_conversation=True,
+        info = await _call_web_model_browser_daemon(
+            "web_model_browser_info",
+            {"group_id": group_id, "actor_id": actor_id},
+            default_status=500,
         )
-        if not url:
+        surface = info.get("browser_surface") if isinstance(info.get("browser_surface"), dict) else {}
+        browser = await run_in_threadpool(chatgpt_browser_session_cached_status, group_id, actor_id)
+        browser_has_url = bool(str(browser.get("tab_url") or browser.get("last_tab_url") or "").strip())
+        if not req.conversation_url and not bool(req.new_chat) and not browser_has_url:
+            browser = await run_in_threadpool(chatgpt_browser_session_status, group_id, actor_id)
+        raw_url = str(
+            req.conversation_url
+            or (surface.get("url") if isinstance(surface, dict) else "")
+            or browser.get("tab_url")
+            or browser.get("last_tab_url")
+            or ""
+        ).strip()
+        conversation_url = _conversation_url_from_tab(raw_url)
+        pending_url = _normalize_chatgpt_url(raw_url) if raw_url else ""
+        if bool(req.new_chat):
+            conversation_url = ""
+            pending_url = CHATGPT_URL
+        if not conversation_url and not pending_url:
             raise HTTPException(
                 status_code=400,
-                detail={"code": "chatgpt_tab_not_found", "message": "open a ChatGPT conversation before binding", "details": {}},
+                detail={"code": "chatgpt_tab_not_found", "message": "open ChatGPT or paste a ChatGPT conversation URL before binding", "details": {}},
             )
+        pending_new_chat = not bool(conversation_url)
         await run_in_threadpool(
             record_chatgpt_browser_state,
             group_id,
             actor_id,
             {
-                "conversation_url": url,
+                "conversation_url": conversation_url,
+                "pending_new_chat_bind": pending_new_chat,
+                "pending_new_chat_url": pending_url if pending_new_chat else "",
+                "pending_new_chat_bind_started_at": utc_now_iso() if pending_new_chat else "",
+                "pending_new_chat_submitted": False,
+                "pending_new_chat_submitted_at": "",
+                "pending_new_chat_delivery_id": "",
+                "pending_new_chat_last_turn_id": "",
+                "pending_new_chat_last_event_ids": [],
+                "pending_new_chat_last_tab_url": "",
+                "new_chat_bound_at": "",
                 "bootstrap_seed_delivered_at": "",
                 "bootstrap_seed_version": "",
                 "bootstrap_seed_digest": "",
                 "bootstrap_seed_conversation_url": "",
+                "last_error": "",
             },
         )
         return await _web_model_browser_payload(group_id, actor_id, {})
@@ -590,7 +767,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
         try:
             check_admin(websocket)
-            _require_web_model_browser_actor(group_id, actor_id)
+            _require_web_model_browser_actor(group_id, actor_id, allow_global_setup=True)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {"code": "permission_denied", "message": str(exc.detail or "permission denied")}
             try:
@@ -617,42 +794,71 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             await websocket.close(code=1000)
             return
 
-        from ....daemon.actors.web_model_browser_session import (
-            attach_web_model_chatgpt_browser_socket,
-            can_attach_web_model_chatgpt_browser_socket,
-        )
-
-        ok, info = can_attach_web_model_chatgpt_browser_socket(group_id=group_id, actor_id=actor_id)
-        if not ok:
+        mode = str(websocket.query_params.get("mode") or "").strip().lower()
+        if mode == "vnc":
             try:
-                await websocket.send_json({"ok": False, "error": info})
+                reader, writer = await open_daemon_stream(home=ctx.home, limit=_WEB_MODEL_BROWSER_STREAM_LIMIT_BYTES)
             except Exception:
-                pass
-            await websocket.close(code=1008)
+                await websocket.close(code=1011)
+                return
+            try:
+                resp = await send_daemon_attach_request(
+                    reader,
+                    writer,
+                    op="web_model_browser_vnc_attach",
+                    args={"group_id": group_id, "actor_id": actor_id},
+                )
+                if not isinstance(resp, dict) or not resp.get("ok"):
+                    await websocket.close(code=1008)
+                    return
+                await proxy_daemon_raw_stream_to_websocket(websocket, reader, writer)
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
             return
 
         try:
-            manager_sock, web_sock = socket.socketpair()
+            from ....daemon.server import get_daemon_endpoint
+
+            ep = get_daemon_endpoint()
+            transport = str(ep.get("transport") or "").strip().lower()
+            if transport == "tcp":
+                host = str(ep.get("host") or "127.0.0.1").strip() or "127.0.0.1"
+                port = int(ep.get("port") or 0)
+                reader, writer = await asyncio.open_connection(host, port, limit=_WEB_MODEL_BROWSER_STREAM_LIMIT_BYTES)
+            else:
+                sock_path = ctx.home / "daemon" / "ccccd.sock"
+                path = str(ep.get("path") or sock_path)
+                reader, writer = await asyncio.open_unix_connection(path, limit=_WEB_MODEL_BROWSER_STREAM_LIMIT_BYTES)
         except Exception:
-            await websocket.send_json({"ok": False, "error": {"code": "browser_surface_attach_failed", "message": "socketpair unavailable"}})
+            await websocket.send_json({"ok": False, "error": {"code": "daemon_unavailable", "message": "ccccd unavailable"}})
             await websocket.close(code=1011)
             return
 
-        attached = False
-        web_sock_attached_to_asyncio = False
         try:
-            attached = attach_web_model_chatgpt_browser_socket(group_id=group_id, actor_id=actor_id, sock=manager_sock)
-            if not attached:
-                try:
-                    manager_sock.close()
-                except Exception:
-                    pass
-                await websocket.send_json({"ok": False, "error": {"code": "browser_surface_attach_failed", "message": "browser surface attach failed"}})
+            req = {
+                "op": "web_model_browser_attach",
+                "args": {
+                    "group_id": group_id,
+                    "actor_id": actor_id,
+                    "viewer_mode": str(websocket.query_params.get("viewer_mode") or "auto"),
+                },
+            }
+            writer.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
+            await writer.drain()
+            line = await reader.readline()
+            try:
+                resp = json.loads(line.decode("utf-8", errors="replace"))
+            except Exception:
+                resp = {}
+            if not isinstance(resp, dict) or not resp.get("ok"):
+                err = resp.get("error") if isinstance(resp.get("error"), dict) else {"code": "browser_surface_attach_failed", "message": "browser surface attach failed"}
+                await websocket.send_json({"ok": False, "error": err})
                 await websocket.close(code=1008)
                 return
-
-            reader, writer = await asyncio.open_connection(sock=web_sock, limit=_WEB_MODEL_BROWSER_STREAM_LIMIT_BYTES)
-            web_sock_attached_to_asyncio = True
 
             async def _pump_out() -> None:
                 while True:
@@ -692,21 +898,26 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 except Exception:
                     pass
         finally:
-            if not web_sock_attached_to_asyncio:
-                try:
-                    web_sock.close()
-                except Exception:
-                    pass
-            if not attached:
-                try:
-                    manager_sock.close()
-                except Exception:
-                    pass
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     @global_router.post("/mcp/web-model/{connector_id}")
     async def web_model_mcp_jsonrpc(connector_id: str, request: Request) -> Response:
         """Stable connector URL shape for the browser web-model runtime RFC."""
         connector = _resolve_web_model_connector(request, connector_id)
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail={"code": "invalid_json", "message": "invalid JSON body"}) from exc
+        return await _handle_remote_mcp_payload(payload, connector=connector)
+
+    @global_router.post("/mcp/web-model/{connector_id}/token/{secret}")
+    async def web_model_mcp_jsonrpc_path_token(connector_id: str, secret: str, request: Request) -> Response:
+        """Compatibility URL for clients that drop or reject query-token MCP URLs."""
+        connector = _resolve_web_model_connector(request, connector_id, secret_override=secret)
         try:
             payload = await request.json()
         except Exception as exc:
@@ -720,10 +931,28 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         connector_id_clean = str(connector.get("connector_id") or "").strip()
         if connector_id_clean:
             await run_in_threadpool(
-                record_web_model_connector_activity,
+                _record_web_model_connector_probe_activity,
                 connector_id_clean,
-                method="GET",
-                call_status="ok",
+            )
+
+        async def _events():
+            yield b": cccc web-model connector ready\n\n"
+
+        return StreamingResponse(
+            _events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @global_router.get("/mcp/web-model/{connector_id}/token/{secret}")
+    async def web_model_mcp_sse_probe_path_token(connector_id: str, secret: str, request: Request) -> StreamingResponse:
+        """Path-token probe variant for remote MCP clients that do not preserve query strings."""
+        connector = _resolve_web_model_connector(request, connector_id, secret_override=secret)
+        connector_id_clean = str(connector.get("connector_id") or "").strip()
+        if connector_id_clean:
+            await run_in_threadpool(
+                _record_web_model_connector_probe_activity,
+                connector_id_clean,
             )
 
         async def _events():
@@ -737,6 +966,17 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
     @global_router.options("/mcp/web-model/{connector_id}")
     async def web_model_mcp_options(connector_id: str) -> Response:
+        return Response(
+            status_code=204,
+            headers={
+                "Allow": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "authorization, content-type, accept, mcp-protocol-version, mcp-session-id",
+            },
+        )
+
+    @global_router.options("/mcp/web-model/{connector_id}/token/{secret}")
+    async def web_model_mcp_path_token_options(connector_id: str, secret: str) -> Response:
         return Response(
             status_code=204,
             headers={
@@ -978,9 +1218,11 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         limit: int = 400,
         offset: int = 0,
         include_indexed: bool = True,
+        include_source_instances: bool = True,
         kind: str = "",
         policy: str = "",
         source_id: str = "",
+        group_id: str = "",
     ) -> Dict[str, Any]:
         """Get global capability overview (policy + blocked + recent-success + source states)."""
         args = {
@@ -988,9 +1230,11 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             "limit": int(limit or 400),
             "offset": max(0, int(offset or 0)),
             "include_indexed": bool(include_indexed),
+            "include_source_instances": bool(include_source_instances),
             "kind": str(kind or ""),
             "policy": str(policy or ""),
             "source_id": str(source_id or ""),
+            "group_id": str(group_id or ""),
         }
         return await ctx.daemon({"op": "capability_overview", "args": args})
 
@@ -1437,6 +1681,138 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             }
         )
 
+    @group_router.post("/capabilities/visibility")
+    async def capability_visibility(group_id: str, request: Request) -> Dict[str, Any]:
+        """Hide/show a capability for one actor's UI/menu surfaces without disabling it."""
+        if ctx.read_only:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "read_only",
+                    "message": "Capability visibility endpoints are disabled in read-only (exhibit) mode.",
+                },
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail={"code": "invalid_request", "message": "request body must be an object"})
+        capability_id = str(payload.get("capability_id") or "").strip()
+        if not capability_id:
+            raise HTTPException(status_code=400, detail={"code": "missing_capability_id", "message": "missing capability_id"})
+        return await ctx.daemon(
+            {
+                "op": "capability_visibility",
+                "args": {
+                    "group_id": group_id,
+                    "by": "user",
+                    "actor_id": str(payload.get("actor_id") or "user").strip() or "user",
+                    "capability_id": capability_id,
+                    "hidden": bool(payload.get("hidden", True)),
+                    "reason": str(payload.get("reason") or "").strip(),
+                },
+            }
+        )
+
+    @group_router.post("/capabilities/use")
+    async def capability_use(group_id: str, request: Request) -> Dict[str, Any]:
+        """Enable a capability and optionally call one of its tools."""
+        if ctx.read_only:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "read_only",
+                    "message": "Capability use endpoints are disabled in read-only (exhibit) mode.",
+                },
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail={"code": "invalid_request", "message": "request body must be an object"})
+        raw_tool_args = payload.get("tool_arguments")
+        if raw_tool_args is not None and not isinstance(raw_tool_args, dict):
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_tool_arguments", "message": "tool_arguments must be an object"},
+            )
+        actor_id = str(payload.get("actor_id") or "user").strip() or "user"
+        tool_args = dict(raw_tool_args) if isinstance(raw_tool_args, dict) else {}
+        try:
+            def _call_capability_use() -> Dict[str, Any]:
+                with runtime_context_override(
+                    home=str(ctx.home),
+                    group_id=group_id,
+                    actor_id=actor_id,
+                ):
+                    return mcp_capability_use(
+                        group_id=group_id,
+                        by="user",
+                        actor_id=actor_id,
+                        capability_id=str(payload.get("capability_id") or ""),
+                        tool_name=str(payload.get("tool_name") or ""),
+                        tool_arguments=tool_args,
+                        scope=str(payload.get("scope") or "session").strip().lower() or "session",
+                        ttl_seconds=int(payload.get("ttl_seconds") or 3600),
+                        reason=str(payload.get("reason") or "").strip(),
+                    )
+
+            result = await run_in_threadpool(_call_capability_use)
+        except MCPError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": exc.message, "details": exc.details},
+            ) from exc
+        return {"ok": True, "result": result}
+
+    @group_router.post("/capabilities/install")
+    async def capability_install(group_id: str, request: Request) -> Dict[str, Any]:
+        """Install a target through the CCCC capability lifecycle."""
+        if ctx.read_only:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "read_only",
+                    "message": "Capability install endpoints are disabled in read-only (exhibit) mode.",
+                },
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail={"code": "invalid_request", "message": "request body must be an object"})
+        target = str(payload.get("target") or payload.get("source_uri") or payload.get("capability_id") or "").strip()
+        if not target:
+            raise HTTPException(status_code=400, detail={"code": "missing_install_target", "message": "missing install target"})
+        actor_id = str(payload.get("actor_id") or "user").strip() or "user"
+        try:
+            def _call_capability_install() -> Dict[str, Any]:
+                with runtime_context_override(
+                    home=str(ctx.home),
+                    group_id=group_id,
+                    actor_id=actor_id,
+                ):
+                    return mcp_capability_install(
+                        group_id=group_id,
+                        by="user",
+                        actor_id=actor_id,
+                        target=target,
+                        scope=str(payload.get("scope") or "actor").strip().lower() or "actor",
+                        ttl_seconds=int(payload.get("ttl_seconds") or 3600),
+                        reason=str(payload.get("reason") or "").strip(),
+                    )
+
+            result = await run_in_threadpool(_call_capability_install)
+        except MCPError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": exc.message, "details": exc.details},
+            ) from exc
+        return {"ok": True, "result": result}
+
     @group_router.post("/capabilities/import")
     async def capability_import(group_id: str, request: Request) -> Dict[str, Any]:
         """Import (install) a capability into a group."""
@@ -1467,6 +1843,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         }
         if "record" in payload:
             args["record"] = payload["record"]
+        if "source_uri" in payload:
+            args["source_uri"] = str(payload.get("source_uri") or "").strip()
         return await ctx.daemon({"op": "capability_import", "args": args})
 
     @group_router.post("/capabilities/uninstall")
@@ -1494,6 +1872,37 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     "by": "user",
                     "actor_id": str(payload.get("actor_id") or "user").strip() or "user",
                     "capability_id": str(payload.get("capability_id") or "").strip(),
+                    "reason": str(payload.get("reason") or "").strip(),
+                },
+            }
+        )
+
+    @group_router.post("/capabilities/sources/delete")
+    async def capability_source_delete(group_id: str, request: Request) -> Dict[str, Any]:
+        """Delete records and bindings owned by a removable capability source."""
+        if ctx.read_only:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "read_only",
+                    "message": "Capability source delete endpoints are disabled in read-only (exhibit) mode.",
+                },
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail={"code": "invalid_request", "message": "request body must be an object"})
+        return await ctx.daemon(
+            {
+                "op": "capability_source_delete",
+                "args": {
+                    "group_id": group_id,
+                    "by": str(payload.get("by") or "user").strip() or "user",
+                    "actor_id": str(payload.get("actor_id") or payload.get("by") or "user").strip() or "user",
+                    "source_id": str(payload.get("source_id") or "").strip(),
+                    "source_instance_key": str(payload.get("source_instance_key") or "").strip(),
                     "reason": str(payload.get("reason") or "").strip(),
                 },
             }

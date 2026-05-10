@@ -1,7 +1,7 @@
 // useChatTab - Encapsulates ChatTab business logic and state.
 // Reduces prop drilling by providing state from stores and computed values directly.
 
-import { useMemo, useCallback, useRef, useState } from "react";
+import { useEffect, useMemo, useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   useGroupStore,
@@ -11,70 +11,23 @@ import {
   useFormStore,
   selectChatBucketState,
 } from "../stores";
-import { getEffectiveComposerDestGroupId } from "../stores/useComposerStore";
+import { getEffectiveComposerDestGroupId, isComposerGroupSettled } from "../stores/useComposerStore";
 import { getChatSession } from "../stores/useUIStore";
 import { useChatOutboxStore, selectOutboxEntries } from "../stores/chatOutboxStore";
 import type { Actor, LedgerEvent, ChatMessageData, MessageRef, OptimisticAttachment, Task } from "../types";
 import * as api from "../services/api";
 import { buildReplyComposerState } from "../utils/chatReply";
+import {
+  formatSendMessageError,
+  getGroupSendBlockedMessage,
+  getGroupSendBlockedReason,
+  isFormalChatMessageEvent,
+  supportsChatStreamingPlaceholder,
+} from "../utils/chatSend";
 import { copyTextToClipboard } from "../utils/copy";
 import { hasRenderableChatMessageContent } from "../utils/ledgerEventHandlers";
-
-type ChatTFunction = (key: string, options?: Record<string, unknown>) => string;
-export type GroupSendBlockedReason = "paused" | "stopped";
-
-export function supportsChatStreamingPlaceholder(actor: Pick<Actor, "runtime" | "runner" | "runner_effective">): boolean {
-  const runtime = String(actor.runtime || "").trim();
-  if (!runtime) return false;
-  return runtime !== "custom";
-}
-
-export function isFormalChatMessageEvent(event: LedgerEvent): boolean {
-  return String(event.kind || "").trim() === "chat.message" && !event._streaming;
-}
-
-export function getGroupSendBlockedReason({
-  lifecycleState,
-  runtimeRunning,
-  actorCount,
-}: {
-  lifecycleState?: unknown;
-  runtimeRunning: boolean;
-  actorCount: number;
-}): GroupSendBlockedReason | null {
-  const state = String(lifecycleState || "").trim().toLowerCase();
-  if (state === "paused") return "paused";
-  if (state === "stopped") return "stopped";
-  if (actorCount > 0 && !runtimeRunning) return "stopped";
-  return null;
-}
-
-export function getGroupSendBlockedMessage(reason: GroupSendBlockedReason, t: ChatTFunction): string {
-  if (reason === "paused") {
-    return t("sendBlockedGroupPaused", {
-      defaultValue: "This group is paused. Resume the group before sending a message to agents.",
-    });
-  }
-  return t("sendBlockedGroupStopped", {
-    defaultValue: "This group is not running. Start the group before sending a message to agents.",
-  });
-}
-
-export function formatSendMessageError(args: {
-  code?: unknown;
-  message?: unknown;
-  groupSendBlockedReason?: GroupSendBlockedReason | null;
-  t: ChatTFunction;
-}): string {
-  const code = String(args.code || "").trim();
-  if (code === "no_enabled_recipients" && args.groupSendBlockedReason) {
-    return getGroupSendBlockedMessage(args.groupSendBlockedReason, args.t);
-  }
-  const message = String(args.message || "").trim();
-  if (!code) return message || args.t("sendFailed", { defaultValue: "Failed to send message." });
-  if (!message) return code;
-  return `${code}: ${message}`;
-}
+import { useSlashCommands } from "./useSlashCommands";
+import { useSlashSkillDispatch } from "./useSlashSkillDispatch";
 
 export const CHAT_SCROLL_SNAPSHOT_MAX_AGE_MS = 30 * 60 * 1000;
 
@@ -750,6 +703,7 @@ export function useChatTab({
     setComposerText,
     setComposerFiles,
     setToText,
+    setReplyToText,
     setReplyTarget,
     setQuotedPresentationRef,
     setPriority,
@@ -758,7 +712,7 @@ export function useChatTab({
     clearDraft,
     clearComposer,
   } = useComposerStore();
-
+  const composerGroupSettled = isComposerGroupSettled(activeGroupId, selectedGroupId);
   const { setRecipientsModal, setRelayModal, openModal } = useModalStore();
   const { setNewActorRole } = useFormStore();
 
@@ -885,6 +839,36 @@ export function useChatTab({
     [actors.length, selectedGroupLifecycleState, selectedGroupRunning]
   );
 
+  const dispatchSlashSkillMessage = useSlashSkillDispatch({
+    selectedGroupId,
+    toTokens,
+    priority,
+    replyRequired,
+    groupSendBlockedReason,
+    clearDraft,
+    setChatUnreadCount,
+    setChatFilter,
+    setChatMobileSurface,
+    enqueueOutbox,
+    removeOutbox,
+    showError,
+    onMessageSent,
+    t,
+  });
+
+  const { slashCommands, refreshSlashCommands, tryExecuteSlashCommand } = useSlashCommands({
+    selectedGroupId,
+    clearComposer,
+    restoreComposerText: setComposerText,
+    showError,
+    showNotice,
+    dispatchMessage: dispatchSlashSkillMessage,
+    onExecuted: () => {
+      if (fileInputRef?.current) fileInputRef.current.value = "";
+    },
+    t,
+  });
+
   // In chat window mode
   const inChatWindow = useMemo(() => {
     return !!chatWindow && String(chatWindow.groupId || "") === String(selectedGroupId || "");
@@ -974,6 +958,19 @@ export function useChatTab({
     () => events.some(isFormalChatMessageEvent) || outboxEntries.length > 0,
     [events, outboxEntries]
   );
+  const latestFormalChatEventKey = useMemo(() => {
+    for (let idx = events.length - 1; idx >= 0; idx -= 1) {
+      const event = events[idx];
+      if (!isFormalChatMessageEvent(event)) continue;
+      return `${String(event.id || "")}:${String(event.ts || "")}:${String(event.by || "")}`;
+    }
+    return "";
+  }, [events]);
+
+  useEffect(() => {
+    if (!latestFormalChatEventKey) return;
+    void refreshSlashCommands();
+  }, [latestFormalChatEventKey, refreshSlashCommands]);
 
   const chatInitialScrollAnchorId = useMemo(() => {
     if (inChatWindow) return undefined;
@@ -1111,14 +1108,26 @@ export function useChatTab({
     if (sendInFlightRef.current) return; // keyboard shortcut can bypass UI state; keep send single-flight locally
     const txt = composerText.trim();
     if (!selectedGroupId) return;
+    const latestSelectedGroupId = String(useGroupStore.getState().selectedGroupId || "").trim();
+    if (latestSelectedGroupId !== selectedGroupId) return;
+    if (!isComposerGroupSettled(useComposerStore.getState().activeGroupId, latestSelectedGroupId)) return;
     if (!txt && composerFiles.length === 0) return;
+
+    const dstGroup = String(sendGroupId || "").trim();
+    const isCrossGroup = !!dstGroup && dstGroup !== selectedGroupId;
+    if (await tryExecuteSlashCommand({
+      text: composerText,
+      composerFilesCount: composerFiles.length,
+      hasReplyTarget: !!replyTarget,
+      hasQuotedPresentationRef: !!quotedPresentationRef,
+      sendGroupId: dstGroup,
+    })) {
+      return;
+    }
     if (groupSendBlockedReason) {
       showError(getGroupSendBlockedMessage(groupSendBlockedReason, t));
       return;
     }
-
-    const dstGroup = String(sendGroupId || "").trim();
-    const isCrossGroup = !!dstGroup && dstGroup !== selectedGroupId;
 
     const prio = replyRequired ? "attention" : (priority || "normal");
     const replyTargetSnapshot = replyTarget;
@@ -1347,6 +1356,7 @@ export function useChatTab({
     composerFiles,
     selectedGroupId,
     groupSendBlockedReason,
+    tryExecuteSlashCommand,
     sendGroupId,
     priority,
     replyRequired,
@@ -1436,11 +1446,11 @@ export function useChatTab({
       if (replyComposerState.destGroupId) {
         setDestGroupId(replyComposerState.destGroupId);
       }
-      setToText(replyComposerState.toText);
+      setReplyToText(replyComposerState.toText);
       setReplyTarget(replyComposerState.replyTarget);
       requestAnimationFrame(() => composerRef?.current?.focus());
     },
-    [selectedGroupId, actors, groupSettings, setDestGroupId, setToText, setReplyTarget, composerRef, showError, t]
+    [selectedGroupId, actors, groupSettings, setDestGroupId, setReplyToText, setReplyTarget, composerRef, showError, t]
   );
 
   const cancelReply = useCallback(() => setReplyTarget(null), [setReplyTarget]);
@@ -1583,6 +1593,7 @@ export function useChatTab({
     setReplyRequired,
     destGroupId: sendGroupId,
     setDestGroupId,
+    composerGroupSettled,
     mentionSuggestions,
 
     // Agent state
@@ -1591,6 +1602,7 @@ export function useChatTab({
 
     // Actions
     sendMessage,
+    slashCommands,
     copyMessageLink,
     copyMessageText,
     startReply,

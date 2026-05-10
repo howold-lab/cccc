@@ -2,7 +2,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SearchModal } from "./SearchModal";
-import type { TemplatePreviewDetailsProps } from "./TemplatePreviewDetails";
 import { MobileMenuSheet } from "./layout/MobileMenuSheet";
 import { AddActorModal } from "./modals/AddActorModal";
 import { CreateGroupModal } from "./modals/CreateGroupModal";
@@ -79,6 +78,13 @@ function sortPresentationSlotIds(slotIds: string[]): string[] {
     const rightIndex = Number(String(right || "").replace("slot-", "")) || 0;
     return leftIndex - rightIndex;
   });
+}
+
+function isStandardChatGptWebModelActor(actor?: Actor | null): boolean {
+  return (
+    String(actor?.runtime || "").trim().toLowerCase() === "web_model"
+    && !String(actor?.internal_kind || "").trim()
+  );
 }
 
 function LazyModalFallback({ isDark }: { isDark: boolean }) {
@@ -224,7 +230,6 @@ export function AppModals({
     resetAddActorForm,
     createGroupPath,
     createGroupName,
-    createGroupTemplateFile,
     dirItems,
     dirSuggestions,
     currentDir,
@@ -232,7 +237,6 @@ export function AppModals({
     showDirBrowser,
     setCreateGroupPath,
     setCreateGroupName,
-    setCreateGroupTemplateFile,
     setDirItems,
     setCurrentDir,
     setParentDir,
@@ -240,9 +244,6 @@ export function AppModals({
     resetCreateGroupForm,
   } = useFormStore();
 
-  const [createTemplatePreview, setCreateTemplatePreview] = useState<TemplatePreviewDetailsProps["template"] | null>(null);
-  const [createTemplateError, setCreateTemplateError] = useState("");
-  const [createTemplateBusy, setCreateTemplateBusy] = useState(false);
   const [dirBrowseError, setDirBrowseError] = useState("");
   const [actorProfiles, setActorProfiles] = useState<ActorProfile[]>([]);
   const [actorProfilesBusy, setActorProfilesBusy] = useState(false);
@@ -925,27 +926,6 @@ export function AppModals({
     }
   };
 
-  const handleSelectCreateGroupTemplate = async (file: File | null) => {
-    setCreateGroupTemplateFile(file);
-    setCreateTemplatePreview(null);
-    setCreateTemplateError("");
-    if (!file) return;
-
-    setCreateTemplateBusy(true);
-    try {
-      const resp = await api.previewTemplate(file);
-      if (!resp.ok) {
-        setCreateTemplateError(resp.error?.message || t('invalidTemplate'));
-        return;
-      }
-      setCreateTemplatePreview(resp.result?.template || null);
-    } catch {
-      setCreateTemplateError(t('failedToLoadTemplate'));
-    } finally {
-      setCreateTemplateBusy(false);
-    }
-  };
-
   const handleCreateGroup = async () => {
     const path = createGroupPath.trim();
     if (!path) return;
@@ -953,46 +933,29 @@ export function AppModals({
     const title = createGroupName.trim() || dirName;
     setBusy("create");
     try {
-      let groupId = "";
-
-      if (createGroupTemplateFile) {
-        const resp = await api.createGroupFromTemplate(path, title, "", createGroupTemplateFile);
-        if (!resp.ok) {
-          if (resp.error?.code === "scope_already_attached") {
-            const existing = getErrorDetailGroupId(resp.error);
-            if (existing) {
-              showError(t('scopeAlreadyAttached'));
-              closeModal("createGroup");
-              resetCreateGroupForm();
-              setCreateTemplatePreview(null);
-              setCreateTemplateError("");
-              setCreateTemplateBusy(false);
-              await refreshGroups();
-              setSelectedGroupId(existing);
-              return;
-            }
+      const resp = await api.createGroup(title);
+      if (!resp.ok) {
+        if (resp.error?.code === "scope_already_attached") {
+          const existing = getErrorDetailGroupId(resp.error);
+          if (existing) {
+            showError(t('scopeAlreadyAttached'));
+            closeModal("createGroup");
+            resetCreateGroupForm();
+            await refreshGroups();
+            setSelectedGroupId(existing);
+            return;
           }
-          showError(`${resp.error.code}: ${resp.error.message}`);
-          return;
         }
-        groupId = resp.result.group_id;
-      } else {
-        const resp = await api.createGroup(title);
-        if (!resp.ok) {
-          showError(`${resp.error.code}: ${resp.error.message}`);
-          return;
-        }
-        groupId = resp.result.group_id;
-        const attachResp = await api.attachScope(groupId, path);
-        if (!attachResp.ok) {
-          showError(t('createdButFailedAttach', { message: attachResp.error.message }));
-        }
+        showError(`${resp.error.code}: ${resp.error.message}`);
+        return;
+      }
+      const groupId = resp.result.group_id;
+      const attachResp = await api.attachScope(groupId, path);
+      if (!attachResp.ok) {
+        showError(t('createdButFailedAttach', { message: attachResp.error.message }));
       }
 
       resetCreateGroupForm();
-      setCreateTemplatePreview(null);
-      setCreateTemplateError("");
-      setCreateTemplateBusy(false);
       closeModal("createGroup");
       await refreshGroups();
       setSelectedGroupId(groupId);
@@ -1150,7 +1113,7 @@ export function AppModals({
   const suggestedActorId = (() => {
     const selectedProfile = actorProfiles.find((item) => actorProfileIdentityKey(item) === String(newActorProfileId || "").trim()) || null;
     const profileRuntime = String(selectedProfile?.runtime || "").trim();
-    const prefix = newActorUseProfile ? (profileRuntime || "actor") : newActorRuntime;
+    const prefix = newActorUseProfile ? (profileRuntime || "actor") : (newActorRuntime === "web_model" ? "chatgpt-web" : newActorRuntime);
     const existing = new Set(actors.map((a) => String(a.id || "")));
     for (let i = 1; i <= 999; i++) {
       const candidate = `${prefix}-${i}`;
@@ -1158,10 +1121,12 @@ export function AppModals({
     }
     return `${prefix}-${Date.now()}`;
   })();
+  const currentGroupHasChatGptWebModelActor = actors.some((actor) => isStandardChatGptWebModelActor(actor));
 
   const canAddActor = (() => {
     if (busy === "actor-add") return false;
     if (newActorUseProfile) return Boolean(String(newActorProfileId || "").trim());
+    if (newActorRuntime === "web_model" && currentGroupHasChatGptWebModelActor) return false;
     const rtInfo = runtimes.find((r) => r.name === newActorRuntime);
     const available = rtInfo?.available ?? false;
     if (!newActorUseDefaultCommand && !newActorCommand.trim()) return false;
@@ -1174,6 +1139,9 @@ export function AppModals({
     if (busy === "actor-add") return "";
     if (newActorUseProfile && !String(newActorProfileId || "").trim()) {
       return t("profileRequired");
+    }
+    if (!newActorUseProfile && newActorRuntime === "web_model" && currentGroupHasChatGptWebModelActor) {
+      return "This group already has the ChatGPT Web Model actor. Use Settings > ChatGPT Web Model to configure it.";
     }
     const rtInfo = runtimes.find((r) => r.name === newActorRuntime);
     const available = rtInfo?.available ?? false;
@@ -1692,11 +1660,6 @@ export function AppModals({
         setCreateGroupPath={setCreateGroupPath}
         createGroupName={createGroupName}
         setCreateGroupName={setCreateGroupName}
-        createGroupTemplateFile={createGroupTemplateFile}
-        templatePreview={createTemplatePreview}
-        templateError={createTemplateError}
-        templateBusy={createTemplateBusy}
-        onSelectTemplate={handleSelectCreateGroupTemplate}
         dirBrowseError={dirBrowseError}
         onFetchDirContents={handleFetchDirContents}
         onCreateGroup={handleCreateGroup}
@@ -1704,9 +1667,6 @@ export function AppModals({
         onCancelAndReset={() => {
           closeModal("createGroup");
           resetCreateGroupForm();
-          setCreateTemplatePreview(null);
-          setCreateTemplateError("");
-          setCreateTemplateBusy(false);
           setDirBrowseError("");
         }}
       />

@@ -43,6 +43,7 @@ import {
 } from "./groupStoreCore";
 import { createGroupStoreAsyncActions } from "./groupStoreAsyncActions";
 import type { GroupState } from "./groupStoreTypes";
+import { useComposerStore } from "./useComposerStore";
 import {
   clearEmptyStreamingEventsForActorPatch,
   clearStreamingEventsForActorPatch,
@@ -79,12 +80,22 @@ function buildHeadlessEventSignature(event: HeadlessStreamEvent): string {
   ].join("|");
 }
 
+function syncComposerToSelectedGroup(groupId: string): void {
+  const gid = String(groupId || "").trim();
+  const composerActiveGid = String(useComposerStore.getState().activeGroupId || "").trim();
+  if (composerActiveGid === gid) return;
+  useComposerStore.getState().switchGroup(composerActiveGid || null, gid || null);
+}
+
+const initialSelectedGroupId = loadSelectedGroupId();
+syncComposerToSelectedGroup(initialSelectedGroupId);
+
 export const useGroupStore = create<GroupState>((set, get) => ({
   // Initial state
   groups: [],
   groupOrder: loadGroupOrder(),
   archivedGroupIds: loadArchivedGroupIds(),
-  selectedGroupId: loadSelectedGroupId(),
+  selectedGroupId: initialSelectedGroupId,
   chatByGroup: {},
   groupDoc: null,
   events: [],
@@ -169,13 +180,32 @@ export const useGroupStore = create<GroupState>((set, get) => ({
   },
   setSelectedGroupId: (id) => {
     const gid = String(id || "").trim();
+    syncComposerToSelectedGroup(gid);
     saveSelectedGroupId(gid);
     set((state) => {
-      const prevGid = String(state.selectedGroupId || "").trim();
+      const statePrevGid = String(state.selectedGroupId || "").trim();
 
-      // 切组前先把当前视图快照落到缓存，回切时才能做到秒开。
-      if (prevGid && prevGid !== gid) {
-        saveCurrentViewSnapshot(prevGid, state);
+      // Cache the current view before switching groups so returning to it is instant.
+      if (statePrevGid && statePrevGid !== gid) {
+        saveCurrentViewSnapshot(statePrevGid, state);
+      }
+
+      if (!gid) {
+        return {
+          selectedGroupId: "",
+          chatByGroup: {},
+          groupDoc: null,
+          events: [],
+          actors: [],
+          groupContext: null,
+          groupSettings: null,
+          groupPresentation: null,
+          selectedGroupActorsHydrating: false,
+          chatWindow: null,
+          hasMoreHistory: false,
+          isLoadingHistory: false,
+          isChatWindowLoading: false,
+        };
       }
 
       const nextChatByGroup = ensureGroupChatBucket(state.chatByGroup, gid);

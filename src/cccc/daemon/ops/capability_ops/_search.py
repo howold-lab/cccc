@@ -66,6 +66,7 @@ from ._remote import (
     _remote_search_mcp_registry_records,
     _remote_search_skill_records,
 )
+from ._skillsmp import _skillsmp_record_display_name, _skillsmp_record_is_canonical, _skillsmp_record_key
 from ._install import (
     _catalog_staleness_seconds,
 )
@@ -533,10 +534,12 @@ def _is_generated_skill_capability_id(capability_id: str) -> bool:
 
 
 def handle_capability_overview(args: Dict[str, Any]) -> DaemonResponse:
+    group_id = str(args.get("group_id") or "").strip()
     query = str(args.get("query") or "").strip()
     limit = max(1, min(int(args.get("limit") or 400), 2000))
     offset = max(0, int(args.get("offset") or 0))
     include_indexed = bool(args.get("include_indexed", True))
+    include_source_instances = bool(args.get("include_source_instances", True))
     kind_filter = str(args.get("kind") or "").strip().lower()
     policy_filter = str(args.get("policy") or "").strip().lower()
     source_filter = str(args.get("source_id") or "").strip()
@@ -555,10 +558,12 @@ def handle_capability_overview(args: Dict[str, Any]) -> DaemonResponse:
             source_states = _render_source_states(catalog_doc)
             records = catalog_doc.get("records") if isinstance(catalog_doc.get("records"), dict) else {}
             external_rows = [dict(v) for v in records.values() if isinstance(v, dict)]
+            source_instances = _pkg().capability_source_instances(external_rows) if include_source_instances else []
 
         with _STATE_LOCK:
             state_path, state_doc = _load_state_doc()
             blocked_caps_all, blocked_mutated = _pkg()._collect_blocked_capabilities(state_doc, group_id="")
+            removed_caps = set(_pkg()._collect_removed_capabilities(state_doc, group_id=group_id)) if group_id else set()
             if blocked_mutated:
                 _save_state_doc(state_path, state_doc)
 
@@ -588,12 +593,29 @@ def handle_capability_overview(args: Dict[str, Any]) -> DaemonResponse:
             merged["capability_id"] = cap_id
             entries[cap_id] = merged
 
-        for row in _build_builtin_search_records():
+        builtin_rows = _build_builtin_search_records()
+        for row in builtin_rows:
             if isinstance(row, dict):
                 _upsert_entry(row)
+        skillsmp_rows_by_key: Dict[str, Dict[str, Any]] = {}
+        non_skillsmp_rows: List[Dict[str, Any]] = []
         for row in external_rows:
-            if isinstance(row, dict):
-                _upsert_entry(row)
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("source_id") or "").strip() != "skillsmp_remote":
+                non_skillsmp_rows.append(row)
+                continue
+            key = _skillsmp_record_key(row)
+            if not key:
+                non_skillsmp_rows.append(row)
+                continue
+            current = skillsmp_rows_by_key.get(key)
+            if current is None or (not _skillsmp_record_is_canonical(current) and _skillsmp_record_is_canonical(row)):
+                skillsmp_rows_by_key[key] = row
+        for row in non_skillsmp_rows:
+            _upsert_entry(row)
+        for row in skillsmp_rows_by_key.values():
+            _upsert_entry(row)
 
         for cap_id, row in recent_success.items():
             cid = str(cap_id or "").strip()
@@ -615,6 +637,14 @@ def handle_capability_overview(args: Dict[str, Any]) -> DaemonResponse:
                     "qualification_status": _QUAL_QUALIFIED,
                 }
             )
+
+        entry_source_counts: Dict[str, int] = {}
+        for rec in entries.values():
+            if not isinstance(rec, dict):
+                continue
+            sid = str(rec.get("source_id") or "").strip()
+            if sid:
+                entry_source_counts[sid] = int(entry_source_counts.get(sid) or 0) + 1
 
         source_cfg_map: Dict[str, Dict[str, Any]] = {}
         effective_sources = effective_doc.get("sources") if isinstance(effective_doc.get("sources"), list) else []
@@ -662,10 +692,13 @@ def handle_capability_overview(args: Dict[str, Any]) -> DaemonResponse:
             blocked_reason = str((blocked or {}).get("reason") or "").strip() if isinstance(blocked, dict) else ""
             qualification_status = str(rec.get("qualification_status") or _QUAL_QUALIFIED)
             blocked_reason_code = "blocked_by_global_policy" if bool(blocked) else ""
+            display_name = str(rec.get("name") or _display_name_from_capability_id(cap_id))
+            if source_id == "skillsmp_remote":
+                display_name = _skillsmp_record_display_name(rec)
             item: Dict[str, Any] = {
                 "capability_id": cap_id,
                 "kind": kind,
-                "name": str(rec.get("name") or _display_name_from_capability_id(cap_id)),
+                "name": display_name,
                 "description_short": str(rec.get("description_short") or ""),
                 "source_id": source_id,
                 "source_uri": str(rec.get("source_uri") or ""),
@@ -724,6 +757,19 @@ def handle_capability_overview(args: Dict[str, Any]) -> DaemonResponse:
 
         if query:
             rows = [row for row in rows if _search_matches(query, row)]
+
+        if removed_caps:
+            rows = [row for row in rows if str(row.get("capability_id") or "").strip() not in removed_caps]
+
+        kind_counts = {"skill": 0, "mcp": 0, "pack": 0}
+        for row in rows:
+            row_kind = str(row.get("kind") or "").strip().lower()
+            if row_kind == "skill":
+                kind_counts["skill"] += 1
+            elif row_kind == "mcp_toolpack":
+                kind_counts["mcp"] += 1
+            elif row_kind == "pack":
+                kind_counts["pack"] += 1
 
         if kind_filter == "pack":
             rows = [row for row in rows if str(row.get("kind") or "").strip().lower() == "pack"]
@@ -792,7 +838,7 @@ def handle_capability_overview(args: Dict[str, Any]) -> DaemonResponse:
                 "sync_state": str(state.get("sync_state") or "never"),
                 "last_synced_at": str(state.get("last_synced_at") or ""),
                 "staleness_seconds": int(state.get("staleness_seconds") or 0),
-                "record_count": int(state.get("record_count") or 0),
+                "record_count": max(int(state.get("record_count") or 0), int(entry_source_counts.get(source_id) or 0)),
                 "error": str(state.get("error") or ""),
             }
 
@@ -821,7 +867,9 @@ def handle_capability_overview(args: Dict[str, Any]) -> DaemonResponse:
                 "limit": limit,
                 "has_more": (offset + len(items)) < total_count,
                 "query": query,
+                "kind_counts": kind_counts,
                 "sources": sources,
+                "source_instances": source_instances,
                 "blocked_capabilities": blocked_list,
                 "allowlist_revision": str(snapshot.get("revision") or ""),
             },
@@ -835,7 +883,7 @@ def handle_capability_search(args: Dict[str, Any]) -> DaemonResponse:
     actor_id = str(args.get("actor_id") or args.get("by") or "").strip()
     query = str(args.get("query") or "").strip()
     limit = max(1, min(int(args.get("limit") or 30), 200))
-    include_external = bool(args.get("include_external", True))
+    include_external = bool(args.get("include_external", False))
     kind_filter = str(args.get("kind") or "").strip().lower()
     source_filter = str(args.get("source_id") or "").strip()
     trust_filter = str(args.get("trust_tier") or "").strip().lower()
@@ -876,21 +924,29 @@ def handle_capability_search(args: Dict[str, Any]) -> DaemonResponse:
         remote_error = ""
         with _CATALOG_LOCK:
             catalog_path, catalog_doc = _pkg()._load_catalog_doc()
-            if include_external and _pkg()._ensure_curated_catalog_records(catalog_doc, policy=policy):
+            if _pkg()._ensure_curated_catalog_records(catalog_doc, policy=policy):
                 _pkg()._save_catalog_doc(catalog_path, catalog_doc)
-            if include_external:
-                for item in (
-                    catalog_doc.get("records")
-                    if isinstance(catalog_doc.get("records"), dict)
-                    else {}
-                ).values():
-                    if isinstance(item, dict):
-                        external_records.append(dict(item))
+            curated_default_ids = {
+                str(item.get("capability_id") or "").strip()
+                for item in (policy.get("curated_skill_entries") if isinstance(policy.get("curated_skill_entries"), list) else [])
+                if isinstance(item, dict) and str(item.get("capability_id") or "").strip()
+            }
+            local_catalog_sources = {"manual_import", "agent_self_proposed", "github_skills_curated", "anthropic_skills"}
+            for item in (
+                catalog_doc.get("records")
+                if isinstance(catalog_doc.get("records"), dict)
+                else {}
+            ).values():
+                if not isinstance(item, dict):
+                    continue
+                source_id = str(item.get("source_id") or "").strip()
+                capability_id = str(item.get("capability_id") or "").strip()
+                if include_external or source_id in local_catalog_sources or capability_id in curated_default_ids:
+                    external_records.append(dict(item))
             source_states = _render_source_states(catalog_doc)
 
         records: List[Dict[str, Any]] = _build_builtin_search_records()
-        if include_external:
-            records.extend(external_records)
+        records.extend(external_records)
         deduped_records: Dict[str, Dict[str, Any]] = {}
         for rec in records:
             cap_id = str(rec.get("capability_id") or "").strip()
@@ -1270,6 +1326,12 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
             minimum=1,
             maximum=500,
         )
+        max_active_capsule_skills = _quota_limit(
+            "CCCC_CAPABILITY_MAX_ACTIVE_CAPSULE_SKILLS",
+            64,
+            minimum=1,
+            maximum=500,
+        )
 
         with _STATE_LOCK:
             state_path, state_doc = _load_state_doc()
@@ -1527,6 +1589,18 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
         actor_autoload_capabilities = _pkg()._normalize_capability_id_list(
             actor_record.get("capability_autoload") if isinstance(actor_record, dict) else []
         )
+        actor_hidden_capabilities = _pkg()._normalize_capability_id_list(
+            actor_record.get("capability_hidden") if isinstance(actor_record, dict) else []
+        )
+        state_hidden_capabilities = _pkg()._collect_hidden_capabilities(
+            state_doc,
+            group_id=group_id,
+            actor_id=actor_id,
+        )
+        actor_hidden_capabilities = _pkg()._normalize_capability_id_list(
+            [*actor_hidden_capabilities, *state_hidden_capabilities]
+        )
+        actor_hidden_set = set(actor_hidden_capabilities)
         profile_id = str(actor_record.get("profile_id") or "").strip() if isinstance(actor_record, dict) else ""
         profile_autoload_capabilities: List[str] = []
         if profile_id:
@@ -1580,6 +1654,7 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
             session_used: List[Dict[str, Any]] = []
             actor_autoload_used: List[Dict[str, Any]] = []
             profile_autoload_used: List[Dict[str, Any]] = []
+            actor_hidden_used: List[Dict[str, Any]] = []
             actor_rows_by_id = {
                 str(item.get("id") or "").strip(): item
                 for item in actors
@@ -1619,6 +1694,9 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
                 autoload = _pkg()._normalize_capability_id_list(actor_doc.get("capability_autoload"))
                 if cap in autoload:
                     actor_autoload_used.append(_actor_usage_row(actor_doc))
+                hidden = _pkg()._normalize_capability_id_list(actor_doc.get("capability_hidden"))
+                if cap in hidden:
+                    actor_hidden_used.append(_actor_usage_row(actor_doc))
                 profile_autoload, profile_id_for_actor, profile_name = _actor_profile_autoload(actor_doc)
                 if cap in profile_autoload:
                     profile_autoload_used.append(
@@ -1666,6 +1744,7 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
                 "session_enabled": session_used,
                 "actor_autoload": actor_autoload_used,
                 "profile_autoload": profile_autoload_used,
+                "actor_hidden": actor_hidden_used,
                 "blocked": bool(blocked_entry),
             }
             if isinstance(blocked_entry, dict):
@@ -1673,6 +1752,7 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
                 capability_usage["blocked_reason"] = str(blocked_entry.get("reason") or "")
 
         active_capsule_skills: List[Dict[str, Any]] = []
+        active_capsule_skill_dropped_ids: List[str] = []
         for cap_id in enabled_caps_effective:
             rec = external_records.get(cap_id)
             if not isinstance(rec, dict):
@@ -1682,6 +1762,25 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
             if str(rec.get("qualification_status") or "").strip().lower() == _QUAL_BLOCKED:
                 continue
             if not _pkg()._record_enable_supported(rec, capability_id=cap_id):
+                continue
+            if cap_id in actor_hidden_set:
+                hidden_capabilities.append(
+                    {
+                        "capability_id": cap_id,
+                        "reason": "actor_hidden",
+                        "policy_level": _effective_policy_level(
+                            policy,
+                            capability_id=cap_id,
+                            kind=str(rec.get("kind") or ""),
+                            source_id=str(rec.get("source_id") or ""),
+                            actor_role=actor_role,
+                        ),
+                        **_hidden_catalog_metadata(cap_id, rec),
+                    }
+                )
+                continue
+            if len(active_capsule_skills) >= max_active_capsule_skills:
+                active_capsule_skill_dropped_ids.append(cap_id)
                 continue
             active_capsule_skills.append(
                 {
@@ -1705,6 +1804,8 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
 
         autoload_skills: List[Dict[str, Any]] = []
         for cap_id in effective_autoload_capabilities:
+            if cap_id in actor_hidden_set:
+                continue
             rec = external_records.get(cap_id)
             if not isinstance(rec, dict):
                 continue
@@ -1927,10 +2028,14 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
             "dynamic_tool_dropped": dynamic_tool_dropped,
             "enabled_capabilities": enabled_caps_effective,
             "active_capsule_skills": active_capsule_skills,
+            "active_capsule_skill_limit": max_active_capsule_skills,
+            "active_capsule_skills_dropped": len(active_capsule_skill_dropped_ids),
+            "active_capsule_skill_dropped_ids": active_capsule_skill_dropped_ids,
             "autoload_skills": autoload_skills,
             "autoload_capabilities": effective_autoload_capabilities,
             "actor_autoload_capabilities": actor_autoload_capabilities,
             "profile_autoload_capabilities": profile_autoload_capabilities,
+            "actor_hidden_capabilities": actor_hidden_capabilities,
             "hidden_capabilities": hidden_capabilities,
             "external_binding_states": external_binding_states,
             "precedence_chain": ["session", "actor", "group"],

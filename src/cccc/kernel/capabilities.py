@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Set, Tuple
 
+from .install_capability import INSTALL_CAPABILITY_ID, INSTALL_CAPABILITY_RECORD
+
 
 CORE_BASIC_TOOLS: Tuple[str, ...] = (
     "cccc_help",
@@ -18,6 +20,9 @@ CORE_BASIC_TOOLS: Tuple[str, ...] = (
     "cccc_project_info",
     "cccc_capability_search",
     "cccc_capability_state",
+    "cccc_capability_enable",
+    "cccc_capability_install",
+    "cccc_capability_use",
     "cccc_inbox_list",
     "cccc_inbox_mark_read",
     "cccc_message_send",
@@ -34,14 +39,15 @@ CORE_BASIC_TOOLS: Tuple[str, ...] = (
 )
 
 CORE_ADMIN_TOOLS: Tuple[str, ...] = (
-    "cccc_capability_enable",
-    "cccc_capability_block",
-    "cccc_capability_import",
-    "cccc_capability_uninstall",
-    "cccc_capability_use",
 )
 
 CORE_TOOL_NAMES: Tuple[str, ...] = CORE_BASIC_TOOLS + CORE_ADMIN_TOOLS
+
+CAPABILITY_ADMIN_TOOLS: Tuple[str, ...] = (
+    "cccc_capability_import",
+    "cccc_capability_block",
+    "cccc_capability_uninstall",
+)
 
 # Pet keeps a dedicated minimal core surface. The mutation lane stays on
 # cccc_pet_decisions, with cccc_agent_state reserved for profile refresh.
@@ -64,14 +70,22 @@ VOICE_SECRETARY_CORE_TOOLS: Tuple[str, ...] = PET_CORE_TOOLS + (
 WEB_MODEL_CORE_TOOLS: Tuple[str, ...] = CORE_BASIC_TOOLS + (
     "cccc_runtime_wait_next_turn",
     "cccc_runtime_complete_turn",
+    "cccc_code_exec",
+    "cccc_code_wait",
     "cccc_repo_edit",
+    "cccc_apply_patch",
     "cccc_shell",
+    "cccc_exec_command",
+    "cccc_write_stdin",
     "cccc_git",
 )
 
+WEB_MODEL_FOREMAN_TOOLS: Tuple[str, ...] = WEB_MODEL_CORE_TOOLS + CORE_ADMIN_TOOLS
+
 # ChatGPT-style remote MCP clients parse the tool schema at connector setup and
-# may not reliably refresh later. Web Model actors therefore advertise a stable
-# built-in schema, while call-time permission checks still enforce actor role.
+# may not reliably refresh later. Web Model actors therefore advertise a stable,
+# role-aware core schema. Built-in capability packs stay behind capability_use
+# instead of being eagerly listed for every Web Model actor.
 WEB_MODEL_ADVERTISED_EXCLUDED_TOOLS: Tuple[str, ...] = (
     "cccc_pet_decisions",
     "cccc_voice_secretary_document",
@@ -155,10 +169,17 @@ BUILTIN_CAPABILITY_PACKS: Dict[str, Dict[str, object]] = {
         ),
         "tags": ("terminal", "debug", "diagnostics"),
     },
+    "pack:capability-admin": {
+        "title": "Capability Admin",
+        "description": "Foreman/admin capability governance: import, block, and uninstall capability records.",
+        "tool_names": CAPABILITY_ADMIN_TOOLS,
+        "tags": ("capability", "admin", "governance"),
+    },
 }
 
 
 BUILTIN_CAPSULE_SKILLS: Dict[str, Dict[str, object]] = {
+    INSTALL_CAPABILITY_ID: INSTALL_CAPABILITY_RECORD,
     "skill:cccc:app-i18n-localization": {
         "name": "app-i18n-localization",
         "description_short": (
@@ -1044,14 +1065,20 @@ BUILTIN_CAPSULE_SKILLS: Dict[str, Dict[str, object]] = {
             "You are the runtime-bootstrap skill for CCCC runtime diagnosis.\n\n"
             "Use this skill when the task is about daemon or web startup failure, port bind or LAN "
             "reachability, actor launch/runtime state, MCP injection, or residue left after shutdown.\n\n"
-            "Protocol:\n"
+            "Procedure:\n"
             "1. Restate the exact symptom and isolate the failing layer before changing anything.\n"
             "2. Gather evidence first; prefer read-only inspection and existing diagnostics/runtime tools.\n"
             "3. Check one layer at a time: process start -> bind/port -> group/actor runtime -> MCP "
             "injection -> shutdown cleanup.\n"
             "4. Report findings as: Symptom, Evidence, Failed layer, Most likely root cause, Next safe action.\n"
-            "5. Do not kill, restart, or mutate runtime state unless the user explicitly asks after evidence is gathered.\n"
-            "6. Prefer the smallest reversible fix. If two hypotheses fail, stop stacking guards and surface evidence."
+            "5. Prefer the smallest reversible fix. If two hypotheses fail, stop stacking guards and surface evidence.\n\n"
+            "Pitfalls:\n"
+            "- Do not kill, restart, or mutate runtime state unless the user explicitly asks after evidence is gathered.\n"
+            "- Do not confuse configured binding values with the live listener state.\n"
+            "- Do not treat stale pid files or residue as proof of current health.\n\n"
+            "Verification:\n"
+            "- The final response includes terminal/log evidence for the failing layer.\n"
+            "- Any proposed fix names the expected observable state after applying it."
         ),
         "tags": ("runtime", "bootstrap", "diagnostics", "daemon", "web", "mcp"),
         "requires_capabilities": ("pack:diagnostics", "pack:group-runtime"),
@@ -1117,10 +1144,13 @@ def all_pack_tool_name_set() -> Set[str]:
     return names
 
 
-def web_model_advertised_tool_names(all_tool_names: Iterable[str]) -> Set[str]:
+def web_model_advertised_tool_names(all_tool_names: Iterable[str], *, actor_role: str = "") -> Set[str]:
     """Return the stable built-in tool schema advertised to Web Model clients."""
+    role = str(actor_role or "").strip().lower()
+    base = WEB_MODEL_FOREMAN_TOOLS if role == "foreman" else WEB_MODEL_CORE_TOOLS
     excluded = set(WEB_MODEL_ADVERTISED_EXCLUDED_TOOLS)
-    return {str(name).strip() for name in all_tool_names if str(name).strip() and str(name).strip() not in excluded}
+    available = {str(name).strip() for name in all_tool_names if str(name).strip()}
+    return {str(name).strip() for name in base if str(name).strip() in available and str(name).strip() not in excluded}
 
 
 def resolve_core_tool_names(

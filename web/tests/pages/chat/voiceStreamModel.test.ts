@@ -1,265 +1,255 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  appendFinalVoiceStreamItem,
-  buildSpeakerConversationItems,
-  createVoiceStreamMessage,
-  createVoiceTranscriptPreview,
-  filterVoiceStreamItemsForDocument,
-  splitVoiceStreamItemBySpeakers,
-  upsertLiveVoiceStreamItem,
-  type VoiceStreamItem,
+  annotateVoiceTranscriptItemsWithSpeakers,
+  appendFinalVoiceTranscriptItem,
+  createVoiceTranscriptItem,
+  filterVoiceTranscriptItemsForDocument,
+  isDisplayableFinalVoiceTranscriptItem,
+  mergeVoiceTranscriptItems,
+  replaceVoiceTranscriptSessionItems,
+  upsertLiveVoiceTranscriptItem,
+  type VoiceTranscriptItem,
 } from "../../../src/pages/chat/voice-secretary/voiceStreamModel";
+import { voiceTranscriptSourceDetail, voiceTranscriptSourceLabel } from "../../../src/pages/chat/voice-secretary/voiceTranscriptSource";
 
-function makeStreamItem(overrides: Partial<VoiceStreamItem> = {}): VoiceStreamItem {
+function makeTranscriptItem(overrides: Partial<VoiceTranscriptItem> = {}): VoiceTranscriptItem {
   return {
     id: "item-1",
     phase: "final",
-    text: "你好我们开始讨论后续方案",
+    text: "doc transcript",
     mode: "document",
-    startMs: 0,
-    endMs: 6000,
+    documentPath: "docs/voice-secretary/one.md",
     createdAt: 1000,
     updatedAt: 1000,
     ...overrides,
   };
 }
 
-describe("voiceStreamModel", () => {
-  it("splits one transcript item across multiple speaker segments", () => {
-    const items = splitVoiceStreamItemBySpeakers(makeStreamItem(), [
-      { speaker_label: "Speaker 1", start_ms: 0, end_ms: 3000 },
-      { speaker_label: "Speaker 2", start_ms: 3000, end_ms: 6000 },
-    ]);
-
-    expect(items).toHaveLength(2);
-    expect(items.map((item) => item.speakerLabel)).toEqual(["Speaker 1", "Speaker 2"]);
-    expect(items.map((item) => item.text).join("")).toBe("你好我们开始讨论后续方案");
-    expect(items.map((item) => [item.startMs, item.endMs])).toEqual([[0, 3000], [3000, 6000]]);
-  });
-
-  it("keeps uncovered text as an unspeaked heard slice instead of dropping it", () => {
-    const items = splitVoiceStreamItemBySpeakers(makeStreamItem({ text: "ab cd ef", startMs: 0, endMs: 6000 }), [
-      { speaker_label: "Speaker 1", start_ms: 2000, end_ms: 4000 },
-    ]);
-
-    expect(items.map((item) => item.speakerLabel)).toEqual(["", "Speaker 1", ""]);
-    expect(items.map((item) => item.text).join("")).toBe("ab cd ef");
-  });
-
-  it("puts live and newest voice stream entries first for stream rendering", () => {
-    const older = createVoiceStreamMessage({
-      id: "older",
-      cleanText: "先说",
-      metadata: { mode: "document" },
-      timing: { startMs: 0, endMs: 1000 },
+describe("voice transcript model", () => {
+  it("creates persisted transcript items only for document mode with a document path", () => {
+    expect(createVoiceTranscriptItem({
+      id: "ask",
+      cleanText: "ask transcript",
+      metadata: { mode: "instruction", documentPath: "docs/voice-secretary/one.md" },
       now: 1000,
-    });
-    const newer = createVoiceStreamMessage({
-      id: "newer",
-      cleanText: "后说",
-      metadata: { mode: "document" },
-      timing: { startMs: 1000, endMs: 2000 },
-      now: 2000,
-    });
-    const live = {
-      ...createVoiceTranscriptPreview({
-        id: "live",
-        cleanText: "正在说",
-        phase: "interim" as const,
-        pendingFinalText: "",
-        metadata: { mode: "document" },
-        timing: { startMs: 2000, endMs: 3000 },
-        now: 1500,
-      }),
-      createdAt: 1500,
-    };
+    })).toBeNull();
 
-    const items = buildSpeakerConversationItems([older, live, newer], []);
-
-    expect(items.map((item) => item.text)).toEqual(["正在说", "先说后说"]);
-  });
-
-  it("coalesces adjacent short heard transcript rows for display", () => {
-    const first = makeStreamItem({
-      id: "first",
-      text: "但是这个",
-      startMs: 40_000,
-      endMs: 41_000,
-      createdAt: 1000,
-      updatedAt: 1000,
-    });
-    const second = makeStreamItem({
-      id: "second",
-      text: "对美国肯定是挑战",
-      startMs: 41_000,
-      endMs: 44_000,
-      createdAt: 2000,
-      updatedAt: 2000,
-    });
-
-    const items = buildSpeakerConversationItems([second, first], []);
-
-    expect(items).toHaveLength(1);
-    expect(items[0]?.text).toBe("但是这个对美国肯定是挑战");
-  });
-
-  it("does not use diarization time slices to split raw stream text", () => {
-    const item = makeStreamItem({ text: "严社会呢一个多亿的中产对吧程序员律师医生中", startMs: 46_000, endMs: 52_000 });
-
-    const items = buildSpeakerConversationItems(
-      [item],
-      [
-        { speaker_label: "Speaker 3", start_ms: 46_000, end_ms: 52_000 },
-        { speaker_label: "Speaker 7", start_ms: 52_000, end_ms: 53_000 },
-      ],
-    );
-
-    expect(items).toHaveLength(1);
-    expect(items[0]?.speakerLabel).toBe("");
-    expect(items[0]?.text).toBe("严社会呢一个多亿的中产对吧程序员律师医生中");
-  });
-
-  it("uses backend speaker transcript segments instead of guessing a front-end split", () => {
-    const item = makeStreamItem({ text: "这是一整段不会被前端猜切的文本" });
-
-    const items = buildSpeakerConversationItems(
-      [item],
-      [
-        { speaker_label: "Speaker 1", start_ms: 0, end_ms: 3000 },
-        { speaker_label: "Speaker 2", start_ms: 3000, end_ms: 6000 },
-      ],
-      [
-        { speaker_label: "Speaker 1", start_ms: 0, end_ms: 3000, text: "真实第一段" },
-        { speaker_label: "Speaker 2", start_ms: 3000, end_ms: 6000, text: "真实第二段" },
-      ],
-    );
-
-    expect(items.map((row) => `${row.speakerLabel}:${row.text}`)).toEqual([
-      "Speaker 2:真实第二段",
-      "Speaker 1:真实第一段",
-    ]);
-  });
-
-  it("keeps distant backend speaker transcript turns as separate entries", () => {
-    const items = buildSpeakerConversationItems(
-      [],
-      [],
-      [
-        { speaker_label: "Speaker 1", start_ms: 1752, end_ms: 3862, text: "那也是这么怪的你这个也" },
-        { speaker_label: "Speaker 1", start_ms: 4925, end_ms: 6511, text: "对消息" },
-        { speaker_label: "Speaker 1", start_ms: 6865, end_ms: 8907, text: "合作" },
-      ],
-    );
-
-    expect(items.map((row) => row.text)).toEqual([
-      "合作",
-      "那也是这么怪的你这个也对消息",
-    ]);
-  });
-
-  it("uses backend speaker transcript segments only when stream text is unavailable", () => {
-    const items = buildSpeakerConversationItems(
-      [],
-      [],
-      [
-        { speaker_label: "Speaker 1", start_ms: 0, end_ms: 3000, text: "第一段" },
-        { speaker_label: "Speaker 2", start_ms: 3000, end_ms: 6000, text: "第二段" },
-      ],
-    );
-
-    expect(items.map((row) => `${row.speakerLabel}:${row.text}`)).toEqual([
-      "Speaker 2:第二段",
-      "Speaker 1:第一段",
-    ]);
-  });
-
-  it("replaces the live preview item when a final message is appended", () => {
-    const livePreview = createVoiceTranscriptPreview({
-      id: "live",
-      cleanText: "临时",
-      phase: "interim",
-      pendingFinalText: "",
+    expect(createVoiceTranscriptItem({
+      id: "missing-doc",
+      cleanText: "document transcript",
       metadata: { mode: "document" },
       now: 1000,
-    });
-    const liveItems = upsertLiveVoiceStreamItem([], livePreview);
-    const finalItem = createVoiceStreamMessage({
-      id: "final",
-      cleanText: "最终",
-      metadata: { mode: "document" },
-      now: 2000,
+    })).toBeNull();
+
+    const item = createVoiceTranscriptItem({
+      id: "doc",
+      cleanText: "document transcript",
+      metadata: { mode: "document", documentPath: "docs/voice-secretary/one.md" },
+      now: 1000,
     });
 
-    const items = appendFinalVoiceStreamItem(liveItems, finalItem, "live");
+    expect(item?.id).toBe("doc");
+    expect(item?.mode).toBe("document");
+    expect(item?.documentPath).toBe("docs/voice-secretary/one.md");
+  });
+
+  it("keeps transcript source metadata on persisted items", () => {
+    const item = createVoiceTranscriptItem({
+      id: "doc",
+      cleanText: "document transcript",
+      metadata: {
+        mode: "document",
+        documentPath: "docs/voice-secretary/one.md",
+        source: "assistant_service_local_asr_final",
+        sourceLabel: "Final SenseVoice",
+        sourceDetail: "sense_voice · lang=auto · 2 chunks",
+      },
+      now: 1000,
+    });
+
+    expect(item?.sourceLabel).toBe("Final SenseVoice");
+    expect(item?.sourceDetail).toBe("sense_voice · lang=auto · 2 chunks");
+  });
+
+  it("filters transcript rows to the selected document path", () => {
+    const items = [
+      makeTranscriptItem({ id: "first-doc", text: "first", documentPath: "docs/voice-secretary/first.md" }),
+      makeTranscriptItem({ id: "second-doc", text: "second", documentPath: "docs/voice-secretary/second.md", updatedAt: 2000 }),
+    ];
+
+    expect(filterVoiceTranscriptItemsForDocument(items, "docs/voice-secretary/second.md").map((item) => item.id)).toEqual(["second-doc"]);
+    expect(filterVoiceTranscriptItemsForDocument(items, "")).toEqual([]);
+  });
+
+  it("replaces a live row when the final transcript for the same window arrives", () => {
+    const live = makeTranscriptItem({ id: "live", phase: "interim", text: "temporary", updatedAt: 1000 });
+    const final = makeTranscriptItem({ id: "final", text: "final text", updatedAt: 2000 });
+
+    const items = appendFinalVoiceTranscriptItem([live], final, "live");
 
     expect(items.map((item) => item.id)).toEqual(["final"]);
-    expect(items[0]?.text).toBe("最终");
+    expect(items[0]?.text).toBe("final text");
   });
 
-  it("does not append duplicate final transcript items for the same audio window", () => {
-    const existing = makeStreamItem({
-      id: "persisted-1",
-      text: "重复的一段会议文本",
-      startMs: 0,
-      endMs: 7000,
-      createdAt: 1000,
-      updatedAt: 1000,
-    });
-    const duplicate = makeStreamItem({
-      id: "final-1",
-      text: "重复的一段会议文本",
-      startMs: 80,
-      endMs: 7100,
-      createdAt: 2000,
+  it("upserts a live document transcript row from the current preview", () => {
+    const existing = makeTranscriptItem({ id: "older", text: "older row" });
+    const items = upsertLiveVoiceTranscriptItem([existing], {
+      id: "live",
+      phase: "interim",
+      text: "live text",
+      mode: "document",
+      documentPath: "docs/voice-secretary/one.md",
       updatedAt: 2000,
     });
 
-    const items = appendFinalVoiceStreamItem([existing], duplicate);
+    expect(items.map((item) => item.id)).toEqual(["live", "older"]);
+    expect(items[0]?.text).toBe("live text");
+    expect(items[0]?.createdAt).toBe(2000);
 
-    expect(items.map((item) => item.id)).toEqual(["final-1"]);
+    const updated = upsertLiveVoiceTranscriptItem(items, {
+      id: "live",
+      phase: "final",
+      text: "updated live text",
+      mode: "document",
+      documentPath: "docs/voice-secretary/one.md",
+      updatedAt: 3000,
+    });
+
+    expect(updated.map((item) => item.id)).toEqual(["live", "older"]);
+    expect(updated[0]?.text).toBe("updated live text");
+    expect(updated[0]?.createdAt).toBe(2000);
   });
 
-  it("dedupes duplicate stream rows before speaker rendering", () => {
-    const first = makeStreamItem({
-      id: "first",
-      text: "同一段内容",
-      startMs: 0,
-      endMs: 7000,
-      createdAt: 1000,
+  it("does not upsert live transcript rows outside document mode", () => {
+    const existing = makeTranscriptItem({ id: "older", text: "older row" });
+
+    expect(upsertLiveVoiceTranscriptItem([existing], {
+      id: "live",
+      phase: "interim",
+      text: "live text",
+      mode: "instruction",
+      documentPath: "docs/voice-secretary/one.md",
+      updatedAt: 2000,
+    })).toEqual([existing]);
+  });
+
+  it("dedupes restored and local transcript rows for the same document", () => {
+    const local = makeTranscriptItem({ id: "local", text: "same transcript", updatedAt: 1000 });
+    const restored = makeTranscriptItem({ id: "restored", text: "same transcript", updatedAt: 1500 });
+
+    const items = mergeVoiceTranscriptItems([local], [restored]);
+
+    expect(items.map((item) => item.id)).toEqual(["restored"]);
+  });
+
+  it("does not treat live preview rows as displayable final transcript rows", () => {
+    expect(isDisplayableFinalVoiceTranscriptItem(makeTranscriptItem({
+      id: "voice-stream-live",
+      text: "live preview",
+    }))).toBe(false);
+    expect(isDisplayableFinalVoiceTranscriptItem(makeTranscriptItem({
+      id: "final-session-segment-0",
+      text: "final transcript",
+    }))).toBe(true);
+  });
+
+  it("replaces pending analysis rows with restored final rows for the same session", () => {
+    const pending = makeTranscriptItem({
+      id: "session-1-analysis",
+      sessionId: "session-1",
+      phase: "interim",
+      text: "Analyzing final audio...",
+      processingPhase: "separating_speakers",
       updatedAt: 1000,
     });
-    const second = makeStreamItem({
-      id: "second",
-      text: "同一段内容",
-      startMs: 0,
-      endMs: 7000,
-      createdAt: 2000,
+    const final = makeTranscriptItem({
+      id: "session-1-segment-0",
+      sessionId: "session-1",
+      text: "final transcript",
       updatedAt: 2000,
     });
 
-    const items = buildSpeakerConversationItems([first, second], []);
+    const items = replaceVoiceTranscriptSessionItems([pending], [final]);
 
-    expect(items.map((item) => item.sourceItemId)).toEqual(["second"]);
+    expect(items.map((item) => item.id)).toEqual(["session-1-segment-0"]);
+    expect(items[0]?.text).toBe("final transcript");
   });
 
-  it("filters stream rows to the selected document path", () => {
-    const firstDoc = makeStreamItem({
-      id: "first-doc",
-      text: "第一个文档",
-      documentPath: "docs/voice-secretary/first.md",
+  it("preserves older transcript rows when a new recording for the same document is restored", () => {
+    const oldSession = makeTranscriptItem({
+      id: "old-session-segment-0",
+      sessionId: "old-session",
+      text: "old session transcript",
+      updatedAt: 1000,
     });
-    const secondDoc = makeStreamItem({
-      id: "second-doc",
-      text: "第二个文档",
-      documentPath: "docs/voice-secretary/second.md",
+    const legacyRow = makeTranscriptItem({
+      id: "legacy-row",
+      sessionId: undefined,
+      text: "legacy transcript",
+      updatedAt: 1100,
+    });
+    const pending = makeTranscriptItem({
+      id: "new-session-analysis",
+      sessionId: "new-session",
+      phase: "interim",
+      text: "Analyzing final audio...",
+      processingPhase: "separating_speakers",
+      updatedAt: 2000,
+    });
+    const final = makeTranscriptItem({
+      id: "new-session-segment-0",
+      sessionId: "new-session",
+      text: "new session transcript",
+      updatedAt: 3000,
     });
 
-    const items = filterVoiceStreamItemsForDocument(
-      [firstDoc, secondDoc],
-      "docs/voice-secretary/second.md",
-    );
+    const items = replaceVoiceTranscriptSessionItems([pending, legacyRow, oldSession], [final]);
 
-    expect(items.map((item) => item.id)).toEqual(["second-doc"]);
+    expect(items.map((item) => item.id)).toEqual([
+      "new-session-segment-0",
+      "legacy-row",
+      "old-session-segment-0",
+    ]);
+  });
+
+  it("does not force a single speaker badge on mixed-speaker transcript rows", () => {
+    const item = makeTranscriptItem({
+      startMs: 0,
+      endMs: 10_000,
+      speakerLabel: "Speaker 4",
+      speakerIndex: 3,
+    });
+
+    const items = annotateVoiceTranscriptItemsWithSpeakers([item], [
+      { start_ms: 0, end_ms: 5_000, speaker_label: "Speaker 1", speaker_index: 0 },
+      { start_ms: 5_000, end_ms: 10_000, speaker_label: "Speaker 2", speaker_index: 1 },
+    ]);
+
+    expect(items[0]?.speakerLabel).toBeUndefined();
+    expect(items[0]?.speakerIndex).toBeUndefined();
+  });
+
+  it("keeps a speaker badge when one speaker clearly dominates the transcript row", () => {
+    const item = makeTranscriptItem({ startMs: 0, endMs: 10_000 });
+
+    const items = annotateVoiceTranscriptItemsWithSpeakers([item], [
+      { start_ms: 0, end_ms: 8_000, speaker_label: "Speaker 1", speaker_index: 0 },
+      { start_ms: 8_000, end_ms: 10_000, speaker_label: "Speaker 2", speaker_index: 1 },
+    ]);
+
+    expect(items[0]?.speakerLabel).toBe("Speaker 1");
+    expect(items[0]?.speakerIndex).toBe(0);
+  });
+
+  it("formats source labels and compact source details", () => {
+    expect(voiceTranscriptSourceLabel("assistant_service_local_asr_final")).toBe("Final SenseVoice");
+    expect(voiceTranscriptSourceDetail({
+      modelId: "sherpa_onnx_sense_voice_zh_en_ja_ko_yue_int8",
+      engine: "sense_voice",
+      language: "auto",
+      chunks: 2,
+      fallbackReason: "vad_failed",
+    })).toBe("sherpa_onnx_sense_voice_zh_en_ja_ko_yue_int8 · sense_voice · lang=auto · 2 chunks · fallback=vad_failed");
   });
 });

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ...paths import ensure_home
-from ...util.file_lock import acquire_lockfile, release_lockfile
+from ...util.file_lock import LockUnavailableError, acquire_lockfile, release_lockfile
 from ...util.fs import atomic_write_json, read_json
 from ...util.time import utc_now_iso
 
@@ -24,7 +24,9 @@ VOICE_RUNTIME_STATUS_FAILED = "failed"
 _STATE_FILENAME = "runtime-state.json"
 _LOCK_FILENAME = ".runtime.lock"
 _INSTALL_TIMEOUT_SECONDS = 3600
-_SUPPORTED_PYTHON_COMMANDS = ("python3.12", "python3.11", "python3.10", "python3.9")
+_MIN_SUPPORTED_PYTHON = (3, 9)
+_SUPPORTED_PYTHON_LABEL = "Python 3.9+"
+_SUPPORTED_PYTHON_COMMANDS = ("python3.14", "python3.13", "python3.12", "python3.11", "python3.10", "python3.9", "python3", "python")
 _SHERPA_ONNX_STREAMING_PACKAGES = ("sherpa-onnx", "numpy")
 _SHERPA_ONNX_STREAMING_MODULES = ("sherpa_onnx", "numpy")
 _STATUS_CACHE_TTL_SECONDS = 2.0
@@ -91,6 +93,35 @@ def _runtime_title(runtime_id: str) -> str:
     return str(runtime_id or "voice runtime")
 
 
+def _directory_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return total
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += int(item.stat().st_size)
+        except OSError:
+            continue
+    return total
+
+
+def _clear_runtime_root(runtime_id: str) -> None:
+    root = _runtime_root(runtime_id)
+    if not root.exists():
+        return
+    for child in root.iterdir():
+        if child.name == _LOCK_FILENAME:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            try:
+                child.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _python_version(argv0: str) -> tuple[int, int]:
     proc = subprocess.run(
         [argv0, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
@@ -109,21 +140,25 @@ def _python_version(argv0: str) -> tuple[int, int]:
         return (0, 0)
 
 
+def _is_supported_python_version(version: tuple[int, int]) -> bool:
+    return version >= _MIN_SUPPORTED_PYTHON
+
+
 def _select_base_python() -> str:
     current = sys.executable
     current_version = sys.version_info[:2]
-    if (3, 9) <= current_version <= (3, 12):
+    if _is_supported_python_version(current_version):
         return current
     for name in _SUPPORTED_PYTHON_COMMANDS:
         path = shutil.which(name)
         if not path:
             continue
         version = _python_version(path)
-        if (3, 9) <= version <= (3, 12):
+        if _is_supported_python_version(version):
             return path
     raise VoiceRuntimeDepsError(
         "voice_runtime_python_missing",
-        "Voice ASR runtime needs Python 3.9-3.12 for compatible wheels.",
+        f"Voice ASR runtime needs {_SUPPORTED_PYTHON_LABEL} for compatible wheels.",
         details={"current_python": sys.executable, "current_version": ".".join(map(str, sys.version_info[:3]))},
     )
 
@@ -207,6 +242,7 @@ def get_voice_runtime_status(runtime_id: str = VOICE_RUNTIME_ID_SHERPA_ONNX_STRE
         "updated_at": str(state.get("updated_at") or ""),
         "installed_at": str(state.get("installed_at") or ""),
         "error": state.get("error") if isinstance(state.get("error"), dict) else {},
+        "disk_usage_bytes": _directory_size_bytes(_runtime_root(runtime_id)),
     }
     _STATUS_CACHE[runtime_id] = (now, dict(result))
     return result
@@ -223,6 +259,26 @@ def list_voice_runtime_statuses() -> List[Dict[str, Any]]:
     return [
         get_voice_runtime_status(VOICE_RUNTIME_ID_SHERPA_ONNX_STREAMING),
     ]
+
+
+def begin_voice_runtime_install(runtime_id: str = VOICE_RUNTIME_ID_SHERPA_ONNX_STREAMING) -> Dict[str, Any]:
+    runtime_id = str(runtime_id or "").strip() or VOICE_RUNTIME_ID_SHERPA_ONNX_STREAMING
+    packages = _runtime_packages(runtime_id)
+    lock_handle = acquire_lockfile(_lock_path(runtime_id))
+    try:
+        _write_state(
+            runtime_id,
+            {
+                "runtime_id": runtime_id,
+                "status": VOICE_RUNTIME_STATUS_INSTALLING,
+                "updated_at": utc_now_iso(),
+                "error": {},
+                "packages": list(packages),
+            },
+        )
+        return get_voice_runtime_status(runtime_id)
+    finally:
+        release_lockfile(lock_handle)
 
 
 def install_voice_runtime_deps(runtime_id: str = VOICE_RUNTIME_ID_SHERPA_ONNX_STREAMING) -> Dict[str, Any]:
@@ -265,6 +321,7 @@ def install_voice_runtime_deps(runtime_id: str = VOICE_RUNTIME_ID_SHERPA_ONNX_ST
                         "stdout": str(proc.stdout or "").strip()[-2000:],
                     },
                 )
+        _STATUS_CACHE.pop(runtime_id, None)
         status = get_voice_runtime_status(runtime_id)
         if status.get("missing_modules"):
             raise VoiceRuntimeDepsError(
@@ -295,5 +352,42 @@ def install_voice_runtime_deps(runtime_id: str = VOICE_RUNTIME_ID_SHERPA_ONNX_ST
             },
         )
         raise
+    finally:
+        release_lockfile(lock_handle)
+
+
+def remove_voice_runtime_deps(runtime_id: str = VOICE_RUNTIME_ID_SHERPA_ONNX_STREAMING) -> Dict[str, Any]:
+    runtime_id = str(runtime_id or "").strip() or VOICE_RUNTIME_ID_SHERPA_ONNX_STREAMING
+    _runtime_packages(runtime_id)
+    try:
+        lock_handle = acquire_lockfile(_lock_path(runtime_id), blocking=False)
+    except LockUnavailableError as exc:
+        raise VoiceRuntimeDepsError(
+            "voice_runtime_busy",
+            f"{_runtime_title(runtime_id)} is currently installing.",
+            details={"runtime_id": runtime_id},
+        ) from exc
+    try:
+        status = str(_read_state(runtime_id).get("status") or "").strip()
+        if status == VOICE_RUNTIME_STATUS_INSTALLING:
+            raise VoiceRuntimeDepsError(
+                "voice_runtime_busy",
+                f"{_runtime_title(runtime_id)} is currently installing.",
+                details={"runtime_id": runtime_id},
+            )
+        _clear_runtime_root(runtime_id)
+        _write_state(
+            runtime_id,
+            {
+                "runtime_id": runtime_id,
+                "status": VOICE_RUNTIME_STATUS_NOT_INSTALLED,
+                "updated_at": utc_now_iso(),
+                "installed_at": "",
+                "error": {},
+                "packages": list(_runtime_packages(runtime_id)),
+            },
+        )
+        _STATUS_CACHE.pop(runtime_id, None)
+        return get_voice_runtime_status(runtime_id)
     finally:
         release_lockfile(lock_handle)

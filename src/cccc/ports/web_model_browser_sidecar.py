@@ -1,53 +1,50 @@
-"""One-shot browser delivery sidecar for CCCC web_model actors.
+"""ChatGPT page automation helpers for CCCC Web Model actors.
 
-The daemon calls this command with one JSON payload on stdin. The sidecar owns
-only browser prompt submission; the website model still reports results through
-the CCCC remote MCP connector.
+The daemon-owned projected browser session is the only browser delivery writer.
+This module keeps shared URL/state helpers and page-level ChatGPT automation used
+by that session.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
+import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
-import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from ..daemon.browser.projected_browser_runtime import (
-    _pick_free_port,
-    _system_browser_binaries,
     _wait_cdp_endpoint,
     ensure_dir,
     ensure_sync_playwright,
 )
 from ..paths import ensure_home
+from ..util.process import pid_is_alive, terminate_pid
 from ..util.fs import atomic_write_json, read_json
-from ..util.time import utc_now_iso
+from ..util.time import parse_utc_iso, utc_now_iso
 
 CHATGPT_URL = "https://chatgpt.com/"
 INPUT_SELECTORS = [
-    'textarea[data-id="prompt-textarea"]',
-    'textarea[placeholder*="Send a message"]',
-    'textarea[aria-label="Message ChatGPT"]',
-    "textarea:not([disabled])",
-    'textarea[name="prompt-textarea"]',
-    "#prompt-textarea",
     ".ProseMirror",
     '[contenteditable="true"][data-virtualkeyboard="true"]',
+    '[role="textbox"][contenteditable="true"]',
     '[contenteditable="true"]',
+    'textarea[data-id="prompt-textarea"]',
+    'textarea[name="prompt-textarea"]',
+    "#prompt-textarea",
+    'textarea[placeholder*="Send a message"]',
+    'textarea[aria-label="Message ChatGPT"]',
 ]
 SEND_BUTTON_SELECTORS = [
+    "#composer-submit-button",
     'button[data-testid="send-button"]',
     'button[data-testid="composer-submit-button"]',
     'button[data-testid*="composer-send"]',
-    'form button[type="submit"]',
     'button[type="submit"][data-testid*="send"]',
     'button[aria-label*="Send"]',
     'button[aria-label*="Send prompt"]',
@@ -55,6 +52,12 @@ SEND_BUTTON_SELECTORS = [
     'button[aria-label*="送信"]',
 ]
 TOOL_CONFIRM_MAX_CLICKS = 3
+CDP_CONNECT_TIMEOUT_MS = 5000
+DEFAULT_BROWSER_DELIVERY_TIMEOUT_SECONDS = 120.0
+
+
+class _UnsafeSubmitState(RuntimeError):
+    pass
 
 
 def _chatgpt_tool_confirm_script() -> str:
@@ -177,14 +180,14 @@ def _conversation_url_from_tab(value: Any) -> str:
     return _normalize_chatgpt_url(value, require_conversation=True)
 
 
-def _default_delivery_visibility() -> str:
-    if sys.platform.startswith("linux") and shutil.which("xvfb-run"):
-        return "background"
-    return "visible"
-
-
-def _json_result(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+def _wait_for_conversation_url(page: Any, *, timeout_seconds: float = 15.0) -> str:
+    deadline = time.time() + max(1.0, float(timeout_seconds))
+    while time.time() < deadline:
+        url = _conversation_url_from_tab(str(getattr(page, "url", "") or ""))
+        if url:
+            return url
+        time.sleep(0.25)
+    return _conversation_url_from_tab(str(getattr(page, "url", "") or ""))
 
 
 def _safe_token(value: str, fallback: str) -> str:
@@ -193,14 +196,24 @@ def _safe_token(value: str, fallback: str) -> str:
     return cleaned[:96] or fallback
 
 
-def _profile_root(payload: dict[str, Any]) -> Path:
+def _actor_state_root(payload: dict[str, Any]) -> Path:
     group_id = _safe_token(str(payload.get("group_id") or ""), "group")
     actor_id = _safe_token(str(payload.get("actor_id") or ""), "actor")
     return ensure_home() / "state" / "web_model_browser" / group_id / actor_id
 
 
-def chatgpt_browser_profile_root(group_id: str, actor_id: str) -> Path:
-    return _profile_root({"group_id": group_id, "actor_id": actor_id})
+def chatgpt_browser_actor_state_root(group_id: str, actor_id: str) -> Path:
+    return _actor_state_root({"group_id": group_id, "actor_id": actor_id})
+
+
+def chatgpt_browser_profile_root(group_id: str = "", actor_id: str = "") -> Path:
+    """Return the shared ChatGPT browser profile root.
+
+    ChatGPT Web Model is a single runtime seat, so login cookies must be tied to
+    the ChatGPT browser surface rather than to a replaceable CCCC actor id.
+    """
+    _ = (group_id, actor_id)
+    return ensure_home() / "state" / "web_model_browser" / "_shared" / "chatgpt_web"
 
 
 def _state_path(profile_root: Path) -> Path:
@@ -214,45 +227,125 @@ def _profile_dir(profile_root: Path) -> Path:
 
 
 def chatgpt_browser_profile_dir(group_id: str, actor_id: str) -> Path:
+    _ensure_shared_profile_migrated(group_id, actor_id)
     return _profile_dir(chatgpt_browser_profile_root(group_id, actor_id))
 
 
+def _dir_has_content(path: Path) -> bool:
+    try:
+        return any(path.iterdir())
+    except Exception:
+        return False
+
+
+def _candidate_legacy_profile_dirs(group_id: str, actor_id: str) -> list[Path]:
+    roots: list[Path] = []
+    direct = _actor_state_root({"group_id": group_id, "actor_id": actor_id}) / "chrome_profile"
+    if direct.exists():
+        roots.append(direct)
+    base = ensure_home() / "state" / "web_model_browser"
+    try:
+        for candidate in base.glob("*/*/chrome_profile"):
+            if "_shared" in candidate.parts:
+                continue
+            if candidate not in roots:
+                roots.append(candidate)
+    except Exception:
+        pass
+    return sorted(
+        [item for item in roots if item.exists() and _dir_has_content(item)],
+        key=lambda item: item.stat().st_mtime if item.exists() else 0,
+        reverse=True,
+    )
+
+
+def _ensure_shared_profile_migrated(group_id: str, actor_id: str) -> None:
+    shared = chatgpt_browser_profile_root(group_id, actor_id) / "chrome_profile"
+    if _dir_has_content(shared):
+        return
+    candidates = _candidate_legacy_profile_dirs(group_id, actor_id)
+    if not candidates:
+        ensure_dir(shared, 0o700)
+        return
+    ensure_dir(shared.parent, 0o700)
+    try:
+        shutil.copytree(candidates[0], shared, dirs_exist_ok=True)
+    except Exception:
+        ensure_dir(shared, 0o700)
+
+
 def record_chatgpt_browser_state(group_id: str, actor_id: str, state: dict[str, Any]) -> None:
-    profile_root = chatgpt_browser_profile_root(group_id, actor_id)
-    current = _load_state(profile_root)
-    _write_state(profile_root, {**current, **dict(state or {})})
+    state_root = chatgpt_browser_actor_state_root(group_id, actor_id)
+    current = _load_state(state_root)
+    _write_state(state_root, {**current, **dict(state or {})})
 
 
 def read_chatgpt_browser_state(group_id: str, actor_id: str) -> dict[str, Any]:
-    return _load_state(chatgpt_browser_profile_root(group_id, actor_id))
+    return _load_state(chatgpt_browser_actor_state_root(group_id, actor_id))
 
 
-def _browser_channel_candidates() -> list[str]:
-    raw = str(os.environ.get("CCCC_WEB_MODEL_BROWSER_CHANNELS") or "").strip()
-    if raw:
-        return [item.strip() for item in raw.split(",") if item.strip()]
-    channel = str(os.environ.get("CCCC_WEB_MODEL_BROWSER_CHANNEL") or "").strip()
-    if channel:
-        return [channel]
-    return ["chrome", "msedge"]
+def record_chatgpt_browser_process_state(state: dict[str, Any]) -> None:
+    root = chatgpt_browser_profile_root()
+    current = _load_state(root)
+    _write_state(root, {**current, **dict(state or {})})
 
 
-def _browser_binary_candidates() -> list[str]:
-    explicit = str(os.environ.get("CCCC_WEB_MODEL_BROWSER_BINARY") or "").strip()
-    out: list[str] = []
-    if explicit:
-        out.append(explicit)
-    for channel in _browser_channel_candidates():
-        out.extend(_system_browser_binaries(channel))
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for item in out:
-        key = str(item or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(key)
-    return deduped
+def read_chatgpt_browser_process_state() -> dict[str, Any]:
+    return _load_state(chatgpt_browser_profile_root())
+
+
+def reset_chatgpt_browser_actor_runtime_state(group_id: str, actor_id: str) -> None:
+    """Clear actor binding/delivery state while preserving the Chrome login profile."""
+    state_root = chatgpt_browser_actor_state_root(group_id, actor_id)
+    current = _load_state(state_root)
+    _write_state(
+        state_root,
+        {
+            **current,
+            "conversation_url": "",
+            "pending_new_chat_bind": False,
+            "pending_new_chat_url": "",
+            "pending_new_chat_bind_started_at": "",
+            "pending_new_chat_submitted": False,
+            "pending_new_chat_submitted_at": "",
+            "pending_new_chat_delivery_id": "",
+            "pending_new_chat_last_turn_id": "",
+            "pending_new_chat_last_event_ids": [],
+            "pending_new_chat_last_tab_url": "",
+            "new_chat_bound_at": "",
+            "bootstrap_seed_delivered_at": "",
+            "bootstrap_seed_version": "",
+            "bootstrap_seed_digest": "",
+            "bootstrap_seed_conversation_url": "",
+            "last_delivery_at": "",
+            "last_delivery_started_at": "",
+            "last_turn_id": "",
+            "last_event_ids": [],
+            "last_delivery_id": "",
+            "last_delivery_status": "",
+            "last_submission_evidence": "",
+            "last_send_selector": "",
+            "auto_reload_active": False,
+            "auto_reload_window_started_at": "",
+            "auto_reload_window_expires_at": "",
+            "auto_reload_last_progress_at": "",
+            "auto_reload_last_progress_reason": "",
+            "auto_reload_last_progress_detail": "",
+            "auto_reload_last_delivery_id": "",
+            "auto_reload_last_turn_id": "",
+            "auto_reload_last_event_ids": [],
+            "auto_reload_target_url": "",
+            "auto_reload_last_reload_at": "",
+            "auto_reload_last_reload_reason": "",
+            "auto_reload_last_page_url": "",
+            "auto_reload_count": 0,
+            "auto_reload_completed_at": "",
+            "auto_reload_completed_reason": "",
+            "auto_reload_expired_at": "",
+            "auto_reload_last_error": "",
+            "last_error": "",
+        },
+    )
 
 
 def _load_state(profile_root: Path) -> dict[str, Any]:
@@ -276,157 +369,273 @@ def _normalize_visibility(value: str) -> str:
     return "visible"
 
 
-def _browser_visibility_from_env(default: str = "visible") -> str:
-    raw = (
-        os.environ.get("CCCC_WEB_MODEL_BROWSER_VISIBILITY")
-        or os.environ.get("CCCC_WEB_MODEL_BROWSER_MODE")
-        or os.environ.get("CCCC_WEB_MODEL_BROWSER_HEADLESS")
-        or default
+def _managed_profile_dir(profile_dir: str | Path) -> Path | None:
+    try:
+        path = Path(profile_dir).resolve()
+        root = chatgpt_browser_profile_root().resolve()
+        if path.is_relative_to(root):
+            return path
+    except Exception:
+        return None
+    return None
+
+
+def _same_profile_path(left: str | Path, right: str | Path) -> bool:
+    try:
+        left_norm = os.path.normcase(os.path.abspath(os.path.expanduser(str(left or ""))))
+        right_norm = os.path.normcase(os.path.abspath(os.path.expanduser(str(right or ""))))
+    except Exception:
+        return False
+    return bool(left_norm and right_norm and left_norm == right_norm)
+
+
+def _user_data_dir_from_args(args: list[str]) -> str:
+    for index, raw in enumerate(args):
+        arg = str(raw or "").strip()
+        if arg.startswith("--user-data-dir="):
+            return arg.split("=", 1)[1].strip().strip("\"'")
+        if arg == "--user-data-dir" and index + 1 < len(args):
+            return str(args[index + 1] or "").strip().strip("\"'")
+    return ""
+
+
+def _user_data_dir_from_command_line(command: str) -> str:
+    text = str(command or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"--user-data-dir=(?:\"([^\"]+)\"|'([^']+)'|(\S+))", text)
+    if match:
+        return str(next((item for item in match.groups() if item), "") or "").strip()
+    match = re.search(r"--user-data-dir\s+(?:\"([^\"]+)\"|'([^']+)'|(\S+))", text)
+    if match:
+        return str(next((item for item in match.groups() if item), "") or "").strip()
+    return ""
+
+
+def _profile_process_pids_from_proc(profile: Path) -> list[int]:
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return []
+    pids: list[int] = []
+    current_pid = os.getpid()
+    for child in proc_root.iterdir():
+        if not child.name.isdigit():
+            continue
+        try:
+            pid = int(child.name)
+        except Exception:
+            continue
+        if pid <= 0 or pid == current_pid:
+            continue
+        try:
+            raw = (child / "cmdline").read_bytes()
+        except Exception:
+            continue
+        if not raw:
+            continue
+        args = [part.decode("utf-8", errors="ignore") for part in raw.split(b"\0") if part]
+        user_data_dir = _user_data_dir_from_args(args)
+        if user_data_dir and _same_profile_path(user_data_dir, profile):
+            pids.append(pid)
+    return pids
+
+
+def _profile_process_pids_from_ps(profile: Path) -> list[int]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+    if int(getattr(proc, "returncode", 1) or 0) != 0:
+        return []
+    pids: list[int] = []
+    current_pid = os.getpid()
+    for raw_line in str(proc.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except Exception:
+            continue
+        if pid <= 0 or pid == current_pid:
+            continue
+        user_data_dir = _user_data_dir_from_command_line(parts[1])
+        if user_data_dir and _same_profile_path(user_data_dir, profile):
+            pids.append(pid)
+    return pids
+
+
+def _profile_process_pids_from_windows(profile: Path) -> list[int]:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        return []
+    command = (
+        "Get-CimInstance Win32_Process | "
+        "Select-Object ProcessId,CommandLine | "
+        "ConvertTo-Json -Compress"
     )
-    if str(raw).strip().lower() in {"1", "true", "yes"}:
-        return "headless"
-    return _normalize_visibility(str(raw))
+    try:
+        proc = subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if int(getattr(proc, "returncode", 1) or 0) != 0:
+        return []
+    try:
+        raw = json.loads(str(proc.stdout or "null"))
+    except Exception:
+        return []
+    rows = raw if isinstance(raw, list) else [raw]
+    pids: list[int] = []
+    current_pid = os.getpid()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        try:
+            pid = int(item.get("ProcessId") or 0)
+        except Exception:
+            continue
+        if pid <= 0 or pid == current_pid:
+            continue
+        user_data_dir = _user_data_dir_from_command_line(str(item.get("CommandLine") or ""))
+        if user_data_dir and _same_profile_path(user_data_dir, profile):
+            pids.append(pid)
+    return pids
 
 
-def _browser_launch_command(binary: str, profile_dir: Path, port: int, visibility: str) -> list[str]:
-    normalized = _normalize_visibility(visibility)
-    browser_cmd = [
-        binary,
-        f"--remote-debugging-port={int(port)}",
-        f"--user-data-dir={profile_dir}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--new-window",
-        CHATGPT_URL,
-    ]
-    if normalized == "headless":
-        return [*browser_cmd[:4], "--headless=new", "--disable-gpu", *browser_cmd[4:]]
-    if normalized == "background":
-        xvfb = shutil.which("xvfb-run")
-        if not xvfb:
-            raise RuntimeError("background browser mode requires xvfb-run; install xvfb or use visible browser mode")
-        return [xvfb, "-a", "-s", "-screen 0 1280x900x24", *browser_cmd]
-    return browser_cmd
+def _profile_process_pids(profile_dir: str | Path) -> list[int]:
+    profile = _managed_profile_dir(profile_dir)
+    if profile is None:
+        return []
+    if os.name == "nt":
+        pids = _profile_process_pids_from_windows(profile)
+    else:
+        pids = _profile_process_pids_from_proc(profile) or _profile_process_pids_from_ps(profile)
+    return sorted(set(pids), reverse=True)
+
+
+def _stop_browser_profile_processes(profile_dir: str | Path) -> None:
+    pids = _profile_process_pids(profile_dir)
+    if not pids:
+        return
+
+    for pid in pids:
+        terminate_pid(pid, timeout_s=0.2, include_group=True, force=False)
+    deadline = time.time() + 3.0
+    while time.time() < deadline and any(pid_is_alive(pid) for pid in pids):
+        time.sleep(0.1)
+    for pid in pids:
+        if not pid_is_alive(pid):
+            continue
+        terminate_pid(pid, timeout_s=0.5, include_group=True, force=True)
 
 
 def _stop_browser_state(state: dict[str, Any]) -> None:
     pid = int(state.get("pid") or 0)
+    profile_dir = str(state.get("profile_dir") or "").strip()
     if pid <= 0:
+        if profile_dir:
+            _stop_browser_profile_processes(profile_dir)
         return
-    def _pid_alive() -> bool:
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except Exception:
-            return False
-
-    def _wait_exit(timeout_seconds: float = 3.0) -> bool:
-        deadline = time.time() + max(0.1, float(timeout_seconds))
-        while time.time() < deadline:
-            if not _pid_alive():
-                return True
-            time.sleep(0.1)
-        return not _pid_alive()
-
-    signaled = False
-    try:
-        os.killpg(pid, signal.SIGTERM)
-        signaled = True
-    except Exception:
-        pass
-    if not signaled:
-        try:
-            os.kill(pid, signal.SIGTERM)
-            signaled = True
-        except Exception:
-            pass
-    if signaled and _wait_exit():
-        return
-    try:
-        os.killpg(pid, signal.SIGKILL)
-        _wait_exit(timeout_seconds=1.0)
-        return
-    except Exception:
-        pass
-    try:
-        os.kill(pid, signal.SIGKILL)
-        _wait_exit(timeout_seconds=1.0)
-    except Exception:
-        pass
-
-
-def _start_or_reuse_browser(profile_root: Path, *, visibility: str = "visible") -> dict[str, Any]:
-    normalized_visibility = _normalize_visibility(visibility)
-    state = _load_state(profile_root)
-    port = int(state.get("cdp_port") or 0)
-    pid = int(state.get("pid") or 0)
-    if port > 0 and _wait_cdp_endpoint(port, timeout_seconds=0.7):
-        prior_visibility = _normalize_visibility(str(state.get("visibility") or "visible"))
-        if prior_visibility == "projected" or normalized_visibility == "visible" or prior_visibility == normalized_visibility:
-            return {**state, "cdp_port": port, "pid": pid, "visibility": prior_visibility, "reused": True}
-        _stop_browser_state(state)
-        time.sleep(0.4)
-
-    binaries = _browser_binary_candidates()
-    if not binaries:
-        raise RuntimeError(
-            "no Chrome/Edge browser binary found; set CCCC_WEB_MODEL_BROWSER_BINARY "
-            "or install Google Chrome/Microsoft Edge"
-        )
-
-    profile_dir = _profile_dir(profile_root)
-    last_error = ""
-    for binary in binaries:
-        proc: subprocess.Popen[str] | None = None
-        port = _pick_free_port()
-        try:
-            cmd = _browser_launch_command(binary, profile_dir, port, normalized_visibility)
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                start_new_session=True,
-            )
-            if not _wait_cdp_endpoint(port, timeout_seconds=12.0):
-                raise RuntimeError("CDP endpoint did not become ready")
-            state = {
-                "pid": int(proc.pid or 0),
-                "cdp_port": int(port),
-                "browser_binary": str(binary),
-                "profile_dir": str(profile_dir),
-                "visibility": normalized_visibility,
-                "started_at": utc_now_iso(),
-                "reused": False,
-            }
-            _write_state(profile_root, state)
-            return state
-        except Exception as exc:
-            last_error = str(exc)
-            try:
-                if proc is not None and proc.poll() is None:
-                    proc.terminate()
-            except Exception:
-                pass
-            continue
-    raise RuntimeError(last_error or "failed to start browser")
+    terminate_pid(pid, timeout_s=3.0, include_group=True, force=True)
+    if profile_dir:
+        _stop_browser_profile_processes(profile_dir)
 
 
 def _visible_input_selector(page: Any, *, timeout_seconds: float) -> str:
     deadline = time.time() + max(1.0, float(timeout_seconds))
     last_error = ""
     while time.time() < deadline:
-        for selector in INPUT_SELECTORS:
-            try:
-                locator = page.locator(selector).first
-                if locator.count() > 0 and locator.is_visible(timeout=250):
-                    return selector
-            except Exception as exc:
-                last_error = str(exc)
+        try:
+            candidate = page.evaluate(
+                """selectors => {
+                    const isVisible = (node) => {
+                        if (!node) return false;
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+                    };
+                    const isEditable = (node) => {
+                        if (!node || !isVisible(node)) return false;
+                        if (node.matches("textarea")) return !node.disabled && !node.readOnly;
+                        if (node.matches("input")) {
+                            const type = String(node.type || "text").toLowerCase();
+                            return !node.disabled && !node.readOnly && !/password|search|email|url|number|tel|file|hidden|checkbox|radio|submit|button|reset/.test(type);
+                        }
+                        return node.isContentEditable || node.getAttribute("contenteditable") === "true" || node.getAttribute("role") === "textbox";
+                    };
+                    const score = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const label = [
+                            node.getAttribute("aria-label") || "",
+                            node.getAttribute("placeholder") || "",
+                            node.getAttribute("name") || "",
+                            node.getAttribute("id") || "",
+                            node.getAttribute("data-testid") || "",
+                        ].join(" ").toLowerCase();
+                        let out = 0;
+                        if (/prompt|message|ask|chat|query|input/.test(label)) out += 80;
+                        if (node.matches("textarea")) out += 50;
+                        if (node.isContentEditable || node.getAttribute("contenteditable") === "true") out += 35;
+                        if (node.getAttribute("role") === "textbox") out += 25;
+                        if (String(node.className || "").toLowerCase().includes("fallback")) out -= 200;
+                        if (rect.width >= 260 && rect.height >= 26) out += 20;
+                        out += Math.min(180, Math.max(0, (rect.width * rect.height) / 2500));
+                        out += Math.max(0, rect.y / 8);
+                        return out;
+                    };
+                    const nodes = [];
+                    const seen = new Set();
+                    const addNode = (node) => {
+                        if (!node || seen.has(node)) return;
+                        seen.add(node);
+                        nodes.push(node);
+                    };
+                    for (const selector of selectors || []) {
+                        try {
+                            document.querySelectorAll(selector).forEach(addNode);
+                        } catch (_error) {}
+                    }
+                    [
+                        ...document.querySelectorAll("main [contenteditable='true'], main [role='textbox'], main textarea"),
+                        ...document.querySelectorAll("[contenteditable='true'], [role='textbox'], textarea, input"),
+                    ].forEach(addNode);
+                    let best = null;
+                    let bestScore = -Infinity;
+                    for (const node of nodes) {
+                        if (!isEditable(node)) continue;
+                        const candidateScore = score(node);
+                        if (candidateScore > bestScore) {
+                            best = node;
+                            bestScore = candidateScore;
+                        }
+                    }
+                    if (!best) return "";
+                    const marker = "cccc-chatgpt-composer-input";
+                    for (const node of document.querySelectorAll("[data-cccc-chatgpt-input-candidate]")) {
+                        node.removeAttribute("data-cccc-chatgpt-input-candidate");
+                    }
+                    best.setAttribute("data-cccc-chatgpt-input-candidate", marker);
+                    return `[data-cccc-chatgpt-input-candidate="${marker}"]`;
+                }""",
+                INPUT_SELECTORS,
+            )
+            if str(candidate or "").strip():
+                return str(candidate)
+        except Exception as exc:
+            last_error = str(exc)
         time.sleep(0.2)
     raise RuntimeError(last_error or "ChatGPT composer input not found; log in and enable the CCCC connector")
 
@@ -435,8 +644,32 @@ def _clear_and_type_prompt(page: Any, selector: str, prompt: str) -> None:
     locator = page.locator(selector).first
     locator.click(timeout=5000)
     try:
-        locator.fill(prompt, timeout=5000)
-        return
+        can_fill = bool(
+            locator.evaluate(
+                """(el) => {
+                    if (!el) return false;
+                    const tag = String(el.tagName || "").toLowerCase();
+                    return (tag === "textarea" || tag === "input") && !el.isContentEditable;
+                }""",
+                timeout=1000,
+            )
+        )
+    except Exception:
+        can_fill = False
+    if can_fill:
+        try:
+            locator.fill(prompt, timeout=5000)
+            return
+        except Exception:
+            pass
+    try:
+        locator.evaluate(
+            """(el) => {
+                if (!el || !el.isContentEditable) return;
+                el.focus();
+            }""",
+            timeout=1000,
+        )
     except Exception:
         pass
     modifier = "Meta" if sys.platform == "darwin" else "Control"
@@ -457,6 +690,20 @@ def _clear_and_type_prompt(page: Any, selector: str, prompt: str) -> None:
 def _composer_text(page: Any, selector: str) -> str:
     locator = page.locator(selector).first
     try:
+        text = locator.evaluate(
+            """(el) => {
+                if (!el) return "";
+                const value = "value" in el ? String(el.value || "") : "";
+                if (value.trim()) return value;
+                return String(el.innerText || el.textContent || "");
+            }""",
+            timeout=1000,
+        )
+        if str(text or "").strip():
+            return str(text or "").strip()
+    except Exception:
+        pass
+    try:
         return str(locator.input_value(timeout=150) or "").strip()
     except Exception:
         pass
@@ -470,25 +717,458 @@ def _composer_text(page: Any, selector: str) -> str:
         return ""
 
 
-def _click_send(page: Any) -> str:
-    last_error = ""
-    for selector in SEND_BUTTON_SELECTORS:
+def _normalize_composer_text(value: str) -> str:
+    return " ".join(str(value or "").replace("\xa0", " ").split())
+
+
+def _prompt_inserted(page: Any, selector: str, prompt: str) -> bool:
+    actual = _normalize_composer_text(_composer_text(page, selector))
+    expected = _normalize_composer_text(prompt)
+    if not actual or not expected:
+        return False
+    if expected in actual:
+        return True
+    prefix = expected[: min(160, len(expected))]
+    suffix = expected[-min(120, len(expected)) :]
+    return bool(prefix and prefix in actual) and (len(expected) <= 200 or bool(suffix and suffix in actual))
+
+
+def _prompt_present_in_any_composer(page: Any, prompt: str, selector: str = "") -> bool:
+    expected = _normalize_composer_text(prompt)
+    if not expected:
+        return False
+    if selector:
         try:
-            button = page.locator(selector).first
-            if button.count() <= 0:
-                continue
-            if not button.is_visible(timeout=250):
-                continue
+            if _prompt_inserted(page, selector, prompt):
+                return True
+        except Exception:
+            pass
+    prefix = expected[: min(160, len(expected))]
+    suffix = expected[-min(120, len(expected)) :]
+    try:
+        texts = page.evaluate(
+            """selector => {
+                const isVisible = (node) => {
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+                };
+                const isEditable = (node) => {
+                    if (!node || !isVisible(node)) return false;
+                    if (node.matches("textarea")) return !node.disabled && !node.readOnly;
+                    if (node.matches("input")) {
+                        const type = String(node.type || "text").toLowerCase();
+                        return !node.disabled && !node.readOnly && !/password|search|email|url|number|tel|file|hidden|checkbox|radio|submit|button|reset/.test(type);
+                    }
+                    return node.isContentEditable || node.getAttribute("contenteditable") === "true" || node.getAttribute("role") === "textbox";
+                };
+                const readText = (node) => {
+                    if (!node) return "";
+                    const value = "value" in node ? String(node.value || "") : "";
+                    if (value.trim()) return value;
+                    return String(node.innerText || node.textContent || "");
+                };
+                const nodes = [];
+                const seen = new Set();
+                const addNode = (node) => {
+                    if (!node || seen.has(node)) return;
+                    seen.add(node);
+                    nodes.push(node);
+                };
+                if (selector) {
+                    try {
+                        document.querySelectorAll(selector).forEach(addNode);
+                    } catch (_error) {}
+                }
+                [
+                    ...document.querySelectorAll("[data-cccc-chatgpt-input-candidate]"),
+                    ...document.querySelectorAll("main textarea, main [role='textbox'], main [contenteditable='true']"),
+                    ...document.querySelectorAll("textarea, [role='textbox'], [contenteditable='true']"),
+                ].forEach(addNode);
+                return nodes.filter(isEditable).map(readText).filter((text) => String(text || "").trim()).slice(0, 12);
+            }""",
+            selector,
+        )
+    except Exception:
+        return False
+    if not isinstance(texts, list):
+        return False
+    for raw in texts:
+        actual = _normalize_composer_text(str(raw or ""))
+        if not actual:
+            continue
+        if expected in actual:
+            return True
+        if prefix and prefix in actual and (len(expected) <= 200 or bool(suffix and suffix in actual)):
+            return True
+    return False
+
+
+def _wait_for_prompt_inserted(page: Any, selector: str, prompt: str, *, timeout_seconds: float = 3.0) -> bool:
+    deadline = time.time() + max(0.5, float(timeout_seconds))
+    while time.time() < deadline:
+        if _prompt_present_in_any_composer(page, prompt, selector):
+            return True
+        time.sleep(0.1)
+    return _prompt_present_in_any_composer(page, prompt, selector)
+
+
+def _raise_if_chatgpt_running_before_submit(page: Any) -> None:
+    if _chatgpt_running_visible(page):
+        raise _UnsafeSubmitState(
+            "ChatGPT is currently responding; refusing to click the composer control because it may be the stop button"
+        )
+
+
+def _chatgpt_started_after_submit_attempt(page: Any, *, timeout_seconds: float = 0.75) -> bool:
+    deadline = time.time() + max(0.0, float(timeout_seconds))
+    while True:
+        if _chatgpt_running_visible(page):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _selector_resolves_to_stop_control(page: Any, selector: str) -> bool:
+    raw_selector = str(selector or "").strip()
+    if not raw_selector:
+        return False
+    try:
+        return bool(
+            page.evaluate(
+                """selector => {
+                    let node = null;
+                    try {
+                        node = document.querySelector(selector);
+                    } catch (_error) {
+                        return false;
+                    }
+                    if (!node) return false;
+                    const label = [
+                        node.getAttribute("aria-label") || "",
+                        node.getAttribute("title") || "",
+                        node.getAttribute("data-testid") || "",
+                        node.id || "",
+                        node.className || "",
+                        node.innerText || node.textContent || "",
+                    ].join(" ").replace(/\\s+/g, " ").trim().toLowerCase();
+                    return /\\bstop\\b|停止|中止|cancel generation|interrupt/.test(label);
+                }""",
+                raw_selector,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _send_control_state(page: Any, selector: str) -> str:
+    button = page.locator(selector).first
+    if button.count() <= 0:
+        return "missing"
+    if not button.is_visible(timeout=250):
+        return "hidden"
+    try:
+        if button.is_disabled(timeout=250):
+            return "disabled"
+    except Exception:
+        pass
+    if _selector_resolves_to_stop_control(page, selector):
+        raise _UnsafeSubmitState(
+            f"ChatGPT composer control matched stop state for selector {selector}; refusing to click"
+        )
+    return "ready"
+
+
+def _wait_for_stable_send_control(
+    page: Any,
+    selector: str,
+    *,
+    deadline: float,
+    stable_seconds: float = 0.35,
+) -> bool:
+    stable_since = 0.0
+    wait_deadline = min(deadline, time.time() + max(0.45, float(stable_seconds) + 0.25))
+    while time.time() < wait_deadline:
+        _raise_if_chatgpt_running_before_submit(page)
+        state = _send_control_state(page, selector)
+        if state == "ready":
+            now = time.time()
+            if stable_since <= 0:
+                stable_since = now
+            if now - stable_since >= max(0.0, float(stable_seconds)):
+                return True
+        elif state in {"missing", "hidden"}:
+            return False
+        else:
+            stable_since = 0.0
+        time.sleep(0.05)
+    return False
+
+
+def _click_send(page: Any, *, timeout_seconds: float = 5.0) -> str:
+    deadline = time.time() + max(0.5, float(timeout_seconds))
+    last_error = ""
+    while time.time() < deadline:
+        _raise_if_chatgpt_running_before_submit(page)
+        for selector in SEND_BUTTON_SELECTORS:
             try:
-                if button.is_disabled(timeout=250):
+                if not _wait_for_stable_send_control(page, selector, deadline=deadline):
                     continue
-            except Exception:
-                pass
-            button.click(timeout=5000)
-            return selector
+                page.locator(selector).first.click(timeout=5000)
+                return selector
+            except _UnsafeSubmitState:
+                raise
+            except Exception as exc:
+                last_error = str(exc)
+                if _chatgpt_started_after_submit_attempt(page):
+                    return f"{selector}:post_click_running"
+        try:
+            candidate_selector = page.evaluate(
+                """() => {
+                    const isVisible = (node) => {
+                        if (!node) return false;
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+                    };
+                    const isDisabled = (node) => !!node.disabled || String(node.getAttribute("aria-disabled") || "").toLowerCase() === "true";
+                    const labelOf = (node) => [
+                        node.getAttribute("aria-label") || "",
+                        node.getAttribute("title") || "",
+                        node.getAttribute("data-testid") || "",
+                        node.id || "",
+                        node.className || "",
+                        node.innerText || node.textContent || "",
+                    ].join(" ").replace(/\\s+/g, " ").trim().toLowerCase();
+                    const editable = (node) => {
+                        if (!node || !isVisible(node)) return false;
+                        if (node.matches("textarea")) return !node.disabled && !node.readOnly;
+                        if (node.matches("input")) return !node.disabled && !node.readOnly && !/password|search|email|url|number|tel|file|hidden|checkbox|radio|submit|button|reset/i.test(String(node.type || "text"));
+                        return node.isContentEditable || node.getAttribute("contenteditable") === "true" || node.getAttribute("role") === "textbox";
+                    };
+                    const promptCandidates = [
+                        ...document.querySelectorAll("[data-cccc-chatgpt-input-candidate]"),
+                        ...document.querySelectorAll("main textarea, main [role='textbox'], main [contenteditable='true']"),
+                        ...document.querySelectorAll("textarea, [role='textbox'], [contenteditable='true']"),
+                    ];
+                    const prompt = promptCandidates.find(editable) || document.activeElement;
+                    const composerRoot =
+                        prompt?.closest?.("form") ||
+                        prompt?.closest?.("[data-testid*='composer' i], [data-testid*='prompt' i], [data-testid*='chat-input' i], [aria-label*='message' i], [aria-label*='prompt' i]") ||
+                        prompt?.closest?.("main") ||
+                        null;
+                    const promptRect = prompt?.getBoundingClientRect?.() || null;
+                    const score = (button) => {
+                        const rect = button.getBoundingClientRect();
+                        const label = labelOf(button);
+                        let out = 0;
+                        if (button.matches("#composer-submit-button, button[data-testid='send-button'], button[data-testid='composer-submit-button'], button[data-testid*='composer-send'], button[aria-label*='Send'], button[aria-label*='发送'], button[aria-label*='送信']")) out += 120;
+                        if (/send|submit|run|go|ask|reply|发送|送信/.test(label)) out += 90;
+                        if (/stop|cancel|retry|signin|sign in|log in|login|continue with|google|microsoft|apple/.test(label)) out -= 160;
+                        if (button.getAttribute("type") === "submit") out += 35;
+                        if (composerRoot && composerRoot.contains(button)) out += 170;
+                        if (rect.width >= 16 && rect.height >= 16) out += 10;
+                        out += Math.max(0, rect.y / 10);
+                        out += Math.max(0, rect.x / 20);
+                        if (promptRect) {
+                            const cx = rect.x + rect.width / 2;
+                            const cy = rect.y + rect.height / 2;
+                            const dx = Math.abs(cx - (promptRect.x + promptRect.width));
+                            const dy = Math.abs(cy - (promptRect.y + promptRect.height / 2));
+                            out += Math.max(0, 140 - dx / 6 - dy / 4);
+                        }
+                        return out;
+                    };
+                    const pool = [];
+                    const seen = new Set();
+                    const local = composerRoot ? [...composerRoot.querySelectorAll("button, [role='button']")] : [];
+                    for (const node of [...local, ...document.querySelectorAll("button, [role='button']")]) {
+                        if (!node || seen.has(node)) continue;
+                        seen.add(node);
+                        if (!isVisible(node) || isDisabled(node)) continue;
+                        pool.push(node);
+                    }
+                    let best = null;
+                    let bestScore = -Infinity;
+                    for (const button of pool) {
+                        const candidateScore = score(button);
+                        if (candidateScore > bestScore) {
+                            best = button;
+                            bestScore = candidateScore;
+                        }
+                    }
+                    if (!best || bestScore < 60) return "";
+                    const marker = "cccc-chatgpt-send-candidate";
+                    for (const node of document.querySelectorAll("[data-cccc-chatgpt-send-candidate]")) {
+                        node.removeAttribute("data-cccc-chatgpt-send-candidate");
+                    }
+                    best.setAttribute("data-cccc-chatgpt-send-candidate", marker);
+                    return `[data-cccc-chatgpt-send-candidate="${marker}"]`;
+                }"""
+            )
+            candidate_selector = str(candidate_selector or "").strip()
+            if candidate_selector:
+                _raise_if_chatgpt_running_before_submit(page)
+                if not _wait_for_stable_send_control(page, candidate_selector, deadline=deadline):
+                    continue
+                page.locator(candidate_selector).first.click(timeout=5000)
+                return "scored:composer-submit"
+        except _UnsafeSubmitState:
+            raise
         except Exception as exc:
             last_error = str(exc)
+            if _chatgpt_started_after_submit_attempt(page):
+                return "scored:composer-submit:post_click_running"
+        time.sleep(0.15)
     raise RuntimeError(last_error or "ChatGPT send button not found or disabled")
+
+
+def _request_submit_composer(page: Any) -> str:
+    try:
+        result = page.evaluate(
+            """() => {
+                const isVisible = (node) => {
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+                };
+                const isDisabled = (node) => !!node.disabled || String(node.getAttribute("aria-disabled") || "").toLowerCase() === "true";
+                const labelOf = (node) => [
+                    node.getAttribute("aria-label") || "",
+                    node.getAttribute("title") || "",
+                    node.getAttribute("data-testid") || "",
+                    node.id || "",
+                    node.className || "",
+                    node.innerText || node.textContent || "",
+                ].join(" ").replace(/\\s+/g, " ").trim().toLowerCase();
+                const stopSelectors = [
+                    '[data-testid="stop-button"]',
+                    '[data-testid*="stop" i]',
+                    'button[aria-label*="Stop" i]',
+                    'button[aria-label*="停止"]',
+                    'button[aria-label*="中止"]',
+                    'button[title*="Stop" i]',
+                    'button[title*="停止"]',
+                    '[role="button"][aria-label*="Stop" i]',
+                    '[role="button"][aria-label*="停止"]',
+                    '[role="button"][aria-label*="中止"]',
+                ];
+                for (const stopSelector of stopSelectors) {
+                    try {
+                        if (Array.from(document.querySelectorAll(stopSelector)).some(isVisible)) return "";
+                    } catch (_error) {}
+                }
+                for (const button of Array.from(document.querySelectorAll("button, [role='button']"))) {
+                    if (isVisible(button) && /\\bstop\\b|停止|中止|cancel generation|interrupt/.test(labelOf(button))) return "";
+                }
+                const editable = (node) => {
+                    if (!node || !isVisible(node)) return false;
+                    if (node.matches("textarea")) return !node.disabled && !node.readOnly;
+                    if (node.matches("input")) return !node.disabled && !node.readOnly && !/password|search|email|url|number|tel|file|hidden|checkbox|radio|submit|button|reset/i.test(String(node.type || "text"));
+                    return node.isContentEditable || node.getAttribute("contenteditable") === "true" || node.getAttribute("role") === "textbox";
+                };
+                const promptCandidates = [
+                    ...document.querySelectorAll("[data-cccc-chatgpt-input-candidate]"),
+                    ...document.querySelectorAll("main textarea, main [role='textbox'], main [contenteditable='true']"),
+                    ...document.querySelectorAll("textarea, [role='textbox'], [contenteditable='true']"),
+                ];
+                const prompt = promptCandidates.find(editable) || document.activeElement;
+                const form = prompt?.closest?.("form") || null;
+                if (!form || typeof form.requestSubmit !== "function") return "";
+                const submit = Array.from(form.querySelectorAll("button, [role='button']")).find((button) => {
+                    if (!isVisible(button) || isDisabled(button)) return false;
+                    const label = labelOf(button);
+                    if (/stop|cancel|retry|signin|sign in|log in|login|google|microsoft|apple/.test(label)) return false;
+                    return button.getAttribute("type") === "submit" || /send|submit|run|go|ask|reply|发送|送信/.test(label);
+                });
+                form.requestSubmit(submit || undefined);
+                return submit ? "form.requestSubmit:button" : "form.requestSubmit";
+            }"""
+        )
+        return str(result or "").strip()
+    except Exception:
+        return ""
+
+
+def _submission_diagnostics(page: Any, selector: str) -> dict[str, Any]:
+    try:
+        probe = page.evaluate(
+            """selector => {
+                const isVisible = (node) => {
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+                };
+                const text = String(document.body?.innerText || "").slice(0, 5000);
+                const prompt = document.querySelector(selector);
+                const promptText = prompt
+                    ? String("value" in prompt ? prompt.value || "" : prompt.innerText || prompt.textContent || "")
+                    : "";
+                const sendButtons = Array.from(document.querySelectorAll("button, [role='button']")).filter((button) => {
+                    if (!isVisible(button)) return false;
+                    const label = [
+                        button.getAttribute("aria-label") || "",
+                        button.getAttribute("title") || "",
+                        button.getAttribute("data-testid") || "",
+                        button.innerText || button.textContent || "",
+                    ].join(" ").toLowerCase();
+                    if (/stop|cancel|retry|signin|sign in|log in|login|google|microsoft|apple/.test(label)) return false;
+                    return button.getAttribute("type") === "submit" || /send|submit|run|go|ask|reply|发送|送信/.test(label);
+                });
+                const stopSelectors = [
+                    '[data-testid="stop-button"]',
+                    '[data-testid*="stop" i]',
+                    'button[aria-label*="Stop" i]',
+                    'button[aria-label*="停止"]',
+                    'button[aria-label*="中止"]',
+                    'button[title*="Stop" i]',
+                    'button[title*="停止"]',
+                    '[role="button"][aria-label*="Stop" i]',
+                    '[role="button"][aria-label*="停止"]',
+                    '[role="button"][aria-label*="中止"]',
+                ];
+                const stopVisible = stopSelectors.some((stopSelector) => {
+                    try {
+                        return Array.from(document.querySelectorAll(stopSelector)).some(isVisible);
+                    } catch (_error) {
+                        return false;
+                    }
+                }) || Array.from(document.querySelectorAll("button, [role='button']")).some((button) => {
+                    if (!isVisible(button)) return false;
+                    const label = [
+                        button.getAttribute("aria-label") || "",
+                        button.getAttribute("title") || "",
+                        button.getAttribute("data-testid") || "",
+                        button.id || "",
+                        button.innerText || button.textContent || "",
+                    ].join(" ").replace(/\\s+/g, " ").trim().toLowerCase();
+                    return /\\bstop\\b|停止|中止/.test(label);
+                });
+                const loginLike = /log in|sign in|continue with|登录|登入/i.test(text);
+                const challengeLike = /verify you are human|human verification|captcha|turnstile|arkose|access denied|unusual traffic/i.test(text);
+                return {
+                    url: location.href || "",
+                    ready_state: document.readyState || "",
+                    prompt_found: !!prompt,
+                    prompt_chars: promptText.trim().length,
+                    send_candidate_count: sendButtons.length,
+                    send_enabled_count: sendButtons.filter((button) => !button.disabled && String(button.getAttribute("aria-disabled") || "").toLowerCase() !== "true").length,
+                    stop_visible: stopVisible,
+                    login_like: loginLike,
+                    challenge_like: challengeLike,
+                };
+            }""",
+            selector,
+        )
+        if isinstance(probe, dict):
+            return probe
+    except Exception as exc:
+        return {"error": str(exc)[:500]}
+    return {}
 
 
 def _auto_confirm_page_tool_prompts(page: Any, *, max_clicks: int = TOOL_CONFIRM_MAX_CLICKS) -> dict[str, Any]:
@@ -546,40 +1226,228 @@ def _auto_confirm_page_tool_prompts(page: Any, *, max_clicks: int = TOOL_CONFIRM
     return out
 
 
-def _wait_for_submission(page: Any, selector: str, *, timeout_seconds: float = 8.0) -> bool:
-    deadline = time.time() + max(1.0, float(timeout_seconds))
+def _submission_echo_found(page: Any, prompt: str) -> bool:
+    needles = _submission_echo_needles(prompt)
+    if not needles:
+        return False
+    try:
+        return bool(
+            page.evaluate(
+                """needles => {
+                    const normalize = value => String(value || "").replace(/\\s+/g, " ").trim();
+                    const targets = Array.isArray(needles) ? needles.map(normalize).filter(Boolean) : [];
+                    if (!targets.length) return false;
+                    const candidates = [
+                        ...document.querySelectorAll('[data-message-author-role="user"]'),
+                        ...document.querySelectorAll('[data-testid*="conversation-turn"]'),
+                        ...document.querySelectorAll('main article'),
+                    ];
+                    for (const node of candidates) {
+                        const text = normalize(node.innerText || node.textContent || "");
+                        if (targets.some(target => text.includes(target))) return true;
+                    }
+                    return false;
+                }""",
+                needles,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _submission_echo_needles(prompt: str) -> list[str]:
+    normalized = " ".join(str(prompt or "").split())
+    if not normalized:
+        return []
+    needles: list[str] = []
+    batch_match = re.search(r"\[cccc\]\s+Browser batch\s+([^\s]+)", normalized)
+    if batch_match:
+        needles.append(f"Browser batch {batch_match.group(1)}")
+    event_match = re.search(r"\bevents=([0-9a-fA-F,]{12,})", normalized)
+    if event_match:
+        needles.append(f"events={event_match.group(1)}")
+    if needles:
+        return needles
+    fallback = normalized[:120] if len(normalized) >= 24 else normalized
+    if fallback:
+        needles.append(fallback)
+    deduped: list[str] = []
+    for item in needles:
+        text = str(item or "").strip()
+        if text and text not in deduped:
+            deduped.append(text)
+    return deduped
+
+
+def _chatgpt_running_visible(page: Any) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """() => {
+                    const isVisible = (node) => {
+                        if (!node) return false;
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+                    };
+                    const labelOf = (node) => [
+                        node.getAttribute("aria-label") || "",
+                        node.getAttribute("title") || "",
+                        node.getAttribute("data-testid") || "",
+                        node.id || "",
+                        node.innerText || node.textContent || "",
+                    ].join(" ").replace(/\\s+/g, " ").trim().toLowerCase();
+                    const selectors = [
+                        '[data-testid="stop-button"]',
+                        '[data-testid*="stop" i]',
+                        'button[aria-label*="Stop" i]',
+                        'button[aria-label*="停止"]',
+                        'button[aria-label*="中止"]',
+                        'button[title*="Stop" i]',
+                        'button[title*="停止"]',
+                        '[role="button"][aria-label*="Stop" i]',
+                        '[role="button"][aria-label*="停止"]',
+                        '[role="button"][aria-label*="中止"]',
+                    ];
+                    for (const selector of selectors) {
+                        try {
+                            if (Array.from(document.querySelectorAll(selector)).some(isVisible)) return true;
+                        } catch (_error) {}
+                    }
+                    for (const button of Array.from(document.querySelectorAll("button, [role='button']"))) {
+                        if (!isVisible(button)) continue;
+                        if (/\\bstop\\b|停止|中止/.test(labelOf(button))) return true;
+                    }
+                    return false;
+                }"""
+            )
+        )
+    except Exception:
+        pass
+    try:
+        return bool(page.locator('[data-testid="stop-button"]').first.is_visible(timeout=150))
+    except Exception:
+        return False
+
+
+def _wait_for_submission(
+    page: Any,
+    selector: str,
+    *,
+    prompt: str,
+    timeout_seconds: float = 8.0,
+) -> str:
+    deadline = time.time() + max(0.2, float(timeout_seconds))
+    stop_seen = False
     while time.time() < deadline:
-        try:
-            stop_visible = page.locator('[data-testid="stop-button"]').first.is_visible(timeout=150)
-            if stop_visible:
-                return True
-        except Exception:
-            pass
-        if not _composer_text(page, selector):
-            return True
+        if _submission_echo_found(page, prompt):
+            return "message_echo"
+        if _chatgpt_running_visible(page):
+            stop_seen = True
         time.sleep(0.15)
-    return False
+    return "stop_without_echo" if stop_seen else ""
 
 
-def _submit_prompt(page: Any, prompt: str, *, input_timeout_seconds: float) -> dict[str, Any]:
-    selector = _visible_input_selector(page, timeout_seconds=input_timeout_seconds)
-    _clear_and_type_prompt(page, selector, prompt)
-    time.sleep(0.5)
+def _raise_submission_unverified(page: Any, selector: str, *, attempted_action: str) -> None:
+    diagnostics = _submission_diagnostics(page, selector)
+    raise RuntimeError(
+        "ChatGPT submit action was attempted but submission could not be verified; "
+        "submission_verification=ambiguous; "
+        f"attempted_action={attempted_action}; "
+        f"diagnostics={json.dumps(diagnostics, ensure_ascii=False, separators=(',', ':'))[:1200]}"
+    )
+
+
+def _wait_after_submit_action(
+    page: Any,
+    selector: str,
+    prompt: str,
+    action: str,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any] | None:
+    evidence = _wait_for_submission(page, selector, prompt=prompt, timeout_seconds=timeout_seconds)
+    if evidence == "message_echo":
+        return {"input_selector": selector, "send_selector": action, "submission_evidence": evidence}
+    if evidence == "stop_without_echo":
+        return {"input_selector": selector, "send_selector": action, "submission_evidence": "running_without_echo"}
+    if not _prompt_present_in_any_composer(page, prompt, selector):
+        return {"input_selector": selector, "send_selector": action, "submission_evidence": "composer_cleared"}
+    return None
+
+
+def _remaining_submit_timeout(deadline: float, *, maximum: float = 20.0, reserve_seconds: float = 0.75) -> float:
+    remaining = float(deadline) - time.time() - max(0.0, float(reserve_seconds))
+    if remaining <= 0:
+        return 0.0
+    return min(float(maximum), remaining)
+
+
+def _submit_prompt(
+    page: Any,
+    prompt: str,
+    *,
+    input_timeout_seconds: float,
+    submit_timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    submit_budget = max(1.0, float(submit_timeout_seconds if submit_timeout_seconds is not None else input_timeout_seconds))
+    submit_deadline = time.time() + submit_budget
+
+    def _wait_after_action(action: str) -> dict[str, Any] | None:
+        wait_seconds = _remaining_submit_timeout(submit_deadline)
+        if wait_seconds <= 0:
+            return None
+        return _wait_after_submit_action(page, selector, prompt, action, timeout_seconds=wait_seconds)
+
+    _raise_if_chatgpt_running_before_submit(page)
+    selector = _visible_input_selector(page, timeout_seconds=min(float(input_timeout_seconds), submit_budget))
+    try:
+        _clear_and_type_prompt(page, selector, prompt)
+    except Exception as exc:
+        first_error = str(exc)
+        retry_timeout = min(3.0, max(1.0, _remaining_submit_timeout(submit_deadline, maximum=3.0, reserve_seconds=0.25)))
+        selector = _visible_input_selector(page, timeout_seconds=retry_timeout)
+        try:
+            _clear_and_type_prompt(page, selector, prompt)
+        except Exception as retry_exc:
+            raise RuntimeError(
+                "ChatGPT composer input was found but could not be focused; "
+                f"first_error={first_error[:400]}; retry_error={str(retry_exc)[:400]}"
+            ) from retry_exc
+    insert_timeout = _remaining_submit_timeout(submit_deadline, maximum=3.0, reserve_seconds=0.25)
+    if not _wait_for_prompt_inserted(page, selector, prompt, timeout_seconds=max(0.2, insert_timeout)):
+        raise RuntimeError("ChatGPT prompt insertion did not stick")
+    settle_seconds = min(0.5, max(0.0, _remaining_submit_timeout(submit_deadline, maximum=0.5, reserve_seconds=0.25)))
+    if settle_seconds > 0:
+        time.sleep(settle_seconds)
+    _raise_if_chatgpt_running_before_submit(page)
     send_selector = ""
     try:
-        send_selector = _click_send(page)
+        click_timeout = _remaining_submit_timeout(submit_deadline, maximum=5.0, reserve_seconds=0.25)
+        if click_timeout > 0:
+            send_selector = _click_send(page, timeout_seconds=max(0.5, click_timeout))
+    except _UnsafeSubmitState:
+        raise
     except Exception:
         send_selector = ""
-    if _wait_for_submission(page, selector):
-        return {"input_selector": selector, "send_selector": send_selector or "keyboard"}
+    if send_selector:
+        result = _wait_after_action(send_selector)
+        if result is not None:
+            return result
+        _raise_submission_unverified(page, selector, attempted_action=send_selector)
+    _raise_if_chatgpt_running_before_submit(page)
+    request_submit = _request_submit_composer(page)
+    if request_submit:
+        result = _wait_after_action(request_submit)
+        if result is not None:
+            return result
+        _raise_submission_unverified(page, selector, attempted_action=request_submit)
+    _raise_if_chatgpt_running_before_submit(page)
     page.keyboard.press("Enter")
-    if _wait_for_submission(page, selector, timeout_seconds=4.0):
-        return {"input_selector": selector, "send_selector": send_selector or "keyboard:Enter"}
-    modifier = "Meta" if sys.platform == "darwin" else "Control"
-    page.keyboard.press(f"{modifier}+Enter")
-    if _wait_for_submission(page, selector, timeout_seconds=4.0):
-        return {"input_selector": selector, "send_selector": send_selector or f"keyboard:{modifier}+Enter"}
-    raise RuntimeError("ChatGPT prompt was inserted but did not submit")
+    result = _wait_after_action("keyboard:Enter")
+    if result is not None:
+        return result
+    _raise_submission_unverified(page, selector, attempted_action="keyboard:Enter")
 
 
 def _inspect_chatgpt_browser(
@@ -591,16 +1459,25 @@ def _inspect_chatgpt_browser(
 ) -> dict[str, Any]:
     sync_playwright = ensure_sync_playwright()
     with sync_playwright() as pw:
-        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{int(cdp_port)}")
+        browser = pw.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{int(cdp_port)}",
+            timeout=CDP_CONNECT_TIMEOUT_MS,
+        )
         contexts = list(getattr(browser, "contexts", []) or [])
         context = contexts[0] if contexts else browser.new_context()
         pages = list(getattr(context, "pages", []) or [])
         page = next((item for item in pages if _normalize_chatgpt_url(str(item.url or ""))), None)
+        fallback_url = str(getattr(pages[0], "url", "") or "") if pages else ""
         if page is None and ensure_page:
             page = context.new_page()
             page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=30000)
         if page is None:
-            return {"tab_url": "", "ready": False, "login_required": True, "message": "ChatGPT tab is not open"}
+            return {
+                "tab_url": fallback_url,
+                "ready": False,
+                "login_required": True,
+                "message": "ChatGPT sign-in is required" if fallback_url else "ChatGPT tab is not open",
+            }
         if bring_to_front:
             page.bring_to_front()
         if not _normalize_chatgpt_url(str(page.url or "")):
@@ -620,21 +1497,264 @@ def _inspect_chatgpt_browser(
         }
 
 
-def _session_payload(profile_root: Path, state: dict[str, Any], inspection: dict[str, Any] | None = None) -> dict[str, Any]:
+def _combined_session_state(actor_state: dict[str, Any], browser_state: dict[str, Any]) -> dict[str, Any]:
+    out = dict(actor_state or {})
+    for key in ("pid", "cdp_port", "browser_binary", "profile_dir", "visibility", "started_at"):
+        if key in browser_state:
+            out[key] = browser_state.get(key)
+    return out
+
+
+def _health_next_action(recommended: str, label: str, reason: str) -> dict[str, str]:
+    return {
+        "recommended": str(recommended or "none").strip() or "none",
+        "label": str(label or "").strip(),
+        "reason": str(reason or "").strip(),
+    }
+
+
+def _delivery_timeout_seconds(session: dict[str, Any]) -> float:
+    raw = session.get("last_delivery_timeout_seconds")
+    if raw in (None, ""):
+        raw = os.environ.get("CCCC_WEB_MODEL_BROWSER_DELIVERY_TIMEOUT_SECONDS")
+    try:
+        value = float(raw)
+    except Exception:
+        value = DEFAULT_BROWSER_DELIVERY_TIMEOUT_SECONDS
+    return max(5.0, min(value, 3600.0))
+
+
+def _seconds_since_iso(ts: str) -> float | None:
+    dt = parse_utc_iso(str(ts or "").strip())
+    now_dt = parse_utc_iso(utc_now_iso())
+    if dt is None or now_dt is None:
+        return None
+    return max(0.0, (now_dt - dt).total_seconds())
+
+
+def _stale_submitting_delivery(session: dict[str, Any]) -> bool:
+    started_at = str(session.get("last_delivery_started_at") or session.get("last_delivery_at") or "").strip()
+    age = _seconds_since_iso(started_at)
+    return age is not None and age >= _delivery_timeout_seconds(session)
+
+
+def build_chatgpt_web_model_health_snapshot(
+    *,
+    group_id: str,
+    actor_id: str,
+    browser_session: dict[str, Any],
+    browser_surface: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a read-only operational summary from existing Web Model browser state.
+
+    This intentionally does not introduce a new state source. It translates the
+    browser/session/delivery fields already persisted by the ChatGPT Web Model
+    path into one UI- and agent-readable snapshot.
+    """
+
+    session = dict(browser_session or {})
+    surface = dict(browser_surface or {})
+    surface_error = surface.get("error") if isinstance(surface.get("error"), dict) else {}
+    surface_error_text = str(surface_error.get("message") or surface.get("message") or "").strip()
+    session_error = str(session.get("error") or "").strip()
+    last_error = str(session.get("last_error") or "").strip()
+    surface_state = str(surface.get("state") or "").strip().lower()
+    url = str(
+        session.get("tab_url")
+        or surface.get("url")
+        or session.get("last_tab_url")
+        or session.get("conversation_url")
+        or ""
+    ).strip()
+
+    active = bool(session.get("active") or surface.get("active"))
+    ready = bool(session.get("ready"))
+    login_required = bool(session.get("login_required"))
+    if surface_state == "failed" or session_error:
+        browser_state = "failed"
+        browser_label = "Check failed"
+        browser_reason = session_error or surface_error_text or "ChatGPT browser check failed."
+    elif ready:
+        browser_state = "ready"
+        browser_label = "Ready"
+        browser_reason = "Signed in and reachable."
+    elif active and login_required:
+        browser_state = "sign_in_required"
+        browser_label = "Needs sign-in"
+        browser_reason = "Open ChatGPT and sign in with this browser profile."
+    elif active:
+        browser_state = "open"
+        browser_label = "Open"
+        browser_reason = "Browser is open; ChatGPT readiness is not confirmed yet."
+    else:
+        browser_state = "closed"
+        browser_label = "Not open"
+        browser_reason = "Open ChatGPT to sign in or inspect the page."
+
+    conversation_url = str(session.get("conversation_url") or "").strip()
+    pending_new_chat = bool(session.get("pending_new_chat_bind"))
+    pending_new_chat_url = str(session.get("pending_new_chat_url") or "").strip()
+    if conversation_url:
+        target_state = "bound"
+        target_label = "Bound chat"
+        target_reason = "Browser delivery targets the bound ChatGPT conversation."
+        target_url = conversation_url
+    elif pending_new_chat:
+        target_state = "new_chat_pending"
+        target_label = "New chat pending"
+        target_reason = "Next delivery creates or finishes binding a ChatGPT conversation."
+        target_url = pending_new_chat_url or CHATGPT_URL
+    else:
+        target_state = "missing"
+        target_label = "No target selected"
+        target_reason = "Choose an existing ChatGPT chat or arm new-chat delivery."
+        target_url = ""
+
+    raw_delivery_status = str(session.get("last_delivery_status") or "").strip().lower()
+    last_delivery_at = str(session.get("last_delivery_at") or "").strip()
+    pending_bind_delivery = raw_delivery_status == "pending" or (
+        not conversation_url
+        and pending_new_chat
+        and (bool(session.get("pending_new_chat_submitted")) or last_error == "conversation_url_pending")
+    )
+    stale_submitting_delivery = raw_delivery_status == "submitting" and _stale_submitting_delivery(session)
+    if pending_bind_delivery:
+        delivery_state = "pending_bind"
+        delivery_label = "Binding chat"
+        delivery_reason = "Prompt was submitted; waiting for ChatGPT to assign the chat URL."
+    elif stale_submitting_delivery:
+        delivery_state = "failed"
+        delivery_label = "Delivery interrupted"
+        delivery_reason = "Browser delivery started but did not finish before the submit timeout."
+        last_error = last_error or "delivery_submitting_stale"
+    elif raw_delivery_status == "submitting":
+        delivery_state = "submitting"
+        delivery_label = "Submitting"
+        delivery_reason = "CCCC is currently injecting this batch into the ChatGPT browser session."
+    elif raw_delivery_status == "ambiguous":
+        delivery_state = "ambiguous"
+        delivery_label = "Delivery unverified"
+        delivery_reason = last_error or "CCCC attempted to submit the prompt, but could not verify whether ChatGPT accepted it."
+    elif raw_delivery_status == "failed":
+        delivery_state = "failed"
+        delivery_label = "Delivery failed"
+        delivery_reason = last_error or "The last ChatGPT delivery did not complete."
+    elif raw_delivery_status == "submitted" or last_delivery_at:
+        delivery_state = "submitted"
+        delivery_label = "Submitted"
+        delivery_reason = str(session.get("last_submission_evidence") or "").strip() or "The last browser delivery was submitted."
+    else:
+        delivery_state = "idle"
+        delivery_label = "No recent delivery"
+        delivery_reason = "No browser delivery has been recorded yet."
+
+    if browser_state == "failed":
+        next_action = _health_next_action("restart_browser", "Restart ChatGPT browser", browser_reason)
+    elif browser_state == "closed":
+        next_action = _health_next_action("open_chatgpt", "Open ChatGPT", browser_reason)
+    elif browser_state == "sign_in_required":
+        next_action = _health_next_action("login_chatgpt", "Sign in to ChatGPT", browser_reason)
+    elif delivery_state == "pending_bind":
+        next_action = _health_next_action("wait_for_chat_bind", "Wait for ChatGPT chat binding", delivery_reason)
+    elif delivery_state == "submitting":
+        next_action = _health_next_action("none", "Submitting to ChatGPT", delivery_reason)
+    elif target_state == "missing":
+        next_action = _health_next_action("bind_chat", "Choose a target ChatGPT chat", target_reason)
+    elif delivery_state == "ambiguous":
+        next_action = _health_next_action("inspect_error", "Inspect ChatGPT delivery", delivery_reason)
+    elif delivery_state == "failed":
+        next_action = _health_next_action("retry_delivery", "Retry or reload ChatGPT delivery", delivery_reason)
+    else:
+        next_action = _health_next_action("none", "No action needed", "ChatGPT Web Model is ready for browser delivery.")
+
+    if delivery_state == "failed" or browser_state == "failed":
+        tone = "error"
+    elif str(next_action.get("recommended") or "none") != "none":
+        tone = "needs"
+    elif browser_state == "ready" and target_state in {"bound", "new_chat_pending"}:
+        tone = "ready"
+    else:
+        tone = "neutral"
+
+    return {
+        "schema": "cccc.web_model.health.v1",
+        "group_id": str(group_id or "").strip(),
+        "actor_id": str(actor_id or "").strip(),
+        "tone": tone,
+        "summary": str(next_action.get("label") or "").strip(),
+        "browser": {
+            "state": browser_state,
+            "label": browser_label,
+            "reason": browser_reason,
+            "active": active,
+            "ready": ready,
+            "logged_in_guess": ready,
+            "url": url,
+            "viewer_attached": bool(surface.get("controller_attached")),
+            "last_frame_at": str(surface.get("last_frame_at") or ""),
+        },
+        "target": {
+            "state": target_state,
+            "label": target_label,
+            "reason": target_reason,
+            "url": target_url,
+        },
+        "delivery": {
+            "state": delivery_state,
+            "label": delivery_label,
+            "reason": delivery_reason,
+            "last_delivery_id": str(session.get("last_delivery_id") or ""),
+            "last_turn_id": str(session.get("last_turn_id") or ""),
+            "last_event_ids": session.get("last_event_ids") if isinstance(session.get("last_event_ids"), list) else [],
+            "last_delivery_at": last_delivery_at,
+            "last_submission_evidence": str(session.get("last_submission_evidence") or ""),
+            "last_send_selector": str(session.get("last_send_selector") or ""),
+            "last_error": "" if delivery_state == "pending_bind" and last_error == "conversation_url_pending" else last_error,
+            "cursor_committed": delivery_state in {"submitted", "pending_bind", "ambiguous"},
+        },
+        "next_action": next_action,
+    }
+
+
+def _session_payload(
+    state: dict[str, Any],
+    inspection: dict[str, Any] | None = None,
+    *,
+    check_alive: bool = True,
+) -> dict[str, Any]:
     port = int(state.get("cdp_port") or 0)
-    alive = port > 0 and _wait_cdp_endpoint(port, timeout_seconds=0.4)
+    alive = port > 0 and (not check_alive or _wait_cdp_endpoint(port, timeout_seconds=0.4))
     payload = {
         "active": alive,
         "pid": int(state.get("pid") or 0),
         "cdp_port": port,
-        "profile_dir": str(_profile_dir(profile_root)),
+        "profile_dir": str(chatgpt_browser_profile_dir("", "")),
         "visibility": _normalize_visibility(str(state.get("visibility") or "visible")),
         "started_at": str(state.get("started_at") or ""),
         "updated_at": str(state.get("updated_at") or ""),
         "last_delivery_at": str(state.get("last_delivery_at") or ""),
+        "last_delivery_started_at": str(state.get("last_delivery_started_at") or ""),
+        "last_delivery_id": str(state.get("last_delivery_id") or ""),
+        "last_delivery_timeout_seconds": _delivery_timeout_seconds(state),
+        "last_delivery_status": str(state.get("last_delivery_status") or ""),
+        "last_submission_evidence": str(state.get("last_submission_evidence") or ""),
+        "last_send_selector": str(state.get("last_send_selector") or ""),
         "last_turn_id": str(state.get("last_turn_id") or ""),
+        "last_event_ids": state.get("last_event_ids") if isinstance(state.get("last_event_ids"), list) else [],
         "last_tab_url": str(state.get("last_tab_url") or ""),
         "conversation_url": str(state.get("conversation_url") or ""),
+        "pending_new_chat_bind": bool(state.get("pending_new_chat_bind")),
+        "pending_new_chat_url": str(state.get("pending_new_chat_url") or ""),
+        "pending_new_chat_bind_started_at": str(state.get("pending_new_chat_bind_started_at") or ""),
+        "pending_new_chat_submitted": bool(state.get("pending_new_chat_submitted")),
+        "pending_new_chat_submitted_at": str(state.get("pending_new_chat_submitted_at") or ""),
+        "pending_new_chat_delivery_id": str(state.get("pending_new_chat_delivery_id") or ""),
+        "pending_new_chat_last_turn_id": str(state.get("pending_new_chat_last_turn_id") or ""),
+        "pending_new_chat_last_event_ids": state.get("pending_new_chat_last_event_ids")
+        if isinstance(state.get("pending_new_chat_last_event_ids"), list)
+        else [],
+        "pending_new_chat_last_tab_url": str(state.get("pending_new_chat_last_tab_url") or ""),
+        "new_chat_bound_at": str(state.get("new_chat_bound_at") or ""),
         "bootstrap_seed_delivered_at": str(state.get("bootstrap_seed_delivered_at") or ""),
         "auto_confirm_scan_at": str(state.get("auto_confirm_scan_at") or ""),
         "auto_confirm_pages_seen": int(state.get("auto_confirm_pages_seen") or 0),
@@ -645,197 +1765,172 @@ def _session_payload(profile_root: Path, state: dict[str, Any], inspection: dict
         "auto_confirm_last_page_url": str(state.get("auto_confirm_last_page_url") or ""),
         "auto_confirm_last_details": state.get("auto_confirm_last_details") if isinstance(state.get("auto_confirm_last_details"), list) else [],
         "auto_confirm_last_errors": state.get("auto_confirm_last_errors") if isinstance(state.get("auto_confirm_last_errors"), list) else [],
+        "auto_reload_active": bool(state.get("auto_reload_active")),
+        "auto_reload_window_started_at": str(state.get("auto_reload_window_started_at") or ""),
+        "auto_reload_window_expires_at": str(state.get("auto_reload_window_expires_at") or ""),
+        "auto_reload_last_progress_at": str(state.get("auto_reload_last_progress_at") or ""),
+        "auto_reload_last_progress_reason": str(state.get("auto_reload_last_progress_reason") or ""),
+        "auto_reload_last_progress_detail": str(state.get("auto_reload_last_progress_detail") or ""),
+        "auto_reload_last_delivery_id": str(state.get("auto_reload_last_delivery_id") or ""),
+        "auto_reload_last_turn_id": str(state.get("auto_reload_last_turn_id") or ""),
+        "auto_reload_last_event_ids": state.get("auto_reload_last_event_ids") if isinstance(state.get("auto_reload_last_event_ids"), list) else [],
+        "auto_reload_target_url": str(state.get("auto_reload_target_url") or ""),
+        "auto_reload_last_reload_at": str(state.get("auto_reload_last_reload_at") or ""),
+        "auto_reload_last_reload_reason": str(state.get("auto_reload_last_reload_reason") or ""),
+        "auto_reload_last_page_url": str(state.get("auto_reload_last_page_url") or ""),
+        "auto_reload_count": int(state.get("auto_reload_count") or 0),
+        "auto_reload_completed_at": str(state.get("auto_reload_completed_at") or ""),
+        "auto_reload_completed_reason": str(state.get("auto_reload_completed_reason") or ""),
+        "auto_reload_expired_at": str(state.get("auto_reload_expired_at") or ""),
+        "auto_reload_last_error": str(state.get("auto_reload_last_error") or ""),
         "ready": False,
-        "login_required": True,
+        "login_required": False,
     }
     if inspection:
         payload.update(inspection)
     return payload
 
 
+def chatgpt_browser_session_cached_status(group_id: str, actor_id: str) -> dict[str, Any]:
+    """Return persisted ChatGPT browser state without inspecting the page.
+
+    The cheap CDP liveness check prevents a stale persisted port from being
+    surfaced as an active sign-in-required browser after daemon restart.
+    """
+
+    actor_state = read_chatgpt_browser_state(group_id, actor_id)
+    browser_state = read_chatgpt_browser_process_state()
+    state = _combined_session_state(actor_state, browser_state)
+    return _session_payload(state)
+
+
 def chatgpt_browser_session_status(group_id: str, actor_id: str) -> dict[str, Any]:
-    profile_root = _profile_root({"group_id": group_id, "actor_id": actor_id})
-    state = _load_state(profile_root)
-    port = int(state.get("cdp_port") or 0)
+    try:
+        resolve_pending_chatgpt_conversation(group_id, actor_id)
+    except Exception:
+        pass
+    actor_state = read_chatgpt_browser_state(group_id, actor_id)
+    browser_state = read_chatgpt_browser_process_state()
+    state = _combined_session_state(actor_state, browser_state)
+    port = int(browser_state.get("cdp_port") or 0)
     if port <= 0 or not _wait_cdp_endpoint(port, timeout_seconds=0.4):
-        return _session_payload(profile_root, state)
+        return _session_payload(state)
     try:
         inspection = _inspect_chatgpt_browser(port, input_timeout_seconds=0.8)
     except Exception as exc:
         inspection = {"ready": False, "login_required": True, "error": str(exc)[:1000]}
-    return _session_payload(profile_root, state, inspection)
+    return _session_payload(state, inspection)
 
 
-def open_chatgpt_browser_session(group_id: str, actor_id: str, *, visibility: str = "visible") -> dict[str, Any]:
-    profile_root = _profile_root({"group_id": group_id, "actor_id": actor_id})
-    normalized_visibility = _normalize_visibility(visibility)
-    state = _start_or_reuse_browser(profile_root, visibility=normalized_visibility)
-    port = int(state.get("cdp_port") or 0)
-    inspection = _inspect_chatgpt_browser(
-        port,
-        bring_to_front=normalized_visibility == "visible",
-        ensure_page=True,
+def _record_pending_new_chat_bound(state_root: Path, state: dict[str, Any], conversation_url: str) -> dict[str, Any]:
+    normalized = _conversation_url_from_tab(conversation_url)
+    if not normalized:
+        return {"ok": False, "resolved": False, "error": "invalid_conversation_url"}
+    now = utc_now_iso()
+    pending_url = _normalize_chatgpt_url(state.get("pending_new_chat_url")) or CHATGPT_URL
+    seed_url = _normalize_chatgpt_url(state.get("bootstrap_seed_conversation_url"))
+    update = {
+        "conversation_url": normalized,
+        "pending_new_chat_bind": False,
+        "pending_new_chat_url": "",
+        "pending_new_chat_bind_started_at": "",
+        "pending_new_chat_submitted": False,
+        "pending_new_chat_submitted_at": "",
+        "pending_new_chat_delivery_id": "",
+        "pending_new_chat_last_turn_id": "",
+        "pending_new_chat_last_event_ids": [],
+        "pending_new_chat_last_tab_url": "",
+        "new_chat_bound_at": now,
+        "last_tab_url": normalized,
+        "last_error": "",
+    }
+    if seed_url and seed_url == pending_url and str(state.get("bootstrap_seed_delivered_at") or "").strip():
+        update["bootstrap_seed_conversation_url"] = normalized
+    _write_state(state_root, {**state, **update})
+    return {"ok": True, "resolved": True, "conversation_url": normalized}
+
+
+def _page_pending_delivery_id(page: Any) -> str:
+    try:
+        value = page.evaluate("() => sessionStorage.getItem('cccc_pending_new_chat_delivery_id') || ''")
+    except Exception:
+        return ""
+    return str(value or "").strip()
+
+
+def _mark_page_pending_delivery(page: Any, delivery_id: str) -> None:
+    token = str(delivery_id or "").strip()
+    if not token:
+        return
+    try:
+        page.evaluate("value => sessionStorage.setItem('cccc_pending_new_chat_delivery_id', value)", token)
+    except Exception:
+        pass
+
+
+def resolve_pending_chatgpt_conversation(group_id: str, actor_id: str) -> dict[str, Any]:
+    """Resolve a previously submitted new ChatGPT chat once ChatGPT assigns /c/..."""
+    state_root = chatgpt_browser_actor_state_root(group_id, actor_id)
+    state = _load_state(state_root)
+    if not bool(state.get("pending_new_chat_bind")):
+        conversation_url = _conversation_url_from_tab(state.get("conversation_url"))
+        return {"ok": True, "resolved": bool(conversation_url), "conversation_url": conversation_url, "pending": False}
+    if not bool(state.get("pending_new_chat_submitted")):
+        return {"ok": True, "resolved": False, "pending": True, "submitted": False}
+    candidates = (
+        state.get("conversation_url"),
+        state.get("last_tab_url"),
+        state.get("auto_confirm_last_page_url"),
+        state.get("pending_new_chat_last_tab_url"),
     )
-    _write_state(profile_root, {**state, "last_tab_url": str(inspection.get("tab_url") or "")})
-    return _session_payload(profile_root, _load_state(profile_root), inspection)
-
-
-def close_chatgpt_browser_session(group_id: str, actor_id: str) -> dict[str, Any]:
-    profile_root = _profile_root({"group_id": group_id, "actor_id": actor_id})
-    state = _load_state(profile_root)
-    _stop_browser_state(state)
-    next_state = {**state, "pid": 0, "cdp_port": 0}
-    _write_state(profile_root, next_state)
-    return _session_payload(profile_root, next_state)
-
-
-def submit_to_chatgpt(payload: dict[str, Any]) -> dict[str, Any]:
-    prompt = str(payload.get("prompt") or "").strip()
-    if not prompt:
-        raise RuntimeError("payload.prompt is required")
-    profile_root = _profile_root(payload)
-    prior_state = _load_state(profile_root)
-    visibility = _normalize_visibility(str(payload.get("browser_visibility") or "") or _browser_visibility_from_env(_default_delivery_visibility()))
-    target_url = _normalize_chatgpt_url(payload.get("target_url")) or _normalize_chatgpt_url(prior_state.get("conversation_url"))
-    browser_state = _start_or_reuse_browser(profile_root, visibility=visibility)
-    cdp_port = int(browser_state.get("cdp_port") or 0)
-    if cdp_port <= 0:
-        raise RuntimeError("browser CDP port is unavailable")
-
+    for candidate in candidates:
+        conversation_url = _conversation_url_from_tab(candidate)
+        if conversation_url:
+            return _record_pending_new_chat_bound(state_root, state, conversation_url)
+    browser_state = read_chatgpt_browser_process_state()
+    port = int(browser_state.get("cdp_port") or 0)
+    if port <= 0 or not _wait_cdp_endpoint(port, timeout_seconds=0.4):
+        return {"ok": True, "resolved": False, "pending": True, "submitted": True, "browser_active": False}
+    expected_delivery_id = str(state.get("pending_new_chat_delivery_id") or "").strip()
     sync_playwright = ensure_sync_playwright()
     with sync_playwright() as pw:
-        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
-        contexts = list(getattr(browser, "contexts", []) or [])
-        context = contexts[0] if contexts else browser.new_context()
-        pages = list(getattr(context, "pages", []) or [])
-        page = None
-        if target_url:
-            page = next((_page for _page in pages if _normalize_chatgpt_url(getattr(_page, "url", "")) == target_url), None)
-        if page is None:
-            page = next((item for item in pages if _normalize_chatgpt_url(str(item.url or ""))), None)
-        if page is None:
-            page = context.new_page()
-            page.goto(target_url or CHATGPT_URL, wait_until="domcontentloaded", timeout=30000)
-        else:
-            if visibility == "visible":
-                page.bring_to_front()
-            current_url = _normalize_chatgpt_url(str(page.url or ""))
-            if target_url and current_url != target_url:
-                page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-            elif not _normalize_chatgpt_url(str(page.url or "")):
-                page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=30000)
-        submit = _submit_prompt(
-            page,
-            prompt,
-            input_timeout_seconds=float(os.environ.get("CCCC_WEB_MODEL_BROWSER_INPUT_TIMEOUT_SECONDS") or 30.0),
+        browser = pw.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{port}",
+            timeout=CDP_CONNECT_TIMEOUT_MS,
         )
-        tab_url = str(page.url or "")
-        conversation_url = _conversation_url_from_tab(tab_url) or target_url
-
-    _write_state(
-        profile_root,
-        {
-            **browser_state,
-            **({"conversation_url": conversation_url} if conversation_url else {}),
-            "last_delivery_at": utc_now_iso(),
-            "last_turn_id": str(payload.get("turn_id") or ""),
-            "last_event_ids": list(payload.get("event_ids") or []),
-            "last_tab_url": tab_url,
-            **(
-                {
-                    "bootstrap_seed_delivered_at": utc_now_iso(),
-                    "bootstrap_seed_version": str(payload.get("bootstrap_seed_version") or ""),
-                    "bootstrap_seed_digest": str(payload.get("bootstrap_seed_digest") or ""),
-                    "bootstrap_seed_conversation_url": str(payload.get("bootstrap_seed_conversation_url") or target_url or conversation_url or ""),
-                }
-                if bool(payload.get("bootstrap_seed"))
-                else {}
-            ),
-        },
-    )
+        contexts = list(getattr(browser, "contexts", []) or [])
+        matching: list[str] = []
+        fallback: list[str] = []
+        for context in contexts:
+            for page in list(getattr(context, "pages", []) or []):
+                page_url = str(getattr(page, "url", "") or "")
+                conversation_url = _conversation_url_from_tab(page_url)
+                if not conversation_url:
+                    continue
+                if expected_delivery_id and _page_pending_delivery_id(page) == expected_delivery_id:
+                    matching.append(conversation_url)
+                else:
+                    fallback.append(conversation_url)
+        unique_matching = list(dict.fromkeys(matching))
+        if len(unique_matching) == 1:
+            return _record_pending_new_chat_bound(state_root, state, unique_matching[0])
+        unique_fallback = list(dict.fromkeys(fallback))
+        if not expected_delivery_id and len(unique_fallback) == 1:
+            return _record_pending_new_chat_bound(state_root, state, unique_fallback[0])
     return {
         "ok": True,
-        "delivery_id": f"browser:{uuid.uuid4().hex}",
-        "browser": {
-            "provider": str(payload.get("provider") or "chatgpt_web"),
-            "tab_url": tab_url,
-            "conversation_url": conversation_url,
-            "profile_dir": str(_profile_dir(profile_root)),
-            "cdp_port": cdp_port,
-            "pid": int(browser_state.get("pid") or 0),
-            "reused": bool(browser_state.get("reused")),
-            **submit,
-        },
+        "resolved": False,
+        "pending": True,
+        "submitted": True,
+        "browser_active": True,
+        "ambiguous": True,
     }
 
 
-def run_payload(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
-    action = str(payload.get("action") or "").strip()
-    if str(payload.get("schema") or "") != "cccc.web_model_browser_delivery.v1":
-        return {"ok": False, "error": "unsupported or missing schema"}
-    if action in {"open_session", "session_status", "close_session"}:
-        group_id = str(payload.get("group_id") or "").strip()
-        actor_id = str(payload.get("actor_id") or "").strip()
-        if not group_id or not actor_id:
-            return {"ok": False, "error": "group_id and actor_id are required"}
-        try:
-            if action == "open_session":
-                return {
-                    "ok": True,
-                    "browser": open_chatgpt_browser_session(
-                        group_id,
-                        actor_id,
-                        visibility=_normalize_visibility(str(payload.get("browser_visibility") or "visible")),
-                    ),
-                }
-            if action == "close_session":
-                return {"ok": True, "browser": close_chatgpt_browser_session(group_id, actor_id)}
-            return {"ok": True, "browser": chatgpt_browser_session_status(group_id, actor_id)}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)[:2000]}
-    if action != "submit_turn":
-        return {"ok": False, "error": f"unsupported action: {action or '<empty>'}"}
-    prompt = str(payload.get("prompt") or "")
-    if not prompt.strip():
-        return {"ok": False, "error": "missing prompt"}
-    if dry_run:
-        return {
-            "ok": True,
-            "delivery_id": f"dry-run:{uuid.uuid4().hex}",
-            "browser": {
-                "provider": str(payload.get("provider") or "chatgpt_web"),
-                "dry_run": True,
-                "prompt_chars": len(prompt),
-                "turn_id": str(payload.get("turn_id") or ""),
-            },
-        }
-    try:
-        return submit_to_chatgpt(payload)
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)[:2000]}
-
-
-def _read_stdin_json() -> dict[str, Any]:
-    raw = sys.stdin.read()
-    if not raw.strip():
-        return {}
-    parsed = json.loads(raw)
-    if not isinstance(parsed, dict):
-        raise ValueError("stdin payload must be a JSON object")
-    return parsed
-
-
-def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Submit CCCC web_model turns into ChatGPT web.")
-    parser.add_argument("--dry-run", action="store_true", help="Validate stdin payload without opening a browser.")
-    args = parser.parse_args(argv)
-    try:
-        result = run_payload(_read_stdin_json(), dry_run=bool(args.dry_run))
-    except Exception as exc:
-        result = {"ok": False, "error": str(exc)[:2000]}
-    sys.stdout.write(_json_result(result) + "\n")
-    return 0 if bool(result.get("ok")) else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+def close_chatgpt_browser_session(group_id: str, actor_id: str) -> dict[str, Any]:
+    actor_state = read_chatgpt_browser_state(group_id, actor_id)
+    state = read_chatgpt_browser_process_state()
+    _stop_browser_state(state)
+    next_state = {**state, "pid": 0, "cdp_port": 0}
+    record_chatgpt_browser_process_state(next_state)
+    return _session_payload(_combined_session_state(actor_state, next_state))

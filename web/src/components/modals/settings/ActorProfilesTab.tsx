@@ -21,6 +21,7 @@ import {
   settingsWorkspaceSoftPanelClass,
 } from "./types";
 import { CapabilityPicker } from "../../CapabilityPicker";
+import { SelectCombobox } from "../../SelectCombobox";
 import { BodyPortal } from "../../ui/BodyPortal";
 
 interface ActorProfilesTabProps {
@@ -254,10 +255,16 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className={labelClass()}>{t("actorProfiles.runtime")}</label>
-              <select
+              <SelectCombobox
+                items={[
+                  ...(editorIsWebModel
+                    ? [{ value: "web_model", label: `${RUNTIME_INFO.web_model?.label || "ChatGPT Web Model"} (single actor)`, disabled: true }]
+                    : []),
+                  ...PROFILE_RUNTIME_OPTIONS.map((rt) => ({ value: rt, label: RUNTIME_INFO[rt]?.label || rt })),
+                ]}
                 value={editor.runtime}
-                onChange={(e) => {
-                  const nextRuntime = String(e.target.value || "");
+                onChange={(value) => {
+                  const nextRuntime = String(value || "");
                   setEditor((prev) => {
                     const supportsDefault = supportsRuntimeDefaultCommand(nextRuntime);
                     return {
@@ -271,20 +278,12 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
                     };
                   });
                 }}
+                ariaLabel={t("actorProfiles.runtime")}
                 className={inputClass()}
-              >
-                {editorIsWebModel ? (
-                  <option value="web_model" disabled>
-                    {RUNTIME_INFO.web_model?.label || "Browser Web Model"} (actor-bound)
-                  </option>
-                ) : null}
-                {PROFILE_RUNTIME_OPTIONS.map((rt) => (
-                  <option key={rt} value={rt}>{RUNTIME_INFO[rt]?.label || rt}</option>
-                ))}
-              </select>
+              />
               {editorIsWebModel ? (
                 <div className="mt-1.5 text-[10px] leading-4 text-[var(--color-text-muted)]">
-                  Browser Web Model setup is actor-bound. Manage connectors and ChatGPT chats in Settings &gt; Web Models; new Runtime Profiles cannot use this runtime.
+                  ChatGPT Web Model is managed as one CCCC actor in Settings &gt; ChatGPT Web Model; new Runtime Profiles cannot use this runtime.
                 </div>
               ) : null}
             </div>
@@ -357,15 +356,17 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
 
           <div>
             <label className={labelClass()}>{t("actorProfiles.submit")}</label>
-            <select
+            <SelectCombobox
+              items={[
+                { value: "enter", label: "Enter" },
+                { value: "newline", label: "Newline" },
+                { value: "none", label: "None" },
+              ]}
               value={editor.submit}
-              onChange={(e) => setEditor((prev) => ({ ...prev, submit: (e.target.value as "enter" | "newline" | "none") }))}
+              onChange={(value) => setEditor((prev) => ({ ...prev, submit: (value as "enter" | "newline" | "none") }))}
+              ariaLabel={t("actorProfiles.submit")}
               className={inputClass()}
-            >
-              <option value="enter">Enter</option>
-              <option value="newline">Newline</option>
-              <option value="none">None</option>
-            </select>
+            />
           </div>
 
           <div className={settingsWorkspacePanelClass(isDark)}>
@@ -392,19 +393,21 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
             <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className={labelClass()}>{t("actorProfiles.autoloadScope")}</label>
-                <select
+                <SelectCombobox
+                  items={[
+                    { value: "actor", label: t("actorProfiles.autoloadScopeActor") },
+                    { value: "session", label: t("actorProfiles.autoloadScopeSession") },
+                  ]}
                   value={editor.capabilityDefaultScope}
-                  onChange={(e) =>
+                  onChange={(value) =>
                     setEditor((prev) => ({
                       ...prev,
-                      capabilityDefaultScope: e.target.value === "session" ? "session" : "actor",
+                      capabilityDefaultScope: value === "session" ? "session" : "actor",
                     }))
                   }
+                  ariaLabel={t("actorProfiles.autoloadScope")}
                   className={inputClass()}
-                >
-                  <option value="actor">{t("actorProfiles.autoloadScopeActor")}</option>
-                  <option value="session">{t("actorProfiles.autoloadScopeSession")}</option>
-                </select>
+                />
               </div>
               <div>
                 <label className={labelClass()}>{t("actorProfiles.sessionTtlSeconds")}</label>
@@ -598,7 +601,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
 
   const openDuplicate = async (profile: ActorProfile) => {
     if (String(profile.runtime || "").trim().toLowerCase() === "web_model") {
-      setErr("Browser Web Model profiles are actor-bound and cannot be duplicated. Create a Web Model actor and configure it in Settings > Web Models.");
+      setErr("ChatGPT Web Model is managed as a single actor and cannot be duplicated as a Runtime Profile. Configure it in Settings > ChatGPT Web Model.");
       return;
     }
     const sourceId = String(profile.id || "").trim();
@@ -729,7 +732,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
 
   const handleSave = async () => {
     if (String(editor.runtime || "").trim().toLowerCase() === "web_model") {
-      setEditorErr("Browser Web Model setup is actor-bound. Manage it in Settings > Web Models instead of saving a Runtime Profile.");
+      setEditorErr("ChatGPT Web Model is managed in Settings > ChatGPT Web Model instead of being saved as a Runtime Profile.");
       return;
     }
     const name = editor.name.trim();

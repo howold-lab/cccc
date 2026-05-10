@@ -33,7 +33,7 @@
 - **永続協調**: 作業状態はターミナルスクロールではなく、append-only ledger に残ります。
 - **到達の可視化**: メッセージはルーティング、既読、ACK、reply-required 追跡を持ち、「送ったはず」で終わりません。
 - **1 つのコントロールプレーン**: Web UI、CLI、MCP、IM ブリッジがすべて同じ daemon 状態を共有します。
-- **マルチランタイム前提**: Claude Code、Codex CLI、Gemini CLI などの主要ランタイムを 1 つのグループで混在運用できます。
+- **マルチランタイム前提**: Claude Code、Codex CLI、ChatGPT Web、Gemini CLI などの主要ランタイムを 1 つのグループで混在運用できます。
 - **ローカルファースト運用**: `pip install` ひとつで始められ、ランタイム状態は `CCCC_HOME` に置いたまま、必要時だけリモート監視へ広げられます。
 
 ## 課題
@@ -56,7 +56,7 @@ CCCC は `pip install` 一つで導入完了、外部依存ゼロ — データ�
 | **唯一の事実源** | append-only ledger（`ledger.jsonl`）が全メッセージ・イベントを記録 — 再生可能、監査可能、喪失なし |
 | **信頼性のあるメッセージング** | 既読カーソル、attention ACK、reply-required 義務追跡 — 誰が何を確認したか明確 |
 | **統一コントロールプレーン** | Web UI、CLI、MCP ツール、IM ブリッジがすべて 1 つの daemon に接続 — 状態の分断なし |
-| **マルチランタイム編成** | Claude Code、Codex CLI、Gemini CLI など 8 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
+| **マルチランタイム編成** | Claude Code、Codex CLI、ChatGPT Web、Gemini CLI など 9 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
 | **ロールベース協調** | Foreman + Peer ロールモデル、権限境界と宛先ルーティング（`@all`、`@peers`、`@foreman`） |
 | **ローカルファーストなランタイム状態** | ランタイムデータはリポジトリではなく `CCCC_HOME` に保持しつつ、Web Access と IM ブリッジで遠隔運用も可能 |
 
@@ -109,9 +109,13 @@ cd /path/to/your/repo
 cccc attach .                              # ディレクトリを scope として紐付け
 cccc setup --runtime claude                # ランタイムの MCP を設定
 cccc actor add foreman --runtime claude    # 最初の actor が foreman に
-cccc actor add reviewer --runtime codex    # peer を追加
+cccc actor add implementer --runtime codex # peer を追加
 cccc group start                           # 全 actor を起動
-cccc send "タスクを分割して実装を開始してください。" --to @all
+cccc send "リポジトリを確認し、最初の安全なタスクを提案してください。" --to foreman
+cccc tracked-send "最初の具体タスクを担当し、検証証拠を添えて返信してください。" \
+  --to implementer \
+  --title "最初の具体タスク" \
+  --outcome "変更内容と検証証拠が報告されている"
 ```
 
 これで 2 つのエージェントが永続グループ内で協調し、完全なメッセージ履歴、到達追跡、Web ダッシュボードを備えた状態になります。配信と協調は daemon が担い、ランタイム状態はリポジトリではなく `CCCC_HOME` に残ります。
@@ -135,8 +139,9 @@ graph TB
         direction LR
         A1["Claude Code"]
         A2["Codex CLI"]
-        A3["Gemini CLI"]
-        A4["+ 5 種 + custom"]
+        A3["ChatGPT Web<br/>GPT-5.x via MCP"]
+        A4["Gemini CLI"]
+        A5["+ 5 種 + custom"]
     end
 
     subgraph Daemon["CCCC Daemon · 単一ライター"]
@@ -165,7 +170,11 @@ graph TB
         WX["Weixin"]
     end
 
-    Agents <-->|MCP ツール| Daemon
+    A1 <-->|MCP ツール<br/>PTY/headless| Daemon
+    A2 <-->|MCP ツール<br/>PTY/headless| Daemon
+    A3 <-->|ブラウザ配信<br/>Remote MCP| Daemon
+    A4 <-->|MCP ツール| Daemon
+    A5 <-->|MCP ツール| Daemon
     Daemon <--> Ports
     Web <--> IM
 
@@ -180,19 +189,20 @@ graph TB
 
 ## サポートランタイム
 
-CCCC は 8 種の主要ランタイムでエージェントを編成し、残りは `custom` で扱えます。同一グループ内で各 actor が異なるランタイムを使用可能です。
+CCCC は 9 種の主要ランタイムでエージェントを編成し、残りは `custom` で扱えます。同一グループ内で各 actor が異なるランタイムを使用可能です。
 
-| ランタイム | MCP 自動設定 | コマンド |
-|-----------|:----------:|---------|
-| Claude Code | ✅ | `claude` |
-| Codex CLI | ✅ | `codex` |
-| Gemini CLI | ✅ | `gemini` |
-| Droid | ✅ | `droid` |
-| Amp | ✅ | `amp` |
-| Auggie | ✅ | `auggie` |
-| Kimi CLI | ✅ | `kimi` |
-| Neovate | ✅ | `neovate` |
-| Custom | — | 任意のコマンド |
+| ランタイム | 連携方式 | コマンド / サーフェス |
+|-----------|----------|------------------------|
+| Claude Code | MCP 自動設定 | `claude` |
+| Codex CLI | MCP 自動設定 | `codex` |
+| ChatGPT Web | Remote MCP + ブラウザ配信 | `chatgpt.com` conversation |
+| Gemini CLI | MCP 自動設定 | `gemini` |
+| Droid | MCP 自動設定 | `droid` |
+| Amp | MCP 自動設定 | `amp` |
+| Auggie | MCP 自動設定 | `auggie` |
+| Kimi CLI | MCP 自動設定 | `kimi` |
+| Neovate | MCP 自動設定 | `neovate` |
+| Custom | 手動設定 | 任意のコマンド |
 
 ```bash
 cccc setup --runtime claude    # ランタイムの MCP を自動設定
@@ -201,6 +211,32 @@ cccc doctor                    # 環境とランタイムの可用性を検証
 ```
 
 Actor は **PTY**（埋め込みターミナル）または **headless**（ターミナルなしの構造化 I/O）モードで実行できます。Claude Code と Codex CLI は両モードに対応。headless モードでは daemon が配信とストリーミングをより精密に制御します。
+
+### ChatGPT Web / GPT-5.x ローカル開発
+
+ChatGPT Web は外部チャットウィンドウではなく、実際の CCCC actor としてグループに参加できます。CCCC はブラウザ配信で明示的に紐付けた 1 つの ChatGPT 会話へグループメッセージを届け、ChatGPT はその actor に紐付いた単一の Remote MCP connector 経由で CCCC に接続します。
+
+Apps/MCP を利用できる ChatGPT セッションでは、**GPT-5.x** が Claude Code や Codex と同じ協調レイヤーでローカル開発に参加できます。ルーティングされたメッセージの受信、CCCC 経由の可視返信、リポジトリの確認/編集、scope 内の shell/git 実行、peer agent との協調が可能です。選択した GPT-5.x chat が CCCC MCP connector を表示・実行できる場合、条件を満たす ChatGPT 環境ではネイティブ Codex に近いローカル開発体験を得られます。また、ChatGPT Web の利用枠を追加のローカル開発 agent 容量として活用でき、ネイティブ Codex の使用量負荷を下げる助けにもなります。
+
+**GPT-5.x Pro について:** GPT-5.x Pro は現在、CCCC のローカル開発 runtime としては扱えません。ChatGPT Pro セッションでは第三者 CCCC MCP connector が公開されず、Web fetcher も public/private tunnel URL を CCCC に到達する前にブロックする場合があります。つまり Pro には CCCC 上の信頼できるローカルアクセスがありません: MCP ツール、リポジトリ読み取り、shell/git 実行、No-MCP resource fallback は使えません。ローカル開発には CCCC connector を表示できる GPT-5.x ChatGPT セッションを使い、Pro は必要なコンテキストを手動で渡した外部助言/review 用として使ってください。
+
+ゼロから利用可能にする手順:
+
+1. `cccc web` を起動し、public HTTPS URL で公開して、その URL を `Settings > Global > Web Access` に入力します。
+   - 推奨候補: Cloudflare Tunnel、ngrok、Tailscale Funnel、または public HTTPS ホスト上の Caddy/Nginx リバースプロキシ。
+   - ChatGPT は `localhost`、通常の HTTP、tailnet 内だけで見える private URL を MCP Server URL として使えません。
+2. `Settings > Global > Web Access` で Admin Access Token を作成します。
+3. `Settings > Global > ChatGPT Web Model` を開き、単一の ChatGPT Web Model actor を作成/起動し、その MCP URL を作成してコピーします。
+4. ChatGPT で `Settings > Apps > Advanced settings > Create app` を開き、以下の項目で custom MCP app を作成します。
+   - Name: `CCCC`
+   - Description: `CCCC local workspace connector`
+   - MCP Server URL: CCCC からコピーした完全な MCP URL
+   - Authentication: `No Auth`
+   - ChatGPT のメニュー名は plan や workspace 設定によって変わる場合があります。同じ入口が見つからない場合は Apps または Connectors 設定を探し、必要なら Developer Mode を有効化して、コピーした CCCC MCP URL と `No Auth` で custom MCP app/connector を作成してください。
+5. CCCC の埋め込み ChatGPT ブラウザでサインインし、CCCC MCP app を表示できる GPT-5.x chat を選び、その chat を配信先として紐付けます。
+6. actor に小さなテストメッセージを送ります。ChatGPT が紐付けた chat で受信し、CCCC MCP ツール経由で返信できれば成功です。
+
+詳細な設定とトラブルシュート: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
 
 ## メッセージングと協調
 
@@ -212,6 +248,8 @@ CCCC は IM グレードのメッセージングセマンティクスを実装 �
 - **Attention ACK** — 優先メッセージは明示的な確認が必要
 - **Reply-required 義務** — 受信者が返信するまで追跡
 - **自動ウェイク** — メッセージ受信時、無効化された agent を自動起動
+
+通常の `send` はチャット、質問、軽い依頼に使います。明確な担当者、完了条件、証拠、引き継ぎ、受け入れ履歴が必要な委任作業には `tracked-send` を使ってください。`@all` は告知や緊急の共有制約には使えますが、具体タスクのデフォルト分配先にはしません。
 
 メッセージは daemon が管理する配信パイプラインを通じて各 actor ランタイムへ届けられ、daemon が全メッセージの到達状態を追跡します。
 
@@ -244,6 +282,7 @@ CCCC は IM グレードのメッセージングセマンティクスを実装 �
 - **オートメーションルールエディター** — トリガー、スケジュール、アクションを視覚的に設定
 - **Context パネル** — 共有ビジョン、スケッチ、マイルストーン、タスク
 - **Group Space** — NotebookLM 統合による共有ナレッジ管理
+- **ChatGPT Web Model 設定** — 1 つの ChatGPT Web 会話を CCCC actor として接続
 - **IM ブリッジ設定** — Telegram/Slack/Discord/Feishu/DingTalk/WeCom/Weixin に接続
 - **設定** — メッセージングポリシー、配信チューニング、ターミナルトランスクリプト制御
 - **テキストスケール** — 90% / 100% / 125% フォントサイズ、ブラウザごとに永続化
@@ -287,7 +326,7 @@ cccc im start
 
 > DingTalk と WeCom はストリーミング返信に対応（それぞれ AI Card と aibot ストリーミング）。他のプラットフォームは最終メッセージを配信。
 
-任意の対応プラットフォームから `/send @all <メッセージ>` でエージェントに指示、`/status` でグループ状態を確認、`/pause` / `/resume` で運用を制御 — すべてスマートフォンから。
+任意の対応プラットフォームから、通常の調整にはプレーンテキストまたは `/send @foreman <メッセージ>` を使い、真のブロードキャストだけ `/send @all <メッセージ>` を使います。`/status` でグループ状態を確認し、`/pause` / `/resume` で運用を制御できます — すべてスマートフォンから。
 
 ## CLI リファレンス
 
@@ -307,7 +346,9 @@ cccc actor add <id> --runtime <runtime>
 cccc actor start|stop|restart <id>
 
 # メッセージング
-cccc send "メッセージ" --to @all
+cccc send "メッセージ" --to foreman
+cccc tracked-send "委任作業" --to implementer --title "タスクタイトル" --outcome "完了条件"
+cccc send "告知" --to @all  # 明示的なブロードキャスト
 cccc reply <event_id> "返信"
 cccc tail -n 50 -f             # ledger をリアルタイム追跡
 
@@ -374,6 +415,7 @@ CCCC は**協調カーネル** — 協調レイヤーを担い、外部の CI/CD
 | [Web UI ガイド](https://chesterra.github.io/cccc/guide/web-ui) | ダッシュボードのナビゲーション |
 | [IM ブリッジ設定](https://chesterra.github.io/cccc/guide/im-bridge/) | Telegram、Slack、Discord、Feishu、DingTalk、WeCom、Weixin の接続 |
 | [Group Space](https://chesterra.github.io/cccc/guide/group-space-notebooklm) | NotebookLM ナレッジ統合 |
+| [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime) | ChatGPT Web / MCP 対応 GPT-5.x を CCCC actor として接続。GPT-5.x Pro は助言・レビュー用途に適しています |
 | [Capability Allowlist](https://chesterra.github.io/cccc/guide/capability-allowlist) | MCP 機能ガバナンス |
 | [ベストプラクティス](https://chesterra.github.io/cccc/guide/best-practices) | 推奨パターンとワークフロー |
 | [FAQ](https://chesterra.github.io/cccc/guide/faq) | よくある質問 |
