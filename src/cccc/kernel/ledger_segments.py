@@ -37,24 +37,29 @@ def active_ledger_path(group_path: Path) -> Path:
     return group_path / "ledger.jsonl"
 
 
-def _segment_entry_from_path(group_path: Path, path: Path) -> Dict[str, Any] | None:
+def _clean_manifest_rel_path(value: Any) -> str:
+    return str(value or "").strip().replace("\\", "/")
+
+
+def _segment_entry_from_path(group_path: Path, path: Path, *, count_lines: bool = False) -> Dict[str, Any] | None:
     match = _SEGMENT_FILE_RE.match(path.name)
     if match is None:
         return None
     seq = int(match.group("seq") or 0)
-    rel_path = str(path.relative_to(group_path))
+    rel_path = path.relative_to(group_path).as_posix()
     compressed = bool(match.group("gz"))
     try:
         size_bytes = max(0, int(path.stat().st_size))
     except Exception:
         size_bytes = 0
     line_count = 0
-    try:
-        with open_ledger_source_text(path) as handle:
-            for _ in handle:
-                line_count += 1
-    except Exception:
-        line_count = 0
+    if count_lines:
+        try:
+            with open_ledger_source_text(path) as handle:
+                for _ in handle:
+                    line_count += 1
+        except Exception:
+            line_count = 0
     stamp = str(match.group("stamp") or "")
     return {
         "id": f"{seq:06d}",
@@ -108,14 +113,15 @@ def _normalize_manifest_segments(group_path: Path, segments: List[Dict[str, Any]
         normalized = dict(item)
         discovered_entry = discovered.get(seq)
         if discovered_entry is not None:
-            if str(normalized.get("path") or "") != str(discovered_entry.get("path") or ""):
+            if _clean_manifest_rel_path(normalized.get("path")) != _clean_manifest_rel_path(discovered_entry.get("path")):
                 normalized["path"] = discovered_entry["path"]
                 changed = True
             if bool(normalized.get("compressed")) != bool(discovered_entry.get("compressed")):
                 normalized["compressed"] = bool(discovered_entry.get("compressed"))
                 changed = True
             normalized["size_bytes"] = int(discovered_entry.get("size_bytes") or 0)
-            normalized["line_count"] = int(discovered_entry.get("line_count") or 0)
+            if int(normalized.get("line_count") or 0) <= 0:
+                normalized["line_count"] = int(discovered_entry.get("line_count") or 0)
             if not str(normalized.get("created_at") or "").strip():
                 normalized["created_at"] = str(discovered_entry.get("created_at") or "")
                 changed = True
@@ -123,7 +129,7 @@ def _normalize_manifest_segments(group_path: Path, segments: List[Dict[str, Any]
                 normalized["sealed_at"] = str(discovered_entry.get("sealed_at") or "")
                 changed = True
         else:
-            path = group_path / str(normalized.get("path") or "")
+            path = group_path / _clean_manifest_rel_path(normalized.get("path"))
             if not path.exists():
                 changed = True
                 continue
@@ -195,10 +201,17 @@ def save_ledger_manifest(group_path: Path, manifest: Dict[str, Any]) -> Dict[str
     out = {
         "schema": _MANIFEST_SCHEMA,
         "active": {
-            "path": str(((manifest.get("active") if isinstance(manifest.get("active"), dict) else {}) or {}).get("path") or "ledger.jsonl"),
+            "path": _clean_manifest_rel_path(
+                ((manifest.get("active") if isinstance(manifest.get("active"), dict) else {}) or {}).get("path")
+            )
+            or "ledger.jsonl",
         },
         "next_segment_seq": max(1, int(manifest.get("next_segment_seq") or 1)),
-        "segments": [dict(item) for item in (manifest.get("segments") if isinstance(manifest.get("segments"), list) else []) if isinstance(item, dict)],
+        "segments": [
+            {**dict(item), "path": _clean_manifest_rel_path(item.get("path"))}
+            for item in (manifest.get("segments") if isinstance(manifest.get("segments"), list) else [])
+            if isinstance(item, dict)
+        ],
         "updated_at": str(manifest.get("updated_at") or ""),
     }
     atomic_write_json(ledger_manifest_path(group_path), out, indent=2)

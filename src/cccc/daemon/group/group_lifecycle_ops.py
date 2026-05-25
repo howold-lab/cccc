@@ -13,8 +13,11 @@ from ...kernel.group import load_group
 from ...kernel.ledger import append_event
 from ...kernel.permissions import require_group_permission
 from ...kernel.runtime import runtime_start_preflight_error
+from ...kernel.runtime_state_source import actor_uses_codex_app_server_state
 from ..claude_app_sessions import SUPERVISOR as claude_app_supervisor
 from ..codex_app_sessions import SUPERVISOR as codex_app_supervisor
+from ..mcp_install import prepare_runtime_mcp_env
+from ..runtime_session_ops import start_pty_actor_with_runtime_resume
 from ...runners import headless as headless_runner
 from ...runners import pty as pty_runner
 from ...util.conv import coerce_bool
@@ -215,13 +218,21 @@ def handle_group_start(
             runner_effective = str(launch_spec["effective_runner"])
             update_actor(group, aid, {"enabled": True})
             effective_env = dict(launch_spec["merged_env"])
+
+            def _launch_env(actor_id: str = aid) -> Dict[str, str]:
+                return prepare_runtime_mcp_env(
+                    runtime,
+                    inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=actor_id),
+                )
+
             if runner_effective != "headless":
                 try:
+                    mcp_env = _launch_env()
                     mcp_ready = bool(
                         ensure_mcp_installed(
                             runtime,
                             cwd,
-                            env={str(k): str(v) for k, v in effective_env.items() if isinstance(k, str)},
+                            env=mcp_env,
                         )
                     )
                 except Exception as e:
@@ -245,12 +256,26 @@ def handle_group_start(
                     write_headless_state(group.group_id, aid)
                 except Exception:
                     pass
+            elif actor_uses_codex_app_server_state(actor):
+                session = codex_app_supervisor.start_pty_app_actor(
+                    group_id=group.group_id,
+                    actor_id=aid,
+                    cwd=cwd,
+                    env=_launch_env(),
+                    model=model_from_runtime_command(launch_spec["effective_command"]),
+                    remote_tui_base_command=list(launch_spec["effective_command"]),
+                    max_backlog_bytes=pty_backlog_bytes(),
+                )
+                try:
+                    write_pty_state(group.group_id, aid, session.remote_tui_pid())
+                except Exception:
+                    pass
             elif runtime == "codex" and runner_effective == "headless":
                 codex_app_supervisor.start_actor(
                     group_id=group.group_id,
                     actor_id=aid,
                     cwd=cwd,
-                    env=dict(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=aid)),
+                    env=_launch_env(),
                     model=model_from_runtime_command(launch_spec["effective_command"]),
                 )
             elif runtime == "claude" and runner_effective == "headless":
@@ -258,7 +283,7 @@ def handle_group_start(
                     group_id=group.group_id,
                     actor_id=aid,
                     cwd=cwd,
-                    env=dict(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=aid)),
+                    env=_launch_env(),
                     model=model_from_runtime_command(launch_spec["effective_command"]),
                 )
             elif runner_effective == "headless":
@@ -266,21 +291,23 @@ def handle_group_start(
                     group_id=group.group_id,
                     actor_id=aid,
                     cwd=cwd,
-                    env=dict(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=aid)),
+                    env=_launch_env(),
                 )
                 try:
                     write_headless_state(group.group_id, aid)
                 except Exception:
                     pass
             else:
-                session = pty_runner.SUPERVISOR.start_actor(
+                session = start_pty_actor_with_runtime_resume(
                     group_id=group.group_id,
                     actor_id=aid,
                     cwd=cwd,
-                    command=launch_spec["effective_command"],
-                    env=prepare_pty_env(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=aid)),
+                    base_command=launch_spec["effective_command"],
+                    env=prepare_pty_env(_launch_env()),
                     runtime=runtime,
+                    model=model_from_runtime_command(launch_spec["effective_command"]),
                     max_backlog_bytes=pty_backlog_bytes(),
+                    runtime_start_preflight_error=runtime_start_preflight_error,
                 )
                 try:
                     write_pty_state(group.group_id, aid, pid=session.pid)

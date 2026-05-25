@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -162,6 +163,147 @@ class TestWebAssistantRoutes(unittest.TestCase):
                 os.environ["CCCC_VOICE_SECRETARY_ASR_COMMAND"] = old_command
             else:
                 os.environ.pop("CCCC_VOICE_SECRETARY_ASR_COMMAND", None)
+            cleanup()
+
+    def test_web_voice_secretary_stream_disconnect_finalizes_document_audio(self) -> None:
+        from cccc.ports.web.app import create_app
+
+        home, cleanup = self._with_home()
+        try:
+            class FakeStreamingSession:
+                def __init__(self) -> None:
+                    self.sent: list[dict] = []
+                    self.closed = False
+
+                async def send(self, payload: dict):
+                    self.sent.append(dict(payload))
+
+                async def receive(self, timeout=None):
+                    from cccc.daemon.assistants.sherpa_streaming_asr import SherpaStreamingAsrError
+
+                    if self.sent and self.sent[-1].get("type") == "stop":
+                        return {"type": "closed"}
+                    raise SherpaStreamingAsrError("asr_backend_timeout", "ASR worker timed out")
+
+                async def close(self):
+                    self.closed = True
+
+            fake_session = FakeStreamingSession()
+            apply_calls: list[dict] = []
+
+            async def fake_open_streaming_session(_model_id: str = ""):
+                return fake_session
+
+            async def fake_final_asr_event(*args, **kwargs):
+                return {"type": "final", "text": "final text from disconnected stream"}
+
+            async def fake_apply_final_text(_daemon, **kwargs):
+                apply_calls.append(dict(kwargs))
+                return {"ok": True, "result": {"applied": True}}
+
+            group_id = self._create_group()
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._local_call_daemon), patch(
+                "cccc.ports.web.routes.groups.open_sherpa_streaming_session",
+                side_effect=fake_open_streaming_session,
+            ), patch(
+                "cccc.ports.web.routes.groups.build_final_asr_text_event",
+                side_effect=fake_final_asr_event,
+            ), patch(
+                "cccc.ports.web.routes.groups.apply_final_text_to_document",
+                side_effect=fake_apply_final_text,
+            ):
+                with TestClient(create_app()) as client:
+                    with client.websocket_connect(
+                        f"/api/v1/groups/{group_id}/assistants/voice_secretary/transcriptions/ws"
+                    ) as ws:
+                        ws.send_json(
+                            {
+                                "type": "start",
+                                "seq": 1,
+                                "session_id": "stream-disconnect",
+                                "capture_mode": "document",
+                                "document_path": "docs/meeting.md",
+                                "sample_rate": 16000,
+                                "language": "en-US",
+                            }
+                        )
+                        ready = ws.receive_json()
+                        self.assertEqual(ready.get("type"), "ready")
+                        ws.send_json(
+                            {
+                                "type": "audio",
+                                "seq": 2,
+                                "sample_rate": 16000,
+                                "audio_base64": base64.b64encode(b"\x01\x00" * 8000).decode("ascii"),
+                            }
+                        )
+
+            self.assertTrue(any(item.get("type") == "stop" for item in fake_session.sent))
+            self.assertTrue(fake_session.closed)
+            self.assertEqual(len(apply_calls), 1)
+            self.assertEqual(apply_calls[0].get("document_path"), "docs/meeting.md")
+            self.assertEqual(apply_calls[0].get("text"), "final text from disconnected stream")
+            session_path = Path(home) / "voice-secretary" / group_id / "stream-disconnect" / "session.json"
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            self.assertEqual(session.get("status"), "closed")
+            self.assertEqual(session.get("final_asr_text"), "final text from disconnected stream")
+        finally:
+            cleanup()
+
+    def test_web_voice_secretary_stream_rejects_oversized_pcm16_audio(self) -> None:
+        from cccc.ports.web.app import create_app
+
+        _, cleanup = self._with_home()
+        old_limit = os.environ.get("CCCC_VOICE_SECRETARY_STREAMING_PCM16_MAX_BYTES")
+        os.environ["CCCC_VOICE_SECRETARY_STREAMING_PCM16_MAX_BYTES"] = "4"
+        try:
+            class FakeStreamingSession:
+                def __init__(self) -> None:
+                    self.closed = False
+
+                async def send(self, _payload: dict):
+                    return None
+
+                async def receive(self, timeout=None):
+                    return {"type": "closed"}
+
+                async def close(self):
+                    self.closed = True
+
+            fake_session = FakeStreamingSession()
+
+            async def fake_open_streaming_session(_model_id: str = ""):
+                return fake_session
+
+            group_id = self._create_group()
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._local_call_daemon), patch(
+                "cccc.ports.web.routes.groups.open_sherpa_streaming_session",
+                side_effect=fake_open_streaming_session,
+            ):
+                with TestClient(create_app()) as client:
+                    with client.websocket_connect(
+                        f"/api/v1/groups/{group_id}/assistants/voice_secretary/transcriptions/ws"
+                    ) as ws:
+                        ws.send_json({"type": "start", "seq": 1, "session_id": "stream-too-large", "sample_rate": 16000})
+                        ready = ws.receive_json()
+                        self.assertEqual(ready.get("type"), "ready")
+                        ws.send_json(
+                            {
+                                "type": "audio",
+                                "seq": 2,
+                                "sample_rate": 16000,
+                                "audio_base64": base64.b64encode(b"\x01\x00\x02\x00\x03\x00").decode("ascii"),
+                            }
+                        )
+                        error = ws.receive_json()
+                        self.assertFalse(bool(error.get("ok")))
+                        self.assertEqual(((error.get("error") or {}).get("code")), "voice_stream_audio_too_large")
+            self.assertTrue(fake_session.closed)
+        finally:
+            if old_limit is None:
+                os.environ.pop("CCCC_VOICE_SECRETARY_STREAMING_PCM16_MAX_BYTES", None)
+            else:
+                os.environ["CCCC_VOICE_SECRETARY_STREAMING_PCM16_MAX_BYTES"] = old_limit
             cleanup()
 
     def test_web_voice_secretary_model_install_route_downloads_and_enables_managed_model(self) -> None:
@@ -357,7 +499,10 @@ class TestWebAssistantRoutes(unittest.TestCase):
             repo.mkdir()
             self._attach_scope(group_id, str(repo))
 
-            with patch("cccc.ports.web.app.call_daemon", side_effect=self._local_call_daemon):
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._local_call_daemon), patch(
+                "cccc.daemon.assistants.assistant_ops._try_wake_voice_secretary_actor_after_input",
+                return_value=(False, ""),
+            ):
                 with TestClient(create_app()) as client:
                     settings_resp = client.put(
                         f"/api/v1/groups/{group_id}/assistants/voice_secretary/settings",
@@ -460,6 +605,111 @@ class TestWebAssistantRoutes(unittest.TestCase):
             self.assertTrue(bool(state_body.get("ok")), state_body)
             documents = ((state_body.get("result") or {}).get("documents_by_id")) or {}
             self.assertIn(document_id, documents)
+        finally:
+            cleanup()
+
+    def test_web_voice_secretary_document_transcript_survives_session_prune(self) -> None:
+        from cccc.ports.web.app import create_app
+
+        home, cleanup = self._with_home()
+        try:
+            group_id = self._create_group()
+            self._add_foreman(group_id)
+            repo = Path(home) / "repo"
+            repo.mkdir()
+            self._attach_scope(group_id, str(repo))
+
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._local_call_daemon), patch(
+                "cccc.daemon.assistants.assistant_ops._try_wake_voice_secretary_actor_after_input",
+                return_value=(False, ""),
+            ):
+                with TestClient(create_app()) as client:
+                    settings_resp = client.put(
+                        f"/api/v1/groups/{group_id}/assistants/voice_secretary/settings",
+                        json={
+                            "enabled": True,
+                            "config": {
+                                "capture_mode": "browser",
+                                "recognition_backend": "browser_asr",
+                                "recognition_language": "en-US",
+                                "retention_ttl_seconds": 1,
+                                "auto_document_enabled": True,
+                                "document_default_dir": "docs/voice-secretary",
+                                "tts_enabled": False,
+                            },
+                        },
+                    )
+                    self.assertEqual(settings_resp.status_code, 200)
+                    self.assertTrue(bool(settings_resp.json().get("ok")), settings_resp.json())
+
+                    first_resp = client.post(
+                        f"/api/v1/groups/{group_id}/assistants/voice_secretary/transcript_segments",
+                        json={
+                            "session_id": "durable-doc-session-1",
+                            "segment_id": "seg-durable-1",
+                            "text": "first durable transcript for the document",
+                            "language": "en-US",
+                            "is_final": True,
+                            "flush": True,
+                            "trigger": {
+                                "mode": "meeting",
+                                "trigger_kind": "meeting_window",
+                                "capture_mode": "browser",
+                                "recognition_backend": "browser_asr",
+                                "input_device_label": "browser_default",
+                                "language": "en-US",
+                            },
+                            "by": "user",
+                        },
+                    )
+                    self.assertEqual(first_resp.status_code, 200)
+                    first_body = first_resp.json()
+                    self.assertTrue(bool(first_body.get("ok")), first_body)
+                    document = ((first_body.get("result") or {}).get("document")) or {}
+                    document_path = str(document.get("document_path") or "")
+                    self.assertTrue(document_path)
+
+                    second_resp = client.post(
+                        f"/api/v1/groups/{group_id}/assistants/voice_secretary/transcript_segments",
+                        json={
+                            "session_id": "durable-doc-session-2",
+                            "segment_id": "seg-durable-2",
+                            "document_path": document_path,
+                            "text": "second durable transcript for the same document",
+                            "language": "en-US",
+                            "is_final": True,
+                            "flush": True,
+                            "trigger": {
+                                "mode": "meeting",
+                                "trigger_kind": "meeting_window",
+                                "capture_mode": "browser",
+                                "recognition_backend": "browser_asr",
+                                "input_device_label": "browser_default",
+                                "language": "en-US",
+                            },
+                            "by": "user",
+                        },
+                    )
+                    self.assertEqual(second_resp.status_code, 200)
+                    second_body = second_resp.json()
+                    self.assertTrue(bool(second_body.get("ok")), second_body)
+
+                    shutil.rmtree(Path(home) / "voice-secretary" / group_id / "durable-doc-session-1", ignore_errors=True)
+                    shutil.rmtree(Path(home) / "voice-secretary" / group_id / "durable-doc-session-2", ignore_errors=True)
+
+                    session_resp = client.get(
+                        f"/api/v1/groups/{group_id}/assistants/voice_secretary/sessions/latest",
+                        params={"document_path": document_path},
+                    )
+                    self.assertEqual(session_resp.status_code, 200)
+                    session_body = session_resp.json()
+                    self.assertTrue(bool(session_body.get("ok")), session_body)
+                    session = ((session_body.get("result") or {}).get("session")) or {}
+                    self.assertEqual(str(session.get("capture_mode") or ""), "document")
+                    self.assertEqual(str(session.get("document_path") or ""), document_path)
+                    texts = [str(item.get("text") or "") for item in (session.get("segments") or [])]
+                    self.assertIn("first durable transcript for the document", texts)
+                    self.assertIn("second durable transcript for the same document", texts)
         finally:
             cleanup()
 

@@ -9,9 +9,11 @@ from unittest.mock import patch
 class TestActorLifecycleOps(unittest.TestCase):
     def _with_home(self):
         old_home = os.environ.get("CCCC_HOME")
+        old_runtime_resume = os.environ.get("CCCC_RUNTIME_RESUME")
         td_ctx = tempfile.TemporaryDirectory()
         td = td_ctx.__enter__()
         os.environ["CCCC_HOME"] = td
+        os.environ["CCCC_RUNTIME_RESUME"] = "0"
 
         def cleanup() -> None:
             try:
@@ -31,6 +33,10 @@ class TestActorLifecycleOps(unittest.TestCase):
                 os.environ.pop("CCCC_HOME", None)
             else:
                 os.environ["CCCC_HOME"] = old_home
+            if old_runtime_resume is None:
+                os.environ.pop("CCCC_RUNTIME_RESUME", None)
+            else:
+                os.environ["CCCC_RUNTIME_RESUME"] = old_runtime_resume
 
         return td, cleanup
 
@@ -109,6 +115,101 @@ class TestActorLifecycleOps(unittest.TestCase):
             self.assertIsInstance(group_doc_after_start, dict)
             assert isinstance(group_doc_after_start, dict)
             self.assertTrue(bool(group_doc_after_start.get("running")))
+        finally:
+            cleanup()
+
+    def test_actor_start_failure_restores_previous_enabled_state(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            create, _ = self._call("group_create", {"title": "actor-start-failure", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+
+            attach, _ = self._call("attach", {"group_id": group_id, "path": ".", "by": "user"})
+            self.assertTrue(attach.ok, getattr(attach, "error", None))
+
+            add, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_id,
+                    "actor_id": "peer1",
+                    "title": "Peer 1",
+                    "runtime": "codex",
+                    "runner": "headless",
+                    "by": "user",
+                },
+            )
+            self.assertTrue(add.ok, getattr(add, "error", None))
+
+            disable, _ = self._call(
+                "actor_update",
+                {"group_id": group_id, "actor_id": "peer1", "by": "user", "patch": {"enabled": False}},
+            )
+            self.assertTrue(disable.ok, getattr(disable, "error", None))
+
+            with patch(
+                "cccc.daemon.server.runtime_start_actor_process",
+                return_value={"success": False, "error": "runtime unavailable"},
+            ):
+                start, _ = self._call("actor_start", {"group_id": group_id, "actor_id": "peer1", "by": "user"})
+            self.assertFalse(start.ok)
+            self.assertEqual(getattr(start.error, "code", ""), "actor_start_failed")
+
+            show, _ = self._call("group_show", {"group_id": group_id})
+            self.assertTrue(show.ok, getattr(show, "error", None))
+            group_doc = (show.result or {}).get("group") if isinstance(show.result, dict) else {}
+            self.assertIsInstance(group_doc, dict)
+            assert isinstance(group_doc, dict)
+            actors = group_doc.get("actors") if isinstance(group_doc.get("actors"), list) else []
+            actor = next((item for item in actors if isinstance(item, dict) and item.get("id") == "peer1"), {})
+            self.assertFalse(bool(actor.get("enabled", True)))
+        finally:
+            cleanup()
+
+    def test_actor_restart_runtime_failure_returns_daemon_error(self) -> None:
+        from cccc.kernel.actors import update_actor
+        from cccc.kernel.group import load_group
+
+        _, cleanup = self._with_home()
+        try:
+            create, _ = self._call("group_create", {"title": "actor-restart-failure", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+
+            attach, _ = self._call("attach", {"group_id": group_id, "path": ".", "by": "user"})
+            self.assertTrue(attach.ok, getattr(attach, "error", None))
+
+            add, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_id,
+                    "actor_id": "peer1",
+                    "title": "Peer 1",
+                    "runtime": "codex",
+                    "runner": "pty",
+                    "by": "user",
+                },
+            )
+            self.assertTrue(add.ok, getattr(add, "error", None))
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+            update_actor(group, "peer1", {"runtime_state_source": "app_server"})
+            group.doc["running"] = True
+            group.save()
+
+            with patch("cccc.daemon.server.runtime_ensure_mcp_installed", return_value=True), patch(
+                "cccc.daemon.actors.actor_lifecycle_ops.codex_app_supervisor.start_pty_app_actor",
+                side_effect=RuntimeError("codex app-server resume failed"),
+            ):
+                restart, _ = self._call("actor_restart", {"group_id": group_id, "actor_id": "peer1", "by": "user"})
+
+            self.assertFalse(restart.ok)
+            self.assertEqual(getattr(restart.error, "code", ""), "actor_restart_failed")
+            self.assertIn("codex app-server resume failed", getattr(restart.error, "message", ""))
         finally:
             cleanup()
 
@@ -335,6 +436,58 @@ class TestActorLifecycleOps(unittest.TestCase):
             hot = agent.hot if agent is not None else None
             self.assertEqual(str(getattr(hot, "active_task_id", "") or ""), "")
             self.assertEqual(str(getattr(hot, "focus", "") or ""), "")
+        finally:
+            cleanup()
+
+    def test_actor_restart_keeps_runtime_session(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            create, _ = self._call("group_create", {"title": "actor-restart-session", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+
+            attach, _ = self._call("attach", {"group_id": group_id, "path": ".", "by": "user"})
+            self.assertTrue(attach.ok, getattr(attach, "error", None))
+
+            add, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_id,
+                    "actor_id": "peer1",
+                    "title": "Peer 1",
+                    "runtime": "codex",
+                    "runner": "pty",
+                    "by": "user",
+                },
+            )
+            self.assertTrue(add.ok, getattr(add, "error", None))
+
+            from cccc.daemon.runtime_session_ops import read_runtime_session, record_pty_runtime_session
+
+            record_pty_runtime_session(
+                group_id=group_id,
+                actor_id="peer1",
+                runtime="codex",
+                cwd=Path("."),
+                command=["codex"],
+                provider_session_id="019dbe1d-cd97-7d31-9ba6-212d3e57b15c",
+                captured_from="test",
+            )
+            from cccc.kernel.group import load_group
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            assert group is not None
+            group.doc["running"] = False
+            group.save()
+
+            restart, _ = self._call("actor_restart", {"group_id": group_id, "actor_id": "peer1", "by": "user"})
+            self.assertTrue(restart.ok, getattr(restart, "error", None))
+
+            self.assertEqual(
+                read_runtime_session(group_id, "peer1").get("provider_session_id"),
+                "019dbe1d-cd97-7d31-9ba6-212d3e57b15c",
+            )
         finally:
             cleanup()
 

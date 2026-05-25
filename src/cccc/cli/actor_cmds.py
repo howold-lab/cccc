@@ -14,6 +14,7 @@ __all__ = [
     "cmd_actor_update",
     "cmd_actor_secrets",
     "cmd_runtime_list",
+    "cmd_runtime_hermes",
 ]
 
 def cmd_actor_list(args: argparse.Namespace) -> int:
@@ -120,7 +121,20 @@ def cmd_actor_add(args: argparse.Namespace) -> int:
             command = []
         elif runner != "pty":
             raise ValueError("invalid runner (must be 'pty')")
-        if runtime not in ("amp", "auggie", "claude", "codex", "droid", "gemini", "kimi", "neovate", "web_model", "custom"):
+        if runtime not in (
+            "amp",
+            "auggie",
+            "claude",
+            "codex",
+            "droid",
+            "gemini",
+            "hermes",
+            "kimi",
+            "neovate",
+            "opencode",
+            "web_model",
+            "custom",
+        ):
             raise ValueError("invalid runtime")
         if runtime == "custom" and not command:
             raise ValueError("custom runtime requires a command (PTY runner)")
@@ -315,6 +329,8 @@ def cmd_actor_update(args: argparse.Namespace) -> int:
         patch["runner"] = str(args.runner)
     if getattr(args, "runtime", None) is not None:
         patch["runtime"] = str(args.runtime)
+    if getattr(args, "runtime_state_source", None) is not None:
+        patch["runtime_state_source"] = str(args.runtime_state_source)
     if args.enabled is not None:
         patch["enabled"] = bool(args.enabled)
 
@@ -427,3 +443,30 @@ def cmd_runtime_list(args: argparse.Namespace) -> int:
     
     _print_json({"ok": True, "result": result})
     return 0
+
+def cmd_runtime_hermes(args: argparse.Namespace) -> int:
+    """Probe or prepare Hermes runtime MCP wiring."""
+    from ..kernel.hermes_runtime import hermes_runtime_status, prepare_hermes_runtime, run_hermes_mcp_test
+
+    action = str(getattr(args, "hermes_action", "") or "").strip()
+    if action == "status":
+        _print_json({"ok": True, "result": hermes_runtime_status()})
+        return 0
+    if action == "prepare":
+        result = prepare_hermes_runtime(
+            cwd=Path(str(getattr(args, "path", "") or ".")).resolve(),
+            auto_enable_tools=bool(getattr(args, "yes", False)),
+            force_mcp=bool(getattr(args, "force", False)),
+        )
+        _print_json({"ok": bool(result.get("ok")), "result": result})
+        return 0 if result.get("ok") else 2
+    if action == "mcp-test":
+        result = run_hermes_mcp_test(
+            cwd=Path(str(getattr(args, "path", "") or ".")).resolve(),
+            group_id=str(getattr(args, "group_id", "") or "g_probe"),
+            actor_id=str(getattr(args, "actor_id", "") or "hermes-probe"),
+        )
+        _print_json({"ok": bool(result.get("ok")), "result": result})
+        return 0 if result.get("ok") else 2
+    _print_json({"ok": False, "error": {"code": "invalid_action", "message": f"unknown Hermes runtime action: {action}"}})
+    return 2

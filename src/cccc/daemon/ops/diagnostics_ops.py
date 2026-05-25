@@ -10,6 +10,7 @@ from ...contracts.v1 import DaemonError, DaemonResponse
 from ...kernel.actors import find_actor, get_effective_role, list_actors
 from ...kernel.group import load_group
 from ...kernel.settings import get_remote_access_settings, resolve_remote_access_web_binding
+from ...kernel.terminal_transcript_filter import strip_codex_working_status_lines
 from ...kernel.terminal_transcript import get_terminal_transcript_settings
 from ...paths import ensure_home
 from ...ports.web.runtime_control import (
@@ -23,6 +24,8 @@ from ...ports.web.runtime_control import (
 )
 from ...runners import headless as headless_runner
 from ...runners import pty as pty_runner
+from ..claude_app_sessions import SUPERVISOR as claude_app_supervisor
+from ..codex_app_sessions import SUPERVISOR as codex_app_supervisor
 from ...util.conv import coerce_bool
 from ...util.process import pid_is_alive
 from ...util.time import utc_now_iso
@@ -181,19 +184,28 @@ def handle_debug_snapshot(
                     continue
                 runner_kind = str(actor.get("runner") or "pty")
                 runner_effective = effective_runner_kind(runner_kind)
+                runtime = str(actor.get("runtime") or "")
+                runtime_lower = runtime.strip().lower()
                 running = False
                 try:
                     if runner_effective == "pty":
                         running = pty_runner.SUPERVISOR.actor_running(group.group_id, aid)
                     elif runner_effective == "headless":
-                        running = headless_runner.SUPERVISOR.actor_running(group.group_id, aid)
+                        if runtime_lower == "codex":
+                            state = codex_app_supervisor.get_state(group_id=group.group_id, actor_id=aid)
+                            running = bool(state is not None and codex_app_supervisor.actor_running(group.group_id, aid))
+                        elif runtime_lower == "claude":
+                            state = claude_app_supervisor.get_state(group_id=group.group_id, actor_id=aid)
+                            running = bool(state is not None and claude_app_supervisor.actor_running(group.group_id, aid))
+                        else:
+                            running = headless_runner.SUPERVISOR.actor_running(group.group_id, aid)
                 except Exception:
                     running = False
                 actors.append(
                     {
                         "id": aid,
                         "role": get_effective_role(group, aid),
-                        "runtime": str(actor.get("runtime") or ""),
+                        "runtime": runtime,
                         "runner": runner_kind,
                         "runner_effective": (runner_effective if runner_effective != runner_kind else runner_kind),
                         "enabled": coerce_bool(actor.get("enabled"), default=True),
@@ -274,6 +286,7 @@ def handle_terminal_tail(
                 pass
             if not text.strip() and raw_text.strip():
                 hint = "Rendered transcript is empty; try disabling Strip ANSI for full-screen TUIs."
+        text = strip_codex_working_status_lines(text, runtime=str(actor.get("runtime") or ""))
         if len(text) > max_chars:
             text = text[-max_chars:]
         return DaemonResponse(
@@ -288,6 +301,96 @@ def handle_terminal_tail(
         )
     except Exception as e:
         return _error("terminal_tail_failed", str(e))
+
+
+def handle_terminal_history(
+    args: Dict[str, Any],
+    *,
+    can_read_terminal_transcript: Callable[[Any, str, str], bool],
+    pty_backlog_bytes: Callable[[], int],
+) -> DaemonResponse:
+    group_id = str(args.get("group_id") or "").strip()
+    actor_id = str(args.get("actor_id") or "").strip()
+    by = str(args.get("by") or "user").strip()
+    before_raw = args.get("before")
+    before: Optional[int] = None
+    if before_raw is not None and str(before_raw).strip() != "":
+        before = _safe_int(before_raw)
+    limit_bytes = _safe_int(args.get("limit_bytes")) or 64_000
+    if limit_bytes <= 0:
+        limit_bytes = 64_000
+    if limit_bytes > 200_000:
+        limit_bytes = 200_000
+    strip_ansi = coerce_bool(args.get("strip_ansi"), default=False)
+    compact = coerce_bool(args.get("compact"), default=False)
+    if not group_id:
+        return _error("missing_group_id", "missing group_id")
+    if not actor_id:
+        return _error("missing_actor_id", "missing actor_id")
+    group = load_group(group_id)
+    if group is None:
+        return _error("group_not_found", f"group not found: {group_id}")
+    if not can_read_terminal_transcript(group, by, actor_id):
+        tt = get_terminal_transcript_settings(group.doc)
+        role = get_effective_role(group, by) if by and by != "user" else ""
+        return _error(
+            "permission_denied",
+            "terminal transcript is restricted by group settings",
+            details={
+                "visibility": str(tt.get("visibility") or "foreman"),
+                "by": by,
+                "by_role": role,
+                "target_actor_id": actor_id,
+                "how_to_enable": "Ask user/foreman to change Settings → Transcript → Visibility.",
+            },
+        )
+    actor = find_actor(group, actor_id)
+    if not isinstance(actor, dict):
+        return _error("actor_not_found", f"actor not found: {actor_id}")
+    runner_kind = str(actor.get("runner") or "pty").strip()
+    if runner_kind != "pty":
+        return _error("not_pty_actor", "terminal transcript is only available for PTY actors", details={"runner": runner_kind})
+    if not pty_runner.SUPERVISOR.actor_running(group_id, actor_id):
+        return _error("actor_not_running", "actor is not running (no live transcript available)")
+    try:
+        page = pty_runner.SUPERVISOR.history_page(
+            group_id=group_id,
+            actor_id=actor_id,
+            before=before,
+            limit_bytes=min(limit_bytes, pty_backlog_bytes()),
+        )
+        raw = page.get("data") if isinstance(page, dict) else b""
+        if not isinstance(raw, bytes):
+            raw = bytes(str(raw or ""), encoding="utf-8", errors="replace")
+        raw_text = raw.decode("utf-8", errors="replace")
+        text = raw_text
+        hint = ""
+        if strip_ansi:
+            try:
+                from ...util.terminal_render import render_transcript
+
+                text = render_transcript(text, compact=compact)
+            except Exception:
+                pass
+            if not text.strip() and raw_text.strip():
+                hint = "Rendered transcript is empty; try disabling Strip ANSI for full-screen TUIs."
+        text = strip_codex_working_status_lines(text, runtime=str(actor.get("runtime") or ""))
+        return DaemonResponse(
+            ok=True,
+            result={
+                "group_id": group_id,
+                "actor_id": actor_id,
+                "warning": "Terminal transcript may include sensitive stdout/stderr.",
+                "hint": hint,
+                "text": text,
+                "start_cursor": _safe_int(page.get("start_cursor") if isinstance(page, dict) else 0),
+                "end_cursor": _safe_int(page.get("end_cursor") if isinstance(page, dict) else 0),
+                "has_more": bool(page.get("has_more") if isinstance(page, dict) else False),
+                "cursor_expired": bool(page.get("cursor_expired") if isinstance(page, dict) else False),
+            },
+        )
+    except Exception as e:
+        return _error("terminal_history_failed", str(e))
 
 
 def handle_terminal_clear(
@@ -429,6 +532,12 @@ def try_handle_diagnostics_op(
         )
     if op == "terminal_tail":
         return handle_terminal_tail(
+            args,
+            can_read_terminal_transcript=can_read_terminal_transcript,
+            pty_backlog_bytes=pty_backlog_bytes,
+        )
+    if op == "terminal_history":
+        return handle_terminal_history(
             args,
             can_read_terminal_transcript=can_read_terminal_transcript,
             pty_backlog_bytes=pty_backlog_bytes,

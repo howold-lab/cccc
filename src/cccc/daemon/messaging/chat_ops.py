@@ -10,9 +10,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from ...contracts.v1 import ChatMessageData, ChatStreamData, DaemonError, DaemonResponse, SystemNotifyData
+from ...contracts.v1 import ChatMessageData, ChatStreamData, DaemonError, DaemonResponse
 from ...kernel.actors import find_actor, list_actors, resolve_recipient_tokens
 from ...kernel.group import get_group_state, load_group, set_group_state
+from ...kernel.chat_idempotency import find_existing_reply_result
 from ...kernel.inbox import find_event_with_chat_ack, is_message_for_actor
 from ...kernel.context import ContextStorage
 from ...kernel.ledger import append_event, read_last_lines
@@ -28,36 +29,18 @@ from ...kernel.pet_actor import PET_ACTOR_ID, get_pet_actor
 from ...util.time import utc_now_iso
 from ..claude_app_sessions import SUPERVISOR as claude_app_supervisor
 from ..codex_app_sessions import SUPERVISOR as codex_app_supervisor
-from .delivery import (
-    append_mcp_reply_reminder,
-    emit_system_notify,
-    flush_pending_messages,
-    get_headless_targets_for_message,
-    queue_chat_message,
-    request_flush_pending_messages,
-)
-from .actor_delivery_planner import (
-    TRANSPORT_CLAUDE_HEADLESS,
-    TRANSPORT_CODEX_HEADLESS,
-    TRANSPORT_PTY,
-    TRANSPORT_WEB_MODEL_BROWSER,
-    event_with_effective_to,
-    plan_actor_chat_delivery,
-)
-from ..actors.web_model_browser_delivery import (
-    schedule_web_model_browser_delivery,
-    web_model_browser_delivery_enabled,
-)
-from .chat_support_ops import schedule_headless_post_wake_delivery
+from .delivery import append_mcp_reply_reminder, flush_pending_messages
+from .chat_delivery_ops import deliver_chat_message
 from .actor_turn_rendering import (
     build_actor_delivery_text as _build_delivery_text,
     build_actor_headless_delivery_text as _build_headless_delivery_text,
     compact_delivery_text as _compact_delivery_text,
 )
-from ..pet.review_scheduler import request_pet_review
-from ..pet.profile_refresh import record_user_chat_message
 from ..context.context_ops import handle_context_sync
 from .install_slash_command import INSTALL_CAPABILITY_ID, parse_install_slash_command, render_install_command_task
+from .chat_side_effects import schedule_chat_side_effects
+from .post_commit import run_chat_post_commit, run_group_chat_post_commit
+from .chat_diagnostics import make_chat_diagnostics
 
 logger = logging.getLogger("cccc.daemon.server")
 
@@ -272,48 +255,6 @@ def _quote_text_from_message_data(data: dict[str, Any], *, max_len: int = 100) -
     return snippet
 
 
-def _notify_headless_targets(
-    *,
-    group: Any,
-    by: str,
-    event_id: str,
-    priority: str,
-    reply_required: bool,
-    event: dict[str, Any],
-    skip_actor_ids: Optional[set[str]] = None,
-) -> None:
-    try:
-        headless_targets = get_headless_targets_for_message(group, event=event, by=by)
-        skip_ids = {str(item).strip() for item in (skip_actor_ids or set()) if str(item).strip()}
-        if reply_required:
-            notify_title = "Need reply"
-            notify_priority = "urgent" if priority == "attention" else "high"
-        else:
-            notify_title = "Needs acknowledgement" if priority == "attention" else "New message"
-            notify_priority = "urgent" if priority == "attention" else "high"
-        for actor_id in headless_targets:
-            if actor_id in skip_ids:
-                continue
-            actor = find_actor(group, actor_id)
-            if isinstance(actor, dict) and str(actor.get("runtime") or "").strip().lower() == "web_model":
-                continue
-            emit_system_notify(
-                group,
-                by="system",
-                notify=SystemNotifyData(
-                    kind="info",
-                    priority=notify_priority,
-                    title=notify_title,
-                    message=f"New message from {by}. Check your inbox.",
-                    target_actor_id=actor_id,
-                    requires_ack=False,
-                    context={"event_id": event_id, "from": by},
-                ),
-            )
-    except Exception:
-        pass
-
-
 def handle_send(
     args: Dict[str, Any],
     *,
@@ -324,6 +265,7 @@ def handle_send(
     automation_on_resume: Callable[[Any], None],
     automation_on_new_message: Callable[[Any], None],
     clear_pending_system_notifies: Callable[[str, set[str]], None],
+    diagnostics_enabled: Callable[[], bool] | None = None,
 ) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     text = str(args.get("text") or "")
@@ -338,6 +280,13 @@ def handle_send(
     source_platform = str(args.get("source_platform") or "").strip()
     source_user_name = str(args.get("source_user_name") or "").strip()
     source_user_id = str(args.get("source_user_id") or "").strip()
+    diag = make_chat_diagnostics(
+        op="send",
+        group_id=group_id,
+        client_id=client_id,
+        diagnostics_enabled=diagnostics_enabled,
+        logger=logger,
+    )
     mention_user_ids_raw = args.get("mention_user_ids")
     mention_user_ids = (
         [str(item).strip() for item in mention_user_ids_raw if str(item).strip()]
@@ -363,22 +312,26 @@ def handle_send(
     install_slash_command = parse_install_slash_command(text)
 
     if priority not in ("normal", "attention"):
-        return _error("invalid_priority", "priority must be 'normal' or 'attention'")
+        return diag.finish_response(_error("invalid_priority", "priority must be 'normal' or 'attention'"))
     if not group_id:
-        return _error("missing_group_id", "missing group_id")
+        return diag.finish_response(_error("missing_group_id", "missing group_id"))
 
     group = load_group(group_id)
+    diag.mark("load_group")
     if group is None:
-        return _error("group_not_found", f"group not found: {group_id}")
+        resp = _error("group_not_found", f"group not found: {group_id}")
+        return diag.finish_response(resp)
     if _is_internal_pet_sender(group, by):
-        return _error(
-            "pet_visible_chat_forbidden",
-            "Pet cannot send or reply visible chat directly; use pet decisions instead.",
+        return diag.finish_response(
+            _error(
+                "pet_visible_chat_forbidden",
+                "Pet cannot send or reply visible chat directly; use pet decisions instead.",
+            )
         )
     if client_id:
         existing = _tracked_send_existing_result(group, client_id=client_id, by=by)
         if existing is not None:
-            return DaemonResponse(ok=True, result=existing)
+            return diag.finish_response(DaemonResponse(ok=True, result=existing))
 
     group = _wake_group_on_human_message(
         group,
@@ -387,11 +340,14 @@ def handle_send(
         automation_on_resume=automation_on_resume,
         clear_pending_system_notifies=clear_pending_system_notifies,
     )
+    diag.mark("wake_group")
 
     try:
         to = resolve_recipient_tokens(group, to_tokens)
     except Exception as e:
-        return _error("invalid_recipient", str(e))
+        resp = _error("invalid_recipient", str(e))
+        return diag.finish_response(resp)
+    diag.mark("resolve_recipients")
 
     if not to:
         mention_pattern = re.compile(r"@(\w[\w-]*)")
@@ -416,17 +372,20 @@ def handle_send(
         if by and by in matched_enabled:
             matched_enabled = [actor_id for actor_id in matched_enabled if actor_id != by]
         woken = auto_wake_recipients(group, to, by)
+        diag.mark("auto_wake")
         if not matched_enabled:
             if not woken:
                 wanted = " ".join(to) if to else "@all"
-                return _error(
-                    "no_enabled_recipients",
-                    (
-                        "No enabled recipients after excluding sender. "
-                        "Please specify 'to' explicitly, e.g. to=['user'], to=['@all'], or to=['peer-reviewer']. "
-                        f"Current resolved recipients: {wanted}"
-                    ),
-                    details={"to": list(to)},
+                return diag.finish_response(
+                    _error(
+                        "no_enabled_recipients",
+                        (
+                            "No enabled recipients after excluding sender. "
+                            "Please specify 'to' explicitly, e.g. to=['user'], to=['@all'], or to=['peer-reviewer']. "
+                            f"Current resolved recipients: {wanted}"
+                        ),
+                        details={"to": list(to)},
+                    )
                 )
 
     path = str(args.get("path") or "").strip()
@@ -438,10 +397,12 @@ def handle_send(
         if isinstance(scopes, list):
             attached = any(isinstance(item, dict) and item.get("scope_key") == scope_key for item in scopes)
         if not attached:
-            return _error(
-                "scope_not_attached",
-                f"scope not attached: {scope_key}",
-                details={"hint": "cccc attach <path> --group <id>"},
+            return diag.finish_response(
+                _error(
+                    "scope_not_attached",
+                    f"scope not attached: {scope_key}",
+                    details={"hint": "cccc attach <path> --group <id>"},
+                )
             )
     else:
         scope_key = str(group.doc.get("active_scope_key") or "").strip()
@@ -451,7 +412,7 @@ def handle_send(
     try:
         attachments = normalize_attachments(group, args.get("attachments"))
     except Exception as e:
-        return _error("invalid_attachments", str(e))
+        return diag.finish_response(_error("invalid_attachments", str(e)))
     refs = _normalize_refs(args.get("refs"))
     delivery_body_text = text
     if install_slash_command is not None:
@@ -470,7 +431,7 @@ def handle_send(
         ]
 
     if not text.strip() and not attachments:
-        return _error("empty_message", "message text cannot be empty")
+        return diag.finish_response(_error("empty_message", "message text cannot be empty"))
 
     event = append_event(
         group.ledger_path,
@@ -499,6 +460,7 @@ def handle_send(
             client_id=client_id or None,
         ).model_dump(),
     )
+    diag.mark("append_event")
     effective_to = to if to else ["@all"]
     event_id = str(event.get("id") or "").strip()
     event_ts = str(event.get("ts") or "").strip()
@@ -523,123 +485,48 @@ def handle_send(
             source_user_id=source_user_id,
         )
     )
-    actors = list_actors(group)
-    event_for_delivery = event_with_effective_to(event, effective_to)
-    skip_headless_notify_actor_ids: set[str] = set()
-    logger.debug(f"[SEND] group={group_id} text={text[:30]!r} actors={[a.get('id') for a in actors]} effective_to={effective_to}")
-    for actor in actors:
-        if not isinstance(actor, dict):
-            continue
-        decision = plan_actor_chat_delivery(
+    logger.debug("[SEND] group=%s text=%r effective_to=%s", group_id, text[:30], effective_to)
+    run_group_chat_post_commit(
+        group_id,
+        "send-delivery",
+        lambda: deliver_chat_message(
             group=group,
-            actor=actor,
             event=event,
             by=by,
             effective_to=effective_to,
+            delivery_text=delivery_text,
+            headless_delivery_text=headless_delivery_text,
+            event_id=event_id,
+            event_ts=event_ts,
+            priority=priority,
+            reply_required=reply_required,
             effective_runner_kind=effective_runner_kind,
-            codex_headless_running=codex_app_supervisor.actor_running,
-            claude_headless_running=claude_app_supervisor.actor_running,
-            web_model_browser_delivery_enabled=web_model_browser_delivery_enabled,
-        )
-        actor_id = decision.actor_id
-        if decision.transport == TRANSPORT_CODEX_HEADLESS:
-            delivered = bool(codex_app_supervisor.submit_user_message(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                text=headless_delivery_text,
-                event_id=event_id,
-                ts=event_ts,
-                attachments=attachments,
-            ))
-            if delivered:
-                skip_headless_notify_actor_ids.add(actor_id)
-        elif decision.transport == TRANSPORT_CLAUDE_HEADLESS:
-            delivered = bool(claude_app_supervisor.submit_user_message(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                text=headless_delivery_text,
-                event_id=event_id,
-                ts=event_ts,
-                attachments=attachments,
-            ))
-            if delivered:
-                skip_headless_notify_actor_ids.add(actor_id)
-        elif decision.transport == TRANSPORT_PTY:
-            queue_chat_message(
-                group,
-                actor_id=actor_id,
-                event_id=event_id,
-                by=by,
-                to=effective_to,
-                text=delivery_text,
-                source_platform=source_platform or None,
-                source_user_name=source_user_name or None,
-                source_user_id=source_user_id or None,
-                ts=event_ts,
-            )
-            request_flush_pending_messages(group, actor_id=actor_id)
-        elif decision.transport == TRANSPORT_WEB_MODEL_BROWSER:
-            if schedule_web_model_browser_delivery(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                trigger_event_id=event_id,
-                logger=logger,
-            ):
-                skip_headless_notify_actor_ids.add(actor_id)
-        else:
-            if actor_id in woken and decision.reason in {"codex_headless_not_running", "claude_headless_not_running"}:
-                if schedule_headless_post_wake_delivery(
-                    group_id=group.group_id,
-                    actor_id=actor_id,
-                    runtime=decision.runtime,
-                    text=headless_delivery_text,
-                    event_id=event_id,
-                    ts=event_ts,
-                    attachments=attachments,
-                    codex_actor_running=codex_app_supervisor.actor_running,
-                    claude_actor_running=claude_app_supervisor.actor_running,
-                    codex_submit_user_message=codex_app_supervisor.submit_user_message,
-                    claude_submit_user_message=claude_app_supervisor.submit_user_message,
-                    logger=logger,
-                ):
-                    skip_headless_notify_actor_ids.add(actor_id)
-            logger.debug(f"[SEND] skip actor={actor_id} ({decision.reason})")
-
-    _notify_headless_targets(
+            codex_actor_running=codex_app_supervisor.actor_running,
+            claude_actor_running=claude_app_supervisor.actor_running,
+            codex_submit_user_message=codex_app_supervisor.submit_user_message,
+            claude_submit_user_message=claude_app_supervisor.submit_user_message,
+            woken=set(woken),
+            logger=logger,
+            attachments=attachments,
+            source_platform=source_platform,
+            source_user_name=source_user_name,
+            source_user_id=source_user_id,
+        ),
+    )
+    diag.mark("schedule_delivery")
+    schedule_chat_side_effects(
         group=group,
         by=by,
         event_id=event_id,
-        priority=priority,
-        reply_required=reply_required,
-        event=event_for_delivery,
-        skip_actor_ids=skip_headless_notify_actor_ids,
+        event_ts=event_ts,
+        text=text,
+        pet_review_reason="chat_message",
+        pet_review_immediate=reply_required,
+        automation_on_new_message=automation_on_new_message,
     )
+    diag.mark("schedule_side_effects")
 
-    try:
-        automation_on_new_message(group)
-    except Exception:
-        pass
-    try:
-        request_pet_review(
-            group.group_id,
-            reason="chat_message",
-            source_event_id=event_id,
-            immediate=reply_required,
-        )
-    except Exception:
-        pass
-    try:
-        if by == "user":
-            record_user_chat_message(
-                group.group_id,
-                event_id=event_id,
-                ts=event_ts,
-                text=text,
-            )
-    except Exception:
-        pass
-
-    return DaemonResponse(ok=True, result={"event": event})
+    return diag.finish_response(DaemonResponse(ok=True, result={"event": event}))
 
 
 def handle_tracked_send(
@@ -861,6 +748,7 @@ def handle_reply(
     automation_on_resume: Callable[[Any], None],
     automation_on_new_message: Callable[[Any], None],
     clear_pending_system_notifies: Callable[[str, set[str]], None],
+    diagnostics_enabled: Callable[[], bool] | None = None,
 ) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     text = str(args.get("text") or "")
@@ -869,26 +757,54 @@ def handle_reply(
     priority = str(args.get("priority") or "normal").strip() or "normal"
     reply_required = coerce_bool(args.get("reply_required"))
     client_id = str(args.get("client_id") or "").strip()
+    diag = make_chat_diagnostics(
+        op="reply",
+        group_id=group_id,
+        client_id=client_id,
+        reply_to=reply_to,
+        diagnostics_enabled=diagnostics_enabled,
+        logger=logger,
+    )
     to_raw = args.get("to")
     to_tokens: list[str] = []
     if isinstance(to_raw, list):
         to_tokens = [str(x).strip() for x in to_raw if isinstance(x, str) and str(x).strip()]
 
     if priority not in ("normal", "attention"):
-        return _error("invalid_priority", "priority must be 'normal' or 'attention'")
+        return diag.finish_response(_error("invalid_priority", "priority must be 'normal' or 'attention'"))
     if not group_id:
-        return _error("missing_group_id", "missing group_id")
+        return diag.finish_response(_error("missing_group_id", "missing group_id"))
     if not reply_to:
-        return _error("missing_reply_to", "missing reply_to event_id")
+        return diag.finish_response(_error("missing_reply_to", "missing reply_to event_id"))
 
     group = load_group(group_id)
+    diag.mark("load_group")
     if group is None:
-        return _error("group_not_found", f"group not found: {group_id}")
+        resp = _error("group_not_found", f"group not found: {group_id}")
+        return diag.finish_response(resp)
     if _is_internal_pet_sender(group, by):
-        return _error(
-            "pet_visible_chat_forbidden",
-            "Pet cannot send or reply visible chat directly; use pet decisions instead.",
+        return diag.finish_response(
+            _error(
+                "pet_visible_chat_forbidden",
+                "Pet cannot send or reply visible chat directly; use pet decisions instead.",
+            )
         )
+
+    if client_id:
+        existing = find_existing_reply_result(group, client_id=client_id, by=by, reply_to=reply_to)
+        if existing is not None:
+            return diag.finish_response(DaemonResponse(ok=True, result=existing))
+
+    original, existing_ack = find_event_with_chat_ack(group, event_id=reply_to, actor_id=by)
+    diag.mark("load_reply_target")
+    if original is None:
+        resp = _error("event_not_found", f"event not found: {reply_to}")
+        return diag.finish_response(resp)
+    target_event_id = str(original.get("id") or "").strip()
+    if client_id and target_event_id and target_event_id != reply_to:
+        existing = find_existing_reply_result(group, client_id=client_id, by=by, reply_to=target_event_id or reply_to)
+        if existing is not None:
+            return diag.finish_response(DaemonResponse(ok=True, result=existing))
 
     group = _wake_group_on_human_message(
         group,
@@ -897,11 +813,7 @@ def handle_reply(
         automation_on_resume=automation_on_resume,
         clear_pending_system_notifies=clear_pending_system_notifies,
     )
-
-    original, existing_ack = find_event_with_chat_ack(group, event_id=reply_to, actor_id=by)
-    if original is None:
-        return _error("event_not_found", f"event not found: {reply_to}")
-    target_event_id = str(original.get("id") or "").strip()
+    diag.mark("wake_group")
     original_data = original.get("data") if isinstance(original.get("data"), dict) else {}
     quote_text = _quote_text_from_message_data(original_data, max_len=100)
     original_source_platform = str(original_data.get("source_platform") or "").strip()
@@ -919,7 +831,9 @@ def handle_reply(
     try:
         to = resolve_recipient_tokens(group, to_tokens)
     except Exception as e:
-        return _error("invalid_recipient", str(e))
+        resp = _error("invalid_recipient", str(e))
+        return diag.finish_response(resp)
+    diag.mark("resolve_recipients")
 
     woken: list[str] = []
     if targets_any_agent(to):
@@ -927,27 +841,30 @@ def handle_reply(
         if by and by in matched_enabled:
             matched_enabled = [actor_id for actor_id in matched_enabled if actor_id != by]
         woken = auto_wake_recipients(group, to, by)
+        diag.mark("auto_wake")
         if not matched_enabled:
             if not woken:
                 wanted = " ".join(to) if to else "@all"
-                return _error(
-                    "no_enabled_recipients",
-                    (
-                        "No enabled recipients after excluding sender. "
-                        "Please specify 'to' explicitly, e.g. to=['user'], to=['@all'], or to=['peer-reviewer']. "
-                        f"Current resolved recipients: {wanted}"
-                    ),
-                    details={"to": list(to)},
+                return diag.finish_response(
+                    _error(
+                        "no_enabled_recipients",
+                        (
+                            "No enabled recipients after excluding sender. "
+                            "Please specify 'to' explicitly, e.g. to=['user'], to=['@all'], or to=['peer-reviewer']. "
+                            f"Current resolved recipients: {wanted}"
+                        ),
+                        details={"to": list(to)},
+                    )
                 )
 
     scope_key = str(group.doc.get("active_scope_key") or "").strip()
     try:
         attachments = normalize_attachments(group, args.get("attachments"))
     except Exception as e:
-        return _error("invalid_attachments", str(e))
+        return diag.finish_response(_error("invalid_attachments", str(e)))
     refs = _normalize_refs(args.get("refs"))
     if not text.strip() and not attachments:
-        return _error("empty_message", "message text cannot be empty")
+        return diag.finish_response(_error("empty_message", "message text cannot be empty"))
 
     event = append_event(
         group.ledger_path,
@@ -973,6 +890,7 @@ def handle_reply(
             client_id=client_id or None,
         ).model_dump(),
     )
+    diag.mark("append_event")
 
     ack_event: Optional[dict[str, Any]] = None
     try:
@@ -995,8 +913,6 @@ def handle_reply(
         ack_event = None
 
     effective_to = to if to else ["@all"]
-    event_for_delivery = event_with_effective_to(event, effective_to)
-
     event_id = str(event.get("id") or "").strip()
     event_ts = str(event.get("ts") or "").strip()
     delivery_text = _build_delivery_text(
@@ -1016,120 +932,46 @@ def handle_reply(
             quote_text=quote_text,
         )
     )
-    skip_headless_notify_actor_ids: set[str] = set()
-    for actor in list_actors(group):
-        if not isinstance(actor, dict):
-            continue
-        decision = plan_actor_chat_delivery(
+    run_group_chat_post_commit(
+        group_id,
+        "reply-delivery",
+        lambda: deliver_chat_message(
             group=group,
-            actor=actor,
             event=event,
             by=by,
             effective_to=effective_to,
+            delivery_text=delivery_text,
+            headless_delivery_text=headless_delivery_text,
+            event_id=event_id,
+            event_ts=event_ts,
+            priority=priority,
+            reply_required=reply_required,
             effective_runner_kind=effective_runner_kind,
-            codex_headless_running=codex_app_supervisor.actor_running,
-            claude_headless_running=claude_app_supervisor.actor_running,
-            web_model_browser_delivery_enabled=web_model_browser_delivery_enabled,
-        )
-        actor_id = decision.actor_id
-        if decision.transport == TRANSPORT_CODEX_HEADLESS:
-            delivered = bool(codex_app_supervisor.submit_user_message(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                text=headless_delivery_text,
-                event_id=event_id,
-                ts=event_ts,
-                reply_to=target_event_id or reply_to,
-                attachments=attachments,
-            ))
-            if delivered:
-                skip_headless_notify_actor_ids.add(actor_id)
-        elif decision.transport == TRANSPORT_CLAUDE_HEADLESS:
-            delivered = bool(claude_app_supervisor.submit_user_message(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                text=headless_delivery_text,
-                event_id=event_id,
-                ts=event_ts,
-                reply_to=target_event_id or reply_to,
-                attachments=attachments,
-            ))
-            if delivered:
-                skip_headless_notify_actor_ids.add(actor_id)
-        elif decision.transport == TRANSPORT_PTY:
-            queue_chat_message(
-                group,
-                actor_id=actor_id,
-                event_id=event_id,
-                by=by,
-                to=effective_to,
-                text=delivery_text,
-                reply_to=target_event_id or reply_to,
-                quote_text=quote_text,
-                ts=event_ts,
-            )
-            request_flush_pending_messages(group, actor_id=actor_id)
-        elif decision.transport == TRANSPORT_WEB_MODEL_BROWSER:
-            if schedule_web_model_browser_delivery(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                trigger_event_id=event_id,
-                logger=logger,
-            ):
-                skip_headless_notify_actor_ids.add(actor_id)
-        elif actor_id in woken and decision.reason in {"codex_headless_not_running", "claude_headless_not_running"}:
-            if schedule_headless_post_wake_delivery(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                runtime=decision.runtime,
-                text=headless_delivery_text,
-                event_id=event_id,
-                ts=event_ts,
-                reply_to=target_event_id or reply_to,
-                attachments=attachments,
-                codex_actor_running=codex_app_supervisor.actor_running,
-                claude_actor_running=claude_app_supervisor.actor_running,
-                codex_submit_user_message=codex_app_supervisor.submit_user_message,
-                claude_submit_user_message=claude_app_supervisor.submit_user_message,
-                logger=logger,
-            ):
-                skip_headless_notify_actor_ids.add(actor_id)
-
-    _notify_headless_targets(
+            codex_actor_running=codex_app_supervisor.actor_running,
+            claude_actor_running=claude_app_supervisor.actor_running,
+            codex_submit_user_message=codex_app_supervisor.submit_user_message,
+            claude_submit_user_message=claude_app_supervisor.submit_user_message,
+            woken=set(woken),
+            logger=logger,
+            attachments=attachments,
+            reply_to=target_event_id or reply_to,
+            quote_text=quote_text,
+        ),
+    )
+    diag.mark("schedule_delivery")
+    schedule_chat_side_effects(
         group=group,
         by=by,
         event_id=event_id,
-        priority=priority,
-        reply_required=reply_required,
-        event=event_for_delivery,
-        skip_actor_ids=skip_headless_notify_actor_ids,
+        event_ts=event_ts,
+        text=text,
+        pet_review_reason="chat_reply",
+        pet_review_immediate=reply_required,
+        automation_on_new_message=automation_on_new_message,
     )
+    diag.mark("schedule_side_effects")
 
-    try:
-        automation_on_new_message(group)
-    except Exception:
-        pass
-    try:
-        request_pet_review(
-            group.group_id,
-            reason="chat_reply",
-            source_event_id=event_id,
-            immediate=reply_required,
-        )
-    except Exception:
-        pass
-    try:
-        if by == "user":
-            record_user_chat_message(
-                group.group_id,
-                event_id=event_id,
-                ts=event_ts,
-                text=text,
-            )
-    except Exception:
-        pass
-
-    return DaemonResponse(ok=True, result={"event": event, "ack_event": ack_event})
+    return diag.finish_response(DaemonResponse(ok=True, result={"event": event, "ack_event": ack_event}))
 
 
 def handle_stream_emit(args: Dict[str, Any]) -> DaemonResponse:
@@ -1200,6 +1042,7 @@ def try_handle_chat_op(
     automation_on_resume: Callable[[Any], None],
     automation_on_new_message: Callable[[Any], None],
     clear_pending_system_notifies: Callable[[str, set[str]], None],
+    diagnostics_enabled: Callable[[], bool] | None = None,
 ) -> Optional[DaemonResponse]:
     if op == "stream_emit":
         return handle_stream_emit(args)
@@ -1213,6 +1056,7 @@ def try_handle_chat_op(
             automation_on_resume=automation_on_resume,
             automation_on_new_message=automation_on_new_message,
             clear_pending_system_notifies=clear_pending_system_notifies,
+            diagnostics_enabled=diagnostics_enabled,
         )
     if op == "tracked_send":
         return handle_tracked_send(
@@ -1235,5 +1079,6 @@ def try_handle_chat_op(
             automation_on_resume=automation_on_resume,
             automation_on_new_message=automation_on_new_message,
             clear_pending_system_notifies=clear_pending_system_notifies,
+            diagnostics_enabled=diagnostics_enabled,
         )
     return None

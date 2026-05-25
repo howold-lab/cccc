@@ -8,7 +8,7 @@ import time
 import threading
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -17,12 +17,15 @@ from ....daemon.codex_app_sessions import SUPERVISOR as codex_app_supervisor
 from ....daemon.actors.actor_profile_store import get_actor_profile, get_actor_profile_by_ref
 from ....daemon.actors.web_model_runtime_ops import decorate_web_model_queued_turn_info
 from ....daemon.context.context_ops import _agent_state_to_dict
+from ....daemon.runtime_session_ops import read_runtime_session
 from ....daemon.runner_state_ops import headless_state_path, headless_state_running, pty_state_path, read_headless_state
 from ....kernel.group import load_group
 from ....kernel.actors import find_actor
+from ....kernel.actor_runtime_projection import actor_runtime_enabled, disabled_actor_runtime_projection
 from ....kernel.context import ContextStorage
 from ....kernel.inbox import get_indexed_unread_counts
 from ....kernel.query_projections import get_actor_list_projection
+from ....kernel.runtime_state_source import actor_uses_codex_app_server_state
 from ....kernel.working_state import DEFAULT_PTY_TERMINAL_SIGNAL_TAIL_BYTES, derive_effective_working_state
 from ....runners import headless as headless_runner
 from ....runners import pty as pty_runner
@@ -39,6 +42,7 @@ from .groups import invalidate_context_read
 from ..schemas import (
     ActorCreateRequest,
     ActorProfileUpsertRequest,
+    ActorRestartRequest,
     ActorUpdateRequest,
     RouteContext,
     _normalize_command,
@@ -59,6 +63,34 @@ _READONLY_ACTOR_GENERATION: Dict[str, int] = {}
 _READONLY_ACTOR_CACHE_LOCK = threading.Lock()
 _READONLY_ACTOR_TTL_S = 0.8
 _STANDARD_WEB_HEADLESS_RUNTIMES = frozenset({"codex", "claude", "web_model"})
+
+
+def _decorate_actor_runtime_session(group_id: str, actor: Dict[str, Any]) -> None:
+    gid = str(group_id or "").strip()
+    aid = str(actor.get("id") or "").strip()
+    if not gid or not aid:
+        return
+    try:
+        doc = read_runtime_session(gid, aid)
+    except Exception:
+        return
+    if not isinstance(doc, dict) or not doc:
+        return
+    status = str(doc.get("status") or "").strip()
+    if status:
+        actor["runtime_session_status"] = status
+    resume_eligible = doc.get("resume_eligible")
+    if isinstance(resume_eligible, bool):
+        actor["runtime_session_resume_eligible"] = resume_eligible
+    last_resume_error = str(doc.get("last_resume_error") or "").strip()
+    if last_resume_error:
+        actor["runtime_session_last_resume_error"] = last_resume_error
+
+
+def _build_actor_web_result(group_id: str, actor: Dict[str, Any]) -> Dict[str, Any]:
+    out = build_actor_web_payload(group_id, actor)
+    _decorate_actor_runtime_session(group_id, out)
+    return out
 
 
 def _pid_matches_actor_context(pid: int, *, group_id: str, actor_id: str) -> bool:
@@ -103,6 +135,27 @@ def _pid_matches_actor_context(pid: int, *, group_id: str, actor_id: str) -> boo
     return False
 
 
+def _pty_state_running(group_id: str, actor_id: str) -> bool:
+    gid = str(group_id or "").strip()
+    aid = str(actor_id or "").strip()
+    if not gid or not aid:
+        return False
+    try:
+        state_doc = read_json(pty_state_path(gid, aid))
+        pid = int(state_doc.get("pid") or 0) if isinstance(state_doc, dict) else 0
+    except Exception:
+        return False
+    return bool(
+        isinstance(state_doc, dict)
+        and str(state_doc.get("kind") or "") == "pty"
+        and str(state_doc.get("group_id") or "") == gid
+        and str(state_doc.get("actor_id") or "") == aid
+        and pid > 0
+        and pid_is_alive(pid)
+        and _pid_matches_actor_context(pid, group_id=gid, actor_id=aid)
+    )
+
+
 async def invalidate_readonly_actor_list(group_id: str) -> None:
     gid = str(group_id or "").strip()
     if not gid:
@@ -139,13 +192,19 @@ def _read_actor_list_local(group_id: str, *, include_unread: bool) -> Dict[str, 
             continue
         runner_kind = str(actor.get("runner") or "pty").strip().lower() or "pty"
         effective_runner = "headless" if runner_kind == "headless" else "pty"
+        uses_codex_app_server_state = actor_uses_codex_app_server_state(actor)
         runtime = str(actor.get("runtime") or "").strip()
         running = False
         idle_seconds = None
         headless_state = None
+        if not actor_runtime_enabled(actor):
+            actor.update(disabled_actor_runtime_projection(effective_runner=effective_runner, runtime=runtime))
+            if runtime.lower() == "web_model":
+                decorate_web_model_queued_turn_info(actor, group, actor_id=aid, headless_state=None)
+            continue
         if runtime.lower() == "web_model" and effective_runner == "headless":
             headless_state = read_headless_state(gid, aid)
-            running = bool(coerce_bool(actor.get("enabled"), default=True) and headless_state_running(gid, aid))
+            running = bool(headless_state_running(gid, aid))
         if not running and runtime.lower() == "codex":
             try:
                 state_doc = read_json(headless_state_path(gid, aid))
@@ -167,7 +226,9 @@ def _read_actor_list_local(group_id: str, *, include_unread: bool) -> Dict[str, 
                 state = codex_app_supervisor.get_state(group_id=gid, actor_id=aid)
                 headless_state = state.model_dump() if hasattr(state, "model_dump") else (dict(state) if isinstance(state, dict) else headless_state)
                 running = bool(state is not None and codex_app_supervisor.actor_running(gid, aid))
-            if running:
+                if uses_codex_app_server_state and not running:
+                    uses_codex_app_server_state = False
+            if running and not uses_codex_app_server_state:
                 effective_runner = "headless"
         if not running and runtime.lower() == "claude" and effective_runner == "headless":
             try:
@@ -193,24 +254,10 @@ def _read_actor_list_local(group_id: str, *, include_unread: bool) -> Dict[str, 
         if not running and effective_runner != "headless":
             running = bool(pty_runner.SUPERVISOR.actor_running(gid, aid))
             if not running:
-                try:
-                    state_doc = read_json(pty_state_path(gid, aid))
-                    pid = int(state_doc.get("pid") or 0) if isinstance(state_doc, dict) else 0
-                except Exception:
-                    state_doc = {}
-                    pid = 0
-                running = bool(
-                    isinstance(state_doc, dict)
-                    and str(state_doc.get("kind") or "") == "pty"
-                    and str(state_doc.get("group_id") or "") == gid
-                    and str(state_doc.get("actor_id") or "") == aid
-                    and pid > 0
-                    and pid_is_alive(pid)
-                    and _pid_matches_actor_context(pid, group_id=gid, actor_id=aid)
-                )
+                running = _pty_state_running(gid, aid)
             idle_seconds = pty_runner.SUPERVISOR.idle_seconds(group_id=gid, actor_id=aid) if running else None
         pty_terminal_text = ""
-        if effective_runner == "pty" and running:
+        if effective_runner == "pty" and running and not uses_codex_app_server_state:
             try:
                 pty_terminal_text = pty_runner.SUPERVISOR.tail_output(
                     group_id=gid,
@@ -222,17 +269,16 @@ def _read_actor_list_local(group_id: str, *, include_unread: bool) -> Dict[str, 
         actor["running"] = running
         actor["idle_seconds"] = idle_seconds
         actor["runner_effective"] = effective_runner
-        actor.update(
-            derive_effective_working_state(
-                running=running,
-                effective_runner=effective_runner,
-                runtime=runtime,
-                idle_seconds=idle_seconds,
-                pty_terminal_text=pty_terminal_text,
-                agent_state=agent_state_by_id.get(aid),
-                headless_state=headless_state,
-            )
+        working_state = derive_effective_working_state(
+            running=running,
+            effective_runner="headless" if uses_codex_app_server_state else effective_runner,
+            runtime=runtime,
+            idle_seconds=idle_seconds,
+            pty_terminal_text=pty_terminal_text,
+            agent_state=agent_state_by_id.get(aid),
+            headless_state=headless_state,
         )
+        actor.update(working_state)
         if runtime.lower() == "web_model":
             decorate_web_model_queued_turn_info(actor, group, actor_id=aid, headless_state=headless_state)
 
@@ -493,10 +539,10 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             return resp
         actor = result.get("actor")
         if isinstance(actor, dict):
-            result["actor"] = build_actor_web_payload(group_id, actor)
+            result["actor"] = _build_actor_web_result(group_id, actor)
         actors = result.get("actors")
         if isinstance(actors, list):
-            result["actors"] = [build_actor_web_payload(group_id, item) for item in actors if isinstance(item, dict)]
+            result["actors"] = [_build_actor_web_result(group_id, item) for item in actors if isinstance(item, dict)]
         return resp
 
     async def _actor_profile_upsert_impl(
@@ -642,6 +688,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             patch["runner"] = req.runner
         if req.runtime is not None:
             patch["runtime"] = req.runtime
+        if req.runtime_state_source is not None:
+            patch["runtime_state_source"] = req.runtime_state_source
         if req.enabled is not None:
             patch["enabled"] = bool(req.enabled)
         if req.avatar_asset_path is not None:
@@ -791,14 +839,25 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         return await ctx.daemon({"op": "actor_stop", "args": {"group_id": group_id, "actor_id": actor_id, "by": by}})
 
     @group_router.post("/actors/{actor_id}/restart")
-    async def actor_restart(request: Request, group_id: str, actor_id: str, by: str = "user") -> Dict[str, Any]:
+    async def actor_restart(
+        request: Request,
+        group_id: str,
+        actor_id: str,
+        req: ActorRestartRequest | None = Body(default=None),
+        by: str = "user",
+    ) -> Dict[str, Any]:
         await invalidate_readonly_actor_list(group_id)
         if not await _developer_mode_enabled() and _is_internal_headless_runtime(await _actor_runtime_meta(group_id, actor_id)):
             raise _headless_error(source="actor_restart")
         return await ctx.daemon(
             {
                 "op": "actor_restart",
-                "args": {"group_id": group_id, "actor_id": actor_id, "by": by, **_profile_auth_args(request)},
+                "args": {
+                    "group_id": group_id,
+                    "actor_id": actor_id,
+                    "by": by,
+                    **_profile_auth_args(request),
+                },
             }
         )
 
@@ -1293,7 +1352,10 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             return
 
         try:
+            since = str(websocket.query_params.get("since") or "").strip()
             req = {"op": "term_attach", "args": {"group_id": group_id, "actor_id": actor_id}}
+            if since:
+                req["args"]["since"] = since
             writer.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
             await writer.drain()
             line = await reader.readline()

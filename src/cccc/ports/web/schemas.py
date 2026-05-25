@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Literal, Optional, Union
 from fastapi import Depends, HTTPException, Path as FastApiPath, Request, WebSocket
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...contracts.v1.actor import ActorSubmit, AgentRuntime, RunnerKind
+from ...contracts.v1.actor import ActorSubmit, AgentRuntime, RunnerKind, RuntimeStateSource
 from ...contracts.v1.automation import AutomationRule
 from ...kernel.access_tokens import list_access_tokens, lookup_access_token
 
@@ -125,11 +125,16 @@ class ActorUpdateRequest(BaseModel):
     submit: Optional[ActorSubmit] = None
     runner: Optional[RunnerKind] = None
     runtime: Optional[AgentRuntime] = None
+    runtime_state_source: Optional[RuntimeStateSource] = None
     enabled: Optional[bool] = None
     profile_id: Optional[str] = None
     profile_scope: Optional[Literal["global", "user"]] = None
     profile_owner: Optional[str] = None
     profile_action: Optional[Literal["convert_to_custom"]] = None
+
+
+class ActorRestartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class ActorProfileUpsertRequest(BaseModel):
@@ -264,6 +269,16 @@ class AssistantVoiceRuntimeInstallRequest(BaseModel):
 
 class AssistantVoiceRuntimeRemoveRequest(BaseModel):
     runtime_id: str = Field(default="")
+    by: str = Field(default="user")
+
+
+class AssistantVoiceRecordingLeaseRequest(BaseModel):
+    action: Literal["acquire", "heartbeat", "release", "status"] = Field(default="status")
+    owner_id: str = Field(default="")
+    lease_id: str = Field(default="")
+    ttl_seconds: int = Field(default=30)
+    capture_mode: str = Field(default="")
+    recognition_backend: str = Field(default="")
     by: str = Field(default="user")
 
 

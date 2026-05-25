@@ -37,6 +37,7 @@ import { getPresentationMessageRefs, getPresentationRefStatus } from "../utils/p
 import { mergeLedgerEvents } from "../utils/mergeLedgerEvents";
 import { replayHeadlessSnapshotEvents } from "../utils/headlessSnapshotReplay";
 import { isHeadlessActorRunner } from "../utils/headlessRuntimeSupport";
+import { createSseConnectionRegistry } from "./sseConnectionRegistry";
 import i18n from "../i18n";
 
 // Re-export for backward compatibility
@@ -126,6 +127,9 @@ type ActorActivityUpdate = {
   effective_working_reason?: string;
   effective_working_updated_at?: string | null;
   effective_active_task_id?: string | null;
+  runtime_session_status?: string | null;
+  runtime_session_resume_eligible?: boolean | null;
+  runtime_session_last_resume_error?: string | null;
 };
 
 export function computeGroupRuntimeFromActorActivityUpdate(
@@ -214,6 +218,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const headlessEventSourceRef = useRef<EventSource | null>(null);
+  const sseRegistryRef = useRef(createSseConnectionRegistry<EventSource>());
   const contextRefreshTimerRef = useRef<number | null>(null);
   const selectedGroupIdRef = useRef<string>("");
   const reconnectDelayRef = useRef<number>(1000);
@@ -545,11 +550,28 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
         schedulePendingHeadlessActivityFlush();
       }
 
-      if (eventType === "headless.thread.started") {
+      if (eventType === "headless.thread.resume_failed" || eventType === "headless.session.resume_failed") {
+        const resumeError = String(data.error || data.message || data.detail || "").trim();
+        updateHeadlessActorRuntime({
+          id: actorId,
+          running: false,
+          idle_seconds: null,
+          effective_working_state: "blocked",
+          effective_working_reason: "headless_runtime_resume_failed",
+          effective_working_updated_at: typeof ev.ts === "string" ? ev.ts : null,
+          effective_active_task_id: null,
+          runtime_session_status: "resume_failed",
+          runtime_session_resume_eligible: false,
+          runtime_session_last_resume_error: resumeError || null,
+        });
+        return;
+      }
+
+      if (eventType === "headless.thread.started" || eventType === "headless.thread.resumed") {
         const threadId = typeof data.thread_id === "string" ? data.thread_id.trim() : "";
         const actorKey = headlessActorKey(groupId, actorId);
         const previousThreadId = String(headlessThreadIdByActorRef.current.get(actorKey) || "").trim();
-        if (threadId && threadId !== previousThreadId) {
+        if (eventType === "headless.thread.started" && threadId && threadId !== previousThreadId) {
           clearHeadlessLiveOutput(groupId, actorId);
         }
         if (threadId) {
@@ -560,9 +582,12 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
           running: true,
           idle_seconds: null,
           effective_working_state: "idle",
-          effective_working_reason: "headless_thread_started",
+          effective_working_reason: eventType === "headless.thread.resumed" ? "headless_thread_resumed" : "headless_thread_started",
           effective_working_updated_at: typeof ev.ts === "string" ? ev.ts : null,
           effective_active_task_id: null,
+          runtime_session_status: "usable",
+          runtime_session_resume_eligible: true,
+          runtime_session_last_resume_error: null,
         });
         return;
       }
@@ -823,27 +848,36 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     flushPendingHeadlessMessages(groupId);
   }
 
+  function closeLedgerStream() {
+    sseRegistryRef.current.close("ledger");
+    eventSourceRef.current = null;
+  }
+
+  function closeHeadlessStream() {
+    sseRegistryRef.current.close("headless");
+    headlessEventSourceRef.current = null;
+  }
+
   function connectHeadlessStream(groupId: string, options?: { replay?: boolean }) {
     if (headlessReconnectTimerRef.current) {
       window.clearTimeout(headlessReconnectTimerRef.current);
       headlessReconnectTimerRef.current = null;
     }
-    if (headlessEventSourceRef.current) {
-      headlessEventSourceRef.current.close();
-      headlessEventSourceRef.current = null;
-    }
+    closeHeadlessStream();
 
     const replay = options?.replay !== false;
     const params = new URLSearchParams();
     if (!replay) params.set("replay", "0");
     const headlessPath = `/api/v1/groups/${encodeURIComponent(groupId)}/headless/stream${params.toString() ? `?${params.toString()}` : ""}`;
     const headlessEs = new EventSource(api.withAuthToken(headlessPath));
+    const headlessToken = sseRegistryRef.current.set("headless", groupId, headlessEs);
     headlessEs.onopen = () => {
+      if (!sseRegistryRef.current.isCurrent(headlessToken)) return;
       headlessReconnectDelayRef.current = 1000;
     };
     headlessEs.onerror = () => {
-      headlessEs.close();
-      headlessEventSourceRef.current = null;
+      if (!sseRegistryRef.current.isCurrent(headlessToken)) return;
+      closeHeadlessStream();
       if (headlessReconnectTimerRef.current) {
         window.clearTimeout(headlessReconnectTimerRef.current);
       }
@@ -857,6 +891,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       headlessReconnectDelayRef.current = Math.min(delay * 2, 30000);
     };
     headlessEs.addEventListener("headless", (e) => {
+      if (!sseRegistryRef.current.isCurrent(headlessToken)) return;
       const msg = e as MessageEvent;
       try {
         handleHeadlessEvent(groupId, JSON.parse(String(msg.data || "{}")) as HeadlessStreamEvent);
@@ -896,14 +931,8 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       window.clearTimeout(headlessReconnectTimerRef.current);
       headlessReconnectTimerRef.current = null;
     }
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    if (headlessEventSourceRef.current) {
-      headlessEventSourceRef.current.close();
-      headlessEventSourceRef.current = null;
-    }
+    closeLedgerStream();
+    closeHeadlessStream();
 
     if (!shouldStartGroupStreams(document.hidden)) {
       needsVisibilityCatchupRef.current = true;
@@ -913,10 +942,12 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
 
     setSSEStatus("connecting");
     const es = new EventSource(api.withAuthToken(`/api/v1/groups/${encodeURIComponent(groupId)}/ledger/stream`));
+    const ledgerToken = sseRegistryRef.current.set("ledger", groupId, es);
 
     const isReconnect = hasConnectedOnceRef.current || needsVisibilityCatchupRef.current;
 
     es.onopen = () => {
+      if (!sseRegistryRef.current.isCurrent(ledgerToken)) return;
       reconnectDelayRef.current = 1000;
       setSSEStatus("connected");
       hasConnectedOnceRef.current = true;
@@ -930,8 +961,8 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     };
 
     es.onerror = () => {
-      es.close();
-      eventSourceRef.current = null;
+      if (!sseRegistryRef.current.isCurrent(ledgerToken)) return;
+      closeLedgerStream();
       setSSEStatus("disconnected");
 
       const delay = reconnectDelayRef.current;
@@ -946,6 +977,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     };
 
     es.addEventListener("ledger", (e) => {
+      if (!sseRegistryRef.current.isCurrent(ledgerToken)) return;
       const msg = e as MessageEvent;
       try {
         const ev = JSON.parse(String(msg.data || "{}"));
@@ -1142,14 +1174,8 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       window.clearTimeout(headlessReconnectTimerRef.current);
       headlessReconnectTimerRef.current = null;
     }
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    if (headlessEventSourceRef.current) {
-      headlessEventSourceRef.current.close();
-      headlessEventSourceRef.current = null;
-    }
+    closeLedgerStream();
+    closeHeadlessStream();
     const flushBeforeClearing = options?.resetConnected === false;
     if (pendingHeadlessMessageFlushRef.current != null) {
       window.cancelAnimationFrame(pendingHeadlessMessageFlushRef.current);

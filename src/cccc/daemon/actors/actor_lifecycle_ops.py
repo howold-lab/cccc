@@ -11,8 +11,12 @@ from ...kernel.context import ContextStorage
 from ...kernel.group import load_group
 from ...kernel.ledger import append_event
 from ...kernel.permissions import require_actor_permission
+from ...kernel.runtime import runtime_start_preflight_error
+from ...kernel.runtime_state_source import actor_uses_codex_app_server_state
 from ..claude_app_sessions import SUPERVISOR as claude_app_supervisor
 from ..codex_app_sessions import SUPERVISOR as codex_app_supervisor
+from ..mcp_install import prepare_runtime_mcp_env
+from ..runtime_session_ops import start_pty_actor_with_runtime_resume
 from ...runners import headless as headless_runner
 from ...runners import pty as pty_runner
 from ...util.conv import coerce_bool
@@ -63,9 +67,26 @@ def handle_actor_start(
     caller_context_explicit = "caller_id" in args or "is_admin" in args
     caller_id = str(args.get("caller_id") or "").strip()
     is_admin = coerce_bool(args.get("is_admin"), default=not caller_context_explicit)
+    previous_actor = find_actor(group, actor_id)
+    previous_enabled = (
+        coerce_bool(previous_actor.get("enabled"), default=True)
+        if isinstance(previous_actor, dict)
+        else None
+    )
+    enabled_was_updated = False
+
+    def _restore_previous_enabled() -> None:
+        if not enabled_was_updated or previous_enabled is None:
+            return
+        try:
+            update_actor(group, actor_id, {"enabled": previous_enabled})
+        except Exception:
+            pass
+
     try:
         require_actor_permission(group, by=by, action="actor.start", target_actor_id=actor_id)
         actor = update_actor(group, actor_id, {"enabled": True})
+        enabled_was_updated = True
         actor = resolve_linked_actor_before_start(
             group,
             actor_id,
@@ -76,6 +97,7 @@ def handle_actor_start(
             is_admin=is_admin,
         )
     except Exception as e:
+        _restore_previous_enabled()
         msg = str(e)
         if "profile not found:" in msg:
             return _error("profile_not_found", msg)
@@ -87,18 +109,23 @@ def handle_actor_start(
     env = actor.get("env") if isinstance(actor.get("env"), dict) else {}
     runner_kind = str(actor.get("runner") or "pty").strip()
     runtime = str(actor.get("runtime") or "codex").strip()
-    start_result = start_actor_process(
-        group,
-        actor_id,
-        command=list(cmd or []),
-        env=dict(env or {}),
-        runner=runner_kind,
-        runtime=runtime,
-        by=by,
-        caller_id=caller_id,
-        is_admin=is_admin,
-    )
+    try:
+        start_result = start_actor_process(
+            group,
+            actor_id,
+            command=list(cmd or []),
+            env=dict(env or {}),
+            runner=runner_kind,
+            runtime=runtime,
+            by=by,
+            caller_id=caller_id,
+            is_admin=is_admin,
+        )
+    except Exception as e:
+        _restore_previous_enabled()
+        return _error("actor_start_failed", str(e))
     if not start_result["success"]:
+        _restore_previous_enabled()
         return _error("actor_start_failed", start_result.get("error") or "unknown error")
 
     maybe_reset_automation_on_foreman_change(group, before_foreman_id=before_foreman)
@@ -339,13 +366,21 @@ def handle_actor_restart(
         runner_effective = str(launch_spec["effective_runner"])
         runtime = str(launch_spec["runtime"])
         effective_env = dict(launch_spec["merged_env"])
+
+        def _launch_env() -> Dict[str, str]:
+            return prepare_runtime_mcp_env(
+                runtime,
+                inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=actor_id),
+            )
+
         if runner_effective != "headless":
             try:
+                mcp_env = _launch_env()
                 mcp_ready = bool(
                     ensure_mcp_installed(
                         runtime,
                         cwd,
-                        env={str(k): str(v) for k, v in effective_env.items() if isinstance(k, str)},
+                        env=mcp_env,
                     )
                 )
             except Exception as e:
@@ -353,52 +388,71 @@ def handle_actor_restart(
             if not mcp_ready:
                 return _error("actor_restart_failed", f"failed to install MCP for runtime: {runtime}")
 
-        if runtime == "web_model" and runner_effective == "headless":
-            try:
-                write_headless_state(group.group_id, actor_id)
-            except Exception:
-                pass
-        elif runtime == "codex" and runner_effective == "headless":
-            codex_app_supervisor.start_actor(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                cwd=cwd,
-                env=dict(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=actor_id)),
-                model=model_from_runtime_command(launch_spec["effective_command"]),
-            )
-        elif runtime == "claude" and runner_effective == "headless":
-            claude_app_supervisor.start_actor(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                cwd=cwd,
-                env=dict(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=actor_id)),
-                model=model_from_runtime_command(launch_spec["effective_command"]),
-            )
-        elif runner_effective == "headless":
-            headless_runner.SUPERVISOR.start_actor(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                cwd=cwd,
-                env=dict(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=actor_id)),
-            )
-            try:
-                write_headless_state(group.group_id, actor_id)
-            except Exception:
-                pass
-        else:
-            session = pty_runner.SUPERVISOR.start_actor(
-                group_id=group.group_id,
-                actor_id=actor_id,
-                cwd=cwd,
-                command=launch_spec["effective_command"],
-                env=prepare_pty_env(inject_actor_context_env(effective_env, group_id=group.group_id, actor_id=actor_id)),
-                runtime=runtime,
-                max_backlog_bytes=pty_backlog_bytes(),
-            )
-            try:
-                write_pty_state(group.group_id, actor_id, pid=session.pid)
-            except Exception:
-                pass
+        try:
+            if runtime == "web_model" and runner_effective == "headless":
+                try:
+                    write_headless_state(group.group_id, actor_id)
+                except Exception:
+                    pass
+            elif actor_uses_codex_app_server_state(actor):
+                session = codex_app_supervisor.start_pty_app_actor(
+                    group_id=group.group_id,
+                    actor_id=actor_id,
+                    cwd=cwd,
+                    env=_launch_env(),
+                    model=model_from_runtime_command(launch_spec["effective_command"]),
+                    remote_tui_base_command=list(launch_spec["effective_command"]),
+                    max_backlog_bytes=pty_backlog_bytes(),
+                )
+                try:
+                    write_pty_state(group.group_id, actor_id, pid=session.remote_tui_pid())
+                except Exception:
+                    pass
+            elif runtime == "codex" and runner_effective == "headless":
+                codex_app_supervisor.start_actor(
+                    group_id=group.group_id,
+                    actor_id=actor_id,
+                    cwd=cwd,
+                    env=_launch_env(),
+                    model=model_from_runtime_command(launch_spec["effective_command"]),
+                )
+            elif runtime == "claude" and runner_effective == "headless":
+                claude_app_supervisor.start_actor(
+                    group_id=group.group_id,
+                    actor_id=actor_id,
+                    cwd=cwd,
+                    env=_launch_env(),
+                    model=model_from_runtime_command(launch_spec["effective_command"]),
+                )
+            elif runner_effective == "headless":
+                headless_runner.SUPERVISOR.start_actor(
+                    group_id=group.group_id,
+                    actor_id=actor_id,
+                    cwd=cwd,
+                    env=_launch_env(),
+                )
+                try:
+                    write_headless_state(group.group_id, actor_id)
+                except Exception:
+                    pass
+            else:
+                session = start_pty_actor_with_runtime_resume(
+                    group_id=group.group_id,
+                    actor_id=actor_id,
+                    cwd=cwd,
+                    base_command=launch_spec["effective_command"],
+                    env=prepare_pty_env(_launch_env()),
+                    runtime=runtime,
+                    model=model_from_runtime_command(launch_spec["effective_command"]),
+                    max_backlog_bytes=pty_backlog_bytes(),
+                    runtime_start_preflight_error=runtime_start_preflight_error,
+                )
+                try:
+                    write_pty_state(group.group_id, actor_id, pid=session.pid)
+                except Exception:
+                    pass
+        except Exception as e:
+            return _error("actor_restart_failed", str(e))
         try:
             ContextStorage(group).clear_agent_status_if_present(actor_id)
         except Exception:

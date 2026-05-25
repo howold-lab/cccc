@@ -41,6 +41,7 @@ from .voice_secretary_runtime_ops import (
     sync_voice_secretary_actor_from_foreman,
     voice_secretary_runtime_changed,
 )
+from .assistant_state_views import assistant_state_view, is_voice_status_view, is_voice_workspace_view
 from .voice_prompt_refine import build_voice_prompt_refine_input_text
 from .voice_models import (
     VoiceModelError,
@@ -55,8 +56,10 @@ from .voice_runtime_deps import (
     VoiceRuntimeDepsError,
     begin_voice_runtime_install,
     get_voice_runtime_status,
+    get_voice_runtime_status_snapshot,
     install_voice_runtime_deps,
     list_voice_runtime_statuses,
+    list_voice_runtime_status_snapshots,
     remove_voice_runtime_deps,
 )
 from .sherpa_streaming_asr import sherpa_streaming_backend_status
@@ -75,6 +78,7 @@ _VOICE_MODEL_INSTALL_LOCK = threading.Lock()
 _VOICE_MODEL_INSTALL_THREADS: Dict[str, threading.Thread] = {}
 _VOICE_RUNTIME_INSTALL_LOCK = threading.Lock()
 _VOICE_RUNTIME_INSTALL_THREADS: Dict[str, threading.Thread] = {}
+_VOICE_RECORDING_LEASE_LOCK = threading.Lock()
 
 
 ASSISTANT_ID_PET = "pet"
@@ -92,7 +96,7 @@ _MAX_VOICE_DOCUMENTS = 100
 _DEFAULT_AUTO_DOCUMENT_QUIET_MS = 5_000
 _DEFAULT_AUTO_DOCUMENT_MIN_CHARS = 700
 _DEFAULT_AUTO_DOCUMENT_FAST_MIN_CHARS = 120
-_DEFAULT_AUTO_DOCUMENT_MAX_WINDOW_SECONDS = 120
+_DEFAULT_AUTO_DOCUMENT_MAX_WINDOW_SECONDS = 300
 _MIN_AUTO_DOCUMENT_QUIET_MS = 1_000
 _MIN_AUTO_DOCUMENT_MAX_WINDOW_SECONDS = 10
 _DEFAULT_AUTO_DOCUMENT_MAX_WINDOW_CHARS = 12_000
@@ -100,9 +104,12 @@ _DEFAULT_AUTO_DOCUMENT_MIN_WINDOW_SEGMENTS = 3
 _DEFAULT_VOICE_DOCUMENT_DIR = "docs/voice-secretary"
 _VOICE_INPUT_NUDGE_RETRY_SECONDS = (180, 360, 720)
 _VOICE_PENDING_PROMPT_DRAFT_STALE_SECONDS = 1_800
+_VOICE_RECORDING_LEASE_DEFAULT_TTL_SECONDS = 30
+_VOICE_RECORDING_LEASE_MIN_TTL_SECONDS = 5
+_VOICE_RECORDING_LEASE_MAX_TTL_SECONDS = 120
 _VOICE_IDLE_REVIEW_FLUSH_THRESHOLD = 8
 _VOICE_IDLE_REVIEW_GROUP_COOLDOWN_SECONDS = 300
-_VOICE_IDLE_REVIEW_STOP_TRIGGER_KINDS = {"push_to_talk_stop"}
+_VOICE_IDLE_REVIEW_STOP_TRIGGER_KINDS = {"push_to_talk_stop", "service_transcript"}
 _VOICE_PREVIOUS_INPUT_TAIL_MAX_CHARS = 240
 _VOICE_PREVIOUS_INPUT_TAIL_MAX_FRAGMENTS = 3
 _VOICE_PREVIOUS_INPUT_TAIL_SCAN_ITEMS = 80
@@ -244,6 +251,10 @@ def _state_path(group: Group):
     return group.path / "state" / _STATE_FILENAME
 
 
+def _voice_recording_lease_path() -> Path:
+    return ensure_home() / "state" / "voice_secretary_recording_lease.json"
+
+
 def _load_runtime_state(group: Group) -> Dict[str, Any]:
     payload = read_json(_state_path(group))
     if not isinstance(payload, dict) or int(payload.get("schema") or 0) != _STATE_SCHEMA:
@@ -295,6 +306,124 @@ def _save_runtime_state(group: Group, payload: Dict[str, Any]) -> None:
     }
     _state_path(group).parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(_state_path(group), normalized, indent=2)
+
+
+def _voice_recording_epoch_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _voice_recording_iso_from_epoch_ms(value: int) -> str:
+    try:
+        return datetime.fromtimestamp(max(0, int(value)) / 1000.0, tz=timezone.utc).isoformat()
+    except Exception:
+        return ""
+
+
+def _voice_recording_lease_ttl_seconds(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = _VOICE_RECORDING_LEASE_DEFAULT_TTL_SECONDS
+    return min(max(_VOICE_RECORDING_LEASE_MIN_TTL_SECONDS, parsed), _VOICE_RECORDING_LEASE_MAX_TTL_SECONDS)
+
+
+def _empty_voice_recording_lease_doc() -> Dict[str, Any]:
+    return {"schema": 1, "kind": "voice_secretary_recording_lease", "lease": {}}
+
+
+def _load_voice_recording_lease_doc() -> Dict[str, Any]:
+    payload = read_json(_voice_recording_lease_path())
+    if not isinstance(payload, dict) or int(payload.get("schema") or 0) != 1:
+        return _empty_voice_recording_lease_doc()
+    lease = payload.get("lease") if isinstance(payload.get("lease"), dict) else {}
+    return {"schema": 1, "kind": "voice_secretary_recording_lease", "lease": dict(lease)}
+
+
+def _save_voice_recording_lease_doc(payload: Dict[str, Any]) -> None:
+    path = _voice_recording_lease_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lease = payload.get("lease") if isinstance(payload.get("lease"), dict) else {}
+    atomic_write_json(
+        path,
+        {"schema": 1, "kind": "voice_secretary_recording_lease", "lease": dict(lease)},
+        indent=2,
+    )
+
+
+def _public_voice_recording_lease(lease: Dict[str, Any]) -> Dict[str, Any]:
+    owner_id = str(lease.get("owner_id") or "").strip()
+    group_id = str(lease.get("group_id") or "").strip()
+    if not owner_id or not group_id:
+        return {}
+    return {
+        key: value
+        for key, value in {
+            "owner_id": owner_id,
+            "group_id": group_id,
+            "group_title": str(lease.get("group_title") or "").strip(),
+            "capture_mode": str(lease.get("capture_mode") or "").strip(),
+            "recognition_backend": str(lease.get("recognition_backend") or "").strip(),
+            "by": str(lease.get("by") or "").strip(),
+            "created_at": str(lease.get("created_at") or "").strip(),
+            "updated_at": str(lease.get("updated_at") or "").strip(),
+            "expires_at": str(lease.get("expires_at") or "").strip(),
+        }.items()
+        if value not in ("", None)
+    }
+
+
+def _voice_recording_lease_matches(lease: Dict[str, Any], *, owner_id: str, lease_id: str) -> bool:
+    if str(lease.get("owner_id") or "").strip() != owner_id:
+        return False
+    active_lease_id = str(lease.get("lease_id") or "").strip()
+    # Allow legacy lease files created before lease_id existed to be released by
+    # their owner, but require exact tokens for all new acquisitions.
+    if not active_lease_id:
+        return not str(lease_id or "").strip()
+    return active_lease_id == str(lease_id or "").strip()
+
+
+def _active_voice_recording_lease_locked(*, now_ms: Optional[int] = None) -> Dict[str, Any]:
+    now_ms = _voice_recording_epoch_ms() if now_ms is None else int(now_ms)
+    doc = _load_voice_recording_lease_doc()
+    lease = doc.get("lease") if isinstance(doc.get("lease"), dict) else {}
+    if not lease:
+        return {}
+    expires_at_ms = int(lease.get("expires_at_ms") or 0)
+    if expires_at_ms <= now_ms:
+        _save_voice_recording_lease_doc(_empty_voice_recording_lease_doc())
+        return {}
+    return dict(lease)
+
+
+def _voice_recording_lease_result(
+    *,
+    group_id: str,
+    action: str,
+    lease: Dict[str, Any],
+    acquired: bool = False,
+    released: bool = False,
+    lost: bool = False,
+    include_lease_id: bool = False,
+) -> Dict[str, Any]:
+    result = {
+        "group_id": group_id,
+        "action": action,
+        "acquired": bool(acquired),
+        "released": bool(released),
+        "lost": bool(lost),
+        "lease": _public_voice_recording_lease(lease),
+    }
+    if include_lease_id:
+        lease_id = str(lease.get("lease_id") or "").strip()
+        if lease_id:
+            result["lease_id"] = lease_id
+    return result
+
+
+def _current_public_voice_recording_lease() -> Dict[str, Any]:
+    with _VOICE_RECORDING_LEASE_LOCK:
+        return _public_voice_recording_lease(_active_voice_recording_lease_locked())
 
 
 def _stored_assistant_settings(group: Group, assistant_id: str) -> Dict[str, Any]:
@@ -355,11 +484,15 @@ def _normalize_voice_config(raw: Any, *, base: Dict[str, Any]) -> Dict[str, Any]
             raise ValueError("auto_document_min_chars must be an integer") from exc
         out["auto_document_min_chars"] = min(max(40, min_chars), 8_000)
     if "auto_document_max_window_seconds" in raw:
-        try:
-            max_window_seconds = int(raw.get("auto_document_max_window_seconds"))
-        except Exception as exc:
-            raise ValueError("auto_document_max_window_seconds must be an integer") from exc
-        out["auto_document_max_window_seconds"] = min(max(_MIN_AUTO_DOCUMENT_MAX_WINDOW_SECONDS, max_window_seconds), 300)
+        raw_max_window_seconds = raw.get("auto_document_max_window_seconds")
+        if raw_max_window_seconds is None:
+            out["auto_document_max_window_seconds"] = None
+        else:
+            try:
+                max_window_seconds = int(raw_max_window_seconds)
+            except Exception as exc:
+                raise ValueError("auto_document_max_window_seconds must be an integer or null") from exc
+            out["auto_document_max_window_seconds"] = min(max(_MIN_AUTO_DOCUMENT_MAX_WINDOW_SECONDS, max_window_seconds), 300)
     if "service_model_id" in raw:
         value = str(raw.get("service_model_id") or "").strip()
         if value and not re.match(r"^[a-z0-9][a-z0-9._-]{0,63}$", value):
@@ -2107,7 +2240,6 @@ def _emit_voice_input_notify(group: Group, *, reason: str) -> Dict[str, Any]:
         },
     )
     notify_event = emit_system_notify(group, by="system", notify=notify)
-    latest_seq = int(state.get("latest_seq") or 0)
     seq_end = max(0, int(envelope.get("seq_end") or 0))
     if seq_end > int(state.get("secretary_delivery_cursor") or 0):
         state["secretary_delivery_cursor"] = seq_end
@@ -2115,6 +2247,7 @@ def _emit_voice_input_notify(group: Group, *, reason: str) -> Dict[str, Any]:
     state["last_notify_emitted_at"] = now
     state["last_input_envelope_at"] = now
     state["last_input_envelope_id"] = str(envelope.get("delivery_id") or "")
+    latest_seq = int(state.get("latest_seq") or 0)
     if _voice_input_delivery_cursor(state) >= latest_seq:
         state["last_notify_at"] = ""
         state["retry_count"] = 0
@@ -2479,7 +2612,48 @@ def _append_voice_document_source(group: Group, *, record: Dict[str, Any], segme
     )
 
 
-def _voice_auto_document_max_window_seconds(config: Dict[str, Any]) -> int:
+def _append_voice_document_transcript(
+    group: Group,
+    *,
+    record: Dict[str, Any],
+    segment: Dict[str, Any],
+    segment_path: str,
+    trigger: Optional[Dict[str, Any]] = None,
+) -> None:
+    doc_id = str(record.get("document_id") or "").strip()
+    text = _clean_multiline_text(segment.get("text"), max_len=_MAX_TRANSCRIPT_SESSION_CHARS)
+    if not doc_id or not text:
+        return
+    item: Dict[str, Any] = {
+        "schema": 1,
+        "document_id": doc_id,
+        "document_path": _voice_document_path(record),
+        "created_at": str(segment.get("created_at") or utc_now_iso()),
+        "updated_at": str(segment.get("updated_at") or utc_now_iso()),
+        "session_id": str(segment.get("session_id") or ""),
+        "segment_id": str(segment.get("segment_id") or ""),
+        "text": text,
+        "language": str(segment.get("language") or ""),
+        "is_final": coerce_bool(segment.get("is_final"), default=True),
+        "source": str(segment.get("source") or ""),
+        "by": str(segment.get("by") or ""),
+        "segment_path": segment_path,
+        "trigger": dict(trigger) if isinstance(trigger, dict) else {},
+    }
+    for key in ("start_ms", "end_ms", "speaker_label", "speaker_index"):
+        if key in segment:
+            item[key] = segment.get(key)
+    _append_voice_document_jsonl(
+        group,
+        document_id=doc_id,
+        filename="transcript.jsonl",
+        item=item,
+    )
+
+
+def _voice_auto_document_max_window_seconds(config: Dict[str, Any]) -> Optional[int]:
+    if "auto_document_max_window_seconds" in config and config.get("auto_document_max_window_seconds") is None:
+        return None
     try:
         max_window_seconds = int(config.get("auto_document_max_window_seconds") or _DEFAULT_AUTO_DOCUMENT_MAX_WINDOW_SECONDS)
     except Exception:
@@ -2535,6 +2709,8 @@ def _voice_document_input_due(
     if started is None or now_dt is None:
         return False
     max_window_seconds = _voice_auto_document_max_window_seconds(config)
+    if max_window_seconds is None:
+        return False
     return (now_dt - started).total_seconds() >= max_window_seconds
 
 
@@ -2673,6 +2849,13 @@ def _flush_voice_session_window(
         segment=source_segment,
         segment_path=str(session_entry.get("last_segment_path") or ""),
     )
+    _append_voice_document_transcript(
+        group,
+        record=document,
+        segment=source_segment,
+        segment_path=str(session_entry.get("last_segment_path") or ""),
+        trigger=trigger_for_document,
+    )
     _append_voice_input_event(
         group,
         kind="asr_transcript",
@@ -2730,6 +2913,8 @@ def _flush_stale_voice_session_windows(group: Group) -> int:
         return 0
     assistant_config = assistant.get("config") if isinstance(assistant.get("config"), dict) else {}
     max_window_seconds = _voice_auto_document_max_window_seconds(assistant_config)
+    if max_window_seconds is None:
+        return 0
     now = utc_now_iso()
     now_dt = parse_utc_iso(now)
     if now_dt is None:
@@ -3072,10 +3257,14 @@ def _speakerize_voice_window_text(window_segments: Any, speaker_segments: Any, f
         label = _speaker_label_for_range(start_ms, end_ms, speaker_segments)
         if not label:
             label = str(item.get("speaker_label") or "").strip()
-        if not label:
-            label = "Speaker ?"
         if label == last_label and lines:
             lines[-1] = f"{lines[-1]} {text}".strip()
+        elif not label:
+            if not last_label and lines:
+                lines[-1] = f"{lines[-1]} {text}".strip()
+            else:
+                lines.append(text)
+                last_label = ""
         else:
             lines.append(f"{label}: {text}")
             last_label = label
@@ -3136,6 +3325,7 @@ def _infer_voice_transcript_intent(text: Any, trigger: Optional[Dict[str, Any]] 
 def handle_assistant_state(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     assistant_id = _normalize_assistant_id(args.get("assistant_id"))
+    view = str(args.get("view") or "").strip()
     prompt_request_id = str(args.get("prompt_request_id") or args.get("request_id") or "").strip()
     if not group_id:
         return _error("missing_group_id", "missing group_id")
@@ -3149,7 +3339,21 @@ def handle_assistant_state(args: Dict[str, Any]) -> DaemonResponse:
         if assistant_id not in _ASSISTANT_DEFAULTS:
             return _error("assistant_not_found", f"assistant not found: {assistant_id}")
         assistant = _effective_assistant(group, assistant_id, runtime_state=runtime_state)
-        documents = _retained_voice_documents(group) if assistant_id == ASSISTANT_ID_VOICE_SECRETARY else []
+        compact_voice_status = assistant_id == ASSISTANT_ID_VOICE_SECRETARY and is_voice_status_view(view)
+        skip_voice_models = assistant_id == ASSISTANT_ID_VOICE_SECRETARY and (
+            compact_voice_status or is_voice_workspace_view(view)
+        )
+        include_voice_document_content = not (
+            assistant_id == ASSISTANT_ID_VOICE_SECRETARY
+            and (compact_voice_status or is_voice_workspace_view(view))
+        )
+        documents = (
+            []
+            if compact_voice_status
+            else _retained_voice_documents(group, include_content=include_voice_document_content)
+            if assistant_id == ASSISTANT_ID_VOICE_SECRETARY
+            else []
+        )
         document_index = _load_voice_documents_index(group) if assistant_id == ASSISTANT_ID_VOICE_SECRETARY else {}
         active_document_id, active_record = (
             _active_voice_document_from_index(group, document_index)
@@ -3164,33 +3368,56 @@ def handle_assistant_state(args: Dict[str, Any]) -> DaemonResponse:
             else {}
         )
         ask_requests = _voice_ask_requests_public(runtime_state) if assistant_id == ASSISTANT_ID_VOICE_SECRETARY else []
-        service_models = list_voice_models() if assistant_id == ASSISTANT_ID_VOICE_SECRETARY else []
-        service_runtimes = list_voice_runtime_statuses() if assistant_id == ASSISTANT_ID_VOICE_SECRETARY else []
-        service_runtime = get_voice_runtime_status() if assistant_id == ASSISTANT_ID_VOICE_SECRETARY else {}
-        return DaemonResponse(
-            ok=True,
-            result={
-                "group_id": group.group_id,
-                "assistant": assistant,
-                "documents": documents,
-                "documents_by_id": {str(item.get("document_id")): item for item in documents},
-                "documents_by_path": {str(item.get("document_path")): item for item in documents if str(item.get("document_path") or "").strip()},
-                "active_document_id": active_document_id,
-                "capture_target_document_id": active_document_id,
-                "active_document_path": active_document_path,
-                "capture_target_document_path": active_document_path,
-                "new_input_available": int(input_state.get("latest_seq") or 0) > _voice_input_delivery_cursor(input_state),
-                "input_timing": _voice_input_timing_public(input_state),
-                "prompt_draft": prompt_draft,
-                "ask_requests": ask_requests,
-                "latest_ask_request": ask_requests[0] if ask_requests else {},
-                "service_models": service_models,
-                "service_models_by_id": {str(item.get("model_id")): item for item in service_models},
-                "service_runtime": service_runtime,
-                "service_runtimes": service_runtimes,
-                "service_runtimes_by_id": {str(item.get("runtime_id")): item for item in service_runtimes},
-            },
+        service_models = (
+            []
+            if skip_voice_models
+            else list_voice_models()
+            if assistant_id == ASSISTANT_ID_VOICE_SECRETARY
+            else []
         )
+        use_voice_runtime_snapshot = assistant_id == ASSISTANT_ID_VOICE_SECRETARY and is_voice_workspace_view(view)
+        service_runtimes = (
+            list_voice_runtime_status_snapshots()
+            if use_voice_runtime_snapshot
+            else list_voice_runtime_statuses()
+            if assistant_id == ASSISTANT_ID_VOICE_SECRETARY
+            else []
+        )
+        service_runtime = (
+            get_voice_runtime_status_snapshot()
+            if use_voice_runtime_snapshot
+            else get_voice_runtime_status()
+            if assistant_id == ASSISTANT_ID_VOICE_SECRETARY
+            else {}
+        )
+        recording_lease = (
+            _current_public_voice_recording_lease()
+            if assistant_id == ASSISTANT_ID_VOICE_SECRETARY
+            else {}
+        )
+        result = {
+            "group_id": group.group_id,
+            "assistant": assistant,
+            "documents": documents,
+            "documents_by_id": {str(item.get("document_id")): item for item in documents},
+            "documents_by_path": {str(item.get("document_path")): item for item in documents if str(item.get("document_path") or "").strip()},
+            "active_document_id": active_document_id,
+            "capture_target_document_id": active_document_id,
+            "active_document_path": active_document_path,
+            "capture_target_document_path": active_document_path,
+            "new_input_available": int(input_state.get("latest_seq") or 0) > _voice_input_delivery_cursor(input_state),
+            "input_timing": _voice_input_timing_public(input_state),
+            "prompt_draft": prompt_draft,
+            "ask_requests": ask_requests,
+            "latest_ask_request": ask_requests[0] if ask_requests else {},
+            "service_models": service_models,
+            "service_models_by_id": {str(item.get("model_id")): item for item in service_models},
+            "service_runtime": service_runtime,
+            "service_runtimes": service_runtimes,
+            "service_runtimes_by_id": {str(item.get("runtime_id")): item for item in service_runtimes},
+            "recording_lease": recording_lease,
+        }
+        return DaemonResponse(ok=True, result=assistant_state_view(result, view))
     assistants = [
         _effective_assistant(group, item, runtime_state=runtime_state)
         for item in sorted(_ASSISTANT_DEFAULTS.keys())
@@ -3205,6 +3432,7 @@ def handle_assistant_state(args: Dict[str, Any]) -> DaemonResponse:
     service_models = list_voice_models()
     service_runtimes = list_voice_runtime_statuses()
     service_runtime = get_voice_runtime_status()
+    recording_lease = _current_public_voice_recording_lease()
     return DaemonResponse(
         ok=True,
         result={
@@ -3228,6 +3456,7 @@ def handle_assistant_state(args: Dict[str, Any]) -> DaemonResponse:
             "service_runtime": service_runtime,
             "service_runtimes": service_runtimes,
             "service_runtimes_by_id": {str(item.get("runtime_id")): item for item in service_runtimes},
+            "recording_lease": recording_lease,
         },
     )
 
@@ -3711,6 +3940,133 @@ def _set_voice_assistant_runtime(group: Group, *, lifecycle: str, health: Dict[s
     return _effective_assistant(group, ASSISTANT_ID_VOICE_SECRETARY, runtime_state=state)
 
 
+def handle_assistant_voice_recording_lease(args: Dict[str, Any]) -> DaemonResponse:
+    group_id = str(args.get("group_id") or "").strip()
+    by = str(args.get("by") or "user").strip()
+    action = str(args.get("action") or "status").strip().lower()
+    owner_id = str(args.get("owner_id") or "").strip()
+    lease_id = str(args.get("lease_id") or "").strip()
+    capture_mode = str(args.get("capture_mode") or "").strip()
+    recognition_backend = str(args.get("recognition_backend") or "").strip()
+    ttl_seconds = _voice_recording_lease_ttl_seconds(args.get("ttl_seconds"))
+    if not group_id:
+        return _error("missing_group_id", "missing group_id")
+    if action not in {"acquire", "heartbeat", "release", "status"}:
+        return _error("invalid_voice_recording_lease_action", "action must be acquire|heartbeat|release|status")
+    if action in {"acquire", "heartbeat", "release"} and not owner_id:
+        return _error("missing_owner_id", "missing owner_id")
+    group = load_group(group_id)
+    if group is None:
+        return _error("group_not_found", f"group not found: {group_id}")
+    try:
+        _require_status_permission(group, assistant_id=ASSISTANT_ID_VOICE_SECRETARY, by=by)
+    except Exception as exc:
+        return _error("assistant_voice_recording_lease_failed", str(exc))
+
+    assistant = _effective_assistant(group, ASSISTANT_ID_VOICE_SECRETARY)
+    if not bool(assistant.get("enabled")) and action in {"acquire", "heartbeat"}:
+        return _error("assistant_disabled", "voice_secretary is disabled")
+
+    with _VOICE_RECORDING_LEASE_LOCK:
+        now_ms = _voice_recording_epoch_ms()
+        active = _active_voice_recording_lease_locked(now_ms=now_ms)
+        if action == "status":
+            return DaemonResponse(
+                ok=True,
+                result=_voice_recording_lease_result(group_id=group.group_id, action=action, lease=active),
+            )
+
+        if action == "release":
+            if active and _voice_recording_lease_matches(active, owner_id=owner_id, lease_id=lease_id):
+                _save_voice_recording_lease_doc(_empty_voice_recording_lease_doc())
+                return DaemonResponse(
+                    ok=True,
+                    result=_voice_recording_lease_result(
+                        group_id=group.group_id,
+                        action=action,
+                        lease={},
+                        released=True,
+                    ),
+                )
+            return DaemonResponse(
+                ok=True,
+                result=_voice_recording_lease_result(
+                    group_id=group.group_id,
+                    action=action,
+                    lease=active,
+                    released=False,
+                    lost=not bool(active) or str(active.get("owner_id") or "").strip() == owner_id,
+                ),
+            )
+
+        same_owner_reacquire = False
+        if action == "acquire" and active:
+            active_owner_id = str(active.get("owner_id") or "").strip()
+            active_group_id = str(active.get("group_id") or "").strip()
+            if active_owner_id != owner_id or active_group_id != group.group_id:
+                public_active = _public_voice_recording_lease(active)
+                return _error(
+                    "assistant_voice_recording_busy",
+                    "voice secretary recording is already active",
+                    details={"active_lease": public_active},
+                )
+            same_owner_reacquire = True
+
+        if active and str(active.get("owner_id") or "") != owner_id:
+            public_active = _public_voice_recording_lease(active)
+            return _error(
+                "assistant_voice_recording_busy",
+                "voice secretary recording is already active",
+                details={"active_lease": public_active},
+            )
+
+        if action == "heartbeat":
+            if not active or not _voice_recording_lease_matches(active, owner_id=owner_id, lease_id=lease_id):
+                return DaemonResponse(
+                    ok=True,
+                    result=_voice_recording_lease_result(
+                        group_id=group.group_id,
+                        action=action,
+                        lease=active,
+                        acquired=False,
+                        lost=True,
+                    ),
+                )
+
+        renew_existing = bool(active) and (action == "heartbeat" or same_owner_reacquire)
+        created_at = str(active.get("created_at") or "") if renew_existing else ""
+        if not created_at:
+            created_at = utc_now_iso()
+        expires_at_ms = now_ms + ttl_seconds * 1000
+        next_lease_id = str(active.get("lease_id") or "").strip() if renew_existing else f"vrl_{uuid.uuid4().hex}"
+        if not next_lease_id:
+            next_lease_id = f"vrl_{uuid.uuid4().hex}"
+        next_lease = {
+            "lease_id": next_lease_id,
+            "owner_id": owner_id,
+            "group_id": group.group_id,
+            "group_title": str(group.doc.get("title") or group.group_id),
+            "capture_mode": capture_mode,
+            "recognition_backend": recognition_backend,
+            "by": by,
+            "created_at": created_at,
+            "updated_at": utc_now_iso(),
+            "expires_at": _voice_recording_iso_from_epoch_ms(expires_at_ms),
+            "expires_at_ms": expires_at_ms,
+        }
+        _save_voice_recording_lease_doc({"schema": 1, "lease": next_lease})
+        return DaemonResponse(
+            ok=True,
+            result=_voice_recording_lease_result(
+                group_id=group.group_id,
+                action=action,
+                lease=next_lease,
+                acquired=True,
+                include_lease_id=True,
+            ),
+        )
+
+
 def handle_assistant_voice_transcribe(args: Dict[str, Any]) -> DaemonResponse:
     group_id = str(args.get("group_id") or "").strip()
     by = str(args.get("by") or "user").strip()
@@ -3983,7 +4339,34 @@ def handle_assistant_voice_transcript_append(
             raw_trigger.get("speaker_segments"),
             document_source_text,
         )
-    if document_source_text and is_final and coerce_bool(assistant_config.get("auto_document_enabled"), default=True):
+    auto_document_enabled = coerce_bool(assistant_config.get("auto_document_enabled"), default=True)
+    if target_document_path and is_final and (text or document_source_text) and (not document_source_text or not auto_document_enabled):
+        try:
+            _, transcript_record = _find_voice_document_by_path(
+                group,
+                document_path=target_document_path,
+                create=False,
+                config=assistant_config,
+            )
+            transcript_segment = dict(segment)
+            if document_source_text:
+                transcript_segment["text"] = document_source_text
+            _append_voice_document_transcript(
+                group,
+                record=transcript_record,
+                segment=transcript_segment,
+                segment_path=segment_path or str(session_entry.get("last_segment_path") or ""),
+                trigger=raw_trigger,
+            )
+        except Exception:
+            logger.exception(
+                "voice secretary transcript sidecar append failed: group_id=%s document_path=%s session_id=%s segment_id=%s",
+                group.group_id,
+                target_document_path,
+                session_id,
+                segment_id,
+            )
+    if document_source_text and is_final and auto_document_enabled:
         try:
             document_intent_hint = _infer_voice_transcript_intent(document_source_text, raw_trigger)
             trigger_for_document = {
@@ -4038,6 +4421,13 @@ def handle_assistant_voice_transcript_append(
                 record=document,
                 segment=source_segment,
                 segment_path=str(session_entry.get("last_segment_path") or segment_path or ""),
+            )
+            _append_voice_document_transcript(
+                group,
+                record=document,
+                segment=source_segment,
+                segment_path=str(session_entry.get("last_segment_path") or segment_path or ""),
+                trigger=trigger_for_document,
             )
             input_event = _append_voice_input_event(
                 group,
@@ -4945,6 +5335,9 @@ def handle_assistant_voice_prompt_draft_submit(args: Dict[str, Any]) -> DaemonRe
     summary = _clean_multiline_text(args.get("summary"), max_len=800)
     raw_operation = str(args.get("operation") or "").strip()
     composer_snapshot_hash = str(args.get("composer_snapshot_hash") or "").strip()
+    no_op = coerce_bool(args.get("no_op"), default=False)
+    if no_op:
+        draft_text = ""
     if not group_id:
         return _error("missing_group_id", "missing group_id")
     if by not in {VOICE_SECRETARY_ACTOR_ID, _assistant_principal(ASSISTANT_ID_VOICE_SECRETARY), "assistant:voice_secretary"}:
@@ -4952,7 +5345,7 @@ def handle_assistant_voice_prompt_draft_submit(args: Dict[str, Any]) -> DaemonRe
     if not raw_request_id:
         return _error("missing_prompt_request_id", "request_id is required for voice prompt drafts")
     request_id = _clean_voice_prompt_request_id(raw_request_id)
-    if not draft_text:
+    if not draft_text and not no_op:
         return _error("empty_voice_prompt_draft", "draft_text is required")
     group = load_group(group_id)
     if group is None:
@@ -4971,12 +5364,13 @@ def handle_assistant_voice_prompt_draft_submit(args: Dict[str, Any]) -> DaemonRe
         request_snapshot_hash = str(request_record.get("composer_snapshot_hash") or "").strip()
         drafts = state.setdefault("voice_prompt_drafts", {})
         existing = drafts.get(request_id) if isinstance(drafts.get(request_id), dict) else {}
+        status = "no_change" if no_op else "pending"
         record = {
             "schema": 1,
             "group_id": group.group_id,
             "assistant_id": ASSISTANT_ID_VOICE_SECRETARY,
             "request_id": request_id,
-            "status": "pending",
+            "status": status,
             "operation": operation,
             "draft_text": draft_text,
             "draft_preview": _clean_multiline_text(draft_text, max_len=240),
@@ -4998,16 +5392,16 @@ def handle_assistant_voice_prompt_draft_submit(args: Dict[str, Any]) -> DaemonRe
             data={
                 "assistant_id": ASSISTANT_ID_VOICE_SECRETARY,
                 "request_id": request_id,
-                "action": "submit",
-                "status": "pending",
+                "action": "no_op" if no_op else "submit",
+                "status": status,
                 "draft_preview": str(record.get("draft_preview") or ""),
             },
         )
         assistant_after = _set_voice_assistant_runtime(
             group,
-            lifecycle="waiting",
+            lifecycle="idle" if no_op else "waiting",
             health={
-                "status": "prompt_draft_ready",
+                "status": "prompt_draft_no_change" if no_op else "prompt_draft_ready",
                 "last_prompt_request_id": request_id,
                 "last_prompt_draft_at": now,
             },
@@ -5417,6 +5811,8 @@ def try_handle_assistant_op(
         return handle_assistant_voice_runtime_install(args)
     if op == "assistant_voice_runtime_remove":
         return handle_assistant_voice_runtime_remove(args)
+    if op == "assistant_voice_recording_lease":
+        return handle_assistant_voice_recording_lease(args)
     if op == "assistant_voice_transcript_append":
         return handle_assistant_voice_transcript_append(
             args,

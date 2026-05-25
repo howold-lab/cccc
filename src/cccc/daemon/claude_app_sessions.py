@@ -4,8 +4,8 @@ Manages Claude Code CLI subprocesses in stream-json mode (bidirectional NDJSON
 over stdio), mapping streaming events to headless-compatible events for the
 existing frontend streaming pipeline.
 
-Architecture mirrors ``codex_app_sessions.py``: one long-lived subprocess per
-actor, stdin for user messages, stdout for NDJSON event stream.
+Claude ``-p``/stream-json processes can exit after completing a print-mode turn,
+so actor enablement is tracked separately from the transient subprocess.
 """
 from __future__ import annotations
 
@@ -31,6 +31,12 @@ from .actors.actor_exit_ops import persist_actor_process_exit_stopped
 from .mcp_install import ensure_mcp_installed
 from .messaging.delivery import auto_mark_headless_delivery_started, render_headless_control_text
 from .runner_state_ops import headless_state_path, remove_headless_state
+from .runtime_session_ops import (
+    mark_runtime_session_resume_failed,
+    prepare_claude_headless_launch_command,
+    record_headless_runtime_session,
+    runtime_resume_enabled,
+)
 from ..util.fs import atomic_write_json
 from ..util.node_env import with_node_deprecation_warnings_suppressed
 from ..util.process import pid_is_alive
@@ -66,6 +72,23 @@ def _safe_logger_call(method: str, message: str, *args: Any, **kwargs: Any) -> N
         if _is_closed_stream_logging_error(exc):
             return
         raise
+
+
+def _looks_like_stale_resume_error(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    markers = (
+        "no conversation found",
+        "conversation not found",
+        "session not found",
+        "resume session not found",
+        "could not find conversation",
+        "could not resume",
+        "failed to resume",
+        "invalid session",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 def _voice_secretary_prepare_control_turn(
@@ -119,6 +142,7 @@ class ClaudeSessionState:
             "actor_id": actor_id,
             "status": self.status,
             "current_task_id": self.current_task_id,
+            "session_id": self.session_id,
             "updated_at": self.updated_at,
         }
 
@@ -152,6 +176,8 @@ class ClaudeAppSession:
         self._stdout_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._turn_thread: Optional[threading.Thread] = None
+        self._runtime_command: list[str] = []
+        self._resumed_provider_session_id = ""
 
         # Streaming text delta tracking (snapshot diffing)
         self._last_text_snapshot = ""
@@ -169,6 +195,11 @@ class ClaudeAppSession:
         self._active_payload: Optional[_PendingTurn] = None
 
     # ── state persistence ───────────────────────────────────────────────
+
+    def request_stop(self) -> None:
+        """Mark this session as intentionally stopping before transports close."""
+        with self._lock:
+            self._stop_requested = True
 
     def _persist_state(self) -> None:
         with self._lock:
@@ -489,6 +520,9 @@ class ClaudeAppSession:
     # ── lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
+        initial_session_id = ""
+        initial_captured_from = ""
+        resumed = False
         with self._lock:
             if self._running:
                 return
@@ -496,8 +530,8 @@ class ClaudeAppSession:
             env = os.environ.copy()
             env.update(self.env)
             env.setdefault("CCCC_HOME", str(ensure_home()))
-            env.setdefault("CCCC_GROUP_ID", self.group_id)
-            env.setdefault("CCCC_ACTOR_ID", self.actor_id)
+            env["CCCC_GROUP_ID"] = self.group_id
+            env["CCCC_ACTOR_ID"] = self.actor_id
             env = with_node_deprecation_warnings_suppressed(env)
             if not ensure_mcp_installed("claude", self.cwd, auto_mcp_runtimes=("claude",), env=env):
                 raise RuntimeError("failed to install MCP for runtime: claude")
@@ -511,13 +545,30 @@ class ClaudeAppSession:
                 "--include-hook-events",
                 "--verbose",
                 "--dangerously-skip-permissions",
-                "--no-session-persistence",
             ]
             if self.model:
                 cmd.extend(["--model", self.model])
+            self._runtime_command = list(cmd)
+            launch_cmd, runtime_doc, launch_kind = prepare_claude_headless_launch_command(
+                group_id=self.group_id,
+                actor_id=self.actor_id,
+                cwd=self.cwd,
+                base_command=cmd,
+                model=self.model,
+            )
+            resumed = launch_kind == "resume"
+            resumed_provider_session_id = (
+                str((runtime_doc or {}).get("provider_session_id") or "").strip()
+                if isinstance(runtime_doc, dict) and resumed
+                else ""
+            )
+            self._resumed_provider_session_id = resumed_provider_session_id
+            if launch_kind != "resume" and isinstance(runtime_doc, dict):
+                initial_session_id = str(runtime_doc.get("provider_session_id") or "").strip()
+                initial_captured_from = str(runtime_doc.get("captured_from") or "").strip()
 
             self._proc = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -527,6 +578,42 @@ class ClaudeAppSession:
                 bufsize=1,
             )
             self._running = True
+
+        # Wait briefly for process to prove it's alive (MCP init may take time).
+        time.sleep(1.0)
+        if not self.is_running() and resumed:
+            resume_error = "claude headless resume process exited immediately"
+            mark_runtime_session_resume_failed(
+                group_id=self.group_id,
+                actor_id=self.actor_id,
+                error=resume_error,
+            )
+            if resumed_provider_session_id:
+                self._emit(
+                    "headless.session.resume_failed",
+                    {
+                        "provider_session_id": resumed_provider_session_id,
+                        "error": resume_error,
+                    },
+                )
+            with self._lock:
+                old_proc = self._proc
+                self._proc = None
+                self._running = False
+                self._resumed_provider_session_id = ""
+            if old_proc is not None:
+                try:
+                    old_proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    old_proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        old_proc.kill()
+                    except Exception:
+                        pass
+            raise RuntimeError(resume_error)
 
         self._stdout_thread = threading.Thread(
             target=self._stdout_loop,
@@ -547,11 +634,25 @@ class ClaudeAppSession:
         self._stdout_thread.start()
         self._stderr_thread.start()
 
-        # Wait briefly for process to prove it's alive (MCP init may take time)
-        time.sleep(1.0)
         if not self.is_running():
             raise RuntimeError("claude process exited immediately")
 
+        if initial_session_id and runtime_resume_enabled():
+            try:
+                record_headless_runtime_session(
+                    group_id=self.group_id,
+                    actor_id=self.actor_id,
+                    runtime="claude",
+                    cwd=self.cwd,
+                    model=self.model,
+                    command=self._runtime_command,
+                    provider_session_id=initial_session_id,
+                    status="usable",
+                    captured_from=initial_captured_from or "claude_generated_session_id",
+                    resume_eligible=True,
+                )
+            except Exception:
+                pass
         with self._lock:
             self._session_state.status = "idle"
             self._session_state.updated_at = utc_now_iso()
@@ -564,6 +665,7 @@ class ClaudeAppSession:
         with self._lock:
             proc = self._proc
             was_running = self._running
+            was_stop_requested = self._stop_requested
             self._stop_requested = True
             self._running = False
             self._proc = None
@@ -571,6 +673,7 @@ class ClaudeAppSession:
             self._session_state.current_task_id = None
             self._session_state.updated_at = utc_now_iso()
             self._active_control_kind = ""
+            self._resumed_provider_session_id = ""
         if was_running:
             exit_code = proc.poll() if proc else None
             logger.info("claude headless stopping: group=%s actor=%s exit_code=%s", self.group_id, self.actor_id, exit_code)
@@ -598,7 +701,7 @@ class ClaudeAppSession:
                 except Exception:
                     pass
         self._emit("headless.session.stopped", {})
-        if persist_actor_stopped:
+        if persist_actor_stopped and not was_stop_requested:
             persist_actor_process_exit_stopped(group_id=self.group_id, actor_id=self.actor_id, runner="headless")
 
     def is_running(self) -> bool:
@@ -613,6 +716,26 @@ class ClaudeAppSession:
     def _control_turn_kind(self) -> str:
         with self._lock:
             return str(self._active_control_kind or "").strip().lower()
+
+    def _mark_stale_resume_failed(self, *, error: str) -> bool:
+        with self._lock:
+            session_id = str(self._resumed_provider_session_id or "").strip()
+            if not session_id:
+                return False
+            self._resumed_provider_session_id = ""
+        mark_runtime_session_resume_failed(
+            group_id=self.group_id,
+            actor_id=self.actor_id,
+            error=error or f"claude headless resume rejected session {session_id}",
+        )
+        self._emit(
+            "headless.session.resume_failed",
+            {
+                "provider_session_id": session_id,
+                "error": error or "claude headless resume rejected",
+            },
+        )
+        return True
 
     def _build_bootstrap_control_text(self) -> str:
         group = load_group(self.group_id)
@@ -751,9 +874,11 @@ class ClaudeAppSession:
         except Exception:
             logger.exception("claude stdout loop failed: %s/%s", self.group_id, self.actor_id)
         finally:
-            with self._lock:
-                persist_actor_stopped = not self._stop_requested
-            self.stop(persist_actor_stopped=persist_actor_stopped)
+            # Claude -p is a print-mode transport and may close stdout after a
+            # completed turn.  Treat that as a transient process end, not as a
+            # durable actor stop; otherwise autostarted headless actors become
+            # permanently disabled after a successful bootstrap.
+            self.stop(persist_actor_stopped=False)
 
     def _stderr_loop(self) -> None:
         proc = self._proc
@@ -923,6 +1048,22 @@ class ClaudeAppSession:
             session_id = str(event.get("session_id") or "").strip()
             with self._lock:
                 self._session_state.session_id = session_id or None
+            if session_id and runtime_resume_enabled():
+                try:
+                    record_headless_runtime_session(
+                        group_id=self.group_id,
+                        actor_id=self.actor_id,
+                        runtime="claude",
+                        cwd=self.cwd,
+                        model=self.model,
+                        command=self._runtime_command,
+                        provider_session_id=session_id,
+                        status="usable",
+                        captured_from="stream_json_init",
+                        resume_eligible=True,
+                    )
+                except Exception:
+                    pass
             logger.info(
                 "claude session init: group=%s actor=%s session=%s model=%s",
                 self.group_id, self.actor_id, session_id,
@@ -1426,7 +1567,14 @@ class ClaudeAppSession:
             self._session_state.status = "idle"
             self._session_state.current_task_id = None
             self._session_state.updated_at = now
+            if subtype in ("success", ""):
+                self._resumed_provider_session_id = ""
         self._persist_state()
+
+        resume_error_text = str(event.get("error") or event.get("result") or "unknown error")
+        resume_rejected = False
+        if subtype not in ("success", "") and _looks_like_stale_resume_error(resume_error_text):
+            resume_rejected = self._mark_stale_resume_failed(error=resume_error_text)
 
         # Complete any remaining tool activities
         for tool_use_id in list(self._active_tool_activities):
@@ -1511,7 +1659,7 @@ class ClaudeAppSession:
                 },
             )
         elif control_kind:
-            error_text = str(event.get("error") or event.get("result") or "unknown error")
+            error_text = resume_error_text
             self._emit(
                 "headless.control.failed",
                 {
@@ -1532,7 +1680,7 @@ class ClaudeAppSession:
                 },
             )
         else:
-            error_text = str(event.get("error") or event.get("result") or "unknown error")
+            error_text = resume_error_text
             self._emit(
                 "headless.turn.failed" if subtype == "error" else "headless.turn.completed",
                 {
@@ -1544,6 +1692,8 @@ class ClaudeAppSession:
             )
 
         self._turn_done.set()
+        if resume_rejected:
+            self.stop(persist_actor_stopped=True)
 
     # ── tool classification ─────────────────────────────────────────────
 
@@ -1617,6 +1767,8 @@ class ClaudeAppSessionManager:
         key = (str(group_id or "").strip(), str(actor_id or "").strip())
         with self._lock:
             session = self._sessions.pop(key, None)
+            if session is not None:
+                session.request_stop()
         if session is not None:
             session.stop()
 
@@ -1627,13 +1779,23 @@ class ClaudeAppSessionManager:
         with self._lock:
             keys = [key for key in self._sessions if key[0] == gid]
             sessions = [self._sessions.pop(key) for key in keys]
+            for session in sessions:
+                session.request_stop()
         for session in sessions:
             session.stop()
+
+    def begin_shutdown(self) -> None:
+        with self._lock:
+            sessions = list(self._sessions.values())
+            for session in sessions:
+                session.request_stop()
 
     def stop_all(self) -> None:
         with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
+            for session in sessions:
+                session.request_stop()
         for session in sessions:
             session.stop()
 

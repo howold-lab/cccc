@@ -44,10 +44,7 @@ const VOICE_BACKENDS = [
 ];
 const VOICE_AVAILABLE_BACKENDS = new Set(["browser_asr", "assistant_service_local_asr"]);
 
-const VOICE_RECOMMENDED_QUIET_SECONDS = 5;
-const VOICE_MIN_QUIET_SECONDS = 1;
-const VOICE_MAX_QUIET_SECONDS = 60;
-const VOICE_RECOMMENDED_MAX_WINDOW_SECONDS = 120;
+const VOICE_RECOMMENDED_MAX_WINDOW_SECONDS = 300;
 const VOICE_MIN_MAX_WINDOW_SECONDS = 10;
 const VOICE_MAX_MAX_WINDOW_SECONDS = 300;
 const DIARIZATION_MODEL_ID = "sherpa_onnx_diarization_pyannote_3dspeaker_zh";
@@ -137,7 +134,7 @@ function StatusPill({ children, tone }: { children: React.ReactNode; tone: "on" 
     tone === "on"
       ? "border border-emerald-600/15 bg-emerald-50 text-emerald-800 dark:border-emerald-400/18 dark:bg-emerald-400/10 dark:text-emerald-200"
       : tone === "off"
-        ? "border border-slate-500/10 bg-slate-500/8 text-[var(--color-text-muted)]"
+        ? "border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-muted)]"
         : "border border-black/10 bg-[rgb(245,245,245)] text-[rgb(35,36,37)] dark:border-white/12 dark:bg-white/[0.08] dark:text-white";
   return (
     <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium shadow-[inset_0_1px_0_rgba(255,255,255,0.55)] ${classes}`}>
@@ -147,19 +144,11 @@ function StatusPill({ children, tone }: { children: React.ReactNode; tone: "on" 
 }
 
 function localVoicePanelClass(isDark: boolean) {
-  return `rounded-xl border p-4 ${
-    isDark
-      ? "border-white/10 bg-white/[0.035]"
-      : "border-slate-200/80 bg-white/70"
-  }`;
+  return "rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] p-4";
 }
 
 function localVoiceModelCardClass(isDark: boolean) {
-  return `rounded-lg border p-3 ${
-    isDark
-      ? "border-white/10 bg-black/10"
-      : "border-slate-200/75 bg-slate-50/70"
-  }`;
+  return "rounded-lg border border-[var(--glass-border-subtle)] bg-[var(--color-bg-secondary)] p-3";
 }
 
 function AssistantsFeedbackToast({ error, notice }: { error: string; notice: string }) {
@@ -211,14 +200,14 @@ function AssistantSwitch({
       />
       <span
         aria-hidden="true"
-        className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors ${
+        className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors duration-300 ease-spring ${
           checked
             ? "border-emerald-500 bg-emerald-500"
             : "border-[var(--glass-border-subtle)] bg-[var(--color-bg-secondary)]"
         } ${disabled ? "opacity-50" : ""}`}
       >
         <span
-          className={`absolute left-0.5 h-6 w-6 rounded-full bg-white shadow-sm transition-transform ${
+          className={`absolute left-0.5 h-6 w-6 rounded-full bg-white shadow-[0_2px_4px_rgba(0,0,0,0.08),0_1px_1px_rgba(0,0,0,0.04)] transition-transform duration-300 ease-spring ${
             checked ? "translate-x-5" : "translate-x-0"
           }`}
         />
@@ -365,6 +354,10 @@ export function AssistantsTab({
   const { t } = useTranslation("settings");
   const loadSeq = useRef(0);
   const visibleLoadCount = useRef(0);
+  const groupIdRef = useRef("");
+  const voiceBackendDraftDirtyRef = useRef(false);
+  groupIdRef.current = String(groupId || "").trim();
+  const isCurrentGroup = useCallback((gid: string) => String(gid || "").trim() === groupIdRef.current, []);
 
   const [assistantState, setAssistantState] = useState<AssistantStateResult | null>(null);
   const [loadBusy, setLoadBusy] = useState(false);
@@ -375,13 +368,14 @@ export function AssistantsTab({
 
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [recognitionBackend, setRecognitionBackend] = useState("browser_asr");
-  const [voiceQuietWindowSeconds, setVoiceQuietWindowSeconds] = useState(VOICE_RECOMMENDED_QUIET_SECONDS);
+  const [voiceDocumentAutoUpdateEnabled, setVoiceDocumentAutoUpdateEnabled] = useState(true);
   const [voiceMaxWindowSeconds, setVoiceMaxWindowSeconds] = useState(VOICE_RECOMMENDED_MAX_WINDOW_SECONDS);
   const [serviceRuntimeInstallBusy, setServiceRuntimeInstallBusy] = useState(false);
   const [diarizationModelInstallBusy, setDiarizationModelInstallBusy] = useState(false);
   const [localAsrMaintenanceBusy, setLocalAsrMaintenanceBusy] = useState(false);
 
   const [assistantHelpPrompt, setAssistantHelpPrompt] = useState<GroupPromptInfo | null>(null);
+  const [assistantHelpPromptGroupId, setAssistantHelpPromptGroupId] = useState("");
   const [petPersonaDraft, setPetPersonaDraft] = useState("");
   const [voiceSecretaryGuidanceDraft, setVoiceSecretaryGuidanceDraft] = useState("");
   const [assistantPromptBusy, setAssistantPromptBusy] = useState(false);
@@ -399,19 +393,18 @@ export function AssistantsTab({
     [assistantState],
   );
   const effectivePetEnabled = Boolean(petAssistant?.enabled ?? petEnabled);
+  const activeAssistantHelpPrompt = assistantHelpPromptGroupId === groupIdRef.current ? assistantHelpPrompt : null;
 
   const syncVoiceDraft = useCallback((state: AssistantStateResult | null) => {
     const voice = findAssistant(state, "voice_secretary");
     const backend = readStringConfig(voice, "recognition_backend", "browser_asr");
     setVoiceEnabled(Boolean(voice?.enabled));
-    setRecognitionBackend(backend || "browser_asr");
-    setVoiceQuietWindowSeconds(readNumberConfig(
-      voice,
-      "auto_document_quiet_ms",
-      VOICE_RECOMMENDED_QUIET_SECONDS * 1000,
-      VOICE_MIN_QUIET_SECONDS * 1000,
-      VOICE_MAX_QUIET_SECONDS * 1000,
-    ) / 1000);
+    if (!voiceBackendDraftDirtyRef.current) {
+      setRecognitionBackend(backend || "browser_asr");
+    }
+    const rawMaxWindow = voice?.config?.auto_document_max_window_seconds;
+    const documentAutoUpdateEnabled = rawMaxWindow !== null;
+    setVoiceDocumentAutoUpdateEnabled(documentAutoUpdateEnabled);
     setVoiceMaxWindowSeconds(readNumberConfig(
       voice,
       "auto_document_max_window_seconds",
@@ -420,6 +413,30 @@ export function AssistantsTab({
       VOICE_MAX_MAX_WINDOW_SECONDS,
     ));
   }, []);
+
+  useEffect(() => {
+    loadSeq.current += 1;
+    visibleLoadCount.current = 0;
+    setLoadBusy(false);
+    setVoiceSaveBusy(false);
+    setPetSaveBusy(false);
+    setServiceRuntimeInstallBusy(false);
+    setDiarizationModelInstallBusy(false);
+    setLocalAsrMaintenanceBusy(false);
+    voiceBackendDraftDirtyRef.current = false;
+    setAssistantState(null);
+    syncVoiceDraft(null);
+    setError("");
+    setNotice("");
+    setAssistantHelpPrompt(null);
+    setAssistantHelpPromptGroupId("");
+    setPetPersonaDraft("");
+    setVoiceSecretaryGuidanceDraft("");
+    setAssistantPromptBusy(false);
+    setAssistantPromptError("");
+    setAssistantPromptNotice("");
+    setAssistantPromptFeedbackBlock("");
+  }, [groupId, syncVoiceDraft]);
 
   const loadAssistants = useCallback(async (opts?: { quiet?: boolean }) => {
     const gid = String(groupId || "").trim();
@@ -433,7 +450,7 @@ export function AssistantsTab({
     setError("");
     try {
       const resp = await api.fetchAssistantState(gid);
-      if (seq !== loadSeq.current) return;
+      if (!isCurrentGroup(gid) || seq !== loadSeq.current) return;
       if (!resp.ok) {
         setAssistantState(null);
         setError(resp.error?.message || t("assistants.loadFailed"));
@@ -442,51 +459,57 @@ export function AssistantsTab({
       setAssistantState(resp.result);
       syncVoiceDraft(resp.result);
     } catch {
-      if (seq === loadSeq.current) {
+      if (isCurrentGroup(gid) && seq === loadSeq.current) {
         setAssistantState(null);
         setError(t("assistants.loadFailed"));
       }
     } finally {
-      if (showBusy) {
+      if (isCurrentGroup(gid) && showBusy) {
         visibleLoadCount.current = Math.max(0, visibleLoadCount.current - 1);
         if (visibleLoadCount.current === 0) setLoadBusy(false);
       }
     }
-  }, [groupId, syncVoiceDraft, t]);
+  }, [groupId, isCurrentGroup, syncVoiceDraft, t]);
 
   const loadAssistantGuidance = useCallback(async (opts?: { force?: boolean }) => {
     const gid = String(groupId || "").trim();
     if (!gid) return null;
-    if (!opts?.force && assistantHelpPrompt) return assistantHelpPrompt;
+    if (!opts?.force && assistantHelpPrompt && assistantHelpPromptGroupId === gid) return assistantHelpPrompt;
     setAssistantPromptBusy(true);
     setAssistantPromptError("");
     setAssistantPromptFeedbackBlock("");
     try {
       const resp = await api.fetchGroupPrompts(gid);
+      if (!isCurrentGroup(gid)) return null;
       if (!resp.ok) {
         setAssistantHelpPrompt(null);
+        setAssistantHelpPromptGroupId("");
         setAssistantPromptError(resp.error?.message || t("assistants.assistantGuidanceLoadFailed"));
         return null;
       }
       const nextHelp = resp.result?.help ?? null;
       if (!nextHelp) {
         setAssistantHelpPrompt(null);
+        setAssistantHelpPromptGroupId("");
         setAssistantPromptError(t("assistants.assistantGuidanceLoadFailed"));
         return null;
       }
       const parsed = parseHelpMarkdown(String(nextHelp.content || ""));
       setAssistantHelpPrompt(nextHelp);
+      setAssistantHelpPromptGroupId(gid);
       setPetPersonaDraft(resolvePetPersonaDraft(parsed.pet));
       setVoiceSecretaryGuidanceDraft(resolveVoiceSecretaryGuidanceDraft(parsed.voiceSecretary));
       return nextHelp;
     } catch {
+      if (!isCurrentGroup(gid)) return null;
       setAssistantHelpPrompt(null);
+      setAssistantHelpPromptGroupId("");
       setAssistantPromptError(t("assistants.assistantGuidanceLoadFailed"));
       return null;
     } finally {
-      setAssistantPromptBusy(false);
+      if (isCurrentGroup(gid)) setAssistantPromptBusy(false);
     }
-  }, [assistantHelpPrompt, groupId, t]);
+  }, [assistantHelpPrompt, assistantHelpPromptGroupId, groupId, isCurrentGroup, t]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -497,7 +520,7 @@ export function AssistantsTab({
   const saveVoiceSettings = async (overrides?: {
     enabled?: boolean;
     backend?: string;
-    quietSeconds?: number;
+    documentAutoUpdateEnabled?: boolean;
     maxWindowSeconds?: number;
   }) => {
     const gid = String(groupId || "").trim();
@@ -512,11 +535,9 @@ export function AssistantsTab({
         readStringConfig(voiceAssistant, "recognition_language", "mixed"),
         nextBackend,
       );
-      const quietSeconds = clampNumber(
-        Number(overrides?.quietSeconds ?? voiceQuietWindowSeconds),
-        VOICE_MIN_QUIET_SECONDS,
-        VOICE_MAX_QUIET_SECONDS,
-      );
+      const nextDocumentAutoUpdateEnabled = typeof overrides?.documentAutoUpdateEnabled === "boolean"
+        ? overrides.documentAutoUpdateEnabled
+        : voiceDocumentAutoUpdateEnabled;
       const maxWindowSeconds = clampNumber(
         Number(overrides?.maxWindowSeconds ?? voiceMaxWindowSeconds),
         VOICE_MIN_MAX_WINDOW_SECONDS,
@@ -529,63 +550,69 @@ export function AssistantsTab({
           recognition_backend: nextBackend,
           recognition_language: nextRecognitionLanguage,
           auto_document_enabled: true,
-          auto_document_quiet_ms: Math.round(quietSeconds * 1000),
-          auto_document_max_window_seconds: Math.round(maxWindowSeconds),
+          auto_document_max_window_seconds: nextDocumentAutoUpdateEnabled ? Math.round(maxWindowSeconds) : null,
           document_default_dir: "docs/voice-secretary",
           service_model_id: "",
           tts_enabled: false,
         },
         by: "user",
       });
+      if (!isCurrentGroup(gid)) return false;
       if (!resp.ok) {
         setError(resp.error?.message || t("assistants.saveFailed"));
         return false;
       }
       setVoiceEnabled(nextEnabled);
+      voiceBackendDraftDirtyRef.current = false;
       setRecognitionBackend(nextBackend);
-      setVoiceQuietWindowSeconds(quietSeconds);
+      setVoiceDocumentAutoUpdateEnabled(nextDocumentAutoUpdateEnabled);
       setVoiceMaxWindowSeconds(maxWindowSeconds);
       setNotice(t("assistants.voiceSaved"));
       await loadAssistants({ quiet: true });
       return true;
     } catch {
+      if (!isCurrentGroup(gid)) return false;
       setError(t("assistants.saveFailed"));
       return false;
     } finally {
-      setVoiceSaveBusy(false);
+      if (isCurrentGroup(gid)) setVoiceSaveBusy(false);
     }
   };
 
-  const resetVoiceBatching = async () => {
-    const previousQuiet = voiceQuietWindowSeconds;
+  const resetVoiceDocumentUpdateInterval = async () => {
+    const previousAutoUpdateEnabled = voiceDocumentAutoUpdateEnabled;
     const previousMaxWindow = voiceMaxWindowSeconds;
-    setVoiceQuietWindowSeconds(VOICE_RECOMMENDED_QUIET_SECONDS);
+    setVoiceDocumentAutoUpdateEnabled(true);
     setVoiceMaxWindowSeconds(VOICE_RECOMMENDED_MAX_WINDOW_SECONDS);
     const ok = await saveVoiceSettings({
-      quietSeconds: VOICE_RECOMMENDED_QUIET_SECONDS,
+      documentAutoUpdateEnabled: true,
       maxWindowSeconds: VOICE_RECOMMENDED_MAX_WINDOW_SECONDS,
     });
     if (!ok) {
-      setVoiceQuietWindowSeconds(previousQuiet);
+      setVoiceDocumentAutoUpdateEnabled(previousAutoUpdateEnabled);
       setVoiceMaxWindowSeconds(previousMaxWindow);
     }
   };
 
   const toggleVoiceEnabled = async (nextEnabled: boolean) => {
+    const gid = String(groupId || "").trim();
     const previous = voiceEnabled;
     setVoiceEnabled(nextEnabled);
     const ok = await saveVoiceSettings({ enabled: nextEnabled });
+    if (!isCurrentGroup(gid)) return;
     if (!ok) setVoiceEnabled(previous);
   };
 
   const togglePet = async (nextEnabled?: boolean) => {
     if (!onUpdatePetEnabled) return;
+    const gid = String(groupId || "").trim();
     setPetSaveBusy(true);
     setError("");
     setNotice("");
     const requestedEnabled = typeof nextEnabled === "boolean" ? nextEnabled : !effectivePetEnabled;
     try {
       const ok = await onUpdatePetEnabled(requestedEnabled);
+      if (!isCurrentGroup(gid)) return;
       if (ok === false) {
         setError(t("assistants.petSaveFailed"));
         return;
@@ -593,9 +620,10 @@ export function AssistantsTab({
       setNotice(requestedEnabled ? t("assistants.petEnabled") : t("assistants.petDisabled"));
       await loadAssistants({ quiet: true });
     } catch {
+      if (!isCurrentGroup(gid)) return;
       setError(t("assistants.petSaveFailed"));
     } finally {
-      setPetSaveBusy(false);
+      if (isCurrentGroup(gid)) setPetSaveBusy(false);
     }
   };
 
@@ -607,7 +635,8 @@ export function AssistantsTab({
     setAssistantPromptNotice("");
     setAssistantPromptFeedbackBlock(block);
     try {
-      const currentHelp = assistantHelpPrompt ?? await loadAssistantGuidance({ force: true });
+      const currentHelp = activeAssistantHelpPrompt ?? await loadAssistantGuidance({ force: true });
+      if (!isCurrentGroup(gid)) return;
       if (!currentHelp) return;
       setAssistantPromptFeedbackBlock(block);
       const currentContent = String(currentHelp.content || "");
@@ -621,6 +650,7 @@ export function AssistantsTab({
         editorMode: "structured",
         changedBlocks: [block],
       });
+      if (!isCurrentGroup(gid)) return;
       if (!resp.ok) {
         setAssistantPromptError(resp.error?.message || t("assistants.assistantGuidanceSaveFailed"));
         return;
@@ -628,20 +658,22 @@ export function AssistantsTab({
       const nextHelp = resp.result;
       const nextParsed = parseHelpMarkdown(String(nextHelp.content || ""));
       setAssistantHelpPrompt(nextHelp);
+      setAssistantHelpPromptGroupId(gid);
       setPetPersonaDraft(resolvePetPersonaDraft(nextParsed.pet));
       setVoiceSecretaryGuidanceDraft(resolveVoiceSecretaryGuidanceDraft(nextParsed.voiceSecretary));
       setAssistantPromptNotice(
         block === "pet" ? t("assistants.petPersonaSaved") : t("assistants.voiceGuidanceSaved"),
       );
     } catch {
+      if (!isCurrentGroup(gid)) return;
       setAssistantPromptError(t("assistants.assistantGuidanceSaveFailed"));
     } finally {
-      setAssistantPromptBusy(false);
+      if (isCurrentGroup(gid)) setAssistantPromptBusy(false);
     }
   };
 
   const discardPetPersona = () => {
-    const saved = assistantHelpPrompt ? parseHelpMarkdown(String(assistantHelpPrompt.content || "")).pet : "";
+    const saved = activeAssistantHelpPrompt ? parseHelpMarkdown(String(activeAssistantHelpPrompt.content || "")).pet : "";
     setPetPersonaDraft(resolvePetPersonaDraft(saved));
     setAssistantPromptError("");
     setAssistantPromptNotice("");
@@ -649,7 +681,7 @@ export function AssistantsTab({
   };
 
   const discardVoiceSecretaryGuidance = () => {
-    const saved = assistantHelpPrompt ? parseHelpMarkdown(String(assistantHelpPrompt.content || "")).voiceSecretary : "";
+    const saved = activeAssistantHelpPrompt ? parseHelpMarkdown(String(activeAssistantHelpPrompt.content || "")).voiceSecretary : "";
     setVoiceSecretaryGuidanceDraft(resolveVoiceSecretaryGuidanceDraft(saved));
     setAssistantPromptError("");
     setAssistantPromptNotice("");
@@ -762,6 +794,7 @@ export function AssistantsTab({
       by: "user",
       background: true,
     });
+    if (!isCurrentGroup(gid)) return false;
     if (!resp.ok) {
       setError(resp.error?.message || t("assistants.streamingAsrModelInstallFailed", { defaultValue: "Failed to install ASR model." }));
       return false;
@@ -777,6 +810,7 @@ export function AssistantsTab({
     setNotice("");
     try {
       const saved = await saveVoiceSettings({ backend: "assistant_service_local_asr" });
+      if (!isCurrentGroup(gid)) return;
       if (!saved) return;
       if (!streamingRuntimeReady) {
         const runtimeResp = await api.installVoiceAssistantRuntime(gid, {
@@ -784,6 +818,7 @@ export function AssistantsTab({
           by: "user",
           background: true,
         });
+        if (!isCurrentGroup(gid)) return;
         if (!runtimeResp.ok) {
           setError(runtimeResp.error?.message || t("assistants.streamingRuntimeInstallFailed"));
           return;
@@ -800,9 +835,10 @@ export function AssistantsTab({
       setNotice(t("assistants.localAsrInstallStarted", { defaultValue: "Local ASR setup started." }));
       await loadAssistants({ quiet: true });
     } catch {
+      if (!isCurrentGroup(gid)) return;
       setError(t("assistants.localAsrInstallFailed", { defaultValue: "Failed to install local ASR." }));
     } finally {
-      setServiceRuntimeInstallBusy(false);
+      if (isCurrentGroup(gid)) setServiceRuntimeInstallBusy(false);
     }
   };
 
@@ -814,12 +850,14 @@ export function AssistantsTab({
     setNotice("");
     try {
       const saved = await saveVoiceSettings({ backend: "assistant_service_local_asr" });
+      if (!isCurrentGroup(gid)) return;
       if (!saved) return;
       const resp = await api.installVoiceAssistantModel(gid, {
         modelId: DIARIZATION_MODEL_ID,
         by: "user",
         background: true,
       });
+      if (!isCurrentGroup(gid)) return;
       if (!resp.ok) {
         setError(resp.error?.message || t("assistants.diarizationModelInstallFailed", { defaultValue: "Failed to install speaker diarization model." }));
         return;
@@ -827,9 +865,10 @@ export function AssistantsTab({
       setNotice(t("assistants.diarizationModelInstallStarted", { defaultValue: "Speaker diarization model download started." }));
       await loadAssistants({ quiet: true });
     } catch {
+      if (!isCurrentGroup(gid)) return;
       setError(t("assistants.diarizationModelInstallFailed", { defaultValue: "Failed to install speaker diarization model." }));
     } finally {
-      setDiarizationModelInstallBusy(false);
+      if (isCurrentGroup(gid)) setDiarizationModelInstallBusy(false);
     }
   };
 
@@ -846,6 +885,7 @@ export function AssistantsTab({
           modelId,
           by: "user",
         });
+        if (!isCurrentGroup(gid)) return;
         if (!modelResp.ok) {
           setError(modelResp.error?.message || t("assistants.localAsrRemoveFailed", { defaultValue: "Failed to remove local ASR." }));
           return;
@@ -855,6 +895,7 @@ export function AssistantsTab({
         runtimeId: STREAMING_ASR_RUNTIME_ID,
         by: "user",
       });
+      if (!isCurrentGroup(gid)) return;
       if (!runtimeResp.ok) {
         setError(runtimeResp.error?.message || t("assistants.localAsrRemoveFailed", { defaultValue: "Failed to remove local ASR." }));
         return;
@@ -862,9 +903,10 @@ export function AssistantsTab({
       setNotice(t("assistants.localAsrRemoved", { defaultValue: "Local ASR cache removed." }));
       await loadAssistants({ quiet: true });
     } catch {
+      if (!isCurrentGroup(gid)) return;
       setError(t("assistants.localAsrRemoveFailed", { defaultValue: "Failed to remove local ASR." }));
     } finally {
-      setLocalAsrMaintenanceBusy(false);
+      if (isCurrentGroup(gid)) setLocalAsrMaintenanceBusy(false);
     }
   };
 
@@ -878,23 +920,27 @@ export function AssistantsTab({
     try {
       for (const modelId of localAsrModelIds) {
         const modelRemove = await api.removeVoiceAssistantModel(gid, { modelId, by: "user" });
+        if (!isCurrentGroup(gid)) return;
         if (!modelRemove.ok) {
           setError(modelRemove.error?.message || t("assistants.localAsrReinstallFailed", { defaultValue: "Failed to reinstall local ASR." }));
           return;
         }
       }
       const runtimeRemove = await api.removeVoiceAssistantRuntime(gid, { runtimeId: STREAMING_ASR_RUNTIME_ID, by: "user" });
+      if (!isCurrentGroup(gid)) return;
       if (!runtimeRemove.ok) {
         setError(runtimeRemove.error?.message || t("assistants.localAsrReinstallFailed", { defaultValue: "Failed to reinstall local ASR." }));
         return;
       }
       const runtimeInstall = await api.installVoiceAssistantRuntime(gid, { runtimeId: STREAMING_ASR_RUNTIME_ID, by: "user", background: true });
+      if (!isCurrentGroup(gid)) return;
       if (!runtimeInstall.ok) {
         setError(runtimeInstall.error?.message || t("assistants.localAsrReinstallFailed", { defaultValue: "Failed to reinstall local ASR." }));
         return;
       }
       for (const modelId of localAsrModelIds) {
         const modelInstall = await api.installVoiceAssistantModel(gid, { modelId, by: "user", background: true });
+        if (!isCurrentGroup(gid)) return;
         if (!modelInstall.ok) {
           setError(modelInstall.error?.message || t("assistants.localAsrReinstallFailed", { defaultValue: "Failed to reinstall local ASR." }));
           return;
@@ -903,9 +949,10 @@ export function AssistantsTab({
       setNotice(t("assistants.localAsrReinstallStarted", { defaultValue: "Local ASR reinstall started." }));
       await loadAssistants({ quiet: true });
     } catch {
+      if (!isCurrentGroup(gid)) return;
       setError(t("assistants.localAsrReinstallFailed", { defaultValue: "Failed to reinstall local ASR." }));
     } finally {
-      setLocalAsrMaintenanceBusy(false);
+      if (isCurrentGroup(gid)) setLocalAsrMaintenanceBusy(false);
     }
   };
 
@@ -921,6 +968,7 @@ export function AssistantsTab({
         modelId: DIARIZATION_MODEL_ID,
         by: "user",
       });
+      if (!isCurrentGroup(gid)) return;
       if (!resp.ok) {
         setError(resp.error?.message || t("assistants.diarizationModelRemoveFailed", { defaultValue: "Failed to remove speaker-label model." }));
         return;
@@ -928,9 +976,10 @@ export function AssistantsTab({
       setNotice(t("assistants.diarizationModelRemoved", { defaultValue: "Speaker-label model removed." }));
       await loadAssistants({ quiet: true });
     } catch {
+      if (!isCurrentGroup(gid)) return;
       setError(t("assistants.diarizationModelRemoveFailed", { defaultValue: "Failed to remove speaker-label model." }));
     } finally {
-      setDiarizationModelInstallBusy(false);
+      if (isCurrentGroup(gid)) setDiarizationModelInstallBusy(false);
     }
   };
 
@@ -943,11 +992,13 @@ export function AssistantsTab({
     setNotice("");
     try {
       const removeResp = await api.removeVoiceAssistantModel(gid, { modelId: DIARIZATION_MODEL_ID, by: "user" });
+      if (!isCurrentGroup(gid)) return;
       if (!removeResp.ok) {
         setError(removeResp.error?.message || t("assistants.diarizationModelReinstallFailed", { defaultValue: "Failed to reinstall speaker-label model." }));
         return;
       }
       const installResp = await api.installVoiceAssistantModel(gid, { modelId: DIARIZATION_MODEL_ID, by: "user", background: true });
+      if (!isCurrentGroup(gid)) return;
       if (!installResp.ok) {
         setError(installResp.error?.message || t("assistants.diarizationModelReinstallFailed", { defaultValue: "Failed to reinstall speaker-label model." }));
         return;
@@ -955,9 +1006,10 @@ export function AssistantsTab({
       setNotice(t("assistants.diarizationModelReinstallStarted", { defaultValue: "Speaker-label model reinstall started." }));
       await loadAssistants({ quiet: true });
     } catch {
+      if (!isCurrentGroup(gid)) return;
       setError(t("assistants.diarizationModelReinstallFailed", { defaultValue: "Failed to reinstall speaker-label model." }));
     } finally {
-      setDiarizationModelInstallBusy(false);
+      if (isCurrentGroup(gid)) setDiarizationModelInstallBusy(false);
     }
   };
 
@@ -979,29 +1031,29 @@ export function AssistantsTab({
       </div>
     );
   }
-  const parsedHelp = assistantHelpPrompt ? parseHelpMarkdown(String(assistantHelpPrompt.content || "")) : null;
+  const parsedHelp = activeAssistantHelpPrompt ? parseHelpMarkdown(String(activeAssistantHelpPrompt.content || "")) : null;
   const savedPetPersona = parsedHelp?.pet || "";
   const savedVoiceSecretaryGuidance = parsedHelp?.voiceSecretary || "";
   const hasPetPersonaUnsaved = promptDraftDirty(
     savedPetPersona,
     petPersonaDraft,
-    assistantHelpPrompt !== null,
+    activeAssistantHelpPrompt !== null,
     resolvePetPersonaDraft(""),
   );
   const hasVoiceGuidanceUnsaved = promptDraftDirty(
     savedVoiceSecretaryGuidance,
     voiceSecretaryGuidanceDraft,
-    assistantHelpPrompt !== null,
+    activeAssistantHelpPrompt !== null,
     resolveVoiceSecretaryGuidanceDraft(""),
   );
-  const showBrowserTranscriptBatching = recognitionBackend === "browser_asr";
+  const showDocumentUpdateControls = recognitionBackend === "browser_asr" || recognitionBackend === "assistant_service_local_asr";
 
   const renderVoiceGuidanceEditor = (expanded = false) => (
     <AssistantPromptEditor
       isDark={isDark}
       title={t("assistants.voiceGuidanceTitle")}
       hint={t("assistants.voiceGuidanceHint")}
-      path={assistantHelpPrompt?.path || undefined}
+      path={activeAssistantHelpPrompt?.path || undefined}
       value={voiceSecretaryGuidanceDraft}
       placeholder={t("assistants.voiceGuidancePlaceholder")}
       busy={assistantPromptBusy}
@@ -1030,7 +1082,7 @@ export function AssistantsTab({
       isDark={isDark}
       title={t("assistants.petPersonaTitle")}
       hint={t("assistants.petPersonaHint")}
-      path={assistantHelpPrompt?.path || undefined}
+      path={activeAssistantHelpPrompt?.path || undefined}
       value={petPersonaDraft}
       placeholder={t("assistants.petPersonaPlaceholder")}
       busy={assistantPromptBusy}
@@ -1107,7 +1159,10 @@ export function AssistantsTab({
                       <GroupCombobox
                         items={backendComboboxItems}
                         value={recognitionBackend}
-                        onChange={setRecognitionBackend}
+                        onChange={(value) => {
+                          voiceBackendDraftDirtyRef.current = true;
+                          setRecognitionBackend(value);
+                        }}
                         placeholder={t("assistants.recognitionBackend")}
                         searchPlaceholder={t("assistants.recognitionBackend")}
                         emptyText={t("common:noResults", { defaultValue: "No matching results" })}
@@ -1310,52 +1365,37 @@ export function AssistantsTab({
                     </div>
                   ) : null}
 
-                  {showBrowserTranscriptBatching ? (
+                  {showDocumentUpdateControls ? (
                     <div className={`mt-4 ${settingsWorkspaceSoftPanelClass(isDark)}`}>
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-xs font-semibold text-[var(--color-text-primary)]">
-                            {t("assistants.transcriptBatchingTitle")}
+                            {t("assistants.documentUpdateIntervalTitle")}
                           </div>
                           <p className="mt-1 text-[11px] leading-5 text-[var(--color-text-muted)]">
-                            {t("assistants.transcriptBatchingHint")}
+                            {t("assistants.documentUpdateIntervalHint")}
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => void resetVoiceBatching()}
-                          disabled={busy || voiceSaveBusy}
-                          className={secondaryButtonClass("sm")}
-                        >
-                          {t("assistants.resetTranscriptBatching")}
-                        </button>
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          <AssistantSwitch
+                            checked={voiceDocumentAutoUpdateEnabled}
+                            disabled={busy || voiceSaveBusy}
+                            label={t("assistants.documentAutoUpdateSwitch")}
+                            onChange={(checked) => setVoiceDocumentAutoUpdateEnabled(checked)}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void resetVoiceDocumentUpdateInterval()}
+                            disabled={busy || voiceSaveBusy}
+                            className={secondaryButtonClass("sm")}
+                          >
+                            {t("assistants.resetDocumentUpdateInterval")}
+                          </button>
+                        </div>
                       </div>
-                      <div className="mt-3 grid gap-4 md:grid-cols-2">
+                      <div className="mt-3 grid gap-4 md:grid-cols-1">
                         <div>
-                          <label className={labelClass(isDark)}>{t("assistants.transcriptQuietWindow")}</label>
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="number"
-                              min={VOICE_MIN_QUIET_SECONDS}
-                              max={VOICE_MAX_QUIET_SECONDS}
-                              step={1}
-                              value={voiceQuietWindowSeconds}
-                              onChange={(event) => {
-                                const value = Number(event.target.value);
-                                if (Number.isFinite(value)) setVoiceQuietWindowSeconds(value);
-                              }}
-                              className={inputClass(isDark)}
-                            />
-                            <span className="shrink-0 text-xs text-[var(--color-text-muted)]">
-                              {t("assistants.secondsUnit")}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-[11px] leading-5 text-[var(--color-text-muted)]">
-                            {t("assistants.transcriptQuietWindowHint")}
-                          </p>
-                        </div>
-                        <div>
-                          <label className={labelClass(isDark)}>{t("assistants.transcriptMaxWindow")}</label>
+                          <label className={labelClass(isDark)}>{t("assistants.documentUpdateInterval")}</label>
                           <div className="flex items-center gap-2">
                             <input
                               type="number"
@@ -1363,6 +1403,7 @@ export function AssistantsTab({
                               max={VOICE_MAX_MAX_WINDOW_SECONDS}
                               step={1}
                               value={voiceMaxWindowSeconds}
+                              disabled={!voiceDocumentAutoUpdateEnabled}
                               onChange={(event) => {
                                 const value = Number(event.target.value);
                                 if (Number.isFinite(value)) setVoiceMaxWindowSeconds(value);
@@ -1374,7 +1415,9 @@ export function AssistantsTab({
                             </span>
                           </div>
                           <p className="mt-1 text-[11px] leading-5 text-[var(--color-text-muted)]">
-                            {t("assistants.transcriptMaxWindowHint")}
+                            {voiceDocumentAutoUpdateEnabled
+                              ? t("assistants.documentUpdateIntervalEnabledHint")
+                              : t("assistants.documentUpdateIntervalDisabledHint")}
                           </p>
                         </div>
                       </div>

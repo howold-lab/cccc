@@ -4,6 +4,110 @@ All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/), and versions follow SemVer/PEP 440.
 
+## [0.4.20] — 2026-05-22
+
+### Added
+- **Voice Secretary recording diagnostics** now report clearer stop reasons for browser and local ASR paths, including microphone track endings, muted tracks, local ASR websocket failures, backend errors, and audio-context interruptions.
+- **Voice Secretary document refresh fallback** now detects external document changes while the Doc panel is open by polling document metadata and loading full content only when the active document revision changes.
+- **Message request lanes and chat diagnostics** add better isolation and evidence for chat send/reply flows, improving durability around concurrent message requests and short-circuit failures.
+- **Actor configuration modal unification** replaces the separate Add Actor modal with a shared add/edit surface, reducing UI drift between actor creation and editing.
+
+### Changed
+- **Local ASR and Browser ASR document-mode stop behavior** is now more consistent: stopping Local ASR can trigger the same final document-refinement path as Browser ASR without requiring a separate manual instruction.
+- **Voice Secretary activity and transcript surfaces** are quieter and denser, focusing Activity on live/request/reply feedback while keeping document transcripts in the document workspace.
+- **Voice Secretary document polling** now uses low-noise metadata-change detection instead of frequent full-content refreshes.
+- **Web UI surfaces** were polished across modals, search, message bubbles, runtime details, sidebar items, typography, and markdown/code-block rendering.
+- **Slash command filtering** now prioritizes command names over noisy short description matches.
+- **Vite development proxying** now honors `CCCC_WEB_HOST` and `CCCC_WEB_PORT`, making local Web development less dependent on the default `127.0.0.1:8848`.
+
+### Fixed
+- Fixed Local ASR normal websocket closes being reported as unexpected recording failures after a successful document-mode stop/save.
+- Fixed Voice Secretary final transcript spacing around ASCII punctuation and improved streaming/offline Sherpa worker shutdown and JSONL handling.
+- Fixed no-op draft handling so empty or meaningless voice input is less likely to pollute composer output.
+- Fixed composer send gating while group actors are still hydrating.
+- Fixed several daemon messaging and ledger reliability issues, including lane isolation, reply idempotency, reverse lookup, compact-threshold behavior, and diagnostics for short-circuit message requests.
+- Fixed MCP blob/file MIME guessing so Markdown attachments are reported as `text/markdown`.
+- Fixed test isolation around remote access environment variables, IM startup process spawning, and pre-commit timeout handling.
+
+### Tests
+- Expanded coverage for Voice Secretary ASR, document finalization, service runtime behavior, chat diagnostics, message lanes, ledger indexing/segmentation, MCP attachment MIME handling, Web UI modal/composer behavior, slash command filtering, and Voice Secretary document polling support.
+
+## [0.4.19] — 2026-05-19
+
+### Fixed
+- **PTY runtime resume recovery** now falls back to a fresh actor when a saved provider resume fails, while preserving durable fresh-session metadata for Claude and Gemini where explicit provider session IDs are supported.
+- **Codex app-server backed PTY relaunches** now record fresh remote TUI thread ids after stale resume metadata falls back to a new thread, preventing repeated relaunch failures on the same invalid thread.
+- **Windows actor restart behavior** now handles Codex command shims, app-server process-tree termination, and PTY terminal capability queries more reliably.
+- **MCP runtime context recovery on Windows** can recover CCCC runtime identity from parent and ancestor process environments when the immediate MCP process environment is incomplete.
+
+### Changed
+- **Codex remote TUI startup and shutdown** now distinguish provider thread failures from observer disconnects, use bounded websocket shutdown, and avoid marking resume metadata failed when only the remote TUI surface exits.
+
+### Tests
+- Expanded coverage for Windows PTY query replies, Windows MCP context recovery, Codex app-server thread resume/fallback, remote TUI shutdown semantics, and PTY resume failure recovery across Claude, Gemini, and Codex.
+
+## [0.4.18] — 2026-05-18
+
+### Added
+- **Hermes runtime support** across CLI, daemon IPC, actor startup, MCP setup, runtime selectors, Web runtime display, and tests. Hermes uses the selected user Hermes home/profile, with explicit `HERMES_HOME` respected as a normal user override.
+- **Hermes runtime diagnostics and setup commands**, including status, prepare, and MCP test operations that validate the Hermes CLI, auth/config state, launch readiness, and actor-scoped CCCC MCP environment placeholders.
+- **Daemon-owned Voice Secretary recording leases** so browser recording is guarded across tabs, browsers, and devices with TTL-based recovery.
+- **View-aware Voice Secretary state and document content APIs** so the Web workspace can load compact status snapshots or document content explicitly instead of over-fetching full assistant state.
+- **Codex app thread resume/start support** for app-server backed sessions, giving Codex runtime sessions a clearer provider thread lifecycle.
+
+### Changed
+- **Voice Secretary ASR and document flow** now emits final ASR text, merges CJK transcript chunks more naturally, and uses tighter notification cursors so fresh input is delivered without stale or duplicate nudges.
+- **Codex and runtime session restart behavior** is more conservative around observer disconnects, bootstrap-control failures, explicit fresh-session requests, and stale provider session metadata.
+- **Web chat synchronization** now uses a shared SSE connection registry, better request freshness guards, and composer-state recovery after failed sends.
+- **Runtime avatars** now treat provider logos as branded assets on a stable light logo plate; ChatGPT Web Model reuses the Codex logo and Hermes has a dedicated logo asset.
+- **Voice Secretary Web surfaces** have a quieter activity stream, clearer document loading, and less transient process noise.
+
+### Fixed
+- Fixed projected browser launch compatibility on macOS.
+- Fixed Codex PTY actors being stopped accidentally when an observer-side connection closes.
+- Fixed Codex restart/session edge cases that could leave app-server state, PTY state, or saved session metadata out of sync.
+- Fixed unnecessary slash-command refresh work after formal event updates.
+- Fixed IM sender identity and mention propagation paths, with additional WeCom adapter hardening.
+
+## [0.4.17] — 2026-05-14
+
+### Added
+- **Codex PTY app-server state source** for interactive Codex actors. Codex can now keep a PTY surface for the user while CCCC derives runtime activity from Codex app-server events instead of relying only on terminal text heuristics.
+- **Runtime state source controls** across daemon, CLI, Web API, and actor contracts, currently scoped to Codex PTY actors that opt into app-server-backed state.
+- **WeCom media bridging improvements**, including outbound file/media upload through the WeCom AI Bot WebSocket chunk protocol and active outbound sends when no callback reply handle is available.
+
+### Changed
+- **Codex PTY lifecycle handling** was tightened so remote TUI exit stops the backing app-server session, disabled actors project as stopped even if stale runtime state remains, and app-server-backed PTY actors avoid duplicate bootstrap queuing.
+- **PTY activity detection** was split into reusable terminal-state helpers with better Claude prompt/working detection and safer Codex prompt-versus-working ordering.
+- **Runtime dock and actor list state** now treat app-server-backed Codex PTY actors like structured runtime sessions for activity rings while preserving their PTY runner identity for terminal access.
+- **Chat scrolling behavior** now clears stale scroll affordances more reliably when the user is already at the bottom or jumps to a specific message.
+
+### Fixed
+- Fixed Codex PTY state false-idle cases where an older prompt line could override a newer visible `Working (...)` banner.
+- Fixed app-server-backed Codex PTY tests so CI does not depend on the runner having the Codex CLI installed.
+- Fixed disabled actor projections that could still appear active when stale headless/app-server state existed.
+- Fixed runtime avatar rendering for Claude by using an inline Claude logo where the packaged runtime logo path is not appropriate.
+
+## [0.4.16] — 2026-05-13
+
+### Added
+- **Durable runtime session resume state** for supported provider runtimes. CCCC now stores provider session metadata under each group so actors can relaunch into the same Claude, Codex, or Gemini session when the runtime supports explicit resume.
+- **PTY runtime resume support** for Claude, Codex, and Gemini with provider-specific session capture: generated explicit session IDs for Claude/Gemini, Codex `/status` session detection, stale-resume fallback, and safeguards against PTY/headless session mix-ups.
+- **Headless runtime session metadata** for Claude and Codex app sessions, including provider session/thread recording and guarded native-resume handling where supported.
+
+### Changed
+- **Actor terminal connection handling** was extracted into a reusable hook, reducing AgentTab complexity and making PTY attach, reconnect, terminal signals, and runtime transitions easier to maintain.
+- **Runtime state synchronization in Web** now uses one unified actor snapshot path for ordinary actors and built-in runtime actors, while `actor.activity` updates merge into both stores. Runtime dock state is less likely to appear stale until a manual page refresh.
+- **Composer and Voice Secretary UI behavior** were tightened around cross-group recipients, mobile/voice layout, live transcript preview behavior, and attachment/action plumbing.
+- **MCP install and runtime startup checks** were hardened so already-installed runtime MCP configurations are handled more predictably during actor startup.
+
+### Fixed
+- Fixed runtime dock desynchronization where an actor could be running in the daemon but still appear stopped in the Web UI until refresh.
+- Fixed noisy terminal attach loops when switching between PTY and headless actors, including repeated `terminal attach is only available for PTY actors` messages.
+- Fixed stale or rejected runtime resume metadata so failed provider resume attempts fall back to fresh starts and do not poison subsequent launches.
+- Fixed Copy Groups export so runtime session metadata remains excluded from copied group packages.
+- Fixed built-in assistant startup/profile synchronization so PET and Voice Secretary use their own configuration instead of inheriting foreman runtime details.
+
 ## [0.4.15] — 2026-05-10
 
 ### Added

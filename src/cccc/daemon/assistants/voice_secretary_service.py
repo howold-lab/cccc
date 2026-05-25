@@ -77,7 +77,13 @@ def _command_argv(raw_command: str, *, audio_path: Path, mime_type: str, languag
         .replace("{mime_type}", mime_type)
         .replace("{language}", language)
     )
-    argv = shlex.split(rendered)
+    if os.name == "nt":
+        argv = [
+            item[1:-1] if len(item) >= 2 and item[0] == item[-1] and item[0] in {"'", '"'} else item
+            for item in shlex.split(rendered, posix=False)
+        ]
+    else:
+        argv = shlex.split(rendered)
     if not has_path_placeholder:
         argv.append(str(audio_path))
     return argv
@@ -141,7 +147,7 @@ def _run_asr(audio_bytes: bytes, *, mime_type: str, language: str) -> tuple[str,
         minimum=1,
         maximum=600,
     )
-    tmp_path = Path("")
+    tmp_path: Path | None = None
     try:
         fd, raw_tmp = tempfile.mkstemp(prefix="cccc-voice-secretary-", suffix=suffix)
         tmp_path = Path(raw_tmp)
@@ -178,7 +184,7 @@ def _run_asr(audio_bytes: bytes, *, mime_type: str, language: str) -> tuple[str,
             details={"command": command},
         ) from exc
     finally:
-        if tmp_path:
+        if tmp_path is not None:
             try:
                 tmp_path.unlink()
             except Exception:
@@ -210,7 +216,7 @@ def _run_asr(audio_bytes: bytes, *, mime_type: str, language: str) -> tuple[str,
     transcript = _parse_transcript_stdout(completed.stdout)
     if not transcript:
         raise AsrServiceError("asr_empty_transcript", "ASR command returned empty transcript")
-    return transcript, {"backend": "command", "command": shlex.split(command)[0] if command else ""}
+    return transcript, {"backend": "command", "command": str(argv[0]) if argv else ""}
 
 
 class VoiceSecretaryServiceContext:

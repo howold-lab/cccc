@@ -239,6 +239,16 @@ export function contextRequestKey(groupId: string, detail: ContextDetailLevel): 
   return `context:${String(groupId || "").trim()}:${detail}`;
 }
 
+export function capabilityStateRequestKey(groupId: string, actorId: string, capabilityId: string = "", view: string = ""): string {
+  return [
+    "capability-state",
+    String(groupId || "").trim(),
+    String(actorId || "user").trim() || "user",
+    String(capabilityId || "").trim(),
+    String(view || "").trim(),
+  ].join(":");
+}
+
 export function clearGroupsReadRequest(): void {
   clearRecentReadRequest(groupsRequestKey());
 }
@@ -747,6 +757,10 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<ApiR
     }
     return normalizeApiResponse<T>(data);
   } catch {
+    if (!resp.ok) {
+      const statusText = resp.statusText ? ` ${resp.statusText}` : "";
+      return makeErrorResponse("HTTP_ERROR", `Server returned ${resp.status}${statusText}: ${text.slice(0, 100)}`);
+    }
     return makeErrorResponse("PARSE_ERROR", `Invalid JSON response: ${text.slice(0, 100)}`);
   }
 }

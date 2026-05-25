@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
+from ..kernel.hermes_runtime import hermes_runtime_status, prepare_hermes_runtime
 from ..kernel.runtime import get_cccc_mcp_stdio_command
 from ..util.conv import coerce_bool
 from ..util.fs import read_json
@@ -112,11 +113,50 @@ def _json_mcp_entry_matches_expected(entry: Any, expected_cmd: list[str]) -> boo
     )
 
 
+def _mcp_command_array_matches_expected(command: Any, expected_cmd: list[str]) -> bool:
+    if not isinstance(command, list) or len(command) != len(expected_cmd):
+        return False
+    if not expected_cmd:
+        return False
+    actual = [str(part or "").strip().strip('"').strip("'") for part in command]
+    expected = [str(part or "").strip().strip('"').strip("'") for part in expected_cmd]
+    if _normalize_mcp_command_value(actual[0]) != _normalize_mcp_command_value(expected[0]):
+        return False
+    return actual[1:] == expected[1:]
+
+
 def _runtime_expected_cccc_command(runtime: str) -> list[str]:
     cmd = list(get_cccc_mcp_stdio_command())
     if sys.platform.startswith("win") and runtime == "droid" and cmd:
         cmd[0] = str(cmd[0]).replace("\\", "/")
     return cmd
+
+
+def _home_dir(env: Dict[str, str] | None) -> Path:
+    raw = ""
+    if isinstance(env, dict):
+        raw = str(env.get("HOME") or env.get("USERPROFILE") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home()
+
+
+def _cccc_home_dir(env: Dict[str, str] | None) -> Path | None:
+    raw = ""
+    if isinstance(env, dict):
+        raw = str(env.get("CCCC_HOME") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return None
+
+
+def _hermes_home_override(env: Dict[str, str] | None) -> Path | None:
+    raw = ""
+    if isinstance(env, dict):
+        raw = str(env.get("HERMES_HOME") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return None
 
 
 def _kimi_share_dir(env: Dict[str, str] | None) -> Path:
@@ -125,7 +165,104 @@ def _kimi_share_dir(env: Dict[str, str] | None) -> Path:
         raw = str(env.get("KIMI_SHARE_DIR") or "").strip()
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / ".kimi"
+    return _home_dir(env) / ".kimi"
+
+
+_OPENCODE_CONTEXT_ENV_KEYS = ("CCCC_HOME", "CCCC_GROUP_ID", "CCCC_ACTOR_ID")
+
+
+def _opencode_context_environment(env: Dict[str, str] | None) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    if not isinstance(env, dict):
+        return result
+    for key in _OPENCODE_CONTEXT_ENV_KEYS:
+        value = str(env.get(key) or "").strip()
+        if value:
+            result[key] = value
+    return result
+
+
+def _opencode_cccc_entry(env: Dict[str, str] | None) -> Dict[str, Any]:
+    return {
+        "type": "local",
+        "command": _runtime_expected_cccc_command("opencode"),
+        "enabled": True,
+        "environment": _opencode_context_environment(env),
+    }
+
+
+def _read_opencode_inline_config(env: Dict[str, str] | None) -> Dict[str, Any]:
+    raw = ""
+    if isinstance(env, dict):
+        raw = str(env.get("OPENCODE_CONFIG_CONTENT") or "").strip()
+    if not raw:
+        return {}
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid OPENCODE_CONFIG_CONTENT: expected JSON object") from exc
+    if not isinstance(doc, dict):
+        raise ValueError("invalid OPENCODE_CONFIG_CONTENT: expected JSON object")
+    return dict(doc)
+
+
+def _opencode_mcp_entry_matches_expected(entry: Any, expected_cmd: list[str], env: Dict[str, str] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if str(entry.get("type") or "").strip().lower() != "local":
+        return False
+    if coerce_bool(entry.get("enabled"), default=True) is False:
+        return False
+    if not _mcp_command_array_matches_expected(entry.get("command"), expected_cmd):
+        return False
+    expected_env = _opencode_context_environment(env)
+    if expected_env:
+        actual_env = entry.get("environment")
+        if not isinstance(actual_env, dict):
+            return False
+        for key, value in expected_env.items():
+            actual = str(actual_env.get(key) or "").strip()
+            if actual not in {value, f"{{env:{key}}}"}:
+                return False
+    return True
+
+
+def _opencode_mcp_state(env: Dict[str, str] | None) -> str:
+    try:
+        doc = _read_opencode_inline_config(env)
+    except ValueError:
+        return "stale"
+    servers = doc.get("mcp") if isinstance(doc, dict) else None
+    if not isinstance(servers, dict):
+        return "missing"
+    entry = servers.get("cccc")
+    if entry is None:
+        return "missing"
+    expected_cmd = _runtime_expected_cccc_command("opencode")
+    return "ready" if _opencode_mcp_entry_matches_expected(entry, expected_cmd, env) else "stale"
+
+
+def prepare_runtime_mcp_env(runtime: str, env: Dict[str, Any] | None) -> Dict[str, str]:
+    """Return the process env needed for runtime-scoped CCCC MCP wiring.
+
+    OpenCode's `mcp add` command is interactive, so CCCC injects the CCCC MCP
+    server through OpenCode's inline runtime config instead of editing global
+    user configuration.
+    """
+    result = {str(k): str(v) for k, v in (env or {}).items() if isinstance(k, str)}
+    if str(runtime or "").strip().lower() != "opencode":
+        return result
+
+    doc = _read_opencode_inline_config(result)
+    mcp = doc.get("mcp")
+    if not isinstance(mcp, dict):
+        mcp = {}
+    else:
+        mcp = dict(mcp)
+    mcp["cccc"] = _opencode_cccc_entry(result)
+    doc["mcp"] = mcp
+    result["OPENCODE_CONFIG_CONTENT"] = json.dumps(doc, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return result
 
 
 def build_mcp_add_command(runtime: str) -> list[str] | None:
@@ -144,6 +281,8 @@ def build_mcp_add_command(runtime: str) -> list[str] | None:
         return ["neovate", "mcp", "add", "-g", "cccc", *cccc_cmd]
     if runtime == "gemini":
         return ["gemini", "mcp", "add", "-s", "user", "cccc", *cccc_cmd]
+    if runtime == "hermes":
+        return ["cccc", "runtime", "hermes", "prepare", "--yes"]
     if runtime == "kimi":
         return ["kimi", "mcp", "add", "--transport", "stdio", "cccc", "--", *cccc_cmd]
     return None
@@ -212,17 +351,18 @@ def _runtime_mcp_state(runtime: str, *, env: Dict[str, str] | None = None) -> st
         return "ready" if _codex_mcp_entry_matches_expected(result.stdout, expected_cmd) else "stale"
 
     if runtime == "droid":
+        home = _home_dir(env)
         return _json_mcp_state(
             (
-                Path.home() / ".factory" / "mcp.json",
-                Path.home() / ".config" / "droid" / "mcp.json",
-                Path.home() / ".droid" / "mcp.json",
+                home / ".factory" / "mcp.json",
+                home / ".config" / "droid" / "mcp.json",
+                home / ".droid" / "mcp.json",
             ),
             expected_cmd,
         )
 
     if runtime == "amp":
-        settings_path = Path.home() / ".config" / "amp" / "settings.json"
+        settings_path = _home_dir(env) / ".config" / "amp" / "settings.json"
         if not settings_path.exists():
             return "missing"
         doc = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
@@ -237,7 +377,7 @@ def _runtime_mcp_state(runtime: str, *, env: Dict[str, str] | None = None) -> st
         return "ready" if _json_mcp_entry_matches_expected(entry, expected_cmd) else "stale"
 
     if runtime == "auggie":
-        settings_path = Path.home() / ".augment" / "settings.json"
+        settings_path = _home_dir(env) / ".augment" / "settings.json"
         if not settings_path.exists():
             return "missing"
         doc = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
@@ -252,7 +392,7 @@ def _runtime_mcp_state(runtime: str, *, env: Dict[str, str] | None = None) -> st
         return "ready" if _json_mcp_entry_matches_expected(entry, expected_cmd) else "stale"
 
     if runtime == "neovate":
-        config_path = Path.home() / ".neovate" / "config.json"
+        config_path = _home_dir(env) / ".neovate" / "config.json"
         if not config_path.exists():
             return "missing"
         doc = json.loads(config_path.read_text(encoding="utf-8") or "{}")
@@ -267,10 +407,22 @@ def _runtime_mcp_state(runtime: str, *, env: Dict[str, str] | None = None) -> st
         return "ready" if _json_mcp_entry_matches_expected(entry, expected_cmd) else "stale"
 
     if runtime == "gemini":
-        return _json_mcp_state((Path.home() / ".gemini" / "settings.json",), expected_cmd)
+        return _json_mcp_state((_home_dir(env) / ".gemini" / "settings.json",), expected_cmd)
+
+    if runtime == "hermes":
+        status = hermes_runtime_status(
+            home=_cccc_home_dir(env),
+            include_version=False,
+            hermes_home_override=_hermes_home_override(env),
+        )
+        mcp = status.get("mcp") if isinstance(status.get("mcp"), dict) else {}
+        return str(mcp.get("status") or "missing")
 
     if runtime == "kimi":
         return _json_mcp_state((_kimi_share_dir(env) / "mcp.json",), expected_cmd)
+
+    if runtime == "opencode":
+        return _opencode_mcp_state(env)
 
     return "missing"
 
@@ -294,6 +446,21 @@ def ensure_mcp_installed(
 ) -> bool:
     if runtime not in auto_mcp_runtimes:
         return True
+    if runtime == "hermes":
+        try:
+            state = _runtime_mcp_state(runtime, env=env)
+            if state == "ready":
+                return True
+            result = prepare_hermes_runtime(
+                home=_cccc_home_dir(env),
+                cwd=cwd,
+                auto_enable_tools=True,
+                force_mcp=(state == "stale"),
+                hermes_home_override=_hermes_home_override(env),
+            )
+            return bool(result.get("ok")) and _runtime_mcp_state(runtime, env=env) == "ready"
+        except Exception:
+            return False
     try:
         state = _runtime_mcp_state(runtime, env=env)
         if state == "ready":

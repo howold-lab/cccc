@@ -70,6 +70,7 @@ from ._skillsmp import _skillsmp_record_display_name, _skillsmp_record_is_canoni
 from ._install import (
     _catalog_staleness_seconds,
 )
+from ._state_views import capability_state_view, is_slash_commands_view
 
 
 def _pkg():
@@ -1307,6 +1308,8 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
     by = str(args.get("by") or args.get("actor_id") or "").strip()
     actor_id = str(args.get("actor_id") or by).strip()
     usage_capability_id = str(args.get("capability_id") or "").strip()
+    view = str(args.get("view") or "").strip()
+    slash_commands_view = is_slash_commands_view(view)
 
     try:
         group = _ensure_group(group_id)
@@ -1425,47 +1428,48 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
             dynamic_tool_dropped = len(dynamic_tools) - max_dynamic_tools_visible
             dynamic_tools = dynamic_tools[:max_dynamic_tools_visible]
 
-        visible_tools = sorted(
-            set(
-                resolve_visible_tool_names(
-                    builtin_enabled,
-                    actor_role=actor_role,
-                    is_pet=actor_is_pet,
-                    is_voice_secretary=actor_is_voice_secretary,
-                    is_web_model=actor_is_web_model,
-                )
-            )
-            | {str(x.get("name") or "").strip() for x in dynamic_tools if isinstance(x, dict)}
-        )
-
         hidden_capabilities: List[Dict[str, Any]] = []
-        for cap_id in all_builtin_pack_ids():
-            if cap_id in builtin_enabled:
-                continue
-            block_entry = blocked_caps.get(cap_id) if isinstance(blocked_caps.get(cap_id), dict) else None
-            if isinstance(block_entry, dict):
-                scope_token = str(block_entry.get("scope") or "group").strip().lower()
-                reason_token = "blocked_by_global_policy" if scope_token == "global" else "blocked_by_group_policy"
-                row = {"capability_id": cap_id, "reason": reason_token, "policy_level": "blocked"}
-                reason_text = str(block_entry.get("reason") or "").strip()
-                if reason_text:
-                    row["blocked_reason"] = reason_text
-                hidden_capabilities.append(row)
-                continue
-            level = _effective_policy_level(
-                policy,
-                capability_id=cap_id,
-                kind="mcp_toolpack",
-                source_id="cccc_builtin",
-                actor_role=actor_role,
+        visible_tools: List[str] = []
+        if not slash_commands_view:
+            visible_tools = sorted(
+                set(
+                    resolve_visible_tool_names(
+                        builtin_enabled,
+                        actor_role=actor_role,
+                        is_pet=actor_is_pet,
+                        is_voice_secretary=actor_is_voice_secretary,
+                        is_web_model=actor_is_web_model,
+                    )
+                )
+                | {str(x.get("name") or "").strip() for x in dynamic_tools if isinstance(x, dict)}
             )
-            hidden_capabilities.append(
-                {
-                    "capability_id": cap_id,
-                    "reason": "policy_indexed" if (not _policy_level_visible(level)) else "not_enabled",
-                    "policy_level": level,
-                }
-            )
+            for cap_id in all_builtin_pack_ids():
+                if cap_id in builtin_enabled:
+                    continue
+                block_entry = blocked_caps.get(cap_id) if isinstance(blocked_caps.get(cap_id), dict) else None
+                if isinstance(block_entry, dict):
+                    scope_token = str(block_entry.get("scope") or "group").strip().lower()
+                    reason_token = "blocked_by_global_policy" if scope_token == "global" else "blocked_by_group_policy"
+                    row = {"capability_id": cap_id, "reason": reason_token, "policy_level": "blocked"}
+                    reason_text = str(block_entry.get("reason") or "").strip()
+                    if reason_text:
+                        row["blocked_reason"] = reason_text
+                    hidden_capabilities.append(row)
+                    continue
+                level = _effective_policy_level(
+                    policy,
+                    capability_id=cap_id,
+                    kind="mcp_toolpack",
+                    source_id="cccc_builtin",
+                    actor_role=actor_role,
+                )
+                hidden_capabilities.append(
+                    {
+                        "capability_id": cap_id,
+                        "reason": "policy_indexed" if (not _policy_level_visible(level)) else "not_enabled",
+                        "policy_level": level,
+                    }
+                )
 
         now = datetime.now(timezone.utc)
         group_enabled_map = state_doc.get("group_enabled") if isinstance(state_doc.get("group_enabled"), dict) else {}
@@ -1569,7 +1573,7 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
             catalog_path, catalog_doc = _pkg()._load_catalog_doc()
             if _pkg()._ensure_curated_catalog_records(catalog_doc, policy=policy):
                 _pkg()._save_catalog_doc(catalog_path, catalog_doc)
-            source_states = _render_source_states(catalog_doc)
+            source_states = {} if slash_commands_view else _render_source_states(catalog_doc)
             records_raw = catalog_doc.get("records") if isinstance(catalog_doc.get("records"), dict) else {}
             external_records = {
                 str(cid): dict(rec)
@@ -1601,6 +1605,40 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
             [*actor_hidden_capabilities, *state_hidden_capabilities]
         )
         actor_hidden_set = set(actor_hidden_capabilities)
+        if slash_commands_view:
+            active_capsule_skills: List[Dict[str, Any]] = []
+            active_capsule_skill_dropped_ids: List[str] = []
+            for cap_id in enabled_caps_effective:
+                rec = external_records.get(cap_id)
+                if not isinstance(rec, dict):
+                    continue
+                if str(rec.get("kind") or "").strip().lower() != "skill":
+                    continue
+                if str(rec.get("qualification_status") or "").strip().lower() == _QUAL_BLOCKED:
+                    continue
+                if not _pkg()._record_enable_supported(rec, capability_id=cap_id):
+                    continue
+                if cap_id in actor_hidden_set:
+                    continue
+                if len(active_capsule_skills) >= max_active_capsule_skills:
+                    active_capsule_skill_dropped_ids.append(cap_id)
+                    continue
+                active_capsule_skills.append(
+                    {
+                        "capability_id": cap_id,
+                        "name": str(rec.get("name") or cap_id),
+                        "description_short": str(rec.get("description_short") or ""),
+                        "capsule_preview": _skill_capsule_preview(rec.get("capsule_text")),
+                    }
+                )
+            result = {
+                "group_id": group_id,
+                "actor_id": actor_id,
+                "dynamic_tools": dynamic_tools,
+                "active_capsule_skills": active_capsule_skills,
+                "actor_hidden_capabilities": actor_hidden_capabilities,
+            }
+            return DaemonResponse(ok=True, result=capability_state_view(result, view))
         profile_id = str(actor_record.get("profile_id") or "").strip() if isinstance(actor_record, dict) else ""
         profile_autoload_capabilities: List[str] = []
         if profile_id:
@@ -2046,7 +2084,7 @@ def handle_capability_state(args: Dict[str, Any]) -> DaemonResponse:
         }
         if capability_usage is not None:
             result["capability_usage"] = capability_usage
-        return DaemonResponse(ok=True, result=result)
+        return DaemonResponse(ok=True, result=capability_state_view(result, view))
     except LookupError as e:
         return _error("group_not_found", str(e))
     except ValueError as e:

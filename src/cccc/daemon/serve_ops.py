@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from .actor_runtime_cache import replace_group_runtime
+from .pty_activity_probe import read_pty_activity_signal
 from .runner_state_ops import headless_state_running, read_headless_state
+from ..kernel.actor_runtime_projection import actor_runtime_enabled
 from ..kernel.context import ContextStorage
-from ..kernel.working_state import (
-    derive_effective_working_state,
-)
+from ..kernel.runtime_state_source import actor_uses_codex_app_server_state
+from ..kernel.working_state import derive_effective_working_state
 
 _LOG = logging.getLogger("cccc.daemon.serve_ops")
 _LOOP_ERROR_LAST_TS: Dict[str, float] = {}
@@ -47,7 +48,7 @@ def start_automation_thread(
     def _automation_loop() -> None:
         next_compact = 0.0
         next_automation = time.time() + max(0.0, float(initial_automation_delay_seconds or 0.0))
-        automation_interval = max(1.0, float(automation_interval_seconds or 5.0))
+        automation_interval = max(0.01, float(automation_interval_seconds or 5.0))
         while not stop_event.is_set():
             now = time.time()
             if now >= next_automation:
@@ -79,7 +80,7 @@ def start_automation_thread(
                     compact_ledgers(home)
                 except Exception as e:
                     _log_loop_error("compact_ledgers failed", e)
-            stop_event.wait(1.0)
+            stop_event.wait(min(1.0, automation_interval))
 
     t = threading.Thread(target=_automation_loop, name="cccc-automation", daemon=True)
     t.start()
@@ -293,7 +294,7 @@ def start_actor_activity_thread(
     import uuid
 
     def _actor_activity_loop() -> None:
-        interval = max(1.0, float(interval_seconds or 1.0))
+        interval = max(0.01, float(interval_seconds or 1.0))
         prev_runtime_by_group: Dict[str, Dict[str, Dict[str, Any]]] = {}
         while not stop_event.is_set():
             try:
@@ -332,9 +333,12 @@ def start_actor_activity_thread(
                             aid = str(actor.get("id") or "").strip()
                             if not aid:
                                 continue
+                            if not actor_runtime_enabled(actor):
+                                continue
                             runtime = str(actor.get("runtime") or "").strip().lower()
                             runner_kind = str(actor.get("runner") or "pty").strip().lower() or "pty"
                             effective_runner = "headless" if runner_kind == "headless" else "pty"
+                            uses_app_server_state = actor_uses_codex_app_server_state(actor)
                             running = False
                             idle = None
                             headless_state = None
@@ -358,6 +362,11 @@ def start_actor_activity_thread(
                                             )
                                     except Exception:
                                         pass
+                            elif uses_app_server_state:
+                                headless_state = codex_supervisor.get_state(group_id=gid, actor_id=aid)
+                                running = bool(headless_state is not None and codex_supervisor.actor_running(gid, aid))
+                                if not running:
+                                    uses_app_server_state = False
                             elif runtime == "codex" and effective_runner == "headless":
                                 headless_state = codex_supervisor.get_state(group_id=gid, actor_id=aid)
                                 running = bool(headless_state is not None and codex_supervisor.actor_running(gid, aid))
@@ -372,11 +381,14 @@ def start_actor_activity_thread(
                                 running = bool(pty_supervisor.actor_running(gid, aid))
                                 idle = pty_supervisor.idle_seconds(group_id=gid, actor_id=aid) if running else None
                             pty_terminal_override = None
-                            if effective_runner == "pty" and running:
-                                try:
-                                    pty_terminal_override = pty_supervisor.terminal_override(group_id=gid, actor_id=aid)
-                                except Exception:
-                                    pty_terminal_override = None
+                            pty_terminal_text = ""
+                            if uses_app_server_state and not running and effective_runner == "pty":
+                                running = bool(pty_supervisor.actor_running(gid, aid))
+                                idle = pty_supervisor.idle_seconds(group_id=gid, actor_id=aid) if running else None
+                            if effective_runner == "pty" and running and not uses_app_server_state:
+                                pty_signal = read_pty_activity_signal(pty_supervisor, group_id=gid, actor_id=aid)
+                                pty_terminal_override = pty_signal.terminal_override
+                                pty_terminal_text = pty_signal.terminal_text
                             if not running:
                                 continue
                             payload = {
@@ -385,17 +397,17 @@ def start_actor_activity_thread(
                                 "runner_effective": effective_runner,
                                 "idle_seconds": round(float(idle), 1) if idle is not None else None,
                             }
-                            payload.update(
-                                derive_effective_working_state(
-                                    running=running,
-                                    effective_runner=effective_runner,
-                                    runtime=str(actor.get("runtime") or ""),
-                                    idle_seconds=idle,
-                                    pty_terminal_override=pty_terminal_override,
-                                    agent_state=agent_state_by_id.get(aid),
-                                    headless_state=headless_state,
-                                )
+                            working_state = derive_effective_working_state(
+                                running=running,
+                                effective_runner="headless" if uses_app_server_state else effective_runner,
+                                runtime=str(actor.get("runtime") or ""),
+                                idle_seconds=idle,
+                                pty_terminal_text=pty_terminal_text,
+                                pty_terminal_override=pty_terminal_override,
+                                agent_state=agent_state_by_id.get(aid),
+                                headless_state=headless_state,
                             )
+                            payload.update(working_state)
                             actors_data.append(payload)
                             actors_snapshot[aid] = payload
                         replace_group_runtime(gid, actors_snapshot)
@@ -502,6 +514,7 @@ def cleanup_after_stop(
     stop_event: threading.Event,
     home: Path,
     best_effort_killpg: Callable[[int, Any], Any],
+    runtime_session_shutdown_start: Callable[[], Any] = lambda: None,
     im_stop_all: Callable[..., Any],
     codex_stop_all: Callable[[], Any],
     claude_stop_all: Callable[[], Any] = lambda: None,
@@ -514,6 +527,10 @@ def cleanup_after_stop(
     lock_handle: Any,
 ) -> None:
     stop_event.set()
+    try:
+        runtime_session_shutdown_start()
+    except Exception:
+        pass
     try:
         im_stop_all(home, best_effort_killpg=best_effort_killpg)
     except Exception:

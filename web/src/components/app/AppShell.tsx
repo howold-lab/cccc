@@ -1,4 +1,4 @@
-import { useEffect, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AppHeader } from "../layout/AppHeader";
@@ -9,6 +9,7 @@ import { ActorTab } from "../../pages/ActorTab";
 import { ChatTab } from "../../pages/chat";
 import type { Actor, GroupContext, GroupDoc, GroupMeta, GroupRuntimeStatus, TextScale } from "../../types";
 import { SIDEBAR_COLLAPSED_WIDTH } from "../../stores/useUIStore";
+import { resolveRuntimeInspectorActor } from "./appShellRuntimeActors";
 
 type AppShellProps = {
   orderedGroups: GroupMeta[];
@@ -108,6 +109,8 @@ function RuntimeInspectorModal({
       title=""
       closeAriaLabel={closeAriaLabel}
       panelClassName="h-full w-full max-w-none overflow-hidden sm:h-[92vh] sm:w-[min(1480px,98vw)] sm:max-w-[98vw]"
+      floatingCloseClassName="sm:!top-3"
+      floatingCloseButtonClassName="!min-h-[40px] !min-w-[40px] !rounded-xl"
       modalRef={modalRef}
     >
       {children}
@@ -190,6 +193,10 @@ export function AppShell({
   const shellStyle = {
     "--sidebar-width": `${sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}px`,
   } as CSSProperties;
+  const mountedRuntimeActorsRef = useRef<{ groupId: string | null; actorsById: Record<string, Actor> }>({
+    groupId: null,
+    actorsById: {},
+  });
 
   useEffect(() => {
     if (!selectedGroupId || runtimeActors.length === 0) return;
@@ -231,6 +238,19 @@ export function AppShell({
     };
   }, [selectedGroupId, runtimeActors.length]);
 
+  useEffect(() => {
+    const current = mountedRuntimeActorsRef.current;
+    const next = current.groupId === selectedGroupId ? { ...current.actorsById } : {};
+    for (const actor of runtimeActors) {
+      const actorId = String(actor.id || "").trim();
+      if (actorId) next[actorId] = actor;
+    }
+    mountedRuntimeActorsRef.current = {
+      groupId: selectedGroupId || null,
+      actorsById: next,
+    };
+  }, [runtimeActors, selectedGroupId]);
+
   return (
     <div
       className="relative h-full min-h-0 transition-[grid-template-columns] duration-300 ease-out md:grid md:[grid-template-columns:var(--sidebar-width)_minmax(0,1fr)]"
@@ -257,9 +277,7 @@ export function AppShell({
       />
 
       <main
-        className={`absolute inset-0 flex h-full min-h-0 flex-col overflow-hidden md:relative md:inset-auto ${
-          isDark ? "bg-transparent md:bg-black/75" : "bg-transparent md:bg-white/80"
-        }`}
+        className="absolute inset-0 flex h-full min-h-0 flex-col overflow-hidden md:relative md:inset-auto bg-transparent md:bg-[var(--color-chat-bg)] md:backdrop-blur-md"
       >
         <AppHeader
           isDark={isDark}
@@ -328,7 +346,9 @@ export function AppShell({
           </div>
 
           {renderedActorIds.map((actorId) => {
-            const actor = runtimeActors.find((item) => item.id === actorId) || null;
+            const mountedRuntimeActors =
+              mountedRuntimeActorsRef.current.groupId === selectedGroupId ? mountedRuntimeActorsRef.current.actorsById : {};
+            const actor = resolveRuntimeInspectorActor(actorId, runtimeActors, mountedRuntimeActors);
             const isVisible = activeTab === actorId && activeTab !== "chat";
             const agentState =
               (groupContext?.agent_states || []).find((item) => item.id === (actor?.id || "")) || null;

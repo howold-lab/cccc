@@ -1615,6 +1615,31 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             }
         )
 
+    @group_router.get("/terminal/history")
+    async def terminal_history(
+        group_id: str,
+        actor_id: str,
+        before: str = "",
+        limit_bytes: int = 64_000,
+        strip_ansi: bool = False,
+        compact: bool = False,
+    ) -> Dict[str, Any]:
+        """Read a cursor-based page from an actor's live terminal history."""
+        return await ctx.daemon(
+            {
+                "op": "terminal_history",
+                "args": {
+                    "group_id": group_id,
+                    "actor_id": actor_id,
+                    "before": before,
+                    "limit_bytes": int(limit_bytes or 64_000),
+                    "strip_ansi": bool(strip_ansi),
+                    "compact": bool(compact),
+                    "by": "user",
+                },
+            }
+        )
+
     @group_router.post("/terminal/clear")
     async def terminal_clear(group_id: str, actor_id: str) -> Dict[str, Any]:
         """Clear (truncate) an actor's in-memory terminal transcript ring buffer."""
@@ -1630,7 +1655,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         )
 
     @group_router.get("/capabilities/state")
-    async def capability_state(group_id: str, actor_id: str = "user", capability_id: str = "") -> Dict[str, Any]:
+    async def capability_state(group_id: str, actor_id: str = "user", capability_id: str = "", view: str = "") -> Dict[str, Any]:
         """Get caller-effective capability state and visible/dynamic tools for a group."""
         return await ctx.daemon(
             {
@@ -1640,6 +1665,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     "by": "user",
                     "actor_id": str(actor_id or "user").strip() or "user",
                     "capability_id": str(capability_id or "").strip(),
+                    "view": str(view or "").strip(),
                 },
             }
         )

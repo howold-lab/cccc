@@ -41,7 +41,8 @@ DEFAULT_MAX_LINES = 64
 # WebSocket defaults
 WECOM_WS_URL = "wss://openws.work.weixin.qq.com"
 WECOM_API_BASE = "https://qyapi.weixin.qq.com/cgi-bin"
-WECOM_ACTIVE_STREAM_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+WECOM_MEDIA_UPLOAD_CHUNK_SIZE = 512 * 1024
+WECOM_MEDIA_UPLOAD_MAX_CHUNKS = 100
 WS_HEARTBEAT_INTERVAL = 25  # seconds
 WS_HEARTBEAT_MAX_FAILURES = 3
 WS_RECONNECT_INITIAL = 1.0  # seconds
@@ -257,6 +258,18 @@ class WecomAdapter(IMAdapter):
 
         return False
 
+    def _send_active_body(self, chat_id: str, body: Dict[str, Any], *, timeout: float = 5.0) -> bool:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return False
+        active_body = dict(body)
+        active_body["chatid"] = normalized_chat_id
+        ok, _ = self._ws_send_and_wait_ack(
+            self._build_command_frame(cmd="aibot_send_msg", body=active_body),
+            timeout=timeout,
+        )
+        return ok
+
     # -- WebSocket send helper --
 
     def _ws_send(self, payload: Dict[str, Any]) -> bool:
@@ -361,6 +374,13 @@ class WecomAdapter(IMAdapter):
             "body": body,
         }
 
+    def _build_command_frame(self, *, cmd: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "cmd": cmd,
+            "headers": {"req_id": f"{cmd}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"},
+            "body": body,
+        }
+
     def _next_stream_id(self) -> str:
         return f"cccc-wecom-{int(time.time() * 1000)}"
 
@@ -372,13 +392,6 @@ class WecomAdapter(IMAdapter):
             return "image/png"
         guessed, _ = mimetypes.guess_type(filename or "")
         return guessed or "application/octet-stream"
-
-    def _supports_stream_msg_item_image(self, raw: bytes) -> bool:
-        if not raw or len(raw) < 3:
-            return False
-        if raw[:3] == b"\xff\xd8\xff":
-            return True
-        return len(raw) >= 8 and raw[:8] == b"\x89PNG\r\n\x1a\n"
 
     def _build_media_api_url(self, path: str, **query: str) -> str:
         params = {
@@ -429,88 +442,70 @@ class WecomAdapter(IMAdapter):
             raise ValueError(f"wecom media decrypt failed: {e}") from e
         return self._strip_pkcs7_padding(decrypted)
 
-    def _upload_media(self, raw: bytes, filename: str, media_type: str) -> str:
-        """Upload media via HTTP multipart to /media/upload (bot_id+secret auth)."""
-        boundary = "----cccc" + uuid.uuid4().hex
-        safe_fn = (filename or "file").replace("\\", "_").replace("/", "_")
-        content_type = self._guess_content_type(safe_fn, media_type)
-
-        body = b""
-        body += (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="media"; filename="{safe_fn}"\r\n'
-            f"Content-Type: {content_type}\r\n\r\n"
-        ).encode("utf-8")
-        body += raw
-        body += f"\r\n--{boundary}--\r\n".encode("utf-8")
-
-        req = urllib.request.Request(
-            self._build_media_api_url("/media/upload", type=media_type),
-            data=body,
-            method="POST",
+    def _send_upload_command(self, cmd: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        ok, frame = self._ws_send_and_wait_ack(
+            self._build_command_frame(cmd=cmd, body=body),
+            timeout=60.0,
         )
-        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        if not ok or not isinstance(frame, dict):
+            raise ValueError(f"{cmd} failed")
+        response_body = frame.get("body")
+        return response_body if isinstance(response_body, dict) else {}
 
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                result = json.loads(resp.read().decode("utf-8", errors="replace"))
-        except Exception as e:
-            raise ValueError(f"upload failed: {e}") from e
+    def _upload_media(self, raw: bytes, filename: str, media_type: str) -> str:
+        """Upload media through WeCom AI Bot WebSocket chunk protocol."""
+        if not raw:
+            raise ValueError("empty media payload")
 
-        if int(result.get("errcode", 0) or 0) != 0:
-            raise ValueError(str(result.get("errmsg") or "upload failed"))
+        safe_fn = (filename or "file").replace("\\", "_").replace("/", "_")
+        total_size = len(raw)
+        total_chunks = (total_size + WECOM_MEDIA_UPLOAD_CHUNK_SIZE - 1) // WECOM_MEDIA_UPLOAD_CHUNK_SIZE
+        if total_chunks > WECOM_MEDIA_UPLOAD_MAX_CHUNKS:
+            raise ValueError(
+                f"file too large: {total_chunks} chunks exceeds maximum of {WECOM_MEDIA_UPLOAD_MAX_CHUNKS}"
+            )
 
-        media_id = str(result.get("media_id") or "").strip()
+        init_body = {
+            "type": media_type,
+            "filename": safe_fn,
+            "total_size": total_size,
+            "total_chunks": total_chunks,
+            "md5": hashlib.md5(raw).hexdigest(),
+        }
+        init_result = self._send_upload_command("aibot_upload_media_init", init_body)
+        upload_id = str(init_result.get("upload_id") or "").strip()
+        if not upload_id:
+            raise ValueError("upload init response missing upload_id")
+
+        for chunk_index in range(total_chunks):
+            start = chunk_index * WECOM_MEDIA_UPLOAD_CHUNK_SIZE
+            end = min(start + WECOM_MEDIA_UPLOAD_CHUNK_SIZE, total_size)
+            self._send_upload_command(
+                "aibot_upload_media_chunk",
+                {
+                    "upload_id": upload_id,
+                    "chunk_index": chunk_index,
+                    "base64_data": base64.b64encode(raw[start:end]).decode("ascii"),
+                },
+            )
+
+        finish_result = self._send_upload_command(
+            "aibot_upload_media_finish",
+            {"upload_id": upload_id},
+        )
+        media_id = str(finish_result.get("media_id") or "").strip()
         if not media_id:
-            raise ValueError("upload response missing media_id")
+            raise ValueError("upload finish response missing media_id")
         self._log(f"[upload] media_id={media_id} type={media_type} size={len(raw)}")
         return media_id
 
     def _send_media_reply(self, chat_id: str, *, msgtype: str, body: Dict[str, Any]) -> bool:
         if not self._get_reply_req_id(chat_id) and not self._get_response_url(chat_id):
-            self._log(
-                f"[send_file] No callback req_id/response_url for chat={chat_id}, cannot send media. "
-                "Ask the user to send any message in that chat to re-establish outbound replies."
-            )
-            return False
+            ok = self._send_active_body(chat_id, {"msgtype": msgtype, **body})
+            if ok:
+                self._log(f"[send_file] Sent media via active send (chat={chat_id})")
+            return ok
         return self._send_reply_body(chat_id, {"msgtype": msgtype, **body})
-
-    def _send_stream_msg_item_image(self, chat_id: str, *, raw: bytes, caption: str = "") -> bool:
-        if not self._get_reply_req_id(chat_id) and not self._get_response_url(chat_id):
-            self._log(
-                f"[send_file] No callback req_id/response_url for chat={chat_id}, cannot send image msg_item. "
-                "Ask the user to send any message in that chat to re-establish outbound replies."
-            )
-            return False
-        if len(raw) > WECOM_ACTIVE_STREAM_IMAGE_MAX_BYTES:
-            self._log(f"[send_file] Image too large for stream msg_item: {len(raw)} bytes")
-            return False
-        if not self._supports_stream_msg_item_image(raw):
-            self._log("[send_file] Unsupported stream msg_item image format (jpg/png only)")
-            return False
-
-        safe_caption = self._compose_safe(caption)
-        body = {
-            "msgtype": "stream",
-            "stream": {
-                "id": self._next_stream_id(),
-                "finish": True,
-                "content": safe_caption,
-                "msg_item": [
-                    {
-                        "msgtype": "image",
-                        "image": {
-                            "base64": base64.b64encode(raw).decode("ascii"),
-                            "md5": hashlib.md5(raw).hexdigest(),
-                        },
-                    }
-                ],
-            },
-        }
-        ok = self._send_reply_body(chat_id, body)
-        if ok:
-            self._log(f"[send_file] Sent image via stream msg_item (chat={chat_id})")
-        return ok
 
     # -- WebSocket connection --
 
@@ -797,6 +792,83 @@ class WecomAdapter(IMAdapter):
                 return text
         return ""
 
+    def _filename_from_url(self, value: str) -> str:
+        try:
+            path = urllib.parse.urlparse(str(value or "").strip()).path
+        except Exception:
+            return ""
+        filename = urllib.parse.unquote(Path(path).name).strip()
+        return filename if filename and "." in filename else ""
+
+    def _filename_from_content_disposition(self, value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        for part in raw.split(";")[1:]:
+            key, sep, val = part.strip().partition("=")
+            if sep != "=":
+                continue
+            key = key.strip().lower()
+            val = val.strip().strip('"')
+            if key == "filename*":
+                if "''" in val:
+                    val = val.split("''", 1)[1]
+                filename = urllib.parse.unquote(val).strip()
+            elif key == "filename":
+                filename = urllib.parse.unquote(val).strip()
+            else:
+                continue
+            filename = Path(filename.replace("\\", "/")).name.strip()
+            if filename:
+                return filename
+        return ""
+
+    def _should_replace_attachment_filename(self, value: str) -> bool:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return True
+        return raw in {"file", "unknown", "attachment"} or Path(raw).stem.lower() in {
+            "file",
+            "unknown",
+            "attachment",
+        }
+
+    def _safe_log_value(self, value: str) -> str:
+        text = str(value or "").strip().replace("\r", "_").replace("\n", "_")
+        return text[:128] if text else "<empty>"
+
+    def _update_attachment_filename_from_response(self, attachment: Dict[str, Any], resp: Any) -> str:
+        if not self._should_replace_attachment_filename(
+            str(attachment.get("file_name") or attachment.get("filename") or "")
+        ):
+            return ""
+        getheader = getattr(resp, "getheader", None)
+        if not callable(getheader):
+            return ""
+        filename = self._filename_from_content_disposition(
+            str(getheader("Content-Disposition", "") or "")
+        )
+        if filename:
+            attachment["file_name"] = filename
+            return filename
+        return ""
+
+    def _log_attachment_download_filename(
+        self,
+        *,
+        source: str,
+        before: str,
+        after: str,
+        header_filename: str,
+    ) -> None:
+        self._log(
+            "[download_attachment] "
+            f"source={source} "
+            f"filename_before={self._safe_log_value(before)} "
+            f"filename_after={self._safe_log_value(after)} "
+            f"content_disposition_filename={'yes' if header_filename else 'no'}"
+        )
+
     def _collect_media_payload(self, payload: Dict[str, Any], msg_type: str, content: Any) -> Dict[str, str]:
         media: Dict[str, Any] = {}
         if isinstance(content, dict):
@@ -813,8 +885,20 @@ class WecomAdapter(IMAdapter):
             media.get("file_name"),
             media.get("fileName"),
             media.get("name"),
+            payload.get("filename"),
+            payload.get("file_name"),
+            payload.get("fileName"),
+            payload.get("name"),
+            self._filename_from_url(download_url),
         )
-        content_type = self._pick_text(media.get("content_type"), media.get("contentType"), media.get("mime_type"))
+        content_type = self._pick_text(
+            media.get("content_type"),
+            media.get("contentType"),
+            media.get("mime_type"),
+            payload.get("content_type"),
+            payload.get("contentType"),
+            payload.get("mime_type"),
+        )
         return {
             "media_id": media_id,
             "download_url": download_url,
@@ -1059,11 +1143,16 @@ class WecomAdapter(IMAdapter):
         self._rate_limiter.wait_and_acquire(chat_id)
 
         if not self._get_reply_req_id(chat_id) and not self._get_response_url(chat_id):
-            self._log(
-                f"[send] No callback req_id/response_url for chat={chat_id}, cannot send. "
-                "Ask the user to send any message in that chat to re-establish outbound replies."
+            ok = self._send_active_body(
+                chat_id,
+                {
+                    "msgtype": "markdown",
+                    "markdown": {"content": safe_text},
+                },
             )
-            return False
+            if ok:
+                self._log(f"[send] Sent via active send (chat={chat_id})")
+            return ok
 
         ok = self._send_reply_body(
             chat_id,
@@ -1097,6 +1186,15 @@ class WecomAdapter(IMAdapter):
             req = urllib.request.Request(download_url, method="GET")
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
+                    filename_before = str(attachment.get("file_name") or attachment.get("filename") or "")
+                    header_filename = self._update_attachment_filename_from_response(attachment, resp)
+                    filename_after = str(attachment.get("file_name") or attachment.get("filename") or "")
+                    self._log_attachment_download_filename(
+                        source="direct",
+                        before=filename_before,
+                        after=filename_after,
+                        header_filename=header_filename,
+                    )
                     raw = resp.read()
             except Exception as e:
                 raise ValueError(f"download failed: {e}") from e
@@ -1118,6 +1216,15 @@ class WecomAdapter(IMAdapter):
         )
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
+                filename_before = str(attachment.get("file_name") or attachment.get("filename") or "")
+                header_filename = self._update_attachment_filename_from_response(attachment, resp)
+                filename_after = str(attachment.get("file_name") or attachment.get("filename") or "")
+                self._log_attachment_download_filename(
+                    source="media_get",
+                    before=filename_before,
+                    after=filename_after,
+                    header_filename=header_filename,
+                )
                 return resp.read()
         except Exception as e:
             raise ValueError(f"download failed: {e}") from e
@@ -1146,14 +1253,8 @@ class WecomAdapter(IMAdapter):
 
         ext = file_path.suffix.lower()
         is_image = ext in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
-        inline_stream_image = ext in {".png", ".jpg", ".jpeg"}
 
         self._rate_limiter.wait_and_acquire(chat_id)
-
-        if inline_stream_image:
-            ok = self._send_stream_msg_item_image(chat_id, raw=raw, caption=caption)
-            if ok:
-                return True
 
         media_type = "image" if is_image else "file"
         try:

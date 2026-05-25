@@ -333,6 +333,55 @@ class TestWecomEnqueueMessage(unittest.TestCase):
         self.assertEqual(att["decryption_key"], "12345678901234567890123456789012")
         self.assertEqual(att["file_name"], "report.pdf")
 
+    def test_ws_file_message_uses_top_level_filename(self):
+        adapter = self._make_adapter()
+        data = {
+            "cmd": "aibot_msg_callback",
+            "headers": {"req_id": "req_media"},
+            "body": {
+                "chatid": "conv_1",
+                "msgid": "msg_file_top_name",
+                "chattype": "single",
+                "msgtype": "file",
+                "fileName": "client-config.ini",
+                "file": {
+                    "url": "https://example.test/download?id=abc",
+                    "aeskey": "12345678901234567890123456789012",
+                },
+                "from": {"userid": "u1"},
+            },
+        }
+        adapter._enqueue_message(data)
+        msgs = adapter.poll()
+        self.assertEqual(len(msgs), 1)
+        att = msgs[0]["attachments"][0]
+        self.assertEqual(msgs[0]["text"], "[file: client-config.ini]")
+        self.assertEqual(att["file_name"], "client-config.ini")
+
+    def test_ws_file_message_infers_filename_from_download_url_path(self):
+        adapter = self._make_adapter()
+        data = {
+            "cmd": "aibot_msg_callback",
+            "headers": {"req_id": "req_media"},
+            "body": {
+                "chatid": "conv_1",
+                "msgid": "msg_file_url_name",
+                "chattype": "single",
+                "msgtype": "file",
+                "file": {
+                    "url": "https://example.test/files/client-config.ini?token=abc",
+                    "aeskey": "12345678901234567890123456789012",
+                },
+                "from": {"userid": "u1"},
+            },
+        }
+        adapter._enqueue_message(data)
+        msgs = adapter.poll()
+        self.assertEqual(len(msgs), 1)
+        att = msgs[0]["attachments"][0]
+        self.assertEqual(msgs[0]["text"], "[file: client-config.ini]")
+        self.assertEqual(att["file_name"], "client-config.ini")
+
     def test_empty_data_ignored(self):
         adapter = self._make_adapter()
         adapter._enqueue_message({"action": "aibot_msg_callback"})
@@ -691,10 +740,17 @@ class TestWecomSendMessage(unittest.TestCase):
             self.assertEqual(call_payload["body"]["stream"]["content"], "hello")
             self.assertEqual(call_payload["body"]["msgtype"], "stream")
 
-    def test_send_returns_false_when_no_handle(self):
+    def test_send_without_reply_ref_uses_active_markdown_send(self):
         adapter = self._make_adapter()
-        result = adapter.send_message("conv_1", "hello")
-        self.assertFalse(result)
+        with patch.object(adapter, "_ws_send_and_wait_ack", return_value=(True, {"errcode": 0})) as mock_ws:
+            result = adapter.send_message("conv_1", "hello")
+
+        self.assertTrue(result)
+        payload = mock_ws.call_args[0][0]
+        self.assertEqual(payload["cmd"], "aibot_send_msg")
+        self.assertEqual(payload["body"]["chatid"], "conv_1")
+        self.assertEqual(payload["body"]["msgtype"], "markdown")
+        self.assertEqual(payload["body"]["markdown"]["content"], "hello")
 
     def test_send_returns_false_when_ws_fails(self):
         adapter = self._make_adapter()
@@ -737,11 +793,15 @@ class TestWecomSendMessage(unittest.TestCase):
 
 
 class _FakeHttpResponse:
-    def __init__(self, payload: bytes):
+    def __init__(self, payload: bytes, headers: dict[str, str] | None = None):
         self._payload = payload
+        self._headers = dict(headers or {})
 
     def read(self) -> bytes:
         return self._payload
+
+    def getheader(self, name: str, default: str | None = None) -> str | None:
+        return self._headers.get(name, default)
 
     def __enter__(self):
         return self
@@ -830,16 +890,126 @@ class TestWecomAttachments(unittest.TestCase):
         self.assertEqual(raw, b"raw-bytes")
         mock_decrypt.assert_not_called()
 
+    def test_download_attachment_updates_generic_filename_from_content_disposition(self):
+        adapter = self._make_adapter()
+        attachment = {
+            "download_url": "https://example.test/media.bin",
+            "file_name": "file",
+        }
+
+        def fake_urlopen(req, timeout=0):
+            self.assertEqual(req.full_url, "https://example.test/media.bin")
+            self.assertEqual(timeout, 60)
+            return _FakeHttpResponse(
+                b"raw-bytes",
+                {"Content-Disposition": 'attachment; filename="tsvpn.ini"'},
+            )
+
+        with patch("cccc.ports.im.adapters.wecom.urllib.request.urlopen", side_effect=fake_urlopen):
+            raw = adapter.download_attachment(attachment)
+
+        self.assertEqual(raw, b"raw-bytes")
+        self.assertEqual(attachment["file_name"], "tsvpn.ini")
+
+    def test_download_attachment_updates_generic_filename_from_rfc5987_content_disposition(self):
+        adapter = self._make_adapter()
+        attachment = {
+            "download_url": "https://example.test/media.bin",
+            "file_name": "attachment.ini",
+        }
+
+        def fake_urlopen(req, timeout=0):
+            self.assertEqual(req.full_url, "https://example.test/media.bin")
+            self.assertEqual(timeout, 60)
+            return _FakeHttpResponse(
+                b"raw-bytes",
+                {"Content-Disposition": "attachment; filename*=UTF-8''tsvpn.ini"},
+            )
+
+        with patch("cccc.ports.im.adapters.wecom.urllib.request.urlopen", side_effect=fake_urlopen):
+            raw = adapter.download_attachment(attachment)
+
+        self.assertEqual(raw, b"raw-bytes")
+        self.assertEqual(attachment["file_name"], "tsvpn.ini")
+
+    def test_download_attachment_preserves_specific_filename_over_content_disposition(self):
+        adapter = self._make_adapter()
+        attachment = {
+            "download_url": "https://example.test/media.bin",
+            "file_name": "report.pdf",
+        }
+
+        def fake_urlopen(req, timeout=0):
+            self.assertEqual(req.full_url, "https://example.test/media.bin")
+            self.assertEqual(timeout, 60)
+            return _FakeHttpResponse(
+                b"raw-bytes",
+                {"Content-Disposition": 'attachment; filename="tsvpn.ini"'},
+            )
+
+        with patch("cccc.ports.im.adapters.wecom.urllib.request.urlopen", side_effect=fake_urlopen):
+            raw = adapter.download_attachment(attachment)
+
+        self.assertEqual(raw, b"raw-bytes")
+        self.assertEqual(attachment["file_name"], "report.pdf")
+
+    def test_download_attachment_logs_filename_resolution_without_url_or_key(self):
+        adapter = self._make_adapter()
+        attachment = {
+            "download_url": "https://example.test/media.bin?token=secret",
+            "aeskey": "12345678901234567890123456789012",
+            "file_name": "file",
+        }
+        logs: list[str] = []
+
+        def fake_urlopen(req, timeout=0):
+            self.assertEqual(req.full_url, "https://example.test/media.bin?token=secret")
+            self.assertEqual(timeout, 60)
+            return _FakeHttpResponse(
+                b"raw-bytes",
+                {"Content-Disposition": 'attachment; filename="tsvpn.ini"'},
+            )
+
+        with patch("cccc.ports.im.adapters.wecom.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch.object(adapter, "_decrypt_media_bytes", return_value=b"plain-bytes"):
+                with patch.object(adapter, "_log", side_effect=logs.append):
+                    raw = adapter.download_attachment(attachment)
+
+        self.assertEqual(raw, b"plain-bytes")
+        self.assertEqual(attachment["file_name"], "tsvpn.ini")
+        self.assertTrue(any("source=direct" in entry for entry in logs))
+        self.assertTrue(any("filename_before=file" in entry for entry in logs))
+        self.assertTrue(any("filename_after=tsvpn.ini" in entry for entry in logs))
+        self.assertTrue(any("content_disposition_filename=yes" in entry for entry in logs))
+        joined = "\n".join(logs)
+        self.assertNotIn("token=secret", joined)
+        self.assertNotIn("12345678901234567890123456789012", joined)
+
     def test_send_file_uploads_image_and_sends_caption(self):
         adapter = self._make_adapter()
         adapter._store_reply_ref("conv_1", "req_test")
+        ws_calls: list[dict] = []
+
+        def fake_ws_send_and_wait_ack(payload, *, timeout=5.0):
+            _ = timeout
+            ws_calls.append(payload)
+            cmd = payload.get("cmd", "")
+            if cmd == "aibot_upload_media_init":
+                return True, {"errcode": 0, "body": {"upload_id": "upload_1"}}
+            if cmd == "aibot_upload_media_chunk":
+                return True, {"errcode": 0, "body": {}}
+            if cmd == "aibot_upload_media_finish":
+                return True, {"errcode": 0, "body": {"media_id": "media_image", "type": "image"}}
+            if cmd == "aibot_respond_msg":
+                return True, {"errcode": 0}
+            return True, {"errcode": 0}
 
         with tempfile.TemporaryDirectory() as td:
             image_path = Path(td) / "photo.png"
             image_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
 
             with patch("cccc.ports.im.adapters.wecom.urllib.request.urlopen") as mock_urlopen:
-                with patch.object(adapter, "_ws_send_and_wait_ack", return_value=(True, {"errcode": 0})) as mock_ws:
+                with patch.object(adapter, "_ws_send_and_wait_ack", side_effect=fake_ws_send_and_wait_ack):
                     with patch.object(adapter, "send_message", return_value=True) as mock_caption:
                         ok = adapter.send_file(
                             "conv_1",
@@ -850,42 +1020,47 @@ class TestWecomAttachments(unittest.TestCase):
 
         self.assertTrue(ok)
         mock_urlopen.assert_not_called()
-        payload = mock_ws.call_args[0][0]
-        self.assertEqual(payload["cmd"], "aibot_respond_msg")
-        self.assertEqual(payload["headers"]["req_id"], "req_test")
-        self.assertEqual(payload["body"]["msgtype"], "stream")
-        self.assertEqual(payload["body"]["stream"]["content"], "caption text")
-        self.assertEqual(payload["body"]["stream"]["msg_item"][0]["msgtype"], "image")
-        self.assertTrue(payload["body"]["stream"]["msg_item"][0]["image"]["base64"])
-        self.assertEqual(len(payload["body"]["stream"]["msg_item"][0]["image"]["md5"]), 32)
-        mock_caption.assert_not_called()
+        upload_init = [c for c in ws_calls if c.get("cmd") == "aibot_upload_media_init"]
+        upload_chunk = [c for c in ws_calls if c.get("cmd") == "aibot_upload_media_chunk"]
+        upload_finish = [c for c in ws_calls if c.get("cmd") == "aibot_upload_media_finish"]
+        respond = [c for c in ws_calls if c.get("cmd") == "aibot_respond_msg"]
+        self.assertEqual(len(upload_init), 1)
+        self.assertEqual(upload_init[0]["body"]["type"], "image")
+        self.assertEqual(upload_init[0]["body"]["filename"], "photo.png")
+        self.assertEqual(upload_init[0]["body"]["total_size"], len(b"\x89PNG\r\n\x1a\nfake"))
+        self.assertEqual(len(upload_chunk), 1)
+        self.assertEqual(len(upload_finish), 1)
+        self.assertEqual(len(respond), 1)
+        self.assertEqual(respond[0]["headers"]["req_id"], "req_test")
+        self.assertEqual(respond[0]["body"]["msgtype"], "image")
+        self.assertEqual(respond[0]["body"]["image"]["media_id"], "media_image")
+        mock_caption.assert_called_once_with("conv_1", "caption text")
 
-    def test_send_file_uploads_regular_file_via_media_api(self):
+    def test_send_file_uploads_regular_file_via_ws_media_upload(self):
         adapter = self._make_adapter()
         adapter._store_reply_ref("conv_1", req_id="req_test")
 
         ws_calls: list[dict] = []
 
         def fake_ws_send_and_wait_ack(payload, *, timeout=5.0):
+            _ = timeout
             ws_calls.append(payload)
             cmd = payload.get("cmd", "")
+            if cmd == "aibot_upload_media_init":
+                return True, {"errcode": 0, "body": {"upload_id": "upload_1"}}
+            if cmd == "aibot_upload_media_chunk":
+                return True, {"errcode": 0, "body": {}}
+            if cmd == "aibot_upload_media_finish":
+                return True, {"errcode": 0, "body": {"media_id": "media_file", "type": "file"}}
             if cmd == "aibot_respond_msg":
                 return True, {"errcode": 0}
             return True, {"errcode": 0}
-
-        # Mock HTTP upload response
-        upload_response = json.dumps({"errcode": 0, "media_id": "media_file"}).encode()
-        mock_resp = unittest.mock.MagicMock()
-        mock_resp.read.return_value = upload_response
-        mock_resp.status = 200
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = unittest.mock.MagicMock(return_value=False)
 
         with tempfile.TemporaryDirectory() as td:
             file_path = Path(td) / "report.pdf"
             file_path.write_bytes(b"%PDF-1.4")
 
-            with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            with patch("cccc.ports.im.adapters.wecom.urllib.request.urlopen") as mock_urlopen:
                 with patch.object(adapter, "_ws_send_and_wait_ack", side_effect=fake_ws_send_and_wait_ack) as mock_ws:
                     with patch.object(adapter, "send_message", return_value=True) as mock_caption:
                         ok = adapter.send_file(
@@ -896,8 +1071,22 @@ class TestWecomAttachments(unittest.TestCase):
                         )
 
         self.assertTrue(ok)
-        # HTTP upload should have been called
-        mock_urlopen.assert_called_once()
+        mock_urlopen.assert_not_called()
+        upload_init = [c for c in ws_calls if c.get("cmd") == "aibot_upload_media_init"]
+        upload_chunk = [c for c in ws_calls if c.get("cmd") == "aibot_upload_media_chunk"]
+        upload_finish = [c for c in ws_calls if c.get("cmd") == "aibot_upload_media_finish"]
+        self.assertEqual(len(upload_init), 1)
+        self.assertEqual(upload_init[0]["body"]["type"], "file")
+        self.assertEqual(upload_init[0]["body"]["filename"], "report.pdf")
+        self.assertEqual(upload_init[0]["body"]["total_size"], len(b"%PDF-1.4"))
+        self.assertEqual(upload_init[0]["body"]["total_chunks"], 1)
+        self.assertEqual(len(upload_init[0]["body"]["md5"]), 32)
+        self.assertEqual(len(upload_chunk), 1)
+        self.assertEqual(upload_chunk[0]["body"]["upload_id"], "upload_1")
+        self.assertEqual(upload_chunk[0]["body"]["chunk_index"], 0)
+        self.assertTrue(upload_chunk[0]["body"]["base64_data"])
+        self.assertEqual(len(upload_finish), 1)
+        self.assertEqual(upload_finish[0]["body"]["upload_id"], "upload_1")
         # WS respond_msg should contain file msgtype with correct media_id
         respond = [c for c in ws_calls if c.get("cmd") == "aibot_respond_msg"]
         self.assertEqual(len(respond), 1)
@@ -905,6 +1094,49 @@ class TestWecomAttachments(unittest.TestCase):
         self.assertEqual(respond[0]["body"]["file"]["media_id"], "media_file")
         self.assertEqual(respond[0]["body"]["file"]["filename"], "report.pdf")
         mock_caption.assert_called_once_with("conv_1", "caption text")
+
+    def test_send_file_without_reply_ref_uses_active_media_send(self):
+        adapter = self._make_adapter()
+
+        ws_calls: list[dict] = []
+
+        def fake_ws_send_and_wait_ack(payload, *, timeout=5.0):
+            _ = timeout
+            ws_calls.append(payload)
+            cmd = payload.get("cmd", "")
+            if cmd == "aibot_upload_media_init":
+                return True, {"errcode": 0, "body": {"upload_id": "upload_1"}}
+            if cmd == "aibot_upload_media_chunk":
+                return True, {"errcode": 0, "body": {}}
+            if cmd == "aibot_upload_media_finish":
+                return True, {"errcode": 0, "body": {"media_id": "media_image", "type": "image"}}
+            if cmd == "aibot_send_msg":
+                return True, {"errcode": 0}
+            return False, None
+
+        with tempfile.TemporaryDirectory() as td:
+            image_path = Path(td) / "photo.webp"
+            image_path.write_bytes(b"RIFFxxxxWEBP")
+
+            with patch.object(adapter, "_ws_send_and_wait_ack", side_effect=fake_ws_send_and_wait_ack):
+                ok = adapter.send_file(
+                    "conv_1",
+                    file_path=image_path,
+                    filename="photo.webp",
+                    caption="caption text",
+                )
+
+        self.assertTrue(ok)
+        active_sends = [c for c in ws_calls if c.get("cmd") == "aibot_send_msg"]
+        self.assertEqual(len(active_sends), 2)
+        media_send = active_sends[0]
+        caption_send = active_sends[1]
+        self.assertEqual(media_send["body"]["chatid"], "conv_1")
+        self.assertEqual(media_send["body"]["msgtype"], "image")
+        self.assertEqual(media_send["body"]["image"]["media_id"], "media_image")
+        self.assertEqual(caption_send["body"]["chatid"], "conv_1")
+        self.assertEqual(caption_send["body"]["msgtype"], "markdown")
+        self.assertEqual(caption_send["body"]["markdown"]["content"], "caption text")
 
 class TestWecomStreaming(unittest.TestCase):
     """Step 11: Streaming reply tests."""

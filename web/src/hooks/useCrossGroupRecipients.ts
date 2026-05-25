@@ -16,6 +16,8 @@ interface UseCrossGroupRecipientsOptions {
   composerGroupId: string;
   /** Target group ID for sending (from useComposerStore.destGroupId) */
   sendGroupId: string;
+  /** Whether the selected group's actors are currently hydrating */
+  selectedGroupActorsHydrating?: boolean;
 }
 
 interface UseCrossGroupRecipientsResult {
@@ -25,6 +27,31 @@ interface UseCrossGroupRecipientsResult {
   recipientActorsBusy: boolean;
   /** Label for the target group's active scope */
   destGroupScopeLabel: string;
+}
+
+export function resolveRecipientActorsForComposer({
+  actors,
+  remoteActorsByGroup,
+  selectedGroupId,
+  composerGroupId,
+  sendGroupId,
+  selectedGroupActorsHydrating,
+}: {
+  actors: Actor[];
+  remoteActorsByGroup: Record<string, Actor[]>;
+  selectedGroupId: string;
+  composerGroupId: string;
+  sendGroupId: string;
+  selectedGroupActorsHydrating?: boolean;
+}): Actor[] {
+  if (selectedGroupActorsHydrating) return [];
+  const selectedGid = String(selectedGroupId || "").trim();
+  const composerGid = String(composerGroupId || "").trim();
+  const sendGid = String(sendGroupId || "").trim();
+  if (!sendGid) return [];
+  if (composerGid !== selectedGid) return [];
+  if (sendGid === selectedGid) return actors;
+  return remoteActorsByGroup[sendGid] ?? [];
 }
 
 function getActiveScopeLabel(doc: GroupDoc | null): string {
@@ -44,6 +71,7 @@ export function useCrossGroupRecipients({
   selectedGroupId,
   composerGroupId,
   sendGroupId,
+  selectedGroupActorsHydrating,
 }: UseCrossGroupRecipientsOptions): UseCrossGroupRecipientsResult {
   const selectedGid = String(selectedGroupId || "").trim();
   const composerGid = String(composerGroupId || "").trim();
@@ -104,18 +132,25 @@ export function useCrossGroupRecipients({
   }, [groupDoc, remoteGroupDocsByGroup, selectedGid, sendGid]);
 
   const recipientActors = useMemo(() => {
-    if (!sendGid) return [];
-    if (sendGid === selectedGid) return actors;
-    return remoteActorsByGroup[sendGid] ?? [];
-  }, [actors, remoteActorsByGroup, selectedGid, sendGid]);
+    return resolveRecipientActorsForComposer({
+      actors,
+      remoteActorsByGroup,
+      selectedGroupId: selectedGid,
+      composerGroupId: composerGid,
+      sendGroupId: sendGid,
+      selectedGroupActorsHydrating,
+    });
+  }, [actors, composerGid, remoteActorsByGroup, selectedGid, sendGid, selectedGroupActorsHydrating]);
 
   const recipientActorsBusy = useMemo(() => {
+    if (selectedGroupActorsHydrating) return true;
     if (!sendGid) return false;
     if (!selectedGid) return false;
+    if (composerGid !== selectedGid) return true;
     if (sendGid === selectedGid) return false;
     if (!canFetchRemoteRecipients) return false;
     return !Object.prototype.hasOwnProperty.call(remoteActorsByGroup, sendGid);
-  }, [canFetchRemoteRecipients, remoteActorsByGroup, selectedGid, sendGid]);
+  }, [canFetchRemoteRecipients, composerGid, remoteActorsByGroup, selectedGid, sendGid, selectedGroupActorsHydrating]);
 
   return { recipientActors, recipientActorsBusy, destGroupScopeLabel };
 }

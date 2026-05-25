@@ -226,7 +226,7 @@ describe("slashCommands", () => {
   it("keeps slash command execution guards as a pure decision", () => {
     const messages = {
       attachmentsUnsupported: "附件不能用于斜杠命令。",
-      repliesUnsupported: "回复不能用于斜杠命令。",
+      repliesUnsupported: "不能回复某条消息。",
       quotedPresentationUnsupported: "引用演示不能用于斜杠命令。",
       crossGroupUnsupported: "跨工作组发送不能用于斜杠命令。",
     };
@@ -242,10 +242,11 @@ describe("slashCommands", () => {
     expect(resolveSlashCommandGuard({
       composerFilesCount: 0,
       hasReplyTarget: true,
+      sourceType: "dynamic_tool",
       hasQuotedPresentationRef: false,
       sendGroupId: "g1",
       selectedGroupId: "g1",
-    }, messages)).toEqual({ ok: false, message: "回复不能用于斜杠命令。" });
+    }, messages)).toEqual({ ok: false, message: "不能回复某条消息。" });
 
     expect(resolveSlashCommandGuard({
       composerFilesCount: 0,
@@ -272,6 +273,34 @@ describe("slashCommands", () => {
     })).toEqual({ ok: true });
   });
 
+  it("allows reply targets for message-backed slash commands only", () => {
+    const base = {
+      composerFilesCount: 0,
+      hasReplyTarget: true,
+      hasQuotedPresentationRef: false,
+      sendGroupId: "g1",
+      selectedGroupId: "g1",
+    };
+
+    expect(resolveSlashCommandGuard({ ...base, sourceType: "builtin_command" })).toEqual({ ok: true });
+    expect(resolveSlashCommandGuard({ ...base, sourceType: "capsule_skill" })).toEqual({ ok: true });
+    expect(resolveSlashCommandGuard({ ...base, sourceType: "dynamic_tool" })).toEqual({
+      ok: false,
+      message: "Slash command does not support replying to a specific message yet.",
+    });
+  });
+
+  it("allows slash commands when the message only requires recipients to reply", () => {
+    expect(resolveSlashCommandGuard({
+      composerFilesCount: 0,
+      hasReplyTarget: false,
+      replyRequired: true,
+      hasQuotedPresentationRef: false,
+      sendGroupId: "g1",
+      selectedGroupId: "g1",
+    })).toEqual({ ok: true });
+  });
+
   it("shows every available slash command for an empty slash query", () => {
     const commands = buildSlashCommands({
       state: {
@@ -288,6 +317,37 @@ describe("slashCommands", () => {
 
     expect(commands).toHaveLength(11);
     expect(filterSlashCommands(commands, "/")).toHaveLength(11);
+  });
+
+  it("prioritizes command names over noisy short description matches", () => {
+    const commands = buildSlashCommands({
+      state: {
+        group_id: "g1",
+        actor_id: "user",
+        enabled: [],
+        active_capsule_skills: [
+          {
+            capability_id: "skill:agent_self_proposed:review",
+            name: "review",
+            description_short: "Review code changes",
+          },
+          {
+            capability_id: "skill:agent_self_proposed:writer",
+            name: "writer",
+            description_short: "Use before sending a release note.",
+          },
+        ],
+        dynamic_tools: [],
+      },
+    });
+
+    expect(filterSlashCommands(commands, "/re").map((item) => item.command)).toEqual(["/review"]);
+  });
+
+  it("allows longer description searches after name matches", () => {
+    const commands = buildSlashCommands({ state: null });
+
+    expect(filterSlashCommands(commands, "/repo").map((item) => item.command)).toEqual(["/install"]);
   });
 
   it("paginates visible slash commands without changing the cached command list", () => {

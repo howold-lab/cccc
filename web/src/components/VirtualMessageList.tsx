@@ -2,7 +2,7 @@ import { memo, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useStat
 import type { MutableRefObject } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTranslation } from "react-i18next";
-import { LedgerEvent, Actor, AgentState, PresentationMessageRef, TaskMessageRef, Task } from "../types";
+import { LedgerEvent, Actor, AgentState, PresentationMessageRef, TaskMessageRef, Task, ChatMessageData } from "../types";
 import { ArrowDownIcon, MessageSquareTextIcon } from "./Icons";
 import { MessageBubble } from "./MessageBubble";
 import { useActorDisplayNameMap } from "../hooks/useActorDisplayName";
@@ -17,15 +17,44 @@ import {
   getStableMessageKey,
   shouldAutoScrollToBottom,
   shouldDetachChatFollowOnScroll,
+  shouldNotifyScrollChange,
+  shouldRunScheduledBottomScroll,
   shouldUseVirtualizedMessageList,
 } from "./virtualMessageListHelpers";
 import { classNames } from "../utils/classNames";
 import type { WebModelDeliveryStatus } from "../utils/webModelDeliveryStatus";
 
 function shouldCollapseMessageHeader(previousMessage: LedgerEvent | undefined, message: LedgerEvent | undefined): boolean {
-  void previousMessage;
-  void message;
-  return false;
+  if (!previousMessage || !message) return false;
+  if (previousMessage.kind !== "chat.message" || message.kind !== "chat.message") return false;
+
+  const prevBy = String(previousMessage.by || "").trim();
+  const currBy = String(message.by || "").trim();
+  if (!prevBy || !currBy || prevBy !== currBy) return false;
+
+  const prevData = previousMessage.data as ChatMessageData | undefined;
+  const currData = message.data as ChatMessageData | undefined;
+
+  // Do not collapse if either message has attention priority or requires a reply
+  if (prevData?.priority === "attention" || currData?.priority === "attention") return false;
+  if (prevData?.reply_required || currData?.reply_required) return false;
+
+  // Do not collapse if the message is a reply targeting another message
+  if (currData?.reply_to) return false;
+
+  if (!previousMessage.ts || !message.ts) return false;
+
+  try {
+    const prevTime = new Date(previousMessage.ts).getTime();
+    const currTime = new Date(message.ts).getTime();
+    if (isNaN(prevTime) || isNaN(currTime)) return false;
+
+    // Collapse if sent within 3 minutes of the previous message
+    const diffMs = Math.abs(currTime - prevTime);
+    return diffMs < 3 * 60 * 1000;
+  } catch {
+    return false;
+  }
 }
 
 function getMessageRowGrouping(previousMessage: LedgerEvent | undefined, message: LedgerEvent | undefined): {
@@ -410,14 +439,22 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   const checkIsAtBottom = useCallback(() => {
     const el = parentRef.current;
     if (!el) return true;
-    const threshold = 32;
+    const threshold = 8;
     return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
   }, []);
 
-  const scrollToBottom = useCallback(() => {
+  const scrollToBottom = useCallback((opts?: { force?: boolean }) => {
     const el = parentRef.current;
     if (!el || displayMessages.length <= 0) return;
     window.requestAnimationFrame(() => {
+      if (!shouldRunScheduledBottomScroll({
+        followMode: followModeRef.current,
+        isAtBottom: isAtBottomRef.current,
+        forceStickToBottom: forceStickToBottomUntilRef.current > performance.now(),
+        explicitForce: !!opts?.force,
+      })) {
+        return;
+      }
       el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
     });
   }, [displayMessages.length]);
@@ -449,7 +486,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     scrollRafRef.current = window.requestAnimationFrame(() => {
       scrollRafRef.current = null;
       if (!shouldForceStickToBottom()) return;
-      scrollToBottom();
+      scrollToBottom({ force: true });
     });
   }, [cancelScheduledScroll, scrollToBottom, shouldForceStickToBottom]);
 
@@ -568,6 +605,23 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   ]);
 
   const handleScroll = useCallback(() => {
+    const currentEl = parentRef.current;
+    if (currentEl && !isContainerResizingRef.current) {
+      const atBottom = checkIsAtBottom();
+      const wasAtBottom = isAtBottomRef.current;
+      setAtBottom(atBottom);
+      if (atBottom) {
+        setFollowMode("follow");
+      } else {
+        setFollowMode("detached");
+        forceStickToBottomUntilRef.current = 0;
+        cancelScheduledScroll();
+      }
+      if (shouldNotifyScrollChange({ wasAtBottom, atBottom, showScrollButton, chatUnreadCount })) {
+        onScrollChange?.(atBottom);
+      }
+    }
+
     if (scrollRafScheduledRef.current) return;
     scrollRafScheduledRef.current = true;
 
@@ -597,13 +651,15 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     lastScrollTopRef.current = curTop;
 
     if (atBottom && followModeRef.current === "detached") {
-      setFollowMode("follow");
+      if (curTop >= previousTop) {
+        setFollowMode("follow");
+      }
     }
     // Only notify parent when atBottom state actually changes (not on every scroll event)
     // to avoid triggering store updates and re-renders during inertia scrolling.
     const wasAtBottom = isAtBottomRef.current;
     setAtBottom(atBottom);
-    if (atBottom !== wasAtBottom) {
+    if (shouldNotifyScrollChange({ wasAtBottom, atBottom, showScrollButton, chatUnreadCount })) {
       onScrollChange?.(atBottom);
     }
 
@@ -655,7 +711,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
       onLoadMore();
     }
     });
-  }, [cancelScheduledScroll, checkIsAtBottom, getAnchorSnapshot, getCurrentContentSize, hasMoreHistory, isLoadingHistory, onLoadMore, onScrollChange, onScrollSnapshot, setAtBottom, setFollowMode]);
+  }, [cancelScheduledScroll, chatUnreadCount, checkIsAtBottom, getAnchorSnapshot, getCurrentContentSize, hasMoreHistory, isLoadingHistory, onLoadMore, onScrollChange, onScrollSnapshot, setAtBottom, setFollowMode, showScrollButton]);
 
   // When switching views (group or window-mode), reset internal scroll bookkeeping.
   //
@@ -683,8 +739,9 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     latestSnapshotRef.current = null;
 
     scrollTokenRef.current += 1;
-    setAtBottom(true);
-    setFollowMode(initialScrollAnchorId ? "detached" : "follow");
+    const hasInitialJumpTarget = !!(initialScrollAnchorId || initialScrollTargetId);
+    setAtBottom(!hasInitialJumpTarget);
+    setFollowMode(hasInitialJumpTarget ? "detached" : "follow");
     didInitialScrollRef.current = false;
     topLoadArmedRef.current = true;
     cancelScheduledScroll();
@@ -709,7 +766,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     if (shouldVirtualize) {
       virtualizer.measure();
     }
-  }, [displayMessages, initialScrollAnchorId, resetKey, cancelScheduledScroll, onScrollSnapshot, setAtBottom, setFollowMode, shouldVirtualize, virtualizer]);
+  }, [displayMessages, initialScrollAnchorId, initialScrollTargetId, resetKey, cancelScheduledScroll, onScrollSnapshot, setAtBottom, setFollowMode, shouldVirtualize, virtualizer]);
 
   const tailMutationSignature = useMemo(() => {
     const lastMessage = displayMessages[displayMessages.length - 1];
@@ -936,6 +993,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   const effectiveHighlightEventId = replyJumpHighlightId || highlightEventId;
 
   return (
+    <div className="relative flex-1 min-h-0 flex flex-col">
     <div
       ref={(el) => {
         parentRef.current = el;
@@ -950,32 +1008,23 @@ const VirtualMessageListInner = function VirtualMessageListInner({
       {displayMessages.length === 0 ? (
         (isLoadingHistory || hasMoreHistory) ? (
           <div className="flex flex-col items-center justify-center h-full text-center pb-20">
-            <div
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-full shadow-md ${isDark ? "bg-slate-800 text-slate-300" : "bg-white text-gray-600"
-                }`}
-            >
+            <div className="glass-panel flex items-center gap-2 rounded-full px-3 py-1.5 text-[var(--color-text-secondary)] shadow-md">
               <div className="animate-spin w-4 h-4 border-2 border-current border-t-transparent rounded-full" />
-              <span className="text-xs">Loading...</span>
+              <span className="text-xs">{t("loadingHistory", { defaultValue: "Loading..." })}</span>
             </div>
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-center pb-20">
-            <div
-              className={`mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border ${
-                isDark
-                  ? "border-white/10 bg-white/[0.04] text-white/55"
-                  : "border-black/[0.08] bg-white/80 text-[rgb(35,36,37)]/55"
-              }`}
-            >
+            <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-muted)]">
               <MessageSquareTextIcon size={28} />
             </div>
-            <p className={`text-sm font-medium ${isDark ? "text-slate-400" : "text-gray-500"}`}>
+            <p className="text-sm font-medium text-[var(--color-text-secondary)]">
               {t("emptyStateTitle")}
             </p>
-            <p className={`text-xs mt-1 ${isDark ? "text-slate-500" : "text-gray-400"}`}>
+            <p className="text-xs mt-1 text-[var(--color-text-tertiary)]">
               {t("emptyStateSubtitle")}
             </p>
-            <div className={`mt-4 w-full max-w-sm space-y-2 text-left text-xs ${isDark ? "text-slate-500" : "text-gray-500"}`}>
+            <div className="mt-4 w-full max-w-sm space-y-2 text-left text-xs text-[var(--color-text-tertiary)]">
               {[
                 [t("emptyStateQuickNoteTitle"), t("emptyStateQuickNoteBody")],
                 [t("emptyStateAskForemanTitle"), t("emptyStateAskForemanBody")],
@@ -983,11 +1032,9 @@ const VirtualMessageListInner = function VirtualMessageListInner({
               ].map(([title, body]) => (
                 <div
                   key={title}
-                  className={`flex gap-2 border-t pt-2 ${
-                    isDark ? "border-white/[0.08]" : "border-black/[0.06]"
-                  }`}
+                  className="flex gap-2 border-t border-[var(--glass-border-subtle)] pt-2"
                 >
-                  <span className={isDark ? "text-slate-300" : "text-gray-700"}>{title}</span>
+                  <span className="text-[var(--color-text-secondary)]">{title}</span>
                   <span>{body}</span>
                 </div>
               ))}
@@ -1002,15 +1049,13 @@ const VirtualMessageListInner = function VirtualMessageListInner({
               style={{ top: topInset }}
             >
               {isLoadingHistory ? (
-                <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full shadow-md ${isDark ? "bg-slate-800 text-slate-300" : "bg-white text-gray-600"
-                  }`}>
+                <div className="glass-panel flex items-center gap-2 rounded-full px-3 py-1.5 text-[var(--color-text-secondary)] shadow-md">
                   <div className="animate-spin w-4 h-4 border-2 border-current border-t-transparent rounded-full" />
-                  <span className="text-xs">Loading...</span>
+                  <span className="text-xs">{t("loadingHistory", { defaultValue: "Loading..." })}</span>
                 </div>
               ) : (
-                <div className={`px-3 py-1.5 rounded-full text-sm shadow-sm ${isDark ? "bg-slate-900/85 text-slate-400" : "bg-white/90 text-gray-400"
-                  }`}>
-                  No more messages
+                <div className="glass-panel rounded-full px-3 py-1.5 text-xs text-[var(--color-text-tertiary)] shadow-sm">
+                  {t("noMoreMessages", { defaultValue: "No more messages" })}
                 </div>
               )}
             </div>
@@ -1021,12 +1066,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
               className="pointer-events-none absolute inset-x-0 z-20 flex justify-center px-4"
               style={{ top: topInset + 48 }}
             >
-              <div
-                className={`rounded-full px-3 py-1 text-xs shadow-sm ${isDark
-                  ? "bg-slate-900/90 text-slate-300 ring-1 ring-white/10"
-                  : "bg-white/95 text-gray-600 ring-1 ring-gray-200"
-                  }`}
-              >
+              <div className="glass-panel rounded-full px-3 py-1 text-xs text-[var(--color-text-secondary)] shadow-sm">
                 {replyJumpNotice}
               </div>
             </div>
@@ -1123,32 +1163,27 @@ const VirtualMessageListInner = function VirtualMessageListInner({
               })}
             </div>
           )}
-
-          {/* Scroll Button */}
-          {!readOnly && showScrollButton && (
-            <button
-              className={`fixed bottom-52 right-5 sm:bottom-44 sm:right-6 p-3 rounded-full shadow-xl transition-all z-30 ${isDark
-                ? "bg-slate-800 text-white hover:bg-slate-700 border border-slate-700"
-                : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-100"
-                }`}
-              onClick={() => {
-                scrollToBottom();
-                onScrollButtonClick();
-              }}
-              aria-label="Scroll to bottom"
-            >
-              <ArrowDownIcon className="w-5 h-5" aria-hidden="true" />
-              {chatUnreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 flex h-4 w-4">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-60"></span>
-                  <span className="relative inline-flex rounded-full h-4 w-4 bg-indigo-500 text-[9px] text-white items-center justify-center font-bold">
-                    {chatUnreadCount > 9 ? "!" : chatUnreadCount}
-                  </span>
-                </span>
-              )}
-            </button>
-          )}
         </>
+      )}
+    </div>
+
+      {/* Scroll Button — positioned outside scrollable container for correct viewport anchoring */}
+      {!readOnly && showScrollButton && (
+        <button
+          className="glass-panel absolute bottom-6 right-5 z-30 rounded-full p-3 shadow-xl transition-all duration-200 hover:shadow-2xl hover:scale-105 active:scale-95 animate-scale-in text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+          onClick={() => {
+            scrollToBottom({ force: true });
+            onScrollButtonClick();
+          }}
+          aria-label={t("scrollToBottom", { defaultValue: "Scroll to bottom" })}
+        >
+          <ArrowDownIcon className="w-5 h-5" aria-hidden="true" />
+          {chatUnreadCount > 0 && (
+            <span className="absolute -top-1.5 -right-1.5 inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-indigo-500 px-1 text-[10px] font-bold text-white shadow-sm">
+              {chatUnreadCount > 99 ? "99+" : chatUnreadCount}
+            </span>
+          )}
+        </button>
       )}
     </div>
   );

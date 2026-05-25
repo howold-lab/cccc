@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect, useMemo } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useMemo } from "react";
 import { DropOverlay } from "./components/DropOverlay";
 const AppModals = lazy(() => import("./components/AppModals").then((m) => ({ default: m.AppModals })));
 const WebPet = lazy(() => import("./features/webPet/WebPet").then((m) => ({ default: m.WebPet })));
@@ -126,6 +126,14 @@ export default function App() {
     () => internalRuntimeActorsByGroup[String(selectedGroupId || "").trim()] || [],
     [internalRuntimeActorsByGroup, selectedGroupId]
   );
+  const refreshRuntimeActors = useCallback(
+    async (groupIdArg?: string, opts?: { includeUnread?: boolean }) => {
+      const gid = String(groupIdArg || selectedGroupId || "").trim();
+      if (!gid) return;
+      await refreshActors(gid, opts);
+    },
+    [refreshActors, selectedGroupId],
+  );
   const visibleRuntimeActors = useMemo(
     () =>
       filterVisibleRuntimeActors(
@@ -166,7 +174,6 @@ export default function App() {
     handleTabChange,
   } = useAppTabState({
     activeTab,
-    actors,
     runtimeActors: visibleRuntimeActors,
     selectedGroupId,
     isSmallScreen,
@@ -214,6 +221,7 @@ export default function App() {
     selectedGroupId,
     composerGroupId: activeGroupId,
     sendGroupId: computedSendGroupId,
+    selectedGroupActorsHydrating,
   });
   const sendGroupId = computedSendGroupId;
 
@@ -263,7 +271,7 @@ export default function App() {
 
   useGlobalEvents({
     refreshGroups,
-    refreshActors,
+    refreshActors: refreshRuntimeActors,
     selectedGroupId,
     refreshCapabilities: (groupId) => {
       publishCapabilityChanged(groupId);
@@ -332,9 +340,7 @@ export default function App() {
 
   return (
     <div
-      className={`relative min-h-0 w-full overflow-hidden ${
-        isDark ? "bg-black text-slate-100" : "bg-gradient-to-br from-slate-50 via-white to-slate-100"
-      }`}
+      className="relative min-h-0 w-full overflow-hidden bg-[var(--color-body-bg)] text-[var(--color-text-primary)]"
       style={{
         height: "calc(100dvh - var(--vk-offset, 0px))",
         maxHeight: "calc(100dvh - var(--vk-offset, 0px))",
@@ -429,7 +435,7 @@ export default function App() {
         onEditActor={editActor}
         onRemoveActor={removeActor}
         onOpenActorInbox={openActorInbox}
-        onRefreshActors={() => void refreshActors()}
+        onRefreshActors={() => void refreshRuntimeActors(selectedGroupId)}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       />

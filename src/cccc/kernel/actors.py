@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from ..contracts.v1 import Actor, ActorRole, ActorSubmit, RunnerKind, AgentRuntime
+from ..contracts.v1 import Actor, ActorRole, ActorSubmit, RunnerKind, AgentRuntime, RuntimeStateSource
 from ..util.time import utc_now_iso
 from ..util.conv import coerce_bool
 from .group import Group
 from .runtime import get_runtime_command_with_flags
+from .runtime_state_source import default_runtime_state_source
 
 # Actor ID naming rules:
 # - Length: 1-32 characters
@@ -198,6 +199,7 @@ def add_actor(
     enabled: bool = True,
     runner: RunnerKind = "pty",
     runtime: AgentRuntime = "codex",
+    runtime_state_source: Optional[RuntimeStateSource] = None,
     internal_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Add a new actor to the group.
@@ -237,6 +239,11 @@ def add_actor(
         enabled=coerce_bool(enabled, default=True),
         runner=runner_kind,  # type: ignore[arg-type]
         runtime=runtime_name,  # type: ignore[arg-type]
+        runtime_state_source=default_runtime_state_source(
+            runtime=runtime_name,
+            runner=runner_kind,
+            requested_source=runtime_state_source,
+        ),
         internal_kind=(str(internal_kind or "").strip() or None),
         created_at=now,
         updated_at=now,
@@ -391,7 +398,20 @@ def update_actor(group: Group, actor_id: str, patch: Dict[str, Any]) -> Dict[str
         runtime = patch.get("runtime")
         if runtime is None:
             item["runtime"] = "codex"
-        elif runtime in ("amp", "auggie", "claude", "codex", "droid", "gemini", "kimi", "neovate", "web_model", "custom"):
+        elif runtime in (
+            "amp",
+            "auggie",
+            "claude",
+            "codex",
+            "droid",
+            "gemini",
+            "hermes",
+            "kimi",
+            "neovate",
+            "opencode",
+            "web_model",
+            "custom",
+        ):
             item["runtime"] = runtime
         else:
             raise ValueError("invalid runtime")
@@ -405,9 +425,29 @@ def update_actor(group: Group, actor_id: str, patch: Dict[str, Any]) -> Dict[str
         ):
             raise ValueError("custom runtime requires a command (PTY runner)")
 
+    if "runtime_state_source" in patch:
+        source = patch.get("runtime_state_source")
+        if source is None:
+            item["runtime_state_source"] = "terminal"
+        elif source in ("terminal", "app_server"):
+            item["runtime_state_source"] = source
+        else:
+            raise ValueError("invalid runtime_state_source")
+
     if str(item.get("runtime") or "").strip() == "web_model":
         item["runner"] = "headless"
         item["command"] = []
+
+    if str(item.get("runtime") or "").strip() != "codex" or str(item.get("runner") or "pty").strip() != "pty":
+        item["runtime_state_source"] = "terminal"
+    elif "runtime_state_source" not in patch and (
+        "runtime" in patch or "runner" in patch or not str(item.get("runtime_state_source") or "").strip()
+    ):
+        item["runtime_state_source"] = default_runtime_state_source(
+            runtime=str(item.get("runtime") or ""),
+            runner=str(item.get("runner") or ""),
+            requested_source=None,
+        )
 
     if "internal_kind" in patch:
         internal_kind = str(patch.get("internal_kind") or "").strip()

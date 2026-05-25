@@ -54,6 +54,30 @@ def test_planner_routes_targeted_pty_actor() -> None:
     assert decision.reason == "pty_runner"
 
 
+def test_planner_keeps_codex_pty_app_server_actor_on_pty_delivery() -> None:
+    actor = {
+        "id": "peer1",
+        "runner": "pty",
+        "runtime": "codex",
+        "runtime_state_source": "app_server",
+    }
+    decision = plan_actor_chat_delivery(
+        group=_group(actor),
+        actor=actor,
+        event=_event(),
+        by="user",
+        effective_to=["peer1"],
+        effective_runner_kind=_runner,
+        codex_headless_running=lambda _group_id, _actor_id: True,
+        claude_headless_running=lambda _group_id, _actor_id: False,
+    )
+
+    assert decision.actor_id == "peer1"
+    assert decision.transport == TRANSPORT_PTY
+    assert decision.reason == "codex_pty_app_server_state_only"
+    assert decision.runner_effective == "pty"
+
+
 def test_planner_skips_sender_and_non_targeted_actor() -> None:
     actor = {"id": "peer1", "runner": "pty", "runtime": "codex"}
     sender_decision = plan_actor_chat_delivery(
@@ -209,8 +233,8 @@ def test_handle_send_uses_same_planner_for_claude_headless_actor(monkeypatch, tm
     with (
         patch("cccc.daemon.messaging.chat_ops.claude_app_supervisor.actor_running", return_value=True),
         patch("cccc.daemon.messaging.chat_ops.claude_app_supervisor.submit_user_message", return_value=True) as submit,
-        patch("cccc.daemon.messaging.chat_ops.queue_chat_message") as queue_chat_message,
-        patch("cccc.daemon.messaging.chat_ops.request_flush_pending_messages") as request_flush,
+        patch("cccc.daemon.messaging.chat_delivery_ops.queue_chat_message") as queue_chat_message,
+        patch("cccc.daemon.messaging.chat_delivery_ops.request_flush_pending_messages") as request_flush,
     ):
         resp = handle_send(
             {
@@ -271,10 +295,10 @@ def test_handle_send_schedules_browser_delivery_for_web_model_actor(monkeypatch,
     assert add_resp.ok
 
     with (
-        patch("cccc.daemon.messaging.chat_ops.web_model_browser_delivery_enabled", return_value=True),
-        patch("cccc.daemon.messaging.chat_ops.schedule_web_model_browser_delivery", return_value=True) as schedule,
-        patch("cccc.daemon.messaging.chat_ops.queue_chat_message") as queue_chat_message,
-        patch("cccc.daemon.messaging.chat_ops.request_flush_pending_messages") as request_flush,
+        patch("cccc.daemon.messaging.chat_delivery_ops.web_model_browser_delivery_enabled", return_value=True),
+        patch("cccc.daemon.messaging.chat_delivery_ops.schedule_web_model_browser_delivery", return_value=True) as schedule,
+        patch("cccc.daemon.messaging.chat_delivery_ops.queue_chat_message") as queue_chat_message,
+        patch("cccc.daemon.messaging.chat_delivery_ops.request_flush_pending_messages") as request_flush,
     ):
         resp = handle_send(
             {

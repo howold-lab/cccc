@@ -498,6 +498,35 @@ class TestWebActorRoutesCache(unittest.TestCase):
         finally:
             cleanup()
 
+    def test_actor_list_route_projects_runtime_session_resume_failure(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.daemon.runtime_session_ops import write_runtime_session
+
+            os.environ.pop("CCCC_WEB_MODE", None)
+            group_id = self._create_group()
+            self._add_actor(group_id, runtime="codex")
+            write_runtime_session(
+                group_id,
+                "peer-1",
+                {
+                    "status": "resume_failed",
+                    "resume_eligible": False,
+                    "last_resume_error": "thread not found",
+                },
+            )
+
+            with self._client() as client:
+                resp = client.get(f"/api/v1/groups/{group_id}/actors")
+
+            self.assertEqual(resp.status_code, 200)
+            actor = resp.json()["result"]["actors"][0]
+            self.assertEqual(actor["runtime_session_status"], "resume_failed")
+            self.assertFalse(bool(actor["runtime_session_resume_eligible"]))
+            self.assertEqual(actor["runtime_session_last_resume_error"], "thread not found")
+        finally:
+            cleanup()
+
     def test_actor_list_route_local_fallback_reports_web_model_queued_count(self) -> None:
         _, cleanup = self._with_home()
         try:
@@ -575,6 +604,12 @@ class TestWebActorRoutesCache(unittest.TestCase):
             os.environ.pop("CCCC_WEB_MODE", None)
             group_id = self._create_group()
             self._add_actor(group_id, runtime="codex")
+            from cccc.kernel.actors import update_actor
+            from cccc.kernel.group import load_group
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            update_actor(group, "peer-1", {"runtime_state_source": "terminal"})  # type: ignore[arg-type]
 
             atomic_write_json(
                 headless_state_path(group_id, "peer-1"),
@@ -608,6 +643,196 @@ class TestWebActorRoutesCache(unittest.TestCase):
             self.assertEqual(actor["runner_effective"], "headless")
             self.assertEqual(actor["effective_working_state"], "working")
             self.assertEqual(actor["effective_working_reason"], "headless_working")
+        finally:
+            cleanup()
+
+    def test_actor_list_route_codex_pty_terminal_prompt_is_idle(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.kernel.actors import update_actor
+            from cccc.kernel.group import load_group
+
+            os.environ.pop("CCCC_WEB_MODE", None)
+            group_id = self._create_group()
+            self._add_actor(group_id, runtime="codex")
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            update_actor(group, "peer-1", {"runtime_state_source": "terminal"})  # type: ignore[arg-type]
+            group.save()  # type: ignore[union-attr]
+
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._daemon_unavailable_for_actor_list), patch(
+                "cccc.ports.web.routes.actors.pty_runner.SUPERVISOR.actor_running",
+                return_value=True,
+            ), patch(
+                "cccc.ports.web.routes.actors.pty_runner.SUPERVISOR.idle_seconds",
+                return_value=0.2,
+            ), patch(
+                "cccc.ports.web.routes.actors.pty_runner.SUPERVISOR.tail_output",
+                return_value=(
+                    "◦ Working (4s • esc to interrupt)\n"
+                    "> Use /skills to list available skills\n"
+                    "gpt-5.5 medium · ~/Desktop/waterbang/ai/cccc · 30M used\n"
+                ).encode("utf-8"),
+            ):
+                with self._client() as client:
+                    resp = client.get(f"/api/v1/groups/{group_id}/actors")
+
+            self.assertEqual(resp.status_code, 200)
+            actor = resp.json()["result"]["actors"][0]
+            self.assertTrue(bool(actor["running"]))
+            self.assertEqual(actor["effective_working_state"], "idle")
+            self.assertEqual(actor["effective_working_reason"], "pty_terminal_codex_prompt_visible")
+        finally:
+            cleanup()
+
+    def test_actor_list_route_codex_pty_app_server_keeps_pty_runner_effective(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.daemon.runner_state_ops import headless_state_path
+            from cccc.kernel.actors import update_actor
+            from cccc.kernel.group import load_group
+            from cccc.util.fs import atomic_write_json
+
+            os.environ.pop("CCCC_WEB_MODE", None)
+            group_id = self._create_group()
+            self._add_actor(group_id, runtime="codex")
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            update_actor(group, "peer-1", {"runtime_state_source": "app_server"})  # type: ignore[arg-type]
+            group.save()  # type: ignore[union-attr]
+
+            atomic_write_json(
+                headless_state_path(group_id, "peer-1"),
+                {
+                    "v": 1,
+                    "kind": "headless",
+                    "runtime": "codex",
+                    "group_id": group_id,
+                    "actor_id": "peer-1",
+                    "pid": os.getpid(),
+                    "status": "working",
+                },
+            )
+
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._daemon_unavailable_for_actor_list), patch(
+                "cccc.ports.web.routes.actors.pty_runner.SUPERVISOR.actor_running",
+                return_value=True,
+            ), patch(
+                "cccc.ports.web.routes.actors.pty_runner.SUPERVISOR.idle_seconds",
+                return_value=12.0,
+            ), patch(
+                "cccc.ports.web.routes.actors.pty_runner.SUPERVISOR.tail_output",
+                return_value=b"",
+            ):
+                with self._client() as client:
+                    resp = client.get(f"/api/v1/groups/{group_id}/actors")
+
+            self.assertEqual(resp.status_code, 200)
+            actor = resp.json()["result"]["actors"][0]
+            self.assertTrue(bool(actor["running"]))
+            self.assertEqual(actor["runner_effective"], "pty")
+            self.assertEqual(actor["effective_working_state"], "working")
+            self.assertEqual(actor["effective_working_reason"], "headless_working")
+        finally:
+            cleanup()
+
+    def test_actor_list_route_codex_pty_app_server_falls_back_to_pty_state_for_running(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.daemon.runner_state_ops import write_pty_state
+            from cccc.kernel.actors import update_actor
+            from cccc.kernel.group import load_group
+
+            os.environ.pop("CCCC_WEB_MODE", None)
+            group_id = self._create_group()
+            self._add_actor(group_id, runtime="codex")
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            update_actor(group, "peer-1", {"runtime_state_source": "app_server"})  # type: ignore[arg-type]
+            group.save()  # type: ignore[union-attr]
+            write_pty_state(group_id, "peer-1", pid=43210)
+
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._daemon_unavailable_for_actor_list), patch(
+                "cccc.ports.web.routes.actors.codex_app_supervisor.get_state",
+                return_value=None,
+            ), patch(
+                "cccc.ports.web.routes.actors.codex_app_supervisor.actor_running",
+                return_value=False,
+            ), patch(
+                "cccc.ports.web.routes.actors.pty_runner.SUPERVISOR.actor_running",
+                return_value=False,
+            ), patch(
+                "cccc.ports.web.routes.actors.pty_runner.SUPERVISOR.idle_seconds",
+                return_value=None,
+            ), patch(
+                "cccc.ports.web.routes.actors.pid_is_alive",
+                return_value=True,
+            ), patch(
+                "cccc.ports.web.routes.actors._pid_matches_actor_context",
+                return_value=True,
+            ):
+                with self._client() as client:
+                    resp = client.get(f"/api/v1/groups/{group_id}/actors")
+
+            self.assertEqual(resp.status_code, 200)
+            actor = resp.json()["result"]["actors"][0]
+            self.assertTrue(bool(actor["running"]))
+            self.assertEqual(actor["runner_effective"], "pty")
+            self.assertEqual(actor["effective_working_state"], "waiting")
+            self.assertEqual(actor["effective_working_reason"], "pty_running_state_unknown")
+        finally:
+            cleanup()
+
+    def test_actor_list_route_disabled_codex_pty_app_server_actor_is_stopped(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.daemon.runner_state_ops import headless_state_path
+            from cccc.kernel.actors import update_actor
+            from cccc.kernel.group import load_group
+            from cccc.util.fs import atomic_write_json
+
+            os.environ.pop("CCCC_WEB_MODE", None)
+            group_id = self._create_group()
+            self._add_actor(group_id, runtime="codex")
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            update_actor(group, "peer-1", {"runtime_state_source": "app_server", "enabled": False})  # type: ignore[arg-type]
+            group.save()  # type: ignore[union-attr]
+
+            atomic_write_json(
+                headless_state_path(group_id, "peer-1"),
+                {
+                    "v": 1,
+                    "kind": "headless",
+                    "runtime": "codex",
+                    "group_id": group_id,
+                    "actor_id": "peer-1",
+                    "pid": os.getpid(),
+                    "status": "working",
+                },
+            )
+
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._daemon_unavailable_for_actor_list), patch(
+                "cccc.ports.web.routes.actors.codex_app_supervisor.get_state",
+                return_value={
+                    "group_id": group_id,
+                    "actor_id": "peer-1",
+                    "status": "working",
+                    "current_task_id": "turn-1",
+                },
+            ), patch(
+                "cccc.ports.web.routes.actors.codex_app_supervisor.actor_running",
+                return_value=True,
+            ):
+                with self._client() as client:
+                    resp = client.get(f"/api/v1/groups/{group_id}/actors")
+
+            self.assertEqual(resp.status_code, 200)
+            actor = resp.json()["result"]["actors"][0]
+            self.assertFalse(bool(actor["running"]))
+            self.assertEqual(actor["runner_effective"], "pty")
+            self.assertEqual(actor["effective_working_state"], "stopped")
+            self.assertEqual(actor["effective_working_reason"], "runner_not_running")
         finally:
             cleanup()
 

@@ -236,6 +236,10 @@ export type Actor = {
   runner?: string;
   runner_effective?: string;
   runtime?: string;
+  runtime_state_source?: "terminal" | "app_server" | string;
+  runtime_session_status?: string | null;
+  runtime_session_resume_eligible?: boolean | null;
+  runtime_session_last_resume_error?: string | null;
   submit?: "enter" | "newline" | "none";
   profile_id?: string;
   profile_scope?: "global" | "user";
@@ -795,6 +799,29 @@ export type AssistantStateResult = {
   service_runtime?: AssistantServiceRuntime;
   service_runtimes?: AssistantServiceRuntime[];
   service_runtimes_by_id?: Record<string, AssistantServiceRuntime>;
+  recording_lease?: AssistantVoiceRecordingLease;
+};
+
+export type AssistantVoiceRecordingLease = {
+  owner_id: string;
+  group_id: string;
+  group_title?: string;
+  capture_mode?: string;
+  recognition_backend?: string;
+  by?: string;
+  created_at?: string;
+  updated_at?: string;
+  expires_at?: string;
+};
+
+export type AssistantVoiceRecordingLeaseResult = {
+  group_id: string;
+  action: string;
+  acquired?: boolean;
+  released?: boolean;
+  lost?: boolean;
+  leaseId?: string;
+  lease?: AssistantVoiceRecordingLease;
 };
 
 export type AssistantVoiceTrigger = {
@@ -1357,7 +1384,9 @@ export const SUPPORTED_RUNTIMES = [
   "auggie",
   "neovate",
   "gemini",
+  "hermes",
   "kimi",
+  "opencode",
   "web_model",
   "custom",
 ] as const;
@@ -1371,8 +1400,10 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   codex: { label: "Codex CLI", desc: "" },
   droid: { label: "Droid", desc: "" },
   gemini: { label: "Gemini CLI", desc: "" },
+  hermes: { label: "Hermes Agent", desc: "Uses your Hermes profile with CCCC MCP" },
   kimi: { label: "Kimi CLI", desc: "" },
   neovate: { label: "Neovate Code", desc: "" },
+  opencode: { label: "OpenCode", desc: "Uses inline OpenCode MCP config at actor launch" },
   web_model: { label: "ChatGPT Web Model", desc: "ChatGPT browser delivery + remote MCP connector" },
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
 };
@@ -1416,6 +1447,10 @@ export const RUNTIME_COLORS: Record<string, {
     bg: "bg-yellow-900/30", text: "text-yellow-300", border: "border-yellow-600/50", dot: "bg-yellow-400",
     bgLight: "bg-yellow-50", textLight: "text-yellow-700", borderLight: "border-yellow-300", dotLight: "bg-yellow-500"
   },
+  hermes: {
+    bg: "bg-cyan-900/30", text: "text-cyan-300", border: "border-cyan-600/50", dot: "bg-cyan-400",
+    bgLight: "bg-cyan-50", textLight: "text-cyan-700", borderLight: "border-cyan-300", dotLight: "bg-cyan-500"
+  },
   kimi: {
     bg: "bg-lime-900/30", text: "text-lime-300", border: "border-lime-600/50", dot: "bg-lime-400",
     bgLight: "bg-lime-50", textLight: "text-lime-700", borderLight: "border-lime-300", dotLight: "bg-lime-500"
@@ -1423,6 +1458,10 @@ export const RUNTIME_COLORS: Record<string, {
   neovate: {
     bg: "bg-fuchsia-900/30", text: "text-fuchsia-300", border: "border-fuchsia-600/50", dot: "bg-fuchsia-400",
     bgLight: "bg-fuchsia-50", textLight: "text-fuchsia-700", borderLight: "border-fuchsia-300", dotLight: "bg-fuchsia-500"
+  },
+  opencode: {
+    bg: "bg-stone-900/40", text: "text-stone-200", border: "border-stone-500/60", dot: "bg-stone-300",
+    bgLight: "bg-stone-100", textLight: "text-stone-800", borderLight: "border-stone-300", dotLight: "bg-stone-600"
   },
   web_model: {
     bg: "bg-indigo-900/30", text: "text-indigo-300", border: "border-indigo-600/50", dot: "bg-indigo-400",

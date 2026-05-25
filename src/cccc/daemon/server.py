@@ -29,6 +29,7 @@ from ..kernel.settings import (
 )
 from ..kernel.terminal_transcript import get_terminal_transcript_settings
 from ..kernel.messaging import disabled_recipient_actor_ids, enabled_recipient_actor_ids
+from ..kernel.runtime_state_source import actor_uses_codex_app_server_state
 from ..paths import ensure_home
 from ..runners import pty as pty_runner
 from ..runners import headless as headless_runner
@@ -43,6 +44,7 @@ from .automation import AutomationManager
 from .actors.actor_exit_ops import persist_actor_process_exit_stopped
 from .claude_app_sessions import SUPERVISOR as claude_app_supervisor
 from .codex_app_sessions import SUPERVISOR as codex_app_supervisor
+from .pty_app_server_exit import stop_codex_app_server_for_pty_actor_if_needed
 from .im.bootstrap_im_ops import autostart_enabled_im_bridges
 from .group.bootstrap_actor_ops import autostart_running_groups
 from .assistants.voice_idle_review_scheduler import recover_pending_voice_idle_reviews
@@ -103,6 +105,7 @@ from .messaging.delivery import (
     THROTTLE,
 )
 from .messaging.chat_support_ops import auto_wake_recipients, normalize_attachments
+from .messaging.message_request_lanes import MessageRequestLanes
 from .ops.execution_queues import DaemonRequestExecutionQueue, GroupSpaceSyncRunQueue
 from .ops.socket_special_ops import try_handle_socket_special_op
 from .ops.socket_accept_ops import handle_incoming_connection
@@ -125,6 +128,7 @@ from .space.group_space_memory_sync import process_due_memory_space_syncs
 from .space.group_space_runtime import process_due_space_jobs
 from .space.group_space_sync import process_due_space_syncs, sync_group_space_files
 from .space.group_space_store import get_space_provider_state
+from .request_queue_policy import FAST_QUEUE_OPS, should_use_read_queue
 from .group.presentation_browser_runtime import close_all_browser_surface_sessions
 from .space.notebooklm_auth_browser_runtime import close_all_notebooklm_auth_browser_sessions
 from .actors.web_model_browser_session import close_all_web_model_chatgpt_browser_sessions
@@ -139,22 +143,6 @@ _DAEMON_CLIENT_WARNING_WINDOW_S = 5.0
 _DAEMON_CLIENT_WARN_LOCK = threading.Lock()
 _DAEMON_CLIENT_WARN_SEEN: Dict[tuple[str, str, str], float] = {}
 _SPACE_SYNC_RUN_QUEUE: Optional[GroupSpaceSyncRunQueue] = None
-_REQUEST_FAST_QUEUE_OPS = {"send", "reply", "chat_ack"}
-_REQUEST_READ_QUEUE_OPS = {
-    "branding_get",
-    "capability_overview",
-    "context_get",
-    "groups",
-    "group_space_status",
-    "im_list_authorized",
-    "im_list_pending",
-    "actor_list",
-    "actor_profile_list",
-    "observability_get",
-    "ping",
-}
-
-
 def _should_log_daemon_client_warning(*, op: str, phase: str, reason: str) -> bool:
     key = (
         str(op or "").strip() or "unknown",
@@ -263,18 +251,14 @@ def _request_queue_for(
     req: Any,
     *,
     read_queue: DaemonRequestExecutionQueue,
-    fast_queue: DaemonRequestExecutionQueue,
+    message_lanes: Any,
     slow_queue: DaemonRequestExecutionQueue,
-) -> DaemonRequestExecutionQueue:
+) -> Any:
     op = str(getattr(req, "op", "") or "").strip()
     args = getattr(req, "args", None)
-    if op in _REQUEST_READ_QUEUE_OPS:
+    if should_use_read_queue(op, args):
         return read_queue
-    if op == "group_space_provider_auth":
-        action = str(args.get("action") or "").strip().lower() if isinstance(args, dict) else ""
-        if action == "status":
-            return read_queue
-    if op in _REQUEST_FAST_QUEUE_OPS:
+    if op in FAST_QUEUE_OPS:
         group_id = str(args.get("group_id") or "").strip() if isinstance(args, dict) else ""
         if group_id:
             group = load_group(group_id)
@@ -282,7 +266,7 @@ def _request_queue_for(
                 state_at_accept = get_group_state(group)
                 if isinstance(args, dict):
                     args["__group_state_at_accept"] = state_at_accept
-        return fast_queue
+        return message_lanes
     return slow_queue
 
 
@@ -312,13 +296,26 @@ SUPPORTED_RUNTIMES = (
     "codex",
     "droid",
     "gemini",
+    "hermes",
     "kimi",
     "neovate",
+    "opencode",
     "web_model",
     "custom",
 )
 
-AUTO_MCP_RUNTIMES = ("claude", "codex", "droid", "amp", "auggie", "neovate", "gemini", "kimi")
+AUTO_MCP_RUNTIMES = (
+    "claude",
+    "codex",
+    "droid",
+    "amp",
+    "auggie",
+    "neovate",
+    "gemini",
+    "hermes",
+    "kimi",
+    "opencode",
+)
 
 
 def _normalize_runtime_command(runtime: str, command: list[str]) -> list[str]:
@@ -602,10 +599,18 @@ def _best_effort_killpg(pid: int, sig: signal.Signals) -> None:
 def _handle_pty_session_exit(session: pty_runner.PtySession, *, persist_actor_stopped: bool = True) -> None:
     """Persist user-visible PTY exits as stopped so daemon autostart does not resurrect them."""
     removed_current_state = bool(_remove_pty_state_if_pid(session.group_id, session.actor_id, pid=session.pid))
+    stop_codex_app_server_for_pty_actor_if_needed(group_id=session.group_id, actor_id=session.actor_id, pid=session.pid)
     if not persist_actor_stopped:
         return
     if not removed_current_state:
         return
+    try:
+        group = load_group(session.group_id)
+        actor = find_actor(group, session.actor_id) if group is not None else None
+        if isinstance(actor, dict) and actor_uses_codex_app_server_state(actor):
+            return
+    except Exception:
+        pass
     persist_actor_process_exit_stopped(group_id=session.group_id, actor_id=session.actor_id, runner="pty")
 
 
@@ -747,6 +752,24 @@ def _start_actor_process(
     )
 
 
+def _auto_wake_actor_running(wake_group: Any, actor_id: str) -> bool:
+    actor = find_actor(wake_group, actor_id)
+    actor_doc = actor if isinstance(actor, dict) else {}
+    runtime = str(actor_doc.get("runtime") or "").strip().lower()
+    runner_effective = _effective_runner_kind(str(actor_doc.get("runner") or "pty"))
+    if actor_uses_codex_app_server_state(actor_doc):
+        return bool(codex_app_supervisor.actor_running(wake_group.group_id, actor_id))
+    if runtime == "codex" and runner_effective == "headless":
+        return bool(codex_app_supervisor.actor_running(wake_group.group_id, actor_id))
+    if runtime == "claude" and runner_effective == "headless":
+        return bool(claude_app_supervisor.actor_running(wake_group.group_id, actor_id))
+    if runtime == "web_model" and runner_effective == "headless":
+        return bool(_headless_state_running(wake_group.group_id, actor_id))
+    if runner_effective == "headless":
+        return bool(headless_runner.SUPERVISOR.actor_running(wake_group.group_id, actor_id))
+    return bool(pty_runner.SUPERVISOR.actor_running(wake_group.group_id, actor_id))
+
+
 def _request_dispatch_deps() -> RequestDispatchDeps:
     global _REQUEST_DISPATCH_DEPS
     if _REQUEST_DISPATCH_DEPS is not None:
@@ -827,33 +850,7 @@ def _request_dispatch_deps() -> RequestDispatchDeps:
             enabled_recipient_actor_ids=enabled_recipient_actor_ids,
             find_actor=find_actor,
             coerce_bool=coerce_bool,
-            is_actor_running=lambda wake_group, actor_id: (
-                (
-                    str((find_actor(wake_group, actor_id) or {}).get("runtime") or "").strip().lower() == "codex"
-                    and _effective_runner_kind(str((find_actor(wake_group, actor_id) or {}).get("runner") or "pty")) == "headless"
-                    and codex_app_supervisor.actor_running(wake_group.group_id, actor_id)
-                )
-                or (
-                    str((find_actor(wake_group, actor_id) or {}).get("runtime") or "").strip().lower() == "claude"
-                    and _effective_runner_kind(str((find_actor(wake_group, actor_id) or {}).get("runner") or "pty")) == "headless"
-                    and claude_app_supervisor.actor_running(wake_group.group_id, actor_id)
-                )
-                or (
-                    str((find_actor(wake_group, actor_id) or {}).get("runtime") or "").strip().lower() == "web_model"
-                    and _effective_runner_kind(str((find_actor(wake_group, actor_id) or {}).get("runner") or "pty")) == "headless"
-                    and _headless_state_running(wake_group.group_id, actor_id)
-                )
-                or (
-                    str((find_actor(wake_group, actor_id) or {}).get("runtime") or "").strip().lower() != "web_model"
-                    and
-                    _effective_runner_kind(str((find_actor(wake_group, actor_id) or {}).get("runner") or "pty")) == "headless"
-                    and headless_runner.SUPERVISOR.actor_running(wake_group.group_id, actor_id)
-                )
-                or (
-                    _effective_runner_kind(str((find_actor(wake_group, actor_id) or {}).get("runner") or "pty")) == "pty"
-                    and pty_runner.SUPERVISOR.actor_running(wake_group.group_id, actor_id)
-                )
-            ),
+            is_actor_running=_auto_wake_actor_running,
             start_actor_process=_start_actor_process,
             update_actor=update_actor,
             runner_stop_actor=runner_stop_actor,
@@ -1123,13 +1120,14 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
             logger=logger,
             on_should_exit=stop_event.set,
         )
-        fast_request_queue = DaemonRequestExecutionQueue(
+        message_request_lanes = MessageRequestLanes(
             stop_event=stop_event,
             handle_request=handle_request,
             send_json=_send_json,
             dump_response=_dump_response,
             logger=logger,
             on_should_exit=stop_event.set,
+            diagnostics_enabled=_developer_mode_enabled,
         )
         read_request_queue = DaemonRequestExecutionQueue(
             stop_event=stop_event,
@@ -1140,7 +1138,6 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
             on_should_exit=stop_event.set,
         )
         start_request_execution_thread(request_queue=request_queue, name="cccc-request-worker-slow")
-        start_request_execution_thread(request_queue=fast_request_queue, name="cccc-request-worker-fast")
         start_request_execution_thread(request_queue=read_request_queue, name="cccc-request-worker-read-1")
         start_request_execution_thread(request_queue=read_request_queue, name="cccc-request-worker-read-2")
 
@@ -1172,10 +1169,11 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
                     dump_response=_dump_response,
                     error=lambda code, message, details=None: _error(code, message, details=details),
                     actor_running=pty_runner.SUPERVISOR.actor_running,
-                    attach_actor_socket=lambda group_id, actor_id, sock2: pty_runner.SUPERVISOR.attach(
+                    attach_actor_socket=lambda group_id, actor_id, sock2, since=None: pty_runner.SUPERVISOR.attach(
                         group_id=group_id,
                         actor_id=actor_id,
                         sock=sock2,
+                        since=since,
                     ),
                     load_group=load_group,
                     find_actor=find_actor,
@@ -1194,7 +1192,7 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
                 schedule_request=lambda req, conn: _request_queue_for(
                     req,
                     read_queue=read_request_queue,
-                    fast_queue=fast_request_queue,
+                    message_lanes=message_request_lanes,
                     slow_queue=request_queue,
                 ).submit(conn=conn, req=req),
                 logger=logger,
@@ -1220,6 +1218,10 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
         stop_event=stop_event,
         home=p.home,
         best_effort_killpg=_best_effort_killpg,
+        runtime_session_shutdown_start=lambda: (
+            codex_app_supervisor.begin_shutdown(),
+            claude_app_supervisor.begin_shutdown(),
+        ),
         im_stop_all=im_stop_all,
         codex_stop_all=codex_app_supervisor.stop_all,
         claude_stop_all=claude_app_supervisor.stop_all,

@@ -29,6 +29,8 @@ export type CapsuleSkillSlashCommandResolution =
 export type SlashCommandGuardInput = {
   composerFilesCount: number;
   hasReplyTarget: boolean;
+  replyRequired?: boolean;
+  sourceType?: SlashCommandItem["sourceType"];
   hasQuotedPresentationRef: boolean;
   sendGroupId: string;
   selectedGroupId: string;
@@ -51,10 +53,14 @@ export type CapsuleSkillSlashCommandMessages = {
 
 const DEFAULT_SLASH_GUARD_MESSAGES: SlashCommandGuardMessages = {
   attachmentsUnsupported: "Slash command does not support attachments.",
-  repliesUnsupported: "Slash command does not support replies.",
+  repliesUnsupported: "Slash command does not support replying to a specific message yet.",
   quotedPresentationUnsupported: "Slash command does not support quoted presentation views.",
   crossGroupUnsupported: "Slash command does not support cross-group send.",
 };
+
+export function slashCommandSupportsReplyTarget(sourceType: SlashCommandItem["sourceType"] | undefined): boolean {
+  return sourceType === "builtin_command" || sourceType === "capsule_skill";
+}
 
 export function slashCommandDisplayKind(item: Pick<SlashCommandItem, "sourceType" | "capabilityId">): SlashCommandDisplayKind {
   if (String(item.capabilityId || "").trim().startsWith("skill:")) return "skill";
@@ -170,11 +176,24 @@ export function filterSlashCommands(commands: SlashCommandItem[], input: string)
   const query = normalizeCommandToken(firstToken);
   if (!query) return commands.slice();
   return commands
-    .filter((item) => {
-      const haystacks = [item.name, item.toolName || "", item.realToolName || "", item.description || ""]
-        .map((value) => value.toLowerCase());
-      return haystacks.some((value) => value.includes(query));
-    });
+    .map((item, index) => {
+      const commandNames = [item.name, item.toolName || "", item.realToolName || ""]
+        .map(normalizeCommandToken)
+        .filter(Boolean);
+      const description = String(item.description || "").toLowerCase();
+      const score = (() => {
+        if (commandNames.some((value) => value.startsWith(query))) return 0;
+        if (commandNames.some((value) => value.includes(query))) return 1;
+        // Short description matches are noisy: "/re" should find review-like
+        // commands, not every item mentioning "repo", "before", or "requires".
+        if (query.length >= 3 && description.includes(query)) return 2;
+        return -1;
+      })();
+      return { item, index, score };
+    })
+    .filter((row) => row.score >= 0)
+    .sort((left, right) => left.score - right.score || left.index - right.index)
+    .map((row) => row.item);
 }
 
 export function getVisibleSlashCommandPage(commands: SlashCommandItem[], visibleCount: number): SlashCommandItem[] {
@@ -205,7 +224,7 @@ export function resolveSlashCommandGuard(
   if (input.composerFilesCount > 0) {
     return { ok: false, message: copy.attachmentsUnsupported };
   }
-  if (input.hasReplyTarget) {
+  if (input.hasReplyTarget && !slashCommandSupportsReplyTarget(input.sourceType)) {
     return { ok: false, message: copy.repliesUnsupported };
   }
   if (input.hasQuotedPresentationRef) {
