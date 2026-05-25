@@ -26,7 +26,12 @@ from .mcp_install import ensure_mcp_installed
 from .messaging.delivery import auto_mark_headless_delivery_started, render_headless_control_text
 from .runner_state_ops import headless_state_path, remove_headless_state
 from .codex_app_thread_ops import prepare_codex_app_tui_resume, start_codex_app_thread
-from .runtime_session_ops import record_codex_app_thread_runtime_session, runtime_resume_enabled
+from .codex_config_ops import inject_codex_openai_base_url_config
+from .runtime_session_ops import (
+    mark_runtime_session_auth_failed,
+    record_codex_app_thread_runtime_session,
+    runtime_resume_enabled,
+)
 from ..util.fs import atomic_write_json
 from ..util.node_env import with_node_deprecation_warnings_suppressed
 from ..util.process import pid_is_alive, resolve_subprocess_argv, terminate_pid
@@ -239,6 +244,13 @@ def _is_closed_stream_logging_error(exc: BaseException) -> bool:
         return False
     message = str(exc or "").strip().lower()
     return "i/o operation on closed file" in message or "closed stream" in message
+
+
+def _is_codex_app_server_auth_failure_line(line: str) -> bool:
+    lowered = str(line or "").strip().lower()
+    if not lowered or "401 unauthorized" not in lowered:
+        return False
+    return "responses" in lowered or "websocket" in lowered or "api.openai.com" in lowered
 
 
 def _is_codex_request_timeout(exc: BaseException, *, method: str = "") -> bool:
@@ -659,7 +671,10 @@ class CodexAppSession:
             env = with_node_deprecation_warnings_suppressed(env)
             if not ensure_mcp_installed("codex", self.cwd, auto_mcp_runtimes=("codex",), env=env):
                 raise RuntimeError("failed to install MCP for runtime: codex")
-            self._runtime_command = ["codex", "app-server", "--listen", self.listen_url]
+            self._runtime_command = inject_codex_openai_base_url_config(
+                ["codex", "app-server", "--listen", self.listen_url],
+                env,
+            )
             popen_command = resolve_subprocess_argv(self._runtime_command)
             self._proc = subprocess.Popen(
                 popen_command,
@@ -1137,6 +1152,8 @@ class CodexAppSession:
                 line = str(raw_line or "").rstrip()
                 if line:
                     _safe_logger_call("info", "[codex-app %s/%s] %s", self.group_id, self.actor_id, line)
+                    if _is_codex_app_server_auth_failure_line(line):
+                        mark_runtime_session_auth_failed(group_id=self.group_id, actor_id=self.actor_id, error=line)
         except Exception as exc:
             if _is_closed_stream_logging_error(exc):
                 return
