@@ -40,6 +40,7 @@ def _looks_like_timeout(exc: BaseException) -> bool:
 @dataclass
 class _PtyClient:
     sock: socket.socket
+    control: bool
     writer: bool
     outbuf: bytearray
 
@@ -266,6 +267,11 @@ class PtySession:
             "cursor_expired": False,
         }
 
+    def backlog_start_offset(self) -> int:
+        """Absolute offset of the oldest byte still in the backlog ring."""
+        with self._lock:
+            return int(getattr(self, "_backlog_start_offset", 0) or 0)
+
     def history_since(self, since: Optional[int]) -> bytes:
         data, start, end = self._backlog_snapshot()
         if since is None:
@@ -329,15 +335,20 @@ class PtySession:
 
     def _reader_loop(self) -> None:
         try:
-            while self._running and self._proc_alive():
+            while self._running:
+                proc_alive = self._proc_alive()
                 try:
                     chunk = self._proc.read(65536)
                 except Exception as e:
                     if _looks_like_timeout(e):
+                        if not proc_alive:
+                            break
                         continue
                     break
                 data = _coerce_bytes(chunk)
                 if not data:
+                    if not proc_alive:
+                        break
                     time.sleep(0.01)
                     continue
                 self._maybe_reply_to_terminal_queries(data)
@@ -413,10 +424,12 @@ class PtySession:
             except queue.Empty:
                 break
             if isinstance(item, tuple):
-                sock, since = item
+                sock = item[0]
+                since = item[1] if len(item) > 1 else None
+                control = bool(item[2]) if len(item) > 2 else True
             else:
-                sock, since = item, None
-            self._attach_client_now(sock, since=since)
+                sock, since, control = item, None, True
+            self._attach_client_now(sock, since=since, control=control)
         while True:
             try:
                 chunk = self._output_q.get_nowait()
@@ -524,16 +537,63 @@ class PtySession:
         except Exception:
             pass
 
-    def attach_client(self, sock: socket.socket, *, since: Optional[int] = None) -> None:
+    def attach_client(
+        self,
+        sock: socket.socket,
+        *,
+        since: Optional[int] = None,
+        mode: str = "control",
+        takeover: bool = False,
+    ) -> Dict[str, object]:
+        requested_mode = str(mode or "control").strip().lower()
+        control = requested_mode != "viewer"
+        fileno = int(sock.fileno())
+        writable = False
+        writer_replaced = False
+        previous_writer_fd: Optional[int] = None
+        with self._lock:
+            if control and fileno >= 0:
+                previous_writer_fd = self._writer_fd
+                if self._writer_fd is None or self._writer_fd == fileno:
+                    self._writer_fd = fileno
+                    writable = True
+                elif takeover:
+                    old_writer = self._clients.get(self._writer_fd)
+                    if old_writer is not None:
+                        old_writer.writer = False
+                    self._writer_fd = fileno
+                    writable = True
+                    writer_replaced = True
         try:
-            self._attach_q.put_nowait((sock, since))
+            self._attach_q.put_nowait((sock, since, control))
         except Exception:
+            with self._lock:
+                if self._writer_fd == fileno:
+                    self._writer_fd = previous_writer_fd
+                    if previous_writer_fd is not None:
+                        previous_writer = self._clients.get(previous_writer_fd)
+                        if previous_writer is not None:
+                            previous_writer.writer = True
             try:
                 sock.close()
             except Exception:
                 pass
-            return
+            return {
+                "mode": "control" if control else "viewer",
+                "writable": False,
+                "writer_replaced": False,
+                "attached_clients": 0,
+                "error": "attach_queue_failed",
+            }
         self._notify_wake()
+        with self._lock:
+            attached_clients = len(self._clients)
+        return {
+            "mode": "control" if control else "viewer",
+            "writable": writable,
+            "writer_replaced": writer_replaced,
+            "attached_clients": attached_clients,
+        }
 
     def detach_client(self, fileno: int) -> None:
         with self._lock:
@@ -556,6 +616,8 @@ class PtySession:
             if self._writer_fd is not None:
                 return
             for fd, c in self._clients.items():
+                if not c.control:
+                    continue
                 self._writer_fd = fd
                 c.writer = True
                 try:
@@ -569,7 +631,7 @@ class PtySession:
                     pass
                 break
 
-    def _attach_client_now(self, sock: socket.socket, *, since: Optional[int] = None) -> None:
+    def _attach_client_now(self, sock: socket.socket, *, since: Optional[int] = None, control: bool = True) -> None:
         fileno = int(sock.fileno())
         if fileno < 0:
             try:
@@ -585,7 +647,7 @@ class PtySession:
         with self._lock:
             if fileno in self._clients:
                 return
-            writer = self._writer_fd is None
+            writer = bool(control and (self._writer_fd is None or self._writer_fd == fileno))
             if writer:
                 self._writer_fd = fileno
             data = b"".join(self._backlog) if self._backlog else b""
@@ -605,7 +667,7 @@ class PtySession:
                 else:
                     backlog = data[max(0, cursor - start):]
             outbuf = bytearray(backlog)
-            client = _PtyClient(sock=sock, writer=writer, outbuf=outbuf)
+            client = _PtyClient(sock=sock, control=bool(control), writer=writer, outbuf=outbuf)
             self._clients[fileno] = client
 
         events = selectors.EVENT_READ
@@ -705,8 +767,6 @@ class PtySession:
     def _loop(self) -> None:
         try:
             while self._running:
-                if not self._proc_alive() and self._output_q.empty():
-                    break
                 for key, mask in self._selector.select(timeout=0.1):
                     kind, meta = key.data if isinstance(key.data, tuple) else ("", None)
                     if kind == "wake":
@@ -810,6 +870,20 @@ class PtySupervisor:
         except Exception:
             return {"data": b"", "start_cursor": 0, "end_cursor": 0, "has_more": False, "cursor_expired": False}
 
+    def backlog_start_offset(self, *, group_id: str, actor_id: str) -> int:
+        """Oldest retained backlog offset for an actor (0 if unknown)."""
+        key = (str(group_id or "").strip(), str(actor_id or "").strip())
+        if not key[0] or not key[1]:
+            return 0
+        with self._lock:
+            s = self._sessions.get(key)
+        if s is None:
+            return 0
+        try:
+            return s.backlog_start_offset()
+        except Exception:
+            return 0
+
     def clear_backlog(self, *, group_id: str, actor_id: str) -> bool:
         key = (str(group_id or "").strip(), str(actor_id or "").strip())
         if not key[0] or not key[1]:
@@ -887,13 +961,22 @@ class PtySupervisor:
             except Exception:
                 pass
 
-    def attach(self, *, group_id: str, actor_id: str, sock: socket.socket, since: Optional[int] = None) -> None:
+    def attach(
+        self,
+        *,
+        group_id: str,
+        actor_id: str,
+        sock: socket.socket,
+        since: Optional[int] = None,
+        mode: str = "control",
+        takeover: bool = False,
+    ) -> Dict[str, object]:
         key = (str(group_id or "").strip(), str(actor_id or "").strip())
         with self._lock:
             s = self._sessions.get(key)
         if s is None or not s.is_running():
             raise RuntimeError("actor not running")
-        s.attach_client(sock, since=since)
+        return s.attach_client(sock, since=since, mode=mode, takeover=takeover)
 
     def bracketed_paste_enabled(self, *, group_id: str, actor_id: str) -> bool:
         key = (str(group_id or "").strip(), str(actor_id or "").strip())

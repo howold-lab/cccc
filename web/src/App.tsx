@@ -1,7 +1,6 @@
 import React, { lazy, Suspense, useCallback, useEffect, useMemo } from "react";
 import { DropOverlay } from "./components/DropOverlay";
 const AppModals = lazy(() => import("./components/AppModals").then((m) => ({ default: m.AppModals })));
-const WebPet = lazy(() => import("./features/webPet/WebPet").then((m) => ({ default: m.WebPet })));
 import { AppBackground } from "./components/app/AppBackground";
 import { AppFeedback } from "./components/app/AppFeedback";
 import { AppShell } from "./components/app/AppShell";
@@ -31,6 +30,7 @@ import {
 } from "./stores";
 import { useChatOutboxStore } from "./stores/chatOutboxStore";
 import type { ChatMessageData, LedgerEvent } from "./types";
+import { shouldMountAppModals } from "./utils/appLazyMount";
 import { publishCapabilityChanged } from "./utils/capabilityEvents";
 import { filterVisibleRuntimeActors } from "./utils/runtimeVisibility";
 
@@ -91,10 +91,20 @@ export default function App() {
   const sseStatus = useUIStore((s) => s.sseStatus);
 
   const openModal = useModalStore((s) => s.openModal);
-  const modalFlags = useModalStore((s) => s.modals);
+  const groupEditOpen = useModalStore((s) => s.modals.groupEdit);
+  const addActorOpen = useModalStore((s) => s.modals.addActor);
   const editingActor = useModalStore((s) => s.editingActor);
+  const shouldRenderAppModals = useModalStore((s) =>
+    shouldMountAppModals({
+      modals: s.modals,
+      recipientsEventId: s.recipientsEventId,
+      presentationViewer: s.presentationViewer,
+      presentationPin: s.presentationPin,
+      editingActor: s.editingActor,
+    })
+  );
   const peerRuntimeVisibility = useObservabilityStore((state) => state.peerRuntimeVisibility);
-  const petRuntimeVisibility = useObservabilityStore((state) => state.petRuntimeVisibility);
+  const assistantRuntimeVisibility = useObservabilityStore((state) => state.assistantRuntimeVisibility);
 
   const {
     activeGroupId,
@@ -144,12 +154,9 @@ export default function App() {
             (actor) => !actors.some((existing) => String(existing.id || "") === String(actor.id || ""))
           ),
         ],
-        {
-        peerRuntimeVisibility,
-        petRuntimeVisibility,
-      }
+        { peerRuntimeVisibility, assistantRuntimeVisibility }
       ),
-    [actors, internalRuntimeActors, peerRuntimeVisibility, petRuntimeVisibility]
+    [actors, internalRuntimeActors, peerRuntimeVisibility, assistantRuntimeVisibility]
   );
 
   useEffect(() => {
@@ -191,7 +198,7 @@ export default function App() {
 
   useEffect(() => {
     const gid = String(selectedGroupId || "").trim();
-    if (!gid || petRuntimeVisibility !== "visible") {
+    if (!gid) {
       return undefined;
     }
     void refreshInternalRuntimeActors(gid);
@@ -199,7 +206,7 @@ export default function App() {
       void refreshInternalRuntimeActors(gid);
     }, 60000);
     return () => window.clearInterval(interval);
-  }, [selectedGroupId, petRuntimeVisibility, refreshInternalRuntimeActors]);
+  }, [selectedGroupId, refreshInternalRuntimeActors]);
 
   // Custom hooks
   const { connectStream, fetchContext, cleanup: cleanupSSE } = useSSE({
@@ -286,8 +293,8 @@ export default function App() {
     setSmallScreen,
     showError,
     setDirSuggestions,
-    groupEditOpen: modalFlags.groupEdit,
-    addActorOpen: modalFlags.addActor,
+    groupEditOpen,
+    addActorOpen,
     editingActor,
   });
 
@@ -442,12 +449,6 @@ export default function App() {
         onTouchEnd={handleTouchEnd}
       />
 
-      {selectedGroupId ? (
-        <Suspense fallback={null}>
-          <WebPet groupId={selectedGroupId} />
-        </Suspense>
-      ) : null}
-
       <AppFeedback
         isDark={isDark}
         webReadOnly={webReadOnly}
@@ -457,24 +458,26 @@ export default function App() {
         dismissNotice={dismissNotice}
       />
 
-      <Suspense fallback={null}>
-        <AppModals
-          isDark={isDark}
-          theme={theme}
-          textScale={textScale}
-          readOnly={webReadOnly}
-          ccccHome={ccccHome}
-          composerRef={composerRef}
-          onStartReply={startReply}
-          onThemeChange={setTheme}
-          onTextScaleChange={setTextScale}
-          onStartGroup={handleStartGroup}
-          onStopGroup={handleStopGroup}
-          onSetGroupState={handleSetGroupState}
-          fetchContext={fetchContext}
-          canManageGroups={canManageGroups}
-        />
-      </Suspense>
+      {shouldRenderAppModals ? (
+        <Suspense fallback={null}>
+          <AppModals
+            isDark={isDark}
+            theme={theme}
+            textScale={textScale}
+            readOnly={webReadOnly}
+            ccccHome={ccccHome}
+            composerRef={composerRef}
+            onStartReply={startReply}
+            onThemeChange={setTheme}
+            onTextScaleChange={setTextScale}
+            onStartGroup={handleStartGroup}
+            onStopGroup={handleStopGroup}
+            onSetGroupState={handleSetGroupState}
+            fetchContext={fetchContext}
+            canManageGroups={canManageGroups}
+          />
+        </Suspense>
+      ) : null}
 
       <DropOverlay isOpen={dropOverlayOpen} isDark={isDark} maxFileMb={WEB_MAX_FILE_MB} />
     </div>

@@ -7,20 +7,21 @@
 
 # CCCC
 
-### ローカルファースト・マルチエージェント協調カーネル
+### コーディングエージェントをグループチャットのように指揮する
 
-**軽量でありながら、インフラ級の信頼性を備えたマルチエージェントフレームワーク。**
+**既読・送達トラッキング・スマホからのリモート運用 —
+Claude Code、Codex、Gemini など 12 のランタイムをひとつの永続グループで。**
 
-チャットネイティブ、プロンプト駆動、双方向オーケストレーションを前提に設計。
+複数のコーディングエージェントを**永続的で協調されたチーム**として運用 — バラバラのターミナルセッションではなく。
 
-複数のコーディングエージェントを**永続的で協調されたシステム**として運用 — バラバラのターミナルセッションではなく。
-
-3 コマンドで開始。ゼロインフラ、プロダクション級のパワー。
+`pip install` ひとつ。ゼロインフラ、プロダクション級のパワー。
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=blue)](https://pypi.org/project/cccc-pair/)
 [![Python](https://img.shields.io/pypi/pyversions/cccc-pair)](https://pypi.org/project/cccc-pair/)
+[![Downloads](https://static.pepy.tech/badge/cccc-pair/month)](https://pepy.tech/projects/cccc-pair)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-online-blue)](https://chesterra.github.io/cccc/)
+[![Telegram](https://img.shields.io/badge/Telegram-ccccpair-2CA5E8?logo=telegram&logoColor=white)](https://t.me/ccccpair)
 
 [English](README.md) | [中文](README.zh-CN.md) | **日本語**
 
@@ -28,24 +29,24 @@
 
 ---
 
+<div align="center">
+
+<video src="https://github.com/user-attachments/assets/8f9c3986-f1ba-4e59-a114-bcb383ff49a7" controls="controls" muted="muted" autoplay="autoplay" loop="loop" style="max-width: 100%;">
+</video>
+
+</div>
+
 ## なぜ CCCC か
 
-- **永続協調**: 作業状態はターミナルスクロールではなく、append-only ledger に残ります。
-- **到達の可視化**: メッセージはルーティング、既読、ACK、reply-required 追跡を持ち、「送ったはず」で終わりません。
-- **1 つのコントロールプレーン**: Web UI、CLI、MCP、IM ブリッジがすべて同じ daemon 状態を共有します。
-- **マルチランタイム前提**: Claude Code、Codex CLI、ChatGPT Web、Gemini CLI などの主要ランタイムを 1 つのグループで混在運用できます。
-- **ローカルファースト運用**: `pip install` ひとつで始められ、ランタイム状態は `CCCC_HOME` に置いたまま、必要時だけリモート監視へ広げられます。
+複数のコーディングエージェントを使う現実はこうです：協調記録はターミナルのスクロールバッファに埋もれて再起動で消え、エージェントがメッセージを*読んだ*かどうか確認できず、起動/停止/復旧はツールごとに分散し、外出先から稼働中のグループを確認する手段もない。これが、マルチエージェント環境が「脆いデモ」で終わってしまう根本原因です。
 
-## 課題
+CCCC はエージェント群を、永続的で協調された 1 つのシステムとして運用します：
 
-複数のコーディングエージェントを使う現実：
-
-- **コンテキストの喪失** — 協調記録はターミナルのスクロールバッファに埋もれ、再起動で消える
-- **到達保証なし** — エージェントがメッセージを*読んだ*かどうか確認できない
-- **運用の断片化** — 起動/停止/復旧/エスカレーションがツールごとに分散
-- **リモートアクセス不可** — 長時間稼働中のグループを外出先から確認できない
-
-これらは些細な問題ではありません。マルチエージェント環境が「脆いデモ」から「信頼できるワークフロー」に進化できない根本原因です。
+- **永続協調** — 作業状態はターミナルスクロールではなく、append-only ledger に残ります。
+- **到達の可視化** — メッセージはルーティング、既読、ACK、reply-required 追跡を持ち、「送ったはず」で終わりません。
+- **1 つのコントロールプレーン** — Web UI、CLI、MCP、IM ブリッジがすべて同じ daemon 状態を共有します。
+- **マルチランタイム前提** — Claude Code、Codex CLI、ChatGPT Web、Gemini CLI などの主要ランタイムを 1 つのグループで混在運用できます。
+- **ローカルファースト運用** — `pip install` ひとつで始められ、ランタイム状態は `CCCC_HOME` に置いたまま、必要時だけリモート監視へ広げられます。
 
 ## CCCC の役割
 
@@ -56,18 +57,9 @@ CCCC は `pip install` 一つで導入完了、外部依存ゼロ — データ�
 | **唯一の事実源** | append-only ledger（`ledger.jsonl`）が全メッセージ・イベントを記録 — 再生可能、監査可能、喪失なし |
 | **信頼性のあるメッセージング** | 既読カーソル、attention ACK、reply-required 義務追跡 — 誰が何を確認したか明確 |
 | **統一コントロールプレーン** | Web UI、CLI、MCP ツール、IM ブリッジがすべて 1 つの daemon に接続 — 状態の分断なし |
-| **マルチランタイム編成** | Claude Code、Codex CLI、OpenCode、ChatGPT Web、Gemini CLI など 10 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
+| **マルチランタイム編成** | Claude Code、Codex CLI、Grok Build、OpenCode、ChatGPT Web、Gemini CLI など 12 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
 | **ロールベース協調** | Foreman + Peer ロールモデル、権限境界と宛先ルーティング（`@all`、`@peers`、`@foreman`） |
 | **ローカルファーストなランタイム状態** | ランタイムデータはリポジトリではなく `CCCC_HOME` に保持しつつ、Web Access と IM ブリッジで遠隔運用も可能 |
-
-## CCCC の見た目
- 
-<div align="center">
- 
-<video src="https://github.com/user-attachments/assets/8f9c3986-f1ba-4e59-a114-bcb383ff49a7" controls="controls" muted="muted" autoplay="autoplay" loop="loop" style="max-width: 100%;">
-</video>
- 
-</div>
 
 ## クイックスタート
 
@@ -119,6 +111,8 @@ cccc tracked-send "最初の具体タスクを担当し、検証証拠を添え�
 ```
 
 これで 2 つのエージェントが永続グループ内で協調し、完全なメッセージ履歴、到達追跡、Web ダッシュボードを備えた状態になります。配信と協調は daemon が担い、ランタイム状態はリポジトリではなく `CCCC_HOME` に残ります。
+
+**この時点で見えるはずのもの:** http://127.0.0.1:8848 の Web UI で両方の actor が実行中になり、foreman の返信が**チャット**に届き、tracked リクエストのメッセージに送達・既読ステータスが表示されます。actor が停止したままの場合は、まず `cccc doctor` でランタイムを確認し、よくある初回トラブルは [FAQ](https://chesterra.github.io/cccc/guide/faq) を参照してください。
 
 ## プログラマブル連携（SDK）
 
@@ -189,7 +183,7 @@ graph TB
 
 ## サポートランタイム
 
-CCCC は 10 種の主要ランタイムでエージェントを編成し、残りは `custom` で扱えます。同一グループ内で各 actor が異なるランタイムを使用可能です。
+CCCC は 12 種の主要ランタイムでエージェントを編成し、残りは `custom` で扱えます。同一グループ内で各 actor が異なるランタイムを使用可能です。
 
 | ランタイム | 連携方式 | コマンド / サーフェス |
 |-----------|----------|------------------------|
@@ -197,6 +191,8 @@ CCCC は 10 種の主要ランタイムでエージェントを編成し、残�
 | Codex CLI | MCP 自動設定 | `codex` |
 | ChatGPT Web | Remote MCP + ブラウザ配信 | `chatgpt.com` conversation |
 | Gemini CLI | MCP 自動設定 | `gemini` |
+| Grok Build | MCP 自動設定 | `grok` |
+| Hermes Agent | MCP 自動設定 | `hermes` |
 | Droid | MCP 自動設定 | `droid` |
 | Amp | MCP 自動設定 | `amp` |
 | Auggie | MCP 自動設定 | `auggie` |
@@ -213,31 +209,11 @@ cccc doctor                    # 環境とランタイムの可用性を検証
 
 Actor は **PTY**（埋め込みターミナル）または **headless**（ターミナルなしの構造化 I/O）モードで実行できます。Claude Code と Codex CLI は両モードに対応。headless モードでは daemon が配信とストリーミングをより精密に制御します。
 
-### ChatGPT Web / GPT-5.x ローカル開発
+### ChatGPT Web / GPT-5.x をローカル開発 actor として
 
-ChatGPT Web は外部チャットウィンドウではなく、実際の CCCC actor としてグループに参加できます。CCCC はブラウザ配信で明示的に紐付けた 1 つの ChatGPT 会話へグループメッセージを届け、ChatGPT はその actor に紐付いた単一の Remote MCP connector 経由で CCCC に接続します。
+ChatGPT Web は外部チャットウィンドウではなく、実際の CCCC actor としてグループに参加できます。CCCC はブラウザ配信で紐付けた ChatGPT 会話へグループメッセージを届け、GPT-5.x は actor に紐付いた Remote MCP connector 経由で CCCC に接続します — ルーティングされたメッセージの受信、可視返信、リポジトリの確認/編集、scope 内の shell/git 実行まで、ネイティブなローカルコーディングエージェントに近い体験です。ChatGPT Web の余剰利用枠を、追加のローカル開発 agent 容量として活用することもできます。
 
-Apps/MCP を利用できる ChatGPT セッションでは、**GPT-5.x** が Claude Code や Codex と同じ協調レイヤーでローカル開発に参加できます。ルーティングされたメッセージの受信、CCCC 経由の可視返信、リポジトリの確認/編集、scope 内の shell/git 実行、peer agent との協調が可能です。選択した GPT-5.x chat が CCCC MCP connector を表示・実行できる場合、条件を満たす ChatGPT 環境ではネイティブ Codex に近いローカル開発体験を得られます。また、ChatGPT Web の利用枠を追加のローカル開発 agent 容量として活用でき、ネイティブ Codex の使用量負荷を下げる助けにもなります。
-
-**GPT-5.x Pro について:** GPT-5.x Pro は現在、CCCC のローカル開発 runtime としては扱えません。ChatGPT Pro セッションでは第三者 CCCC MCP connector が公開されず、Web fetcher も public/private tunnel URL を CCCC に到達する前にブロックする場合があります。つまり Pro には CCCC 上の信頼できるローカルアクセスがありません: MCP ツール、リポジトリ読み取り、shell/git 実行、No-MCP resource fallback は使えません。ローカル開発には CCCC connector を表示できる GPT-5.x ChatGPT セッションを使い、Pro は必要なコンテキストを手動で渡した外部助言/review 用として使ってください。
-
-ゼロから利用可能にする手順:
-
-1. `cccc web` を起動し、public HTTPS URL で公開して、その URL を `Settings > Global > Web Access` に入力します。
-   - 推奨候補: Cloudflare Tunnel、ngrok、Tailscale Funnel、または public HTTPS ホスト上の Caddy/Nginx リバースプロキシ。
-   - ChatGPT は `localhost`、通常の HTTP、tailnet 内だけで見える private URL を MCP Server URL として使えません。
-2. `Settings > Global > Web Access` で Admin Access Token を作成します。
-3. `Settings > Global > ChatGPT Web Model` を開き、単一の ChatGPT Web Model actor を作成/起動し、その MCP URL を作成してコピーします。
-4. ChatGPT で `Settings > Apps > Advanced settings > Create app` を開き、以下の項目で custom MCP app を作成します。
-   - Name: `CCCC`
-   - Description: `CCCC local workspace connector`
-   - MCP Server URL: CCCC からコピーした完全な MCP URL
-   - Authentication: `No Auth`
-   - ChatGPT のメニュー名は plan や workspace 設定によって変わる場合があります。同じ入口が見つからない場合は Apps または Connectors 設定を探し、必要なら Developer Mode を有効化して、コピーした CCCC MCP URL と `No Auth` で custom MCP app/connector を作成してください。
-5. CCCC の埋め込み ChatGPT ブラウザでサインインし、CCCC MCP app を表示できる GPT-5.x chat を選び、その chat を配信先として紐付けます。
-6. actor に小さなテストメッセージを送ります。ChatGPT が紐付けた chat で受信し、CCCC MCP ツール経由で返信できれば成功です。
-
-詳細な設定とトラブルシュート: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+セットアップには MCP connector 用の public HTTPS URL（Cloudflare Tunnel、ngrok、Tailscale Funnel、またはリバースプロキシ）が必要です。なお GPT-5.x Pro セッションは第三者 MCP connector を公開しないため、現在この用途には使えません。詳細な設定とトラブルシュート: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
 
 ## メッセージングと協調
 
@@ -394,6 +370,16 @@ MCP アクセスを持つエージェントは、権限境界の中で自己組�
 | 純粋な DAG ワークフローオーケストレーション | ❌ 専用オーケストレーターを使用；CCCC は補完的に利用可能 |
 
 CCCC は**協調カーネル** — 協調レイヤーを担い、外部の CI/CD、オーケストレーター、デプロイツールとの組み合わせを維持します。
+
+## 他のアプローチとの比較
+
+| すでに使っているもの | その強み | CCCC が加えるもの |
+|---|---|---|
+| **ネイティブのエージェントチーム**（例：Claude Code subagents/teams） | 単一ベンダー・単一セッション内で最もスムーズな連携 | ベンダー横断のグループ（Claude + Codex + Gemini + Kimi…）、再起動後も残る状態、スマホ/IM からの運用、完全な監査 ledger |
+| **並列タスクランナー**（worktree/タスクボード系ツール） | 隔離された並列タスク実行 | 協調レイヤー：エージェント同士が対話・引き継ぎ・ACK・催促される — さらに 24/7 の daemon 運用 |
+| **IM アシスタントゲートウェイ** | チャットアプリに住む個人アシスタント | 実作業向けの配信セマンティクス：tracked task、既読/ACK、マルチエージェントグループ、永続監査証跡 |
+
+CCCC はエージェントを置き換えるものではなく、それらをチームにするレイヤーです。詳しい議論: [FAQ — 他ツールとの比較](https://chesterra.github.io/cccc/guide/faq#how-does-cccc-compare-to-native-agent-teams-and-other-tools)
 
 ## セキュリティ
 

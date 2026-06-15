@@ -33,6 +33,24 @@ class TestWebGroupRoutesLocal(unittest.TestCase):
 
         return create_app()
 
+    def _route_paths(self, app) -> set[str]:
+        paths: set[str] = set()
+
+        def collect(routes, prefix: str = "") -> None:
+            for route in routes:
+                path = getattr(route, "path", None)
+                if isinstance(path, str):
+                    paths.add(f"{prefix}{path}")
+                original_router = getattr(route, "original_router", None)
+                if original_router is None:
+                    continue
+                include_context = getattr(route, "include_context", None)
+                include_prefix = str(getattr(include_context, "prefix", "") or "")
+                collect(getattr(original_router, "routes", []), f"{prefix}{include_prefix}")
+
+        collect(getattr(app, "routes", []))
+        return paths
+
     def _create_group(self) -> str:
         from cccc.kernel.group import create_group
         from cccc.kernel.registry import load_registry
@@ -47,6 +65,42 @@ class TestWebGroupRoutesLocal(unittest.TestCase):
         request = DaemonRequest.model_validate(req)
         resp, _ = handle_request(request)
         return resp.model_dump(exclude_none=True)
+
+    def test_group_attach_rejects_relative_web_path(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            group_id = self._create_group()
+            with patch("cccc.ports.web.app.call_daemon", side_effect=AssertionError("relative attach should not call daemon")):
+                with self._client() as client:
+                    resp = client.post(f"/api/v1/groups/{group_id}/attach", json={"path": ".", "by": "user"})
+            self.assertEqual(resp.status_code, 200)
+            body = resp.json()
+            self.assertFalse(bool(body.get("ok")))
+            self.assertEqual(str((body.get("error") or {}).get("code") or ""), "invalid_scope_path")
+        finally:
+            cleanup()
+
+    def test_group_attach_sends_absolute_web_path_to_daemon(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            group_id = self._create_group()
+            with tempfile.TemporaryDirectory(prefix="cccc_web_attach_") as project_dir:
+                captured: dict = {}
+
+                def _fake_call_daemon(req: dict):
+                    captured.update(req)
+                    return {"ok": True, "result": {"group_id": group_id, "scope_key": "s_web"}}
+
+                with patch("cccc.ports.web.app.call_daemon", side_effect=_fake_call_daemon):
+                    with self._client() as client:
+                        resp = client.post(f"/api/v1/groups/{group_id}/attach", json={"path": project_dir, "by": "user"})
+                self.assertEqual(resp.status_code, 200)
+                body = resp.json()
+                self.assertTrue(bool(body.get("ok")), body)
+                self.assertEqual(captured.get("op"), "attach")
+                self.assertEqual(str((captured.get("args") or {}).get("path") or ""), str(Path(project_dir).resolve()))
+        finally:
+            cleanup()
 
     def test_group_show_reads_local_projection_without_daemon(self) -> None:
         _, cleanup = self._with_home()
@@ -70,7 +124,7 @@ class TestWebGroupRoutesLocal(unittest.TestCase):
         try:
             group_id = self._create_group()
             app = self._app()
-            route_paths = {getattr(route, "path", "") for route in app.routes}
+            route_paths = self._route_paths(app)
             self.assertIn("/api/v1/groups/{group_id}/codex/stream", route_paths)
 
             with TestClient(app) as client:
@@ -108,6 +162,10 @@ class TestWebGroupRoutesLocal(unittest.TestCase):
                         export_resp = client.get(f"/api/v1/groups/{group_id}/copy/export")
                         self.assertEqual(export_resp.status_code, 200)
                         self.assertEqual(export_resp.headers.get("content-type"), "application/zip")
+                        content_disposition = str(export_resp.headers.get("content-disposition") or "")
+                        content_disposition.encode("latin-1")
+                        self.assertIn("filename=", content_disposition)
+                        self.assertIn("filename*=UTF-8''", content_disposition)
                         package_bytes = export_resp.content
                         self.assertGreater(len(package_bytes), 0)
 
@@ -136,6 +194,15 @@ class TestWebGroupRoutesLocal(unittest.TestCase):
                         self.assertNotEqual(imported_id, group_id)
         finally:
             cleanup()
+
+    def test_copy_export_content_disposition_supports_unicode_filename(self) -> None:
+        from cccc.ports.web.routes.groups import _download_content_disposition
+
+        header = _download_content_disposition("cccc-group--中文项目--g_123.zip")
+
+        header.encode("latin-1")
+        self.assertIn('filename="cccc-group--____--g_123.zip"', header)
+        self.assertIn("filename*=UTF-8''cccc-group--%E4%B8%AD%E6%96%87%E9%A1%B9%E7%9B%AE--g_123.zip", header)
 
     def test_headless_snapshot_replays_recent_completed_turn(self) -> None:
         _, cleanup = self._with_home()

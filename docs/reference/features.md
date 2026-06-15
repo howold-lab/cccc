@@ -27,6 +27,8 @@ cccc_tracked_send(title="Task title", text="Delegated work", to=["assistant"], o
 cccc_message_reply(reply_to="evt_xxx", text="Reply")
 ```
 
+Agents may add `suggested_user_message` when sending to `user`; CCCC Web shows it as an editable next-message suggestion in the composer and never sends it automatically.
+
 ### Read Receipts
 
 - Agents call `cccc_inbox_mark_read(event_id)` to mark as read
@@ -332,7 +334,7 @@ cccc setup --runtime kimi
 cccc setup --runtime custom
 ```
 
-`web_model` does not use `cccc setup`; create the single `ChatGPT Web Model` actor, copy its remote MCP URL from Web Settings, and bind one specific ChatGPT conversation.
+`web_model` does not use `cccc setup`; create the single `ChatGPT Web Model` actor from the CCCC Web group, then use Web Settings to sign in to ChatGPT, copy its remote MCP URL, and bind one specific ChatGPT conversation.
 
 ### Runtime Detection
 

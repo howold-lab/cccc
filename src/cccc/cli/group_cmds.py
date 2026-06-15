@@ -11,6 +11,7 @@ __all__ = [
     "cmd_group_update",
     "cmd_group_detach_scope",
     "cmd_group_delete",
+    "cmd_group_reset",
     "cmd_group_use",
     "cmd_group_start",
     "cmd_group_stop",
@@ -20,10 +21,15 @@ __all__ = [
     "cmd_active",
 ]
 
+def _resolve_cli_workspace_path(raw: Any) -> str:
+    return str(Path(str(raw or ".")).expanduser().resolve())
+
+
 def cmd_attach(args: argparse.Namespace) -> int:
+    scope_path = Path(_resolve_cli_workspace_path(args.path))
     if _ensure_daemon_running():
         resp = call_daemon(
-            {"op": "attach", "args": {"path": args.path, "by": "cli", "group_id": str(args.group_id or "")}}
+            {"op": "attach", "args": {"path": str(scope_path), "by": "cli", "group_id": str(args.group_id or "")}}
         )
         if resp.get("ok"):
             try:
@@ -38,7 +44,6 @@ def cmd_attach(args: argparse.Namespace) -> int:
             return _return_daemon_rejection(resp)
 
     # Fallback: local execution (dev convenience)
-    scope_path = Path(args.path)
     if not scope_path.exists():
         try:
             scope_path.mkdir(parents=True, exist_ok=True)
@@ -211,9 +216,37 @@ def cmd_group_delete(args: argparse.Namespace) -> int:
     _print_json(resp)
     return 0 if resp.get("ok") else 2
 
+def cmd_group_reset(args: argparse.Namespace) -> int:
+    group_id = _resolve_group_id(getattr(args, "group", ""))
+    if not group_id:
+        _print_json({"ok": False, "error": {"code": "missing_group_id", "message": "missing group_id (no active group?)"}})
+        return 2
+    by = str(args.by or "user").strip()
+    confirm = str(args.confirm or "").strip()
+    if confirm != group_id:
+        _print_json({"ok": False, "error": {"code": "confirm_required", "message": f"pass --confirm {group_id} to reset"}})
+        return 2
+
+    if not _ensure_daemon_running():
+        _print_json({"ok": False, "error": {"code": "daemon_unavailable", "message": "ccccd unavailable"}})
+        return 2
+    resp = call_daemon({"op": "group_reset", "args": {"group_id": group_id, "confirm": confirm, "by": by}})
+    if resp.get("ok"):
+        try:
+            result = (resp.get("result") or {}) if isinstance(resp.get("result"), dict) else {}
+            new_group_id = str(result.get("new_group_id") or "").strip()
+            active_group_id = str(result.get("active_group_id") or "").strip()
+            if new_group_id and active_group_id == new_group_id:
+                set_active_group_id(new_group_id)
+        except Exception:
+            pass
+    _print_json(resp)
+    return 0 if resp.get("ok") else 2
+
 def cmd_group_use(args: argparse.Namespace) -> int:
+    scope_path = Path(_resolve_cli_workspace_path(args.path))
     if _ensure_daemon_running():
-        resp = call_daemon({"op": "group_use", "args": {"group_id": args.group_id, "path": args.path, "by": "cli"}})
+        resp = call_daemon({"op": "group_use", "args": {"group_id": args.group_id, "path": str(scope_path), "by": "cli"}})
         if resp.get("ok"):
             _print_json(resp)
             return 0
@@ -224,7 +257,7 @@ def cmd_group_use(args: argparse.Namespace) -> int:
     if group is None:
         _print_json({"ok": False, "error": {"code": "group_not_found", "message": f"group not found: {args.group_id}"}})
         return 2
-    scope = detect_scope(Path(args.path))
+    scope = detect_scope(scope_path)
     reg = load_registry()
     try:
         group = set_active_scope(reg, group, scope_key=scope.scope_key)

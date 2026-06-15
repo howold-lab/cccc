@@ -7,20 +7,21 @@
 
 # CCCC
 
-### 本地优先多智能体协作内核
+### 像群聊一样指挥你的编码智能体
 
-**一个轻量级、却具备基础设施级可靠性的多智能体框架。**
+**已读回执、送达追踪、手机远程运维 ——
+Claude Code、Codex、Gemini 等 12 种运行时，在同一个持久协作组里。**
 
-原生聊天式协作，提示词驱动，平台与 agent 双向调度。
+让多个 coding agent 作为一支**持久化、可协调的团队**运行 — 而不是一堆各自为政的终端窗口。
 
-让多个 coding agent 作为一套**持久化、可协调的系统**运行 — 而不是一堆各自为政的终端窗口。
-
-三条命令即可开始。零基础设施，生产级能力。
+一条 `pip install`。零基础设施，生产级能力。
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=blue)](https://pypi.org/project/cccc-pair/)
 [![Python](https://img.shields.io/pypi/pyversions/cccc-pair)](https://pypi.org/project/cccc-pair/)
+[![Downloads](https://static.pepy.tech/badge/cccc-pair/month)](https://pepy.tech/projects/cccc-pair)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-online-blue)](https://chesterra.github.io/cccc/)
+[![Telegram](https://img.shields.io/badge/Telegram-ccccpair-2CA5E8?logo=telegram&logoColor=white)](https://t.me/ccccpair)
 
 [English](README.md) | **中文** | [日本語](README.ja.md)
 
@@ -28,24 +29,24 @@
 
 ---
 
+<div align="center">
+
+<video src="https://github.com/user-attachments/assets/8f9c3986-f1ba-4e59-a114-bcb383ff49a7" controls="controls" muted="muted" autoplay="autoplay" loop="loop" style="max-width: 100%;">
+</video>
+
+</div>
+
 ## 为什么选择 CCCC
 
-- **协作可持久**：工作状态进入 append-only ledger，而不是埋在终端滚动缓冲区里。
-- **触达可验证**：消息具备路由、已读、ACK、reply-required 追踪，而不是“发过去了应该看到了”。
-- **控制面统一**：Web UI、CLI、MCP、IM 桥接全部围绕同一 daemon 运作，不会出现多套状态。
-- **多运行时是默认能力**：Claude Code、Codex CLI、ChatGPT Web、Gemini CLI 以及其它一线 runtime 可以在同一协作组内协同工作。
-- **本地优先但可远程值守**：单条 `pip install` 即可启动，运行时状态放在 `CCCC_HOME`，需要时再通过 Web / IM 远程运维。
+多智能体开发的现实是：协作记录散落在终端滚动缓冲区里、重启即消失；agent 到底有没有*读到*你的消息无从得知；启停、恢复、催办分散在多个工具里；出门之后长时间运行的协作组就彻底失控。这些不是小问题——它们是绝大多数多智能体方案停留在"脆弱 demo"阶段的根本原因。
 
-## 痛点
+CCCC 让你的 agent 作为一套持久、可协调的系统运行：
 
-多智能体开发的现实困境：
-
-- **上下文丢失** — 协作记录散落在终端滚动缓冲区，重启即消失
-- **触达无保障** — agent 到底有没有*读到*你的消息？无从得知
-- **运维碎片化** — 启停、恢复、催办、提醒分散在多个工具里
-- **无法远程值守** — 长时间运行的协作组，出门就失控
-
-这些不是小问题。它们是绝大多数多智能体方案停留在"脆弱 demo"阶段的根本原因。
+- **协作可持久** — 工作状态进入 append-only ledger，而不是埋在终端滚动缓冲区里。
+- **触达可验证** — 消息具备路由、已读、ACK、reply-required 追踪，而不是"发过去了应该看到了"。
+- **控制面统一** — Web UI、CLI、MCP、IM 桥接全部围绕同一 daemon 运作，不会出现多套状态。
+- **多运行时是默认能力** — Claude Code、Codex CLI、ChatGPT Web、Gemini CLI 以及其它一线 runtime 可以在同一协作组内协同工作。
+- **本地优先但可远程值守** — 单条 `pip install` 即可启动，运行时状态放在 `CCCC_HOME`，需要时再通过 Web / IM 远程运维。
 
 ## CCCC 能做什么
 
@@ -56,18 +57,9 @@ CCCC 只需一条 `pip install`，零外部依赖 — 不需要数据库、不�
 | **唯一事实源** | append-only ledger（`ledger.jsonl`）记录所有消息和事件 — 可回放、可审计、永不丢失 |
 | **可靠的消息语义** | 已读游标、attention ACK、reply-required 义务追踪 — 谁看到了什么一清二楚 |
 | **统一控制面** | Web UI、CLI、MCP 工具、IM 桥接全部对接同一 daemon — 不存在状态分裂 |
-| **多运行时编排** | Claude Code、Codex CLI、OpenCode、ChatGPT Web、Gemini CLI 等 10 种一线运行时可混用，此外还支持 `custom` 运行时兜底 |
+| **多运行时编排** | Claude Code、Codex CLI、Grok Build、OpenCode、ChatGPT Web、Gemini CLI 等 12 种一线运行时可混用，此外还支持 `custom` 运行时兜底 |
 | **角色化协调** | Foreman + Peer 角色模型，权限边界清晰，收件人路由精确（`@all`、`@peers`、`@foreman`） |
 | **本地优先的运行时状态** | 运行时数据保存在 `CCCC_HOME` 而不是代码仓库里，同时仍可通过 Web Access 与 IM 做远程运维 |
-
-## CCCC 长什么样
-
-<div align="center">
-
-<video src="https://github.com/user-attachments/assets/8f9c3986-f1ba-4e59-a114-bcb383ff49a7" controls="controls" muted="muted" autoplay="autoplay" loop="loop" style="max-width: 100%;">
-</video>
-
-</div>
 
 ## 快速上手
 
@@ -119,6 +111,8 @@ cccc tracked-send "请接手第一个具体任务，并回复验证证据。" \
 ```
 
 此刻你已拥有两个 agent 在一个持久化协作组中协同工作，具备完整的消息历史、触达追踪和 Web 看板。投递与协调由 daemon 统一负责，运行时状态则保存在 `CCCC_HOME`，不会污染代码仓库。
+
+**此刻你应该看到：**在 http://127.0.0.1:8848 的 Web UI 中，两个 actor 都处于运行状态，foreman 的回复出现在**聊天**里，tracked 请求的消息上显示着送达与已读状态。如果有 actor 一直没起来，先运行 `cccc doctor` 检查运行时，常见首跑问题见 [FAQ](https://chesterra.github.io/cccc/guide/faq)。
 
 ## 程序化接入（SDK）
 
@@ -189,7 +183,7 @@ graph TB
 
 ## 支持的运行时
 
-CCCC 跨 10 种一线运行时编排 agent，除此之外还支持 `custom` 运行时兜底。同一协作组内，每个 actor 可使用不同的运行时。
+CCCC 跨 12 种一线运行时编排 agent，除此之外还支持 `custom` 运行时兜底。同一协作组内，每个 actor 可使用不同的运行时。
 
 | 运行时 | 接入方式 | 命令 / 表面 |
 |---------|----------|-------------|
@@ -197,6 +191,8 @@ CCCC 跨 10 种一线运行时编排 agent，除此之外还支持 `custom` 运�
 | Codex CLI | 自动 MCP 配置 | `codex` |
 | ChatGPT Web | 远程 MCP + 浏览器投递 | `chatgpt.com` 对话 |
 | Gemini CLI | 自动 MCP 配置 | `gemini` |
+| Grok Build | 自动 MCP 配置 | `grok` |
+| Hermes Agent | 自动 MCP 配置 | `hermes` |
 | Droid | 自动 MCP 配置 | `droid` |
 | Amp | 自动 MCP 配置 | `amp` |
 | Auggie | 自动 MCP 配置 | `auggie` |
@@ -213,31 +209,11 @@ cccc doctor                    # 检查环境和运行时可用性
 
 Actor 可以以 **PTY**（嵌入式终端）或 **headless**（无终端的结构化 I/O）模式运行。Claude Code 和 Codex CLI 支持两种模式；headless 模式下 daemon 对投递和流式传输具有更精细的控制。
 
-### ChatGPT Web / GPT-5.x 本地开发
+### ChatGPT Web / GPT-5.x 作为本地开发 actor
 
-ChatGPT Web 可以作为真正的 CCCC actor 加入协作组，而不只是外部聊天窗口。CCCC 会通过浏览器投递把协作组消息送进一个明确绑定的 ChatGPT 对话；ChatGPT 再通过这个单一 actor 绑定的远程 MCP connector 回调 CCCC。
+ChatGPT Web 可以作为真正的 CCCC actor 加入协作组，而不只是外部聊天窗口：CCCC 通过浏览器投递把组消息送进绑定的 ChatGPT 对话，GPT-5.x 再经由 actor 绑定的远程 MCP connector 回连 CCCC —— 接收路由消息、可见回复、查看和编辑仓库文件、运行受 scope 限制的 shell/git 命令，体验接近原生本地编码 agent。这也能把闲置的 ChatGPT Web 用量转化为额外的本地开发 agent 容量。
 
-在支持 Apps/MCP 的 ChatGPT 会话中，**GPT-5.x** 可以参与本地开发，并复用和 Claude Code、Codex 相同的协作层：接收路由消息、通过 CCCC 可见回复、查看和编辑仓库文件、运行受 scope 限制的 shell/git 命令，并和其它 peer agent 协同。当所选 GPT-5.x chat 能够看到并调用 CCCC MCP connector 时，符合条件的 ChatGPT 环境可以获得接近原生 Codex 的本地开发体验；同时也能把 ChatGPT Web 的使用容量转化为额外的本地开发 agent 容量，降低原生 Codex 用量压力。
-
-**GPT-5.x Pro 说明：**GPT-5.x Pro 当前不能作为 CCCC 本地开发 runtime 使用。ChatGPT Pro 会话不会暴露第三方 CCCC MCP connector，其网页 fetcher 也可能在请求到达 CCCC 前阻断公开或私有 tunnel URL。实际效果是 Pro 在 CCCC 中没有可靠本地访问能力：不能使用 MCP 工具，不能读取仓库，不能运行 shell/git，也没有可靠的 No-MCP resource fallback。请使用能够看到 CCCC connector 的 GPT-5.x ChatGPT 会话进行本地开发；Pro 只适合作为用户手动提供上下文后的外部建议/review 工具。
-
-从零配置到可用：
-
-1. 启动 `cccc web`，通过公网 HTTPS URL 暴露它，然后在 `Settings > Global > Web Access` 填入该 URL。
-   - 推荐方案：Cloudflare Tunnel、ngrok、Tailscale Funnel，或在公网 HTTPS 主机上用 Caddy/Nginx 做反向代理。
-   - ChatGPT 不能把 `localhost`、普通 HTTP、或仅 tailnet 内可见的私有 URL 当作 MCP Server URL。
-2. 在 `Settings > Global > Web Access` 创建 Admin Access Token。
-3. 打开 `Settings > Global > ChatGPT Web Model`，创建/启动唯一的 ChatGPT Web Model actor，然后创建并复制它的 MCP URL。
-4. 在 ChatGPT 中打开 `Settings > Apps > Advanced settings > Create app`，按以下字段创建 custom MCP app：
-   - Name: `CCCC`
-   - Description: `CCCC local workspace connector`
-   - MCP Server URL: 粘贴从 CCCC 复制的完整 MCP URL
-   - Authentication: `No Auth`
-   - ChatGPT 菜单名称可能因 plan 和 workspace 设置而变化。如果没有完全相同的入口，请查找 Apps 或 Connectors 设置，按需启用 Developer Mode，然后用复制的 CCCC MCP URL 和 `No Auth` 创建 custom MCP app/connector。
-5. 在 CCCC 的嵌入式 ChatGPT 浏览器中登录，选择一个能够看到 CCCC MCP app 的 GPT-5.x chat，并将该 chat 绑定为投递目标。
-6. 向该 actor 发送一条小测试消息。ChatGPT 应该在绑定的 chat 中收到消息，并通过 CCCC MCP 工具回复。
-
-完整配置和排障见：[ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+配置需要通过公网 HTTPS URL 暴露 MCP connector（Cloudflare Tunnel、ngrok、Tailscale Funnel 或反向代理）。注意 GPT-5.x Pro 会话目前不支持此用法 —— 它不暴露第三方 MCP connector。完整配置与排障见 [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
 
 ## 消息与协调
 
@@ -394,6 +370,16 @@ Agent 通过一套紧凑的 action-oriented MCP surface 与 CCCC 交互。核心
 | 纯 DAG 工作流编排 | ❌ 建议使用专用编排器，CCCC 可作为协作层补充 |
 
 CCCC 是**协作内核** — 它拥有协调层，与外部 CI/CD、编排器、部署工具保持可组合性。
+
+## 与其他方案的对比
+
+| 如果你在用 | 它的强项 | CCCC 补上的 |
+|---|---|---|
+| **原生 agent 团队**（如 Claude Code subagents/teams） | 单厂商、单会话内体验最顺滑 | 跨厂商混编（Claude + Codex + Gemini + Kimi…）、重启不丢的持久状态、手机/IM 远程运维、完整审计 ledger |
+| **并行任务执行器**（worktree/任务板类工具） | 隔离的并行任务执行 | 一个协调层：agent 之间对话、交接、ACK、被催办 —— 外加 7×24 daemon 运维 |
+| **IM 助理网关** | 住在聊天软件里的个人助理 | 面向真实工作的投递语义：tracked task、已读/ACK 回执、多 agent 协作组、持久审计链 |
+
+CCCC 不替代你的 agent —— 它是让它们成为一个团队的那一层。更完整的讨论见 [FAQ — CCCC 与其他方案的对比](https://chesterra.github.io/cccc/guide/faq#how-does-cccc-compare-to-native-agent-teams-and-other-tools)。
 
 ## 安全
 

@@ -4,6 +4,105 @@ All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/), and versions follow SemVer/PEP 440.
 
+## [Unreleased]
+
+## [0.4.27] — 2026-06-15
+
+### Added
+- **Agents can now suggest the user's next message** by attaching `suggested_user_message` when sending or replying to the user. CCCC Web shows the suggestion as editable gray prefill text in the composer; the user can accept it with Tab or the inline suggestion button, edit it, or ignore it.
+- **The suggested-message field is available through daemon messaging, Web messaging, and MCP messaging APIs**, with focused safeguards so suggestions are only surfaced for the active user-facing composer context.
+- **ChatGPT Web Model delivery now includes a lightweight app-permission hint** when a browser-delivered message appears to be waiting on ChatGPT-side app approval.
+
+### Changed
+- **ChatGPT Web Model setup has been reorganized around the real setup order**: configure Web Access, create a ChatGPT Web Model actor in the target group, sign in to ChatGPT, connect the MCP app, then save an explicit delivery target.
+- **ChatGPT delivery targets are now explicit and easier to reason about**. CCCC can bind to a saved conversation URL, use the current inspected ChatGPT chat when the user saves it, or start a new chat on the next delivery and bind it once ChatGPT creates the final `/c/...` URL.
+- **Automatic ChatGPT page refresh recovery is disabled by default**. The legacy refresh mechanism remains available through `CCCC_WEB_MODEL_BROWSER_AUTO_RELOAD=1` for fragile browser sessions.
+- **CCCC no longer tries to automate ChatGPT app permission approval clicks**. Users should approve the CCCC app in ChatGPT, preferably with ChatGPT's "Always allow" option when they trust the local connector.
+- **Legacy `## @pet` help blocks are treated as preserved legacy content**, not as an active assistant prompt surface.
+- **Unsupported internal actors are skipped during group start/autostart**, preventing stale internal runtime records from being launched.
+
+### Removed
+- **PET and WebPet have been removed** from the daemon, MCP tool surface, Web UI, settings, release workflow, and generated Web assets. Voice Secretary remains the supported built-in assistant.
+- **PET-specific local review, task proposal, reminder, context refresh, WebPet animation, and PET settings surfaces are no longer active product paths**.
+
+### Fixed
+- **Starting a new ChatGPT chat on next delivery now reports and persists the final bound conversation more reliably** after the first browser-delivered prompt.
+- **ChatGPT target setup no longer treats diagnostic browser history as a saved delivery target**. A `last_tab_url` is informational only until the user saves a target.
+- **Suggested next-message prompts no longer reappear after a newer user reply**, even when the chat view is filtered or showing a jump-to window.
+- **Suggested next-message prompts are hidden when the composer is routed to another group**, preventing an agent-proposed reply for one group from being sent to another.
+
+### Tests
+- Added and updated coverage for PET removal boundaries, legacy help parsing, ChatGPT target drafting, browser recovery behavior, app-permission hints, new-chat binding, suggested-message contracts, and composer suggestion freshness/routing.
+
+## [0.4.26] — 2026-06-10
+
+### Added
+- **First-class local memory daemon operations** expose search, read, write, profile, and health checks on top of CCCC's local ReMe-backed memory store.
+- **Read-only terminal viewing** supports viewer-mode attaches without granting or stealing terminal write control.
+
+### Changed
+- **Web terminal sessions now preserve raw PTY output across attach and reconnect**, including byte-cursor replay, better viewer/control separation, and safer control takeover behavior.
+- **Group sends no longer get blocked just because the Web UI currently sees no running actor**, allowing stopped groups to wake through the server-side send path instead of failing early in the browser.
+- **Terminal transcript rendering is more accurate for wide CJK/fullwidth characters and alternate-screen TUIs**, making terminal tails and diagnostics easier to read.
+
+### Fixed
+- **Read-only exhibit terminal access can no longer take over a live PTY writer**, so public viewers cannot deny control to an active operator.
+- **Changing Web theme or terminal scrollback no longer recreates the live xterm instance**, preventing terminal input/resize from silently detaching until reconnect.
+- **Windows ConPTY installs now avoid the newly regressed pywinpty 3.0.4 release** while keeping the previously verified 3.0.3 path available.
+- **Ledger index catch-up is serialized to avoid SQLite writer-lock failures** during concurrent ledger tail/search and append-index activity.
+- **Headless Codex and Claude session shutdown now waits briefly for worker threads**, reducing stale runtime threads after stop/restart flows.
+- **Reply uploads now reject invalid default recipients with a clear validation error** instead of creating a misleading send result.
+- **Task reference chips have stronger dark-mode contrast**, and Web chat follow mode avoids forcing the bottom while the user is browsing detached history.
+- **Foreman actors can remove peer actors through the expected management path**, matching the documented permission model.
+
+### Tests
+- Added and updated coverage for terminal attach modes, reconnect cursors, raw PTY replay helpers, read-only Web terminal access, runtime thread cleanup, local memory operations, ledger index locking, group send lifecycle projection, reply upload validation, terminal transcript rendering, and related Web typecheck paths.
+
+## [0.4.25] — 2026-06-04
+
+### Changed
+- **The Web UI background no longer runs continuous decorative blob animations while idle**, reducing baseline GPU work and improving responsiveness on older desktops and integrated GPUs.
+
+### Tests
+- Validated the Web typecheck and production build after the background rendering change.
+
+## [0.4.24] — 2026-06-04
+
+### Added
+- **Grok Build runtime support** is available across runtime detection, actor creation/editing, CLI setup, daemon runtime metadata, MCP setup checks, Web runtime selectors, runtime logos, and tests.
+- **Reset group** is available from Web and CLI for creating a clean replacement group without manually deleting and recreating the group.
+
+### Changed
+- **MCP stdio framing now follows the client's inbound framing**, improving compatibility with plain newline-JSON MCP clients while keeping Content-Length framing for clients that use it.
+- **Reset group preserves high-effort group configuration** such as actors, project scopes, stored secrets, and automation rules/settings, while intentionally leaving message history, memory, context, runtime sessions, and provider state behind.
+- **The Web reset/delete group controls use a consistent tooltip style**, with reset guidance moved out of the modal footer into contextual hover help.
+
+### Fixed
+- **`cccc attach .` and `cccc group use` now resolve CLI paths before crossing the daemon boundary**, so running them from a project console no longer depends on the daemon's current working directory.
+- **Web attach requests reject relative paths with a clear error**, avoiding accidental interpretation relative to `CCCC_HOME` or the daemon process directory.
+
+### Tests
+- Added and updated coverage for Grok runtime defaults and MCP setup, MCP stdio framing, reset group behavior and permissions, CLI active-group handling after reset, and attach path resolution through CLI and Web routes.
+
+## [0.4.23] — 2026-06-01
+
+### Changed
+- **Web chat history now uses a single chronological search contract** for initial tails and older-history pagination, so the latest message window and follow-up history loads connect in normal conversation order.
+- **NotebookLM work notebook sync is explicit by default**: plain `context_sync` no longer uploads repeated internal context snapshots into the work notebook.
+- **Group Space source and artifact lists can use cached remote snapshots**, reducing routine NotebookLM provider calls while keeping explicit fresh reads available.
+- **Automation nudge scans are throttled per group**, lowering repeated obligation-scan load without changing configured nudge windows.
+- **Daemon logging is quieter for HTTP and NotebookLM provider internals**, making debug logs easier to read.
+
+### Fixed
+- **Ledger history recovery is more robust** when the sqlite ledger index becomes stale or incomplete while the append-only ledger still contains the messages.
+- **Full event-id lookups can fall back to the ledger** after an index miss instead of treating the event as absent.
+- **Windows ConPTY sessions now drain final output from fast-exiting commands**, fixing cases where quick commands appeared to emit only terminal control sequences.
+- **Copy Groups zip downloads now use Unicode-safe download headers** with an ASCII fallback and `filename*` value.
+- **Stale Group Space jobs left running by an earlier daemon** are reconciled into a failed state with a clear stale-job reason.
+
+### Tests
+- Added coverage for ledger index repair, chat history ordering and pagination, Copy Groups Unicode download headers, NotebookLM/Group Space cached lists and stale job reconciliation, automation nudge throttling, and Windows ConPTY fast-exit output draining.
+
 ## [0.4.22] — 2026-05-29
 
 ### Added

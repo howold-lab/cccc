@@ -95,6 +95,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_group_delete.add_argument("--by", default="user", help="Requester (default: user)")
     p_group_delete.set_defaults(func=cmd_group_delete)
 
+    p_group_reset = group_sub.add_parser("reset", help="Reset a group by creating a clean replacement")
+    p_group_reset.add_argument("--group", default="", help="Target group_id (default: active group)")
+    p_group_reset.add_argument("--confirm", default="", help="Type the group_id to confirm reset")
+    p_group_reset.add_argument("--by", default="user", help="Requester (default: user)")
+    p_group_reset.set_defaults(func=cmd_group_reset)
+
     p_group_use = group_sub.add_parser("use", help="Set group's active scope (must already be attached)")
     p_group_use.add_argument("group_id", help="Target group_id")
     p_group_use.add_argument("path", nargs="?", default=".", help="Path inside target scope (default: .)")
@@ -138,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_actor_add.add_argument("--title", default="", help="Display title (optional)")
     p_actor_add.add_argument(
         "--runtime",
-        choices=["claude", "codex", "droid", "amp", "auggie", "neovate", "gemini", "hermes", "kimi", "opencode", "custom"],
+        choices=["claude", "codex", "droid", "amp", "auggie", "neovate", "gemini", "grok", "hermes", "kimi", "opencode", "custom"],
         default="codex",
         help="Agent runtime (auto-sets command if not provided)",
     )
@@ -177,7 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_actor_update = actor_sub.add_parser("update", help="Update an actor (title/command/env/scope/enabled/runtime)")
     p_actor_update.add_argument("actor_id", help="Actor id")
     p_actor_update.add_argument("--title", default=None, help="New title")
-    p_actor_update.add_argument("--runtime", choices=["claude", "codex", "droid", "amp", "auggie", "neovate", "gemini", "hermes", "kimi", "opencode", "custom"], default=None, help="New runtime")
+    p_actor_update.add_argument("--runtime", choices=["claude", "codex", "droid", "amp", "auggie", "neovate", "gemini", "grok", "hermes", "kimi", "opencode", "custom"], default=None, help="New runtime")
     p_actor_update.add_argument("--command", default=None, help="Replace command (shell-like string); use empty to clear")
     p_actor_update.add_argument("--env", action="append", default=[], help="Replace env with these KEY=VAL entries (repeatable)")
     p_actor_update.add_argument("--scope", default="", help="Set default scope path (must be attached)")
@@ -380,7 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup = sub.add_parser("setup", help="Setup MCP for agent runtimes (configure MCP, print guidance)")
     p_setup.add_argument(
         "--runtime",
-        choices=["claude", "codex", "droid", "amp", "auggie", "neovate", "gemini", "hermes", "kimi", "opencode", "custom"],
+        choices=["claude", "codex", "droid", "amp", "auggie", "neovate", "gemini", "grok", "hermes", "kimi", "opencode", "custom"],
         default="",
         help="Target runtime (default: all supported runtimes)",
     )

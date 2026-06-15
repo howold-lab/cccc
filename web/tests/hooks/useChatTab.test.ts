@@ -25,6 +25,7 @@ const { localStorageMock } = vi.hoisted(() => {
 
 import {
   CHAT_SCROLL_SNAPSHOT_MAX_AGE_MS,
+  buildUnfilteredLiveChatMessages,
   buildComposerSendRoutingSnapshot,
   buildReplyAnchorTsMap,
   buildReplySlotTsMap,
@@ -34,6 +35,7 @@ import {
   parseComposerRecipientTokens,
   restoreFailedSendComposerState,
   sortChatMessages,
+  shouldLockChatToBottomForSend,
   shouldRestoreDetachedScrollSnapshot,
 } from "../../src/hooks/useChatTab";
 import {
@@ -49,6 +51,7 @@ import {
   isFormalChatMessageEvent,
   supportsChatStreamingPlaceholder,
 } from "../../src/utils/chatSend";
+import { latestSuggestedUserMessage } from "../../src/utils/suggestedUserMessage";
 import type { LedgerEvent } from "../../src/types";
 
 void localStorageMock;
@@ -237,6 +240,39 @@ describe("buildComposerSendRoutingSnapshot", () => {
   });
 });
 
+describe("buildUnfilteredLiveChatMessages", () => {
+  it("keeps later user replies in the suggestion freshness source even when a view could be filtered", () => {
+    const events: LedgerEvent[] = [
+      {
+        id: "evt-agent",
+        kind: "chat.message",
+        ts: "2026-06-15T00:00:01Z",
+        by: "agent-1",
+        data: {
+          text: "Done.",
+          to: ["user"],
+          suggested_user_message: "Please continue.",
+        },
+      },
+      {
+        id: "evt-user",
+        kind: "chat.message",
+        ts: "2026-06-15T00:00:02Z",
+        by: "user",
+        data: {
+          text: "I already continued.",
+          to: ["agent-1"],
+        },
+      },
+    ];
+
+    const source = buildUnfilteredLiveChatMessages(events, [], { map: new Map(), next: 0 });
+
+    expect(source.map((event) => event.id)).toEqual(["evt-agent", "evt-user"]);
+    expect(latestSuggestedUserMessage(source)).toBeNull();
+  });
+});
+
 describe("restoreFailedSendComposerState", () => {
   it("restores the current composer when the failed send still belongs to the selected group", () => {
     resetComposerAndGroupSelection();
@@ -341,7 +377,7 @@ describe("isFormalChatMessageEvent", () => {
 });
 
 describe("group send blocked state", () => {
-  it("blocks paused and stopped groups before optimistic send feedback", () => {
+  it("blocks only explicit paused lifecycle before optimistic send feedback", () => {
     expect(getGroupSendBlockedReason({
       lifecycleState: "paused",
       runtimeRunning: true,
@@ -351,7 +387,12 @@ describe("group send blocked state", () => {
       lifecycleState: "active",
       runtimeRunning: false,
       actorCount: 2,
-    })).toBe("stopped");
+    })).toBeNull();
+    expect(getGroupSendBlockedReason({
+      lifecycleState: "stopped",
+      runtimeRunning: false,
+      actorCount: 2,
+    })).toBeNull();
     expect(getGroupSendBlockedReason({
       lifecycleState: "idle",
       runtimeRunning: true,
@@ -360,8 +401,8 @@ describe("group send blocked state", () => {
   });
 
   it("maps recipient-resolution failures to group-state recovery copy", () => {
-    expect(getGroupSendBlockedMessage("stopped", t)).toBe(
-      "This group is not running. Start the group before sending a message to agents.",
+    expect(getGroupSendBlockedMessage("paused", t)).toBe(
+      "This group is paused. Resume the group before sending a message to agents.",
     );
     expect(formatSendMessageError({
       code: "no_enabled_recipients",
@@ -1220,6 +1261,60 @@ describe("shouldRestoreDetachedScrollSnapshot", () => {
       anchorId: "",
       updatedAt: now,
     }, now)).toBe(false);
+  });
+});
+
+describe("shouldLockChatToBottomForSend", () => {
+  it("locks to bottom only when the current chat is cleanly following", () => {
+    const now = 1_700_000_000_000;
+
+    expect(shouldLockChatToBottomForSend({
+      currentAtBottom: true,
+      showScrollButton: false,
+      chatUnreadCount: 0,
+      scrollSnapshot: null,
+      now,
+    })).toBe(true);
+
+    expect(shouldLockChatToBottomForSend({
+      currentAtBottom: false,
+      showScrollButton: false,
+      chatUnreadCount: 0,
+      scrollSnapshot: null,
+      now,
+    })).toBe(false);
+  });
+
+  it("does not force bottom while the user is browsing detached history", () => {
+    const now = 1_700_000_000_000;
+
+    expect(shouldLockChatToBottomForSend({
+      currentAtBottom: true,
+      showScrollButton: true,
+      chatUnreadCount: 0,
+      scrollSnapshot: null,
+      now,
+    })).toBe(false);
+
+    expect(shouldLockChatToBottomForSend({
+      currentAtBottom: true,
+      showScrollButton: false,
+      chatUnreadCount: 2,
+      scrollSnapshot: null,
+      now,
+    })).toBe(false);
+
+    expect(shouldLockChatToBottomForSend({
+      currentAtBottom: true,
+      showScrollButton: false,
+      chatUnreadCount: 0,
+      scrollSnapshot: {
+        mode: "detached",
+        anchorId: "evt-older",
+        updatedAt: now - 1000,
+      },
+      now,
+    })).toBe(false);
   });
 });
 
