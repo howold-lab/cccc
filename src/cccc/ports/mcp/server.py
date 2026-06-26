@@ -77,10 +77,22 @@ from .handlers.cccc_messaging import (  # noqa: F401
     message_send,
     tracked_send,
 )
+from .handlers.group_bridge_client import (  # noqa: F401
+    remote_access,
+    remote_apply_patch,
+    remote_context,
+    remote_exec_command,
+    remote_git,
+    remote_repo,
+    remote_repo_edit,
+    remote_shell,
+    remote_write_stdin,
+)
 from .handlers.cccc_repo import (  # noqa: F401
     apply_codex_patch_tool,
     exec_command_tool,
     git_tool,
+    repo_search_tool,
     repo_tool,
     shell_tool,
     write_stdin_tool,
@@ -108,6 +120,7 @@ from .handlers.cccc_group_actor import (  # noqa: F401
     actor_stop,
     group_info,
     group_list,
+    group_resolve,
     group_set_state,
     runtime_list,
 )
@@ -157,10 +170,10 @@ from .handlers.context import (  # noqa: F401
     coordination_add_note,
     coordination_get,
     coordination_update_brief,
+    actor_notes_clear,
+    actor_notes_get,
+    actor_notes_set,
     task_delete,
-    role_notes_clear,
-    role_notes_get,
-    role_notes_set,
     task_create,
     task_list,
     task_move,
@@ -209,6 +222,12 @@ def _normalize_to_arg(raw: Any) -> Optional[List[str]]:
                 pass
         return [s]
     return None
+
+
+def _optional_group_id(arguments: Dict[str, Any]) -> str:
+    env_gid = _runtime_context().group_id
+    arg_gid = str(arguments.get("group_id") or "").strip()
+    return env_gid or arg_gid
 
 
 _BUILTIN_MCP_TOOL_NAMES = frozenset(str(spec.get("name") or "") for spec in MCP_TOOLS if isinstance(spec, dict))
@@ -480,9 +499,46 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
             to=to_val,
             priority=str(arguments.get("priority") or "normal"),
             reply_required=coerce_bool(arguments.get("reply_required"), default=False),
+            idempotency_key=str(arguments.get("idempotency_key") or ""),
             refs=refs_val,
             suggested_user_message=str(arguments.get("suggested_user_message") or ""),
         )
+
+    if name == "cccc_remote_access":
+        gid = _resolve_group_id(arguments)
+        return remote_access(group_id=gid, arguments=arguments)
+
+    if name == "cccc_remote_context":
+        gid = _resolve_group_id(arguments)
+        return remote_context(group_id=gid, arguments=arguments)
+
+    if name == "cccc_remote_repo":
+        gid = _resolve_group_id(arguments)
+        return remote_repo(group_id=gid, arguments=arguments)
+
+    if name == "cccc_remote_git":
+        gid = _resolve_group_id(arguments)
+        return remote_git(group_id=gid, arguments=arguments)
+
+    if name == "cccc_remote_repo_edit":
+        gid = _resolve_group_id(arguments)
+        return remote_repo_edit(group_id=gid, arguments=arguments)
+
+    if name == "cccc_remote_apply_patch":
+        gid = _resolve_group_id(arguments)
+        return remote_apply_patch(group_id=gid, arguments=arguments)
+
+    if name == "cccc_remote_shell":
+        gid = _resolve_group_id(arguments)
+        return remote_shell(group_id=gid, arguments=arguments)
+
+    if name == "cccc_remote_exec_command":
+        gid = _resolve_group_id(arguments)
+        return remote_exec_command(group_id=gid, arguments=arguments)
+
+    if name == "cccc_remote_write_stdin":
+        gid = _resolve_group_id(arguments)
+        return remote_write_stdin(group_id=gid, arguments=arguments)
 
     if name == "cccc_tracked_send":
         gid = _resolve_group_id(arguments)
@@ -696,6 +752,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 actor_id=aid,
                 path=str(arguments.get("path") or ""),
                 text=str(arguments.get("text") or ""),
+                dst_group_id=str(arguments.get("dst_group_id") or ""),
                 to=to_val_file,
                 priority=str(arguments.get("priority") or "normal"),
                 reply_required=coerce_bool(arguments.get("reply_required"), default=False),
@@ -705,6 +762,20 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
     if name == "cccc_repo":
         gid = _resolve_group_id(arguments)
         action = str(arguments.get("action") or "info").strip().lower()
+        if action == "search":
+            return repo_search_tool(
+                group_id=gid,
+                query=str(arguments.get("query") or ""),
+                path=str(arguments.get("path") or arguments.get("file_path") or ""),
+                limit=arguments.get("limit") or 100,
+                include_hidden=coerce_bool(arguments.get("include_hidden"), default=False),
+                case_sensitive=coerce_bool(arguments.get("case_sensitive"), default=False),
+                regex=coerce_bool(arguments.get("regex"), default=False),
+                include_globs=arguments.get("include_globs"),
+                exclude_globs=arguments.get("exclude_globs"),
+                context_lines=arguments.get("context_lines"),
+                max_file_bytes=arguments.get("max_file_bytes") or 200000,
+            )
         if action not in {"info", "list", "list_dir", "read"}:
             raise MCPError(code="invalid_action", message="cccc_repo is read-only; use cccc_repo_edit/cccc_apply_patch for writes")
         return repo_tool(
@@ -849,6 +920,9 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
         action = str(arguments.get("action") or "info").strip().lower()
         if action == "list":
             return group_list()
+        if action == "resolve":
+            gid = _optional_group_id(arguments)
+            return group_resolve(group_id=gid, token=str(arguments.get("token") or ""))
         if action == "info":
             gid = _resolve_group_id(arguments)
             return group_info(group_id=gid)
@@ -860,7 +934,7 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
                 by=by,
                 state=str(arguments.get("state") or ""),
             )
-        raise MCPError(code="invalid_request", message="cccc_group action must be one of: info/list/set_state")
+        raise MCPError(code="invalid_request", message="cccc_group action must be one of: info/list/resolve/set_state")
 
     if name == "cccc_actor":
         gid = _resolve_group_id(arguments)
@@ -1258,23 +1332,23 @@ def _handle_cccc_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dic
 
 
 def _handle_context_namespace(name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if name == "cccc_role_notes":
+    if name == "cccc_actor_notes":
         gid = _resolve_group_id(arguments)
         by = _resolve_caller_from_by(arguments)
         action = str(arguments.get("action") or "get").strip().lower()
         target = str(arguments.get("target_actor_id") or "").strip() or None
         if action == "get":
-            return role_notes_get(group_id=gid, caller_actor_id=by, target_actor_id=target)
+            return actor_notes_get(group_id=gid, caller_actor_id=by, target_actor_id=target)
         if action == "set":
             if not target:
                 raise MCPError(code="invalid_request", message="target_actor_id is required for set")
             content = str(arguments.get("content") or "")
-            return role_notes_set(group_id=gid, target_actor_id=target, content=content, by=by)
+            return actor_notes_set(group_id=gid, target_actor_id=target, content=content, by=by)
         if action == "clear":
             if not target:
                 raise MCPError(code="invalid_request", message="target_actor_id is required for clear")
-            return role_notes_clear(group_id=gid, target_actor_id=target, by=by)
-        raise MCPError(code="invalid_request", message="cccc_role_notes action must be get|set|clear")
+            return actor_notes_clear(group_id=gid, target_actor_id=target, by=by)
+        raise MCPError(code="invalid_request", message="cccc_actor_notes action must be get|set|clear")
     return _handle_context_namespace_impl(
         name,
         arguments,

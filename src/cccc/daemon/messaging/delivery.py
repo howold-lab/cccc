@@ -36,8 +36,11 @@ from ...kernel.delivery_policy import auto_mark_on_delivery_from_doc
 from ...kernel.group import Group, get_group_state, load_group, set_group_state
 from ...kernel.inbox import get_cursor, is_message_for_actor, set_cursor
 from ...kernel.ledger import append_event
+from ...kernel.runtime import (
+    build_prompt_assisted_mcp_setup_prompt,
+    runtime_uses_prompt_assisted_mcp_setup,
+)
 from ...kernel.system_prompt import render_system_prompt
-from ...paths import ensure_home
 from ...runners import pty as pty_runner
 from ...runners import headless as headless_runner
 from ...util.fs import atomic_write_text, read_json
@@ -61,6 +64,7 @@ PTY_STARTUP_MAX_WAIT_SECONDS = 10.0  # Max wait for a fresh runtime to become re
 PTY_STARTUP_READY_GRACE_SECONDS = 1.0  # Extra safety delay after readiness is detected (user request)
 ASYNC_FLUSH_POLL_SECONDS = 0.25  # Short poll used when a one-shot kick loses the immediate flush window
 ASYNC_FLUSH_MAX_WAIT_SECONDS = 12.0  # Avoid keeping a kick thread alive indefinitely when delivery is impossible
+PTY_REPEAT_SUBMIT_DELAY_SECONDS = 0.2  # Short gap for runtimes that need a second Enter after pasted input.
 ### NOTE
 # Delivery is intentionally daemon-driven (single-writer). If a service needs to notify actors, it
 # should call the daemon IPC and retry on transient failures rather than writing directly to ledgers.
@@ -85,6 +89,22 @@ def _get_delivery_config(group: Group) -> Dict[str, Any]:
 def _get_auto_mark_on_delivery(group: Group) -> bool:
     """Get auto_mark_on_delivery setting from group.yaml delivery config."""
     return auto_mark_on_delivery_from_doc(group.doc.get("delivery"))
+
+
+def _pty_submit_sequence_for_actor(actor: Any) -> tuple[bytes, ...]:
+    actor_doc = actor if isinstance(actor, dict) else {}
+    mode = str(actor_doc.get("submit") or "enter").strip().lower() or "enter"
+    if mode == "none":
+        return ()
+    if mode == "newline":
+        return (b"\n",)
+    runtime = str(actor_doc.get("runtime") or "").strip().lower()
+    if runtime == "copilot":
+        # Copilot CLI's TUI can keep pasted text in the composer after the first
+        # synthetic Enter, especially on Windows ConPTY. A second Enter matches
+        # the observed manual recovery without changing other runtimes.
+        return (b"\r", b"\r")
+    return (b"\r",)
 
 
 def should_auto_mark_on_delivery(group: Group) -> bool:
@@ -173,6 +193,26 @@ def _save_preamble_sent(group: Group, state: Dict[str, str]) -> None:
         atomic_write_text(p, json.dumps(state, ensure_ascii=False, indent=2))
     except Exception:
         pass
+
+
+def _prompt_assisted_mcp_setup_runtime(actor: Dict[str, Any]) -> Optional[str]:
+    actor_id = str(actor.get("id") or "").strip()
+    runtime = str(actor.get("runtime") or "").strip().lower()
+    runner = str(actor.get("runner") or "pty").strip().lower() or "pty"
+    if not actor_id or runner != "pty" or not runtime_uses_prompt_assisted_mcp_setup(runtime):
+        return None
+    return runtime
+
+
+def _render_delivery_preamble(group: Group, actor: Dict[str, Any]) -> str:
+    prompt = render_system_prompt(group=group, actor=actor)
+    runtime = _prompt_assisted_mcp_setup_runtime(actor)
+    if not runtime:
+        return prompt
+    setup_prompt = build_prompt_assisted_mcp_setup_prompt(runtime)
+    if not setup_prompt:
+        return prompt
+    return f"{setup_prompt}\n\n---\n\n{prompt}".rstrip() + "\n"
 
 
 def _current_preamble_session_key(group: Group, actor_id: str) -> Optional[str]:
@@ -531,10 +571,9 @@ THROTTLE = DeliveryThrottle()
 
 REMINDER_EVERY_N_MESSAGES = 1
 MCP_REMINDER_LINE = (
-    "[cccc] If you respond: use MCP (cccc_message_send / cccc_message_reply); "
-    "terminal output isn't delivered. Verify reply_to/to; avoid routine @all. "
-    "A reply handles the communication obligation, not the whole job; "
-    "resume active work unless priority changed. If unsure, use MCP tool cccc_help."
+    "[cccc] Use cccc_message_reply for replies; use cccc_message_send for new messages. "
+    "Terminal output is not delivered. Verify reply_to/to; avoid routine @all. "
+    "Use cccc_help if unsure."
 )
 
 
@@ -731,14 +770,10 @@ def pty_submit_text(
 
     multiline = ("\n" in raw) or ("\r" in raw)
     
-    # Determine submit mode for this actor.
-    submit = b"\r"
     actor = find_actor(group, aid)
-    mode = str(actor.get("submit") if isinstance(actor, dict) else "") or "enter"
-    if mode == "none":
-        submit = b""
-    elif mode == "newline":
-        submit = b"\n"
+    actor_doc = actor if isinstance(actor, dict) else {}
+    mode = str(actor_doc.get("submit") or "enter").strip().lower() or "enter"
+    submit_sequence = _pty_submit_sequence_for_actor(actor_doc)
 
     payload = raw.encode("utf-8", errors="replace")
     
@@ -766,10 +801,10 @@ def pty_submit_text(
         return False
     logger.debug(f"[pty_submit_text] Sent text payload, scheduling delayed submit")
     
-    # Step 2: send submit (Enter/Newline) after a small delay for CLI timing
-    if submit:
-        if wait_for_submit:
-            time.sleep(PTY_SUBMIT_DELAY_SECONDS)
+    def _write_submit_sequence() -> bool:
+        for index, submit in enumerate(submit_sequence):
+            if index > 0:
+                time.sleep(PTY_REPEAT_SUBMIT_DELAY_SECONDS)
             if not pty_runner.SUPERVISOR.actor_running(gid, aid):
                 logger.warning(f"[pty_submit_text] Actor no longer running for delayed submit: {gid}/{aid}")
                 return False
@@ -777,18 +812,20 @@ def pty_submit_text(
             if not ok_submit:
                 logger.warning(f"[pty_submit_text] Delayed submit failed to write to {gid}/{aid}")
                 return False
+        return True
+
+    # Step 2: send submit (Enter/Newline) after a small delay for CLI timing
+    if submit_sequence:
+        if wait_for_submit:
+            time.sleep(PTY_SUBMIT_DELAY_SECONDS)
+            if not _write_submit_sequence():
+                return False
             logger.debug(f"[pty_submit_text] Delayed submit sent to {gid}/{aid}")
         else:
             def delayed_submit():
                 time.sleep(PTY_SUBMIT_DELAY_SECONDS)  # Empirically reliable delay
-                if pty_runner.SUPERVISOR.actor_running(gid, aid):
-                    ok_submit = bool(pty_runner.SUPERVISOR.write_input(group_id=gid, actor_id=aid, data=submit))
-                    if ok_submit:
-                        logger.debug(f"[pty_submit_text] Delayed submit sent to {gid}/{aid}")
-                    else:
-                        logger.warning(f"[pty_submit_text] Delayed submit failed to write to {gid}/{aid}")
-                else:
-                    logger.warning(f"[pty_submit_text] Actor no longer running for delayed submit: {gid}/{aid}")
+                if _write_submit_sequence():
+                    logger.debug(f"[pty_submit_text] Delayed submit sent to {gid}/{aid}")
 
             submit_thread = threading.Thread(target=delayed_submit, daemon=True)
             submit_thread.start()
@@ -828,7 +865,7 @@ def deliver_message_with_preamble(
     # Deliver system prompt first (lazy preamble) when needed.
     if not is_preamble_sent(group, aid):
         try:
-            prompt = render_system_prompt(group=group, actor=actor)
+            prompt = _render_delivery_preamble(group, actor)
             if prompt and prompt.strip():
                 if pty_submit_text(group, actor_id=aid, text=prompt, file_fallback=True, wait_for_submit=True):
                     mark_preamble_sent(group, aid)
@@ -1179,7 +1216,7 @@ def _start_async_first_delivery(
 
     def worker() -> None:
         try:
-            prompt = render_system_prompt(group=group, actor=actor)
+            prompt = _render_delivery_preamble(group, actor)
             if prompt and prompt.strip():
                 preamble_ok = pty_submit_text(group, actor_id=aid, text=prompt.strip(), wait_for_submit=True)
                 if not preamble_ok:

@@ -4,6 +4,7 @@
 import { useEffect, useRef } from "react";
 import * as api from "../services/api";
 import { publishCapabilityChanged } from "../utils/capabilityEvents";
+import { publishGroupBridgePairingChanged } from "../utils/groupBridgePairingEvents";
 
 const GLOBAL_REFRESH_EVENT_KINDS = new Set([
   "group.created",
@@ -28,7 +29,22 @@ const CAPABILITY_REFRESH_EVENT_KINDS = new Set([
   "capability.changed",
 ]);
 
+const GROUP_BRIDGE_PAIRING_EVENT_KINDS = new Set([
+  "group_bridge.pairing.invite_created",
+  "group_bridge.pairing.request_created",
+  "group_bridge.pairing.request_approved",
+  "group_bridge.pairing.request_rejected",
+  "group_bridge.pairing.trust_access_updated",
+  "group_bridge.pairing.trust_revoked",
+  "group_bridge.pairing.outbound_changed",
+  "group_bridge.pairing.outbound_approved",
+]);
+
 export function shouldRefreshGroupsAfterGlobalEventsOpen(_hasConnectedOnce: boolean): boolean {
+  return true;
+}
+
+export function shouldRefreshGroupBridgePairingAfterGlobalEventsOpen(_hasConnectedOnce: boolean): boolean {
   return true;
 }
 
@@ -58,6 +74,15 @@ export function shouldRefreshCapabilitiesAfterGlobalEvent(ev: unknown, selectedG
   if (!ev || typeof ev !== "object") return false;
   const kind = String((ev as { kind?: unknown }).kind || "").trim();
   if (!CAPABILITY_REFRESH_EVENT_KINDS.has(kind)) return false;
+  const selected = String(selectedGroupId || "").trim();
+  if (!selected) return false;
+  return getGlobalEventGroupId(ev) === selected;
+}
+
+export function shouldRefreshGroupBridgePairingAfterGlobalEvent(ev: unknown, selectedGroupId: string): boolean {
+  if (!ev || typeof ev !== "object") return false;
+  const kind = String((ev as { kind?: unknown }).kind || "").trim();
+  if (!GROUP_BRIDGE_PAIRING_EVENT_KINDS.has(kind)) return false;
   const selected = String(selectedGroupId || "").trim();
   if (!selected) return false;
   return getGlobalEventGroupId(ev) === selected;
@@ -140,6 +165,12 @@ export function useGlobalEvents({ refreshGroups, refreshActors, selectedGroupId,
       publishCapabilityChanged(gid);
     }
 
+    function refreshSelectedGroupBridgePairing() {
+      const gid = String(selectedGroupIdRef.current || "").trim();
+      if (!gid) return;
+      publishGroupBridgePairingChanged(gid);
+    }
+
     function scheduleFallbackPoll() {
       if (fallbackTimer) return;
       fallbackTimer = window.setTimeout(() => {
@@ -178,12 +209,16 @@ export function useGlobalEvents({ refreshGroups, refreshActors, selectedGroupId,
           if (shouldRefreshCapabilitiesAfterGlobalEvent(ev, selectedGroupIdRef.current || "")) {
             refreshSelectedCapabilities();
           }
+          if (shouldRefreshGroupBridgePairingAfterGlobalEvent(ev, selectedGroupIdRef.current || "")) {
+            refreshSelectedGroupBridgePairing();
+          }
         } catch {
           /* ignore parse errors */
         }
       });
       es.onopen = () => {
         const shouldRefresh = shouldRefreshGroupsAfterGlobalEventsOpen(hasConnectedOnceRef.current);
+        const shouldRefreshGroupBridgePairing = shouldRefreshGroupBridgePairingAfterGlobalEventsOpen(hasConnectedOnceRef.current);
         errorCount = 0; // Reset on successful connection
         fallbackDelayMs = 10000;
         clearFallbackTimer();
@@ -193,6 +228,9 @@ export function useGlobalEvents({ refreshGroups, refreshActors, selectedGroupId,
         if (shouldRefresh) {
           invalidateAndRefreshGroups();
           refreshSelectedActors();
+        }
+        if (shouldRefreshGroupBridgePairing) {
+          refreshSelectedGroupBridgePairing();
         }
       };
       es.onerror = () => {

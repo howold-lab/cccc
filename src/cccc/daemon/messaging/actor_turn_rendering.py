@@ -35,6 +35,19 @@ def _presentation_slot_label(slot_id: str, label: str) -> str:
     return slot_id or "Presentation"
 
 
+def render_group_bridge_route_ref(ref: dict[str, Any]) -> list[str]:
+    remote_group_id = compact_delivery_text(ref.get("remote_group_id"), limit=48)
+    if not remote_group_id:
+        return []
+    access_level = compact_delivery_text(ref.get("access_level"), limit=24)
+    remote_group_title = compact_delivery_text(ref.get("remote_group_title"), limit=72)
+    token = compact_delivery_text(ref.get("token"), limit=72)
+    label = remote_group_title or token or remote_group_id
+    if access_level:
+        return [f"- Group Bridge route {label} ({remote_group_id} remote/{access_level})"]
+    return [f"- Group Bridge route {label} (remote_group_id={remote_group_id})"]
+
+
 def render_delivery_refs(refs: list[dict[str, Any]]) -> list[str]:
     if not refs:
         return []
@@ -118,6 +131,15 @@ def render_delivery_refs(refs: list[dict[str, Any]]) -> list[str]:
                 break
             continue
 
+        if kind == "group_bridge_route":
+            route_lines = render_group_bridge_route_ref(ref)
+            if route_lines:
+                lines.extend(route_lines)
+                rendered += 1
+                if rendered >= 4:
+                    break
+                continue
+
         summary = compact_delivery_text(
             ref.get("title") or ref.get("path") or ref.get("url") or kind,
             limit=96,
@@ -146,6 +168,7 @@ def build_actor_delivery_text(
     attachments: list[dict[str, Any]],
     src_group_id: str = "",
     src_event_id: str = "",
+    remote_reply_to: list[str] | None = None,
 ) -> str:
     delivery_text = text
     prefix_lines: list[str] = []
@@ -155,6 +178,10 @@ def build_actor_delivery_text(
         prefix_lines.append(f"[cccc] REPLY REQUIRED (event_id={event_id}): reply via cccc_message_reply.")
     if src_group_id and src_event_id:
         prefix_lines.append(f"[cccc] RELAYED FROM (group_id={src_group_id}, event_id={src_event_id}):")
+    reply_targets = [str(item or "").strip() for item in (remote_reply_to or []) if str(item or "").strip()]
+    if reply_targets:
+        target_text = ", ".join(reply_targets)
+        prefix_lines.append(f"[cccc] REMOTE REPLY DEFAULT: omit to in cccc_message_reply to reply to remote {target_text}.")
     if prefix_lines:
         delivery_text = "\n".join(prefix_lines) + "\n" + delivery_text
     ref_lines = render_delivery_refs(refs)
@@ -231,6 +258,13 @@ def render_actor_event_for_delivery(event: Dict[str, Any], *, actor_id: str = ""
             else [],
             src_group_id=str(data.get("src_group_id") or ""),
             src_event_id=str(data.get("src_event_id") or ""),
+            remote_reply_to=[
+                str(item or "").strip()
+                for item in (data.get("remote_reply_to") or [])
+                if str(item or "").strip()
+            ]
+            if isinstance(data.get("remote_reply_to"), list)
+            else [],
         )
         return build_actor_headless_delivery_text(
             by=by,

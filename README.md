@@ -9,10 +9,10 @@
 
 ### Coordinate your coding agents like a group chat
 
-**Read receipts, delivery tracking, and remote ops from your phone —
-for Claude Code, Codex, Gemini, and 9 more runtimes in one durable group.**
+**Read receipts, delivery tracking, remote group bridges, and mobile ops —
+for Claude Code, Codex, ChatGPT Web, and 13 more runtimes in one durable group.**
 
-Run multiple coding agents as a **persistent, coordinated team** — not a pile of disconnected terminal sessions.
+Run multiple coding agents as a **persistent, coordinated team** across runtimes, machines, and trusted working groups — not a pile of disconnected terminal sessions.
 
 One `pip install`. Zero infrastructure, production-grade power.
 
@@ -45,7 +45,8 @@ CCCC runs your agents as one durable, coordinated system:
 - **Durable coordination** — working state lives in an append-only ledger, not in terminal scrollback.
 - **Visible delivery semantics** — messages have routing, read, ack, and reply-required tracking instead of best-effort prompting.
 - **One control plane** — Web UI, CLI, MCP, and IM bridges all operate on the same daemon-owned state.
-- **Multi-runtime by default** — Claude Code, Codex CLI, ChatGPT Web, Gemini CLI, and the rest of the first-class runtimes can collaborate in one group.
+- **Multi-runtime by default** — Claude Code, Codex CLI, ChatGPT Web, Grok Build, and the rest of the first-class runtimes can collaborate in one group.
+- **Group Bridge for remote teams** — trusted CCCC groups can exchange explicit messages and, when granted, inspect or work with each other's local resources.
 - **Local-first operations** — one `pip install`, runtime state in `CCCC_HOME`, and remote supervision only when you choose to expose it.
 
 ## What CCCC Does
@@ -57,7 +58,8 @@ CCCC is a single `pip install` with zero external dependencies — no database, 
 | **Single source of truth** | Append-only ledger (`ledger.jsonl`) records every message and event — replayable, auditable, never lost |
 | **Reliable messaging** | Read cursors, attention ACK, and reply-required obligations — you know exactly who saw what |
 | **Unified control plane** | Web UI, CLI, MCP tools, and IM bridges all talk to one daemon — no state fragmentation |
-| **Multi-runtime orchestration** | Claude Code, Codex CLI, Grok Build, OpenCode, ChatGPT Web, Gemini CLI, and 6 more first-class runtimes, plus `custom` for everything else |
+| **Multi-runtime orchestration** | Claude Code, Codex CLI, GitHub Copilot CLI, Cursor CLI, Devin CLI, Kiro CLI, Kilo Code CLI, Antigravity CLI, Grok Build, OpenCode, ChatGPT Web, and 5 more first-class runtimes, plus `custom` for everything else |
+| **Group Bridge** | Connect trusted remote groups across machines or teams, starting with explicit messages and optionally granting read/full local access |
 | **Role-based coordination** | Foreman + peer model with permission boundaries and recipient routing (`@all`, `@peers`, `@foreman`) |
 | **Local-first runtime state** | Runtime data stays in `CCCC_HOME`, not your repo, while Web Access and IM bridges cover remote operations |
 
@@ -135,8 +137,8 @@ graph TB
         A1["Claude Code"]
         A2["Codex CLI"]
         A3["ChatGPT Web<br/>GPT-5.x via MCP"]
-        A4["Gemini CLI"]
-        A5["+ 6 more + custom"]
+        A4["Grok Build"]
+        A5["+ 12 more + custom"]
     end
 
     subgraph Daemon["CCCC Daemon · single writer"]
@@ -165,6 +167,12 @@ graph TB
         WX["Weixin"]
     end
 
+    subgraph Remote["Remote CCCC Groups"]
+        direction LR
+        RG1["Trusted group"]
+        RG2["Another machine/team"]
+    end
+
     A1 <-->|MCP tools<br/>PTY/headless| Daemon
     A2 <-->|MCP tools<br/>PTY/headless| Daemon
     A3 <-->|Browser delivery<br/>Remote MCP| Daemon
@@ -172,6 +180,8 @@ graph TB
     A5 <-->|MCP tools| Daemon
     Daemon <--> Ports
     Web <--> IM
+    Daemon <-->|Group Bridge<br/>messages · read · full| RG1
+    Daemon <-->|Group Bridge<br/>messages · read · full| RG2
 
 ```
 
@@ -180,32 +190,42 @@ graph TB
 - **Daemon is the single writer** — all state changes go through one process, eliminating race conditions
 - **Ledger is append-only** — events are never mutated, making history reliable and debuggable
 - **Ports are thin** — Web, CLI, MCP, and IM bridges are stateless frontends; the daemon owns all truth
+- **Remote groups are explicit trust edges** — Group Bridge starts with message-only coordination, and read/full access must be granted per remote group
 - **Runtime home is `CCCC_HOME`** (default `~/.cccc/`) — runtime state stays out of your repo
 
 ## Supported Runtimes
 
-CCCC orchestrates agents across 12 first-class runtimes, with `custom` available for everything else. Each actor in a group can use a different runtime.
+CCCC orchestrates agents across 16 first-class runtimes, with `custom` available for everything else. Each actor in a group can use a different runtime.
 
-| Runtime | Integration | Command / Surface |
-|---------|-------------|-------------------|
+| Runtime | Integration | Entrypoint / Surface |
+|---------|-------------|----------------------|
 | Claude Code | Auto MCP setup | `claude` |
 | Codex CLI | Auto MCP setup | `codex` |
+| GitHub Copilot CLI | Auto MCP setup | `copilot` |
+| Cursor CLI | Prompt-assisted MCP setup | `cursor-agent` |
+| Devin CLI | Auto MCP setup | `devin` |
+| Kiro CLI | Auto MCP setup | `kiro-cli` |
+| Kilo Code CLI | Prompt-assisted MCP setup | `kilo` |
+| Antigravity CLI | Prompt-assisted MCP setup | `agy` |
 | ChatGPT Web | Remote MCP + Browser Delivery | `chatgpt.com` conversation |
-| Gemini CLI | Auto MCP setup | `gemini` |
 | Grok Build | Auto MCP setup | `grok` |
 | Hermes Agent | Auto MCP setup | `hermes` |
 | Droid | Auto MCP setup | `droid` |
 | Amp | Auto MCP setup | `amp` |
 | Auggie | Auto MCP setup | `auggie` |
 | Kimi CLI | Auto MCP setup | `kimi` |
-| Neovate | Auto MCP setup | `neovate` |
 | OpenCode | Auto MCP setup via runtime config | `opencode` |
 | Custom | Manual | Any command |
 
+These are stable runtime entrypoints or surfaces. CCCC applies runtime-specific launch defaults automatically; actor/profile commands can be reviewed and customized in settings.
+
 ```bash
-cccc setup --runtime claude    # auto-configures MCP for this runtime
-cccc runtime list --all        # show all available runtimes
-cccc doctor                    # verify environment and runtime availability
+cccc setup --runtime claude       # auto-configures MCP for this runtime
+cccc setup --runtime cursor       # shows the prompt-assisted MCP setup contract
+cccc setup --runtime kilo         # shows the prompt-assisted MCP setup contract
+cccc setup --runtime antigravity  # shows the prompt-assisted MCP setup contract
+cccc runtime list --all           # show all available runtimes
+cccc doctor                       # verify environment and runtime availability
 ```
 
 Actors can run as **PTY** (embedded terminal) or **headless** (structured I/O without a terminal). Claude Code and Codex CLI support both modes; headless gives the daemon tighter delivery and streaming control.
@@ -215,6 +235,20 @@ Actors can run as **PTY** (embedded terminal) or **headless** (structured I/O wi
 ChatGPT Web can join a CCCC group as a real actor, not just an external chat window: CCCC delivers group messages into one bound ChatGPT conversation via browser delivery, and GPT-5.x calls back through an actor-bound remote MCP connector — receiving routed messages, replying visibly, editing repository files, and running scoped shell/git commands much like a native local coding agent. This also turns spare ChatGPT Web capacity into additional local-development agent capacity.
 
 Setup requires exposing CCCC through a public HTTPS URL for the MCP connector (Cloudflare Tunnel, ngrok, Tailscale Funnel, or a reverse proxy). Note that GPT-5.x Pro sessions currently cannot be used this way — they do not expose third-party MCP connectors. Full setup and troubleshooting: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime).
+
+## Group Bridge: connect remote groups
+
+Group Bridge extends CCCC from one local working group into a network of trusted groups. A group on your Windows workstation can coordinate with a group in WSL, a Mac, a server, or a teammate's CCCC instance without merging their runtime state or losing the local-first model.
+
+Access is intentionally layered:
+
+| Level | What it enables |
+|-------|-----------------|
+| **Messages** | Send explicit cross-group messages to the remote foreman, including attachments when needed |
+| **Read** | Let a trusted remote group inspect local context, repository, and git state through remote MCP tools |
+| **Full** | Let a highly trusted remote group edit files and run commands through the same local-access surface used by native actors |
+
+This makes CCCC useful for multi-machine work, lead/worker coordination across several environments, or trusted team collaboration where one group needs to ask another group for status, evidence, or implementation help. It is not a public guest-access feature: grant read/full access only to remote groups you trust with the target workspace.
 
 ## Messaging & Coordination
 
@@ -226,6 +260,7 @@ CCCC implements IM-grade messaging semantics, not just "paste text into a termin
 - **Attention ACK** — priority messages require explicit acknowledgment
 - **Reply-required obligations** — tracked until the recipient responds
 - **Auto-wake** — disabled agents are automatically started when they receive a message
+- **Remote group recipients** — Group Bridge targets appear as explicit remote recipients instead of hidden broadcasts
 
 Use ordinary `send` for chat, questions, and quick requests. Use `tracked-send` when delegated work needs a durable owner, outcome, evidence, handoff, or acceptance trail. `@all` remains available for announcements or urgent shared coordination, but it should not be the default way to start concrete work.
 
@@ -261,6 +296,7 @@ The built-in Web UI at `http://127.0.0.1:8848` provides:
 - **Context panel** — shared vision, sketch, milestones, and tasks
 - **Group Space** — NotebookLM integration for shared knowledge management
 - **ChatGPT Web Model setup** — connect one ChatGPT Web conversation as a CCCC actor
+- **Group Bridge setup** — pair trusted remote groups and choose message/read/full access per connection
 - **IM bridge configuration** — connect to Telegram/Slack/Discord/Feishu/DingTalk/WeCom/Weixin
 - **Settings** — messaging policies, delivery tuning, terminal transcript controls
 - **Text scale** — 90% / 100% / 125% font size with per-browser persistence
@@ -354,6 +390,7 @@ Agents interact with CCCC through a compact action-oriented MCP surface. Core to
 | **Messaging & files** | `cccc_inbox_list`, `cccc_inbox_mark_read`, `cccc_message_send`, `cccc_message_reply`, `cccc_file` |
 | **Group & actor control** | `cccc_group`, `cccc_actor` |
 | **Coordination & state** | `cccc_context_get`, `cccc_coordination`, `cccc_task`, `cccc_agent_state`, `cccc_context_sync` |
+| **Remote group access** | `cccc_remote_access`, `cccc_remote_context`, `cccc_remote_repo`, `cccc_remote_git`, `cccc_remote_apply_patch`, `cccc_remote_exec_command` |
 | **Automation & memory** | `cccc_automation`, `cccc_memory`, `cccc_memory_admin` |
 | **Capability-managed extras** | `cccc_capability_*`, `cccc_space`, `cccc_terminal`, `cccc_debug`, `cccc_im_bind` |
 
@@ -366,7 +403,8 @@ Agents with MCP access can self-organize: read inbox state, reply visibly, coord
 | Multiple coding agents collaborating on one codebase | ✅ Core use case |
 | Human + agent coordination with full audit trail | ✅ Core use case |
 | Long-running groups managed remotely via phone/IM | ✅ Strong fit |
-| Multi-runtime teams (e.g., Claude + Codex + Gemini) | ✅ Strong fit |
+| Multi-runtime teams (e.g., Claude + Codex + Kimi) | ✅ Strong fit |
+| Trusted groups collaborating across machines or teams | ✅ Strong fit |
 | Single-agent local coding helper | ⚠️ Works, but CCCC's value shines with multiple participants |
 | Pure DAG workflow orchestration | ❌ Use a dedicated orchestrator; CCCC can complement it |
 
@@ -376,7 +414,7 @@ CCCC is a **collaboration kernel** — it owns the coordination layer and stays 
 
 | If you already use | It is great at | What CCCC adds |
 |---|---|---|
-| **Native agent teams** (e.g. Claude Code subagents/teams) | The smoothest single-vendor teamwork inside one session | Cross-vendor groups (Claude + Codex + Gemini + Kimi…), state that survives restarts, phone/IM operations, and a full audit ledger |
+| **Native agent teams** (e.g. Claude Code subagents/teams) | The smoothest single-vendor teamwork inside one session | Cross-vendor groups (Claude + Codex + Grok + Kimi…), state that survives restarts, phone/IM operations, and a full audit ledger |
 | **Parallel task runners** (worktree/task-board tools) | Isolated, parallel task execution | A coordination layer: agents that talk, hand off, ack, and get nudged — plus 24/7 daemon-owned operations |
 | **IM assistant gateways** | A personal assistant living in your chat app | Delivery-grade work semantics: tracked tasks, read/ack receipts, multi-agent groups, and a durable audit trail |
 
@@ -388,6 +426,7 @@ CCCC does not replace your agents — it is the layer that makes them a team. Lo
 - **Daemon IPC has no authentication.** It binds to localhost by default.
 - **IM bot tokens** are read from environment variables, never stored in config files.
 - **Runtime state** lives in `CCCC_HOME` (`~/.cccc/`), not in your repository.
+- **Group Bridge is trust-based.** Message-only bridges are the safest default; read/full access should be granted only to remote groups that may inspect or operate on the target workspace.
 - **Capability allowlist** governs which optional MCP surfaces agents can enable. Policy is composed from a packaged default and an optional user overlay in `CCCC_HOME/config/`.
 
 For detailed security guidance, see [SECURITY.md](SECURITY.md).
@@ -461,7 +500,7 @@ cd docker
 docker compose up -d  # then create an Admin Access Token in Settings > Web Access before exposing beyond localhost
 ```
 
-The Docker image bundles Claude Code, Codex CLI, Gemini CLI, and Factory CLI. See [`docker/`](docker/) for full configuration.
+The Docker image bundles Claude Code, Codex CLI, and Factory CLI. See [`docker/`](docker/) for full configuration.
 
 ### Upgrading from 0.3.x
 

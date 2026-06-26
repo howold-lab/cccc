@@ -9,10 +9,10 @@
 
 ### コーディングエージェントをグループチャットのように指揮する
 
-**既読・送達トラッキング・スマホからのリモート運用 —
-Claude Code、Codex、Gemini など 12 のランタイムをひとつの永続グループで。**
+**既読・送達トラッキング・リモートグループブリッジ・スマホ運用 —
+Claude Code、Codex、ChatGPT Web など 16 のランタイムをひとつの永続グループで。**
 
-複数のコーディングエージェントを**永続的で協調されたチーム**として運用 — バラバラのターミナルセッションではなく。
+複数のコーディングエージェントを、ランタイム・マシン・信頼済み working group をまたぐ**永続的で協調されたチーム**として運用 — バラバラのターミナルセッションではなく。
 
 `pip install` ひとつ。ゼロインフラ、プロダクション級のパワー。
 
@@ -45,7 +45,8 @@ CCCC はエージェント群を、永続的で協調された 1 つのシステ
 - **永続協調** — 作業状態はターミナルスクロールではなく、append-only ledger に残ります。
 - **到達の可視化** — メッセージはルーティング、既読、ACK、reply-required 追跡を持ち、「送ったはず」で終わりません。
 - **1 つのコントロールプレーン** — Web UI、CLI、MCP、IM ブリッジがすべて同じ daemon 状態を共有します。
-- **マルチランタイム前提** — Claude Code、Codex CLI、ChatGPT Web、Gemini CLI などの主要ランタイムを 1 つのグループで混在運用できます。
+- **マルチランタイム前提** — Claude Code、Codex CLI、ChatGPT Web、Grok Build などの主要ランタイムを 1 つのグループで混在運用できます。
+- **Group Bridge によるリモート連携** — 信頼済み CCCC group 同士が明示的なメッセージを交換し、許可された場合は相手のローカルリソースを調査・操作できます。
 - **ローカルファースト運用** — `pip install` ひとつで始められ、ランタイム状態は `CCCC_HOME` に置いたまま、必要時だけリモート監視へ広げられます。
 
 ## CCCC の役割
@@ -57,7 +58,8 @@ CCCC は `pip install` 一つで導入完了、外部依存ゼロ — データ�
 | **唯一の事実源** | append-only ledger（`ledger.jsonl`）が全メッセージ・イベントを記録 — 再生可能、監査可能、喪失なし |
 | **信頼性のあるメッセージング** | 既読カーソル、attention ACK、reply-required 義務追跡 — 誰が何を確認したか明確 |
 | **統一コントロールプレーン** | Web UI、CLI、MCP ツール、IM ブリッジがすべて 1 つの daemon に接続 — 状態の分断なし |
-| **マルチランタイム編成** | Claude Code、Codex CLI、Grok Build、OpenCode、ChatGPT Web、Gemini CLI など 12 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
+| **マルチランタイム編成** | Claude Code、Codex CLI、GitHub Copilot CLI、Cursor CLI、Devin CLI、Kiro CLI、Kilo Code CLI、Antigravity CLI、Grok Build、OpenCode、ChatGPT Web など 16 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
+| **Group Bridge** | マシンやチームをまたぐ信頼済みリモートグループを接続し、明示的メッセージから始めて read/full のローカルアクセスを必要時だけ付与 |
 | **ロールベース協調** | Foreman + Peer ロールモデル、権限境界と宛先ルーティング（`@all`、`@peers`、`@foreman`） |
 | **ローカルファーストなランタイム状態** | ランタイムデータはリポジトリではなく `CCCC_HOME` に保持しつつ、Web Access と IM ブリッジで遠隔運用も可能 |
 
@@ -134,8 +136,8 @@ graph TB
         A1["Claude Code"]
         A2["Codex CLI"]
         A3["ChatGPT Web<br/>GPT-5.x via MCP"]
-        A4["Gemini CLI"]
-        A5["+ 6 種 + custom"]
+        A4["Grok Build"]
+        A5["+ 12 種 + custom"]
     end
 
     subgraph Daemon["CCCC Daemon · 単一ライター"]
@@ -164,6 +166,12 @@ graph TB
         WX["Weixin"]
     end
 
+    subgraph Remote["リモート CCCC Groups"]
+        direction LR
+        RG1["信頼済みグループ"]
+        RG2["別マシン/チーム"]
+    end
+
     A1 <-->|MCP ツール<br/>PTY/headless| Daemon
     A2 <-->|MCP ツール<br/>PTY/headless| Daemon
     A3 <-->|ブラウザ配信<br/>Remote MCP| Daemon
@@ -171,6 +179,8 @@ graph TB
     A5 <-->|MCP ツール| Daemon
     Daemon <--> Ports
     Web <--> IM
+    Daemon <-->|Group Bridge<br/>messages · read · full| RG1
+    Daemon <-->|Group Bridge<br/>messages · read · full| RG2
 
 ```
 
@@ -179,32 +189,42 @@ graph TB
 - **Daemon は単一ライター** — すべての状態変更が 1 つのプロセスを経由し、競合状態を排除
 - **Ledger は append-only** — イベントは不変、履歴は信頼性が高くデバッグ可能
 - **ポートは薄い** — Web、CLI、MCP、IM ブリッジはステートレスなフロントエンド；daemon が全真実を保持
+- **リモートグループは明示的な信頼関係** — Group Bridge は message-only の協調から始まり、read/full アクセスはリモートグループごとに明示的に付与
 - **ランタイムホーム `CCCC_HOME`**（デフォルト `~/.cccc/`）— ランタイム状態はリポジトリの外に保持
 
 ## サポートランタイム
 
-CCCC は 12 種の主要ランタイムでエージェントを編成し、残りは `custom` で扱えます。同一グループ内で各 actor が異なるランタイムを使用可能です。
+CCCC は 16 種の主要ランタイムでエージェントを編成し、残りは `custom` で扱えます。同一グループ内で各 actor が異なるランタイムを使用可能です。
 
-| ランタイム | 連携方式 | コマンド / サーフェス |
-|-----------|----------|------------------------|
+| ランタイム | 連携方式 | 入口 / サーフェス |
+|-----------|----------|-------------------|
 | Claude Code | MCP 自動設定 | `claude` |
 | Codex CLI | MCP 自動設定 | `codex` |
+| GitHub Copilot CLI | MCP 自動設定 | `copilot` |
+| Cursor CLI | プロンプト支援 MCP 設定 | `cursor-agent` |
+| Devin CLI | MCP 自動設定 | `devin` |
+| Kiro CLI | MCP 自動設定 | `kiro-cli` |
+| Kilo Code CLI | プロンプト支援 MCP 設定 | `kilo` |
+| Antigravity CLI | プロンプト支援 MCP 設定 | `agy` |
 | ChatGPT Web | Remote MCP + ブラウザ配信 | `chatgpt.com` conversation |
-| Gemini CLI | MCP 自動設定 | `gemini` |
 | Grok Build | MCP 自動設定 | `grok` |
 | Hermes Agent | MCP 自動設定 | `hermes` |
 | Droid | MCP 自動設定 | `droid` |
 | Amp | MCP 自動設定 | `amp` |
 | Auggie | MCP 自動設定 | `auggie` |
 | Kimi CLI | MCP 自動設定 | `kimi` |
-| Neovate | MCP 自動設定 | `neovate` |
 | OpenCode | ランタイム設定経由の MCP 自動設定 | `opencode` |
 | Custom | 手動設定 | 任意のコマンド |
 
+ここでは安定したランタイムの入口または利用サーフェスのみを示します。CCCC はランタイムごとの起動デフォルトを自動適用し、actor/profile のコマンドは設定で確認・変更できます。
+
 ```bash
-cccc setup --runtime claude    # ランタイムの MCP を自動設定
-cccc runtime list --all        # 利用可能なランタイムを表示
-cccc doctor                    # 環境とランタイムの可用性を検証
+cccc setup --runtime claude       # ランタイムの MCP を自動設定
+cccc setup --runtime cursor       # プロンプト支援 MCP 設定コントラクトを表示
+cccc setup --runtime kilo         # プロンプト支援 MCP 設定コントラクトを表示
+cccc setup --runtime antigravity  # プロンプト支援 MCP 設定コントラクトを表示
+cccc runtime list --all           # 利用可能なランタイムを表示
+cccc doctor                       # 環境とランタイムの可用性を検証
 ```
 
 Actor は **PTY**（埋め込みターミナル）または **headless**（ターミナルなしの構造化 I/O）モードで実行できます。Claude Code と Codex CLI は両モードに対応。headless モードでは daemon が配信とストリーミングをより精密に制御します。
@@ -214,6 +234,20 @@ Actor は **PTY**（埋め込みターミナル）または **headless**（タ�
 ChatGPT Web は外部チャットウィンドウではなく、実際の CCCC actor としてグループに参加できます。CCCC はブラウザ配信で紐付けた ChatGPT 会話へグループメッセージを届け、GPT-5.x は actor に紐付いた Remote MCP connector 経由で CCCC に接続します — ルーティングされたメッセージの受信、可視返信、リポジトリの確認/編集、scope 内の shell/git 実行まで、ネイティブなローカルコーディングエージェントに近い体験です。ChatGPT Web の余剰利用枠を、追加のローカル開発 agent 容量として活用することもできます。
 
 セットアップには MCP connector 用の public HTTPS URL（Cloudflare Tunnel、ngrok、Tailscale Funnel、またはリバースプロキシ）が必要です。なお GPT-5.x Pro セッションは第三者 MCP connector を公開しないため、現在この用途には使えません。詳細な設定とトラブルシュート: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+
+## Group Bridge: リモートグループを接続
+
+Group Bridge は、CCCC を 1 つのローカル working group から、信頼済みグループのネットワークへ拡張します。Windows ワークステーション上の group を、WSL、Mac、サーバー、またはチームメイトの CCCC インスタンスと連携させても、ランタイム状態を混ぜる必要はなく、ローカルファーストなモデルも保てます。
+
+アクセスは段階的に付与します：
+
+| レベル | できること |
+|--------|------------|
+| **Messages** | 必要に応じて添付も含め、リモート foreman へ明示的な cross-group メッセージを送信 |
+| **Read** | 信頼済みリモート group が remote MCP ツールでローカル context、リポジトリ、git 状態を調査 |
+| **Full** | 高度に信頼したリモート group が、ネイティブ actor と同じローカルアクセス面でファイル編集やコマンド実行 |
+
+これにより、複数マシンでの開発、複数環境をまたぐ lead/worker 協調、信頼済みチーム間でのステータス・証拠・実装支援の依頼が扱いやすくなります。これは公開ゲストアクセス機能ではありません。read/full は、対象ワークスペースを見せたり操作させたりしてよい相手にだけ付与してください。
 
 ## メッセージングと協調
 
@@ -225,6 +259,7 @@ CCCC は IM グレードのメッセージングセマンティクスを実装 �
 - **Attention ACK** — 優先メッセージは明示的な確認が必要
 - **Reply-required 義務** — 受信者が返信するまで追跡
 - **自動ウェイク** — メッセージ受信時、無効化された agent を自動起動
+- **リモートグループ宛先** — Group Bridge の対象は、隠れたブロードキャストではなく明示的な remote recipient として扱われます
 
 通常の `send` はチャット、質問、軽い依頼に使います。明確な担当者、完了条件、証拠、引き継ぎ、受け入れ履歴が必要な委任作業には `tracked-send` を使ってください。`@all` は告知や緊急の共有制約には使えますが、具体タスクのデフォルト分配先にはしません。
 
@@ -260,6 +295,7 @@ CCCC は IM グレードのメッセージングセマンティクスを実装 �
 - **Context パネル** — 共有ビジョン、スケッチ、マイルストーン、タスク
 - **Group Space** — NotebookLM 統合による共有ナレッジ管理
 - **ChatGPT Web Model 設定** — 1 つの ChatGPT Web 会話を CCCC actor として接続
+- **Group Bridge 設定** — 信頼済みリモートグループをペアリングし、接続ごとに messages/read/full アクセスを選択
 - **IM ブリッジ設定** — Telegram/Slack/Discord/Feishu/DingTalk/WeCom/Weixin に接続
 - **設定** — メッセージングポリシー、配信チューニング、ターミナルトランスクリプト制御
 - **テキストスケール** — 90% / 100% / 125% フォントサイズ、ブラウザごとに永続化
@@ -353,6 +389,7 @@ cccc im start|stop|status
 | **メッセージングとファイル** | `cccc_inbox_list`、`cccc_inbox_mark_read`、`cccc_message_send`、`cccc_message_reply`、`cccc_file` |
 | **グループと actor 制御** | `cccc_group`、`cccc_actor` |
 | **協調と状態** | `cccc_context_get`、`cccc_coordination`、`cccc_task`、`cccc_agent_state`、`cccc_context_sync` |
+| **リモートグループアクセス** | `cccc_remote_access`、`cccc_remote_context`、`cccc_remote_repo`、`cccc_remote_git`、`cccc_remote_apply_patch`、`cccc_remote_exec_command` |
 | **オートメーションと記憶** | `cccc_automation`、`cccc_memory`、`cccc_memory_admin` |
 | **必要時のみの拡張** | `cccc_capability_*`、`cccc_space`、`cccc_terminal`、`cccc_debug`、`cccc_im_bind` |
 
@@ -365,7 +402,8 @@ MCP アクセスを持つエージェントは、権限境界の中で自己組�
 | 複数のコーディングエージェントが 1 つのコードベースで協調 | ✅ コアユースケース |
 | 人間 + エージェントの協調、完全な監査証跡付き | ✅ コアユースケース |
 | 長時間稼働グループをスマートフォン/IM でリモート管理 | ✅ 強い適合 |
-| マルチランタイムチーム（例：Claude + Codex + Gemini） | ✅ 強い適合 |
+| マルチランタイムチーム（例：Claude + Codex + Kimi） | ✅ 強い適合 |
+| 信頼済みグループがマシンやチームをまたいで協調 | ✅ 強い適合 |
 | 単一エージェントのローカルコーディングヘルパー | ⚠️ 動作するが、CCCC の価値は複数参加者で発揮 |
 | 純粋な DAG ワークフローオーケストレーション | ❌ 専用オーケストレーターを使用；CCCC は補完的に利用可能 |
 
@@ -375,7 +413,7 @@ CCCC は**協調カーネル** — 協調レイヤーを担い、外部の CI/CD
 
 | すでに使っているもの | その強み | CCCC が加えるもの |
 |---|---|---|
-| **ネイティブのエージェントチーム**（例：Claude Code subagents/teams） | 単一ベンダー・単一セッション内で最もスムーズな連携 | ベンダー横断のグループ（Claude + Codex + Gemini + Kimi…）、再起動後も残る状態、スマホ/IM からの運用、完全な監査 ledger |
+| **ネイティブのエージェントチーム**（例：Claude Code subagents/teams） | 単一ベンダー・単一セッション内で最もスムーズな連携 | ベンダー横断のグループ（Claude + Codex + Grok + Kimi…）、再起動後も残る状態、スマホ/IM からの運用、完全な監査 ledger |
 | **並列タスクランナー**（worktree/タスクボード系ツール） | 隔離された並列タスク実行 | 協調レイヤー：エージェント同士が対話・引き継ぎ・ACK・催促される — さらに 24/7 の daemon 運用 |
 | **IM アシスタントゲートウェイ** | チャットアプリに住む個人アシスタント | 実作業向けの配信セマンティクス：tracked task、既読/ACK、マルチエージェントグループ、永続監査証跡 |
 
@@ -387,6 +425,7 @@ CCCC はエージェントを置き換えるものではなく、それらをチ
 - **Daemon IPC は認証なし。** デフォルトで localhost にのみバインド。
 - **IM ボットトークン** は環境変数から読み取り、設定ファイルには保存しない。
 - **ランタイム状態** は `CCCC_HOME`（`~/.cccc/`）に保持、リポジトリ内には置かない。
+- **Group Bridge は信頼ベースの接続です。** message-only が最も安全なデフォルトであり、read/full は対象ワークスペースの調査や操作を任せられるリモート group にだけ付与してください。
 - **Capability allowlist** がエージェントの有効化できるオプション MCP サーフェスを管理。ポリシーはパッケージ内のデフォルトと `CCCC_HOME/config/` のユーザーオーバーレイで構成。
 
 詳細なセキュリティガイダンスは [SECURITY.md](SECURITY.md) を参照。
@@ -460,7 +499,7 @@ cd docker
 docker compose up -d  # その後 Settings > Web Access で Admin Access Token を作成してから公開
 ```
 
-Docker イメージには Claude Code、Codex CLI、Gemini CLI、Factory CLI がバンドル済み。完全な設定は [`docker/`](docker/) を参照。
+Docker イメージには Claude Code、Codex CLI、Factory CLI がバンドル済み。完全な設定は [`docker/`](docker/) を参照。
 
 ### 0.3.x からのアップグレード
 

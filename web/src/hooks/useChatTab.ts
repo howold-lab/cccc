@@ -1,7 +1,7 @@
 // useChatTab - Encapsulates ChatTab business logic and state.
 // Reduces prop drilling by providing state from stores and computed values directly.
 
-import { useMemo, useCallback, useRef, useState } from "react";
+import { useMemo, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   useGroupStore,
@@ -16,6 +16,7 @@ import { getChatSession } from "../stores/useUIStore";
 import { useChatOutboxStore, selectOutboxEntries, type OutboxEntry } from "../stores/chatOutboxStore";
 import type {
   Actor,
+  GroupMeta,
   LedgerEvent,
   ChatMessageData,
   MessageRef,
@@ -37,6 +38,22 @@ import { copyTextToClipboard } from "../utils/copy";
 import { hasRenderableChatMessageContent } from "../utils/ledgerEventHandlers";
 import { useSlashCommands } from "./useSlashCommands";
 import { useSlashSkillDispatch } from "./useSlashSkillDispatch";
+import type { ComposerAgentMentionToken, ComposerGroupMentionToken } from "./composerGroupMentions";
+import {
+  buildComposerGroupBridgeRouteRefs,
+  pruneComposerAgentMentionTokens,
+  pruneComposerGroupMentionTokens,
+} from "./composerGroupMentions";
+import { buildComposerSendPlanTargets } from "./composerSendPlan";
+import {
+  buildComposerMentionSuggestions,
+  buildGroupBridgeRouteGroups,
+  mergeComposerRouteGroups,
+  type ComposerMentionKind,
+} from "../pages/chat/chatMentionSuggestions";
+import type { GroupBridgeTrust } from "../services/api/groupBridge";
+import { isDelegationSourceOutboundEvent } from "../components/messageBubbleDelegation";
+import { subscribeGroupBridgePairingChanged } from "../utils/groupBridgePairingEvents";
 
 export const CHAT_SCROLL_SNAPSHOT_MAX_AGE_MS = 30 * 60 * 1000;
 
@@ -64,6 +81,24 @@ export function shouldLockChatToBottomForSend(input: {
   if (Math.max(0, Number(input.chatUnreadCount) || 0) > 0) return false;
   if (shouldRestoreDetachedScrollSnapshot(input.scrollSnapshot, input.now ?? Date.now())) return false;
   return true;
+}
+
+export function buildComposerTrustFetchGroupId(_selectedGroupId: string): string | undefined {
+  const gid = String(_selectedGroupId || "").trim();
+  return gid || undefined;
+}
+
+function canOpenSourceMessageLocally(groups: GroupMeta[], srcGroupId: string): boolean {
+  const gid = String(srcGroupId || "").trim();
+  if (!gid) return false;
+  return (groups || []).some((group) => {
+    if (String(group?.group_id || "").trim() !== gid) return false;
+    return !group.group_bridge_remote;
+  });
+}
+
+export function shouldShowInConversation(event: LedgerEvent): boolean {
+  return !isDelegationSourceOutboundEvent(event.data);
 }
 
 function mergeStreamingCandidates(primary: LedgerEvent, secondary: LedgerEvent): LedgerEvent {
@@ -677,6 +712,9 @@ interface UseChatTabOptions {
   selectedGroupRunning: boolean;
   actors: Actor[];
   recipientActors: Actor[];
+  mentionFilter?: string;
+  mentionKind?: ComposerMentionKind;
+  mentionActorScope?: "selected" | "destination";
   /** Callback for when message is sent */
   onMessageSent?: () => void;
   /** Refs for composer interactions */
@@ -755,6 +793,10 @@ export type ComposerSendRoutingSnapshot = {
   isCrossGroup: boolean;
 };
 
+type SendMessageResponse =
+  | { ok: true; result: unknown; error?: null }
+  | { ok: false; result?: unknown; error: { code: string; message: string; details?: unknown } };
+
 export function buildComposerSendRoutingSnapshot({
   selectedGroupId,
   activeGroupId,
@@ -793,11 +835,66 @@ export function parseComposerRecipientTokens(toText: string, validRecipientSet: 
   return out;
 }
 
+export function buildComposerSendRecipientTokens({
+  toText,
+  isCrossGroup,
+  validRecipientSet,
+  crossGroupValidRecipientSet,
+}: {
+  toText: string;
+  isCrossGroup: boolean;
+  validRecipientSet: Set<string>;
+  crossGroupValidRecipientSet: Set<string>;
+}): string[] {
+  return parseComposerRecipientTokens(
+    toText,
+    isCrossGroup ? crossGroupValidRecipientSet : validRecipientSet,
+  );
+}
+
+export function pruneMissingMentionRecipientTokens({
+  toText,
+  mentionRecipientTokens: previousMentionRecipientTokens,
+  liveAgentMentionTokens,
+  validRecipientSet,
+}: {
+  toText: string;
+  mentionRecipientTokens?: Set<string>;
+  liveAgentMentionTokens: ComposerAgentMentionToken[];
+  validRecipientSet: Set<string>;
+}): { toText: string; mentionRecipientTokens: Set<string> } {
+  const previousMentionTokens = previousMentionRecipientTokens || new Set<string>();
+  const mentionRecipientTokens = new Set(
+    (liveAgentMentionTokens || [])
+      .filter((token) => token.scope === "selected")
+      .map((token) => String(token.actorId || "").trim())
+      .filter((token) => token && validRecipientSet.has(token)),
+  );
+  if (mentionRecipientTokens.size === 0 && previousMentionTokens.size === 0) {
+    return { toText: String(toText || ""), mentionRecipientTokens: new Set() };
+  }
+
+  const nextTokens = parseComposerRecipientTokens(toText, validRecipientSet)
+    .filter((token) => !previousMentionTokens.has(token) || mentionRecipientTokens.has(token));
+  for (const token of mentionRecipientTokens) {
+    if (!nextTokens.includes(token)) {
+      nextTokens.push(token);
+    }
+  }
+  return {
+    toText: nextTokens.join(", "),
+    mentionRecipientTokens,
+  };
+}
+
 export function useChatTab({
   selectedGroupId,
   selectedGroupRunning,
   actors,
   recipientActors,
+  mentionFilter = "",
+  mentionKind = "agent",
+  mentionActorScope = "selected",
   onMessageSent,
   composerRef,
   fileInputRef,
@@ -806,10 +903,13 @@ export function useChatTab({
 }: UseChatTabOptions) {
   const { t } = useTranslation(["chat", "common"]);
   const [forceStickToBottomToken, setForceStickToBottomToken] = useState(0);
+  const [group_bridgeTrusts, setGroupBridgeTrusts] = useState<GroupBridgeTrust[]>([]);
+  const [selectedRemoteGroupIds, setSelectedRemoteGroupIds] = useState<string[]>([]);
   // ============ Stores ============
   const { events, streamingEvents, chatWindow, hasMoreHistory, hasLoadedTail, isLoadingHistory, isChatWindowLoading } = useGroupStore(
     useCallback((state) => selectChatBucketState(state, selectedGroupId), [selectedGroupId])
   );
+  const groups = useGroupStore((state) => state.groups);
   const appendEvent = useGroupStore((state) => state.appendEvent);
   const upsertStreamingEvent = useGroupStore((state) => state.upsertStreamingEvent);
   const removeStreamingEventsByPrefix = useGroupStore((state) => state.removeStreamingEventsByPrefix);
@@ -877,6 +977,9 @@ export function useChatTab({
   const enqueueOutbox = useChatOutboxStore((s) => s.enqueue);
   const removeOutbox = useChatOutboxStore((s) => s.remove);
   const sendInFlightRef = useRef(false);
+  const mentionRecipientTokensRef = useRef<Set<string>>(new Set());
+  const [composerGroupMentionTokens, setComposerGroupMentionTokens] = useState<ComposerGroupMentionToken[]>([]);
+  const [composerAgentMentionTokens, setComposerAgentMentionTokens] = useState<ComposerAgentMentionToken[]>([]);
 
   // ============ Computed Values ============
 
@@ -921,8 +1024,23 @@ export function useChatTab({
     return Array.from(resolved.values()).filter((actor) => String(actor.runtime || "").trim() === "codex");
   }, [actors, groupSettings?.default_send_to]);
 
-  // Valid recipient tokens
+  // Recipient parsing accepts tokens selected from either the current group or
+  // the destination group, because @ suggestions can switch source by cursor
+  // position while selected chips still serialize into one toText field.
   const validRecipientSet = useMemo(() => {
+    const out = new Set<string>(["@all", "@foreman", "@peers"]);
+    for (const a of actors) {
+      const id = String(a.id || "").trim();
+      if (id) out.add(id);
+    }
+    for (const a of recipientActors) {
+      const id = String(a.id || "").trim();
+      if (id) out.add(id);
+    }
+    return out;
+  }, [actors, recipientActors]);
+
+  const crossGroupValidRecipientSet = useMemo(() => {
     const out = new Set<string>(["@all", "@foreman", "@peers"]);
     for (const a of recipientActors) {
       const id = String(a.id || "").trim();
@@ -931,22 +1049,70 @@ export function useChatTab({
     return out;
   }, [recipientActors]);
 
-  // Parse toText into validated tokens
-  const toTokens = useMemo(() => {
-    return parseComposerRecipientTokens(toText, validRecipientSet);
-  }, [toText, validRecipientSet]);
-
-  // Mention suggestions
-  const mentionSuggestions = useMemo(() => {
-    const base = ["@all", "@foreman", "@peers"];
-    const actorIds = recipientActors.map((a) => String(a.id || "")).filter((id) => id);
-    return [...base, ...actorIds];
-  }, [recipientActors]);
-
   // Send group ID (respects cross-group destination)
   const sendGroupId = useMemo(() => {
     return getEffectiveComposerDestGroupId(destGroupId, activeGroupId, selectedGroupId);
   }, [destGroupId, activeGroupId, selectedGroupId]);
+
+  // Parse toText into validated tokens
+  const toTokens = useMemo(() => {
+    return buildComposerSendRecipientTokens({
+      toText,
+      isCrossGroup: !!sendGroupId && !!selectedGroupId && sendGroupId !== selectedGroupId,
+      validRecipientSet,
+      crossGroupValidRecipientSet,
+    });
+  }, [crossGroupValidRecipientSet, sendGroupId, selectedGroupId, toText, validRecipientSet]);
+
+  const refreshGroupBridgeTrusts = useCallback(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid) {
+      setGroupBridgeTrusts([]);
+      return;
+    }
+    let cancelled = false;
+    void api.fetchGroupBridgeTrusts(buildComposerTrustFetchGroupId(gid)).then((resp) => {
+      if (cancelled) return;
+      setGroupBridgeTrusts(resp.ok ? (resp.result.trusts || []) : []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedGroupId]);
+
+  useEffect(() => refreshGroupBridgeTrusts(), [refreshGroupBridgeTrusts]);
+
+  useEffect(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid) return;
+    return subscribeGroupBridgePairingChanged(gid, refreshGroupBridgeTrusts);
+  }, [refreshGroupBridgeTrusts, selectedGroupId]);
+
+  const remoteRouteGroups = useMemo(() => buildGroupBridgeRouteGroups(group_bridgeTrusts), [group_bridgeTrusts]);
+
+  const composerRouteGroups: GroupMeta[] = useMemo(() => (
+    mergeComposerRouteGroups(groups, remoteRouteGroups)
+  ), [remoteRouteGroups, groups]);
+
+  useEffect(() => {
+    setSelectedRemoteGroupIds([]);
+  }, [selectedGroupId]);
+
+  useEffect(() => {
+    const validRemoteIds = new Set(remoteRouteGroups.map((group) => String(group.group_id || "").trim()).filter(Boolean));
+    setSelectedRemoteGroupIds((current) => current.filter((groupId) => validRemoteIds.has(groupId)));
+  }, [remoteRouteGroups]);
+
+  // Message-body mentions: @ selects current-route recipients; # selects the destination group.
+  const mentionSuggestions = useMemo(() => {
+    const mentionActors = mentionKind === "agent" && mentionActorScope === "selected" ? actors : recipientActors;
+    return buildComposerMentionSuggestions({
+      kind: mentionKind,
+      filter: mentionFilter,
+      recipientActors: mentionActors,
+      groups: composerRouteGroups,
+    });
+  }, [actors, composerRouteGroups, mentionActorScope, mentionFilter, mentionKind, recipientActors]);
 
   // Project root
   const projectRoot = useMemo(() => {
@@ -1051,20 +1217,38 @@ export function useChatTab({
 
   // Filtered live chat messages (canonical + optimistic pending merged)
   const liveChatMessages = useMemo(() => {
+    const all = events.filter(isFormalChatMessageEvent).filter(shouldShowInConversation);
+    const renderableCanonicalClientIds = new Set(
+      all
+        .filter((ev: LedgerEvent) => hasRenderableChatMessageContent(ev))
+        .map((ev: LedgerEvent) => {
+          const data = ev.data && typeof ev.data === "object" ? (ev.data as { client_id?: unknown }) : null;
+          return data && typeof data.client_id === "string" ? data.client_id.trim() : "";
+        })
+        .filter((clientId: string) => clientId.length > 0)
+    );
+    const pendingEvents = outboxEntries
+      .filter((entry) => !renderableCanonicalClientIds.has(entry.localId))
+      .map((entry) => entry.event);
+    const ordered = sortChatMessages(
+      mergeVisibleChatMessages(all, [], pendingEvents, logicalMessageOrderStateRef.current),
+      new Map(),
+    );
+
     if (chatFilter === "attention") {
-      return unfilteredLiveChatMessages.filter((ev: LedgerEvent) => {
+      return ordered.filter((ev: LedgerEvent) => {
         const d = ev.data as ChatMessageData | undefined;
         return String(d?.priority || "normal") === "attention";
       });
     }
     if (chatFilter === "task") {
-      return unfilteredLiveChatMessages.filter((ev: LedgerEvent) => {
+      return ordered.filter((ev: LedgerEvent) => {
         const d = ev.data as ChatMessageData | undefined;
         return !!d?.reply_required;
       });
     }
     if (chatFilter === "user") {
-      return unfilteredLiveChatMessages.filter((ev: LedgerEvent) => {
+      return ordered.filter((ev: LedgerEvent) => {
         const d = ev.data as ChatMessageData | undefined;
         const dst = typeof d?.dst_group_id === "string" ? String(d.dst_group_id || "").trim() : "";
         if (dst) return false;
@@ -1073,17 +1257,17 @@ export function useChatTab({
         return by === "user" || to.includes("user") || to.includes("@user");
       });
     }
-    return unfilteredLiveChatMessages;
-  }, [chatFilter, unfilteredLiveChatMessages]);
+    return ordered;
+  }, [events, chatFilter, outboxEntries]);
 
   // Chat messages (window or live)
   const chatMessages = useMemo(() => {
-    if (inChatWindow && chatWindow) return (chatWindow.events || []).filter(isFormalChatMessageEvent);
+    if (inChatWindow && chatWindow) return (chatWindow.events || []).filter(isFormalChatMessageEvent).filter(shouldShowInConversation);
     return liveChatMessages;
   }, [chatWindow, inChatWindow, liveChatMessages]);
 
   const hasAnyChatMessages = useMemo(
-    () => events.some(isFormalChatMessageEvent) || outboxEntries.length > 0,
+    () => events.some((event: LedgerEvent) => isFormalChatMessageEvent(event) && shouldShowInConversation(event)) || outboxEntries.length > 0,
     [events, outboxEntries]
   );
   const chatInitialScrollAnchorId = useMemo(() => {
@@ -1194,6 +1378,7 @@ export function useChatTab({
       const idx = cur.findIndex((x) => x === t);
       if (idx >= 0) {
         const next = cur.slice(0, idx).concat(cur.slice(idx + 1));
+        setComposerAgentMentionTokens((tokens) => tokens.filter((mention) => mention.scope !== "selected" || mention.actorId !== t));
         setToText(next.join(", "));
       } else {
         setToText(cur.concat([t]).join(", "));
@@ -1202,13 +1387,53 @@ export function useChatTab({
     [toTokens, setToText]
   );
 
-  const clearRecipients = useCallback(() => setToText(""), [setToText]);
+  const toggleRemoteGroupRecipient = useCallback((groupId: string) => {
+    const gid = String(groupId || "").trim();
+    if (!gid) return;
+    setSelectedRemoteGroupIds((current) => {
+      if (current.includes(gid)) return current.filter((item) => item !== gid);
+      return [...current, gid];
+    });
+  }, []);
+
+  const clearRecipients = useCallback(() => {
+    mentionRecipientTokensRef.current = new Set();
+    setComposerAgentMentionTokens((tokens) => tokens.filter((token) => token.scope !== "selected"));
+    setSelectedRemoteGroupIds([]);
+    setToText("");
+  }, [setToText]);
 
   const appendRecipientToken = useCallback(
     (token: string) => {
-      setToText(toText ? toText + ", " + token : token);
+      const normalized = String(token || "").trim();
+      if (!normalized) return;
+      mentionRecipientTokensRef.current.add(normalized);
+      setToText(toText ? toText + ", " + normalized : normalized);
     },
     [toText, setToText]
+  );
+
+  const syncMentionRecipientsFromComposerText = useCallback(
+    (textOrUpdater: string | ((prev: string) => string)) => {
+      const text = typeof textOrUpdater === "function" ? textOrUpdater(composerText) : textOrUpdater;
+      setComposerGroupMentionTokens((tokens) => pruneComposerGroupMentionTokens({ text, tokens }));
+      const liveAgentMentionTokens = pruneComposerAgentMentionTokens({ text, tokens: composerAgentMentionTokens });
+      if (liveAgentMentionTokens.length !== composerAgentMentionTokens.length) {
+        setComposerAgentMentionTokens(liveAgentMentionTokens);
+      }
+      const result = pruneMissingMentionRecipientTokens({
+        toText,
+        mentionRecipientTokens: mentionRecipientTokensRef.current,
+        liveAgentMentionTokens,
+        validRecipientSet,
+      });
+      mentionRecipientTokensRef.current = result.mentionRecipientTokens;
+      if (result.toText !== toText) {
+        setToText(result.toText);
+      }
+      setComposerText(text);
+    },
+    [composerAgentMentionTokens, composerText, setComposerText, setToText, toText, validRecipientSet],
   );
 
   const removeComposerFile = useCallback(
@@ -1238,6 +1463,35 @@ export function useChatTab({
 
     const dstGroup = routingSnapshot.destGroupId;
     const isCrossGroup = routingSnapshot.isCrossGroup;
+    const selectedRemoteGroupIdsSnapshot = selectedRemoteGroupIds.slice();
+    const toTextSnapshot = composerStateSnapshot.toText;
+    const localToTokensSnapshot = buildComposerSendRecipientTokens({
+      toText: toTextSnapshot,
+      isCrossGroup: false,
+      validRecipientSet,
+      crossGroupValidRecipientSet,
+    });
+    const crossToTokensSnapshot = buildComposerSendRecipientTokens({
+      toText: toTextSnapshot,
+      isCrossGroup: true,
+      validRecipientSet,
+      crossGroupValidRecipientSet,
+    });
+    const sendPlanTargets = buildComposerSendPlanTargets({
+      selectedGroupId: originGroupId,
+      dstGroupId: dstGroup,
+      isCrossGroup,
+      text: composerStateSnapshot.composerText,
+      groupMentionTokens: composerGroupMentionTokens,
+      groups: composerRouteGroups,
+      remoteGroupIds: selectedRemoteGroupIdsSnapshot,
+      includeSelectedGroup: selectedRemoteGroupIdsSnapshot.length > 0 && localToTokensSnapshot.length > 0,
+    });
+    const sendsCrossGroup = sendPlanTargets.some((target) => target.isCrossGroup);
+    const sendsLocal = sendPlanTargets.some((target) => !target.isCrossGroup);
+    const slashGuardSendGroupId = sendsCrossGroup
+      ? (sendPlanTargets.find((target) => target.isCrossGroup)?.groupId || dstGroup)
+      : dstGroup;
     if (await tryExecuteSlashCommand({
       text: composerStateSnapshot.composerText,
       composerFilesCount: composerFilesSnapshot.length,
@@ -1245,7 +1499,7 @@ export function useChatTab({
       replyTarget: composerStateSnapshot.replyTarget,
       replyRequired: composerStateSnapshot.replyRequired,
       hasQuotedPresentationRef: !!composerStateSnapshot.quotedPresentationRef,
-      sendGroupId: dstGroup,
+      sendGroupId: slashGuardSendGroupId,
     })) {
       return;
     }
@@ -1256,13 +1510,20 @@ export function useChatTab({
 
     const replyTargetSnapshot = composerStateSnapshot.replyTarget;
     const quotedPresentationRefSnapshot = composerStateSnapshot.quotedPresentationRef;
-    const refsSnapshot: MessageRef[] = quotedPresentationRefSnapshot ? [quotedPresentationRefSnapshot] : [];
+    const refsSnapshot: MessageRef[] = [
+      ...(quotedPresentationRefSnapshot ? [quotedPresentationRefSnapshot] : []),
+      ...buildComposerGroupBridgeRouteRefs({
+        text: composerStateSnapshot.composerText,
+        tokens: composerGroupMentionTokens,
+        groups: composerRouteGroups,
+      }),
+    ];
     const prioritySnapshot = composerStateSnapshot.priority;
     const replyRequiredSnapshot = composerStateSnapshot.replyRequired;
-    const toTextSnapshot = composerStateSnapshot.toText;
-    const toTokensSnapshot = parseComposerRecipientTokens(toTextSnapshot, validRecipientSet);
+    const groupMentionTokensSnapshot = composerGroupMentionTokens;
+    const agentMentionTokensSnapshot = composerAgentMentionTokens;
     const prio = replyRequiredSnapshot ? "attention" : (prioritySnapshot || "normal");
-    const assistantTargets = !isCrossGroup ? resolveAssistantTargets(toTokensSnapshot) : [];
+    const assistantTargets = sendsLocal && !sendsCrossGroup ? resolveAssistantTargets(localToTokensSnapshot) : [];
 
     // Generate a local ID for outbox tracking
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1328,6 +1589,9 @@ export function useChatTab({
           upsertDraft,
         },
       );
+      setComposerGroupMentionTokens(groupMentionTokensSnapshot);
+      setComposerAgentMentionTokens(agentMentionTokensSnapshot);
+      setSelectedRemoteGroupIds(selectedRemoteGroupIdsSnapshot);
     };
 
     const applyImmediateComposerFeedback = () => {
@@ -1338,6 +1602,9 @@ export function useChatTab({
         scrollSnapshot,
       });
       clearComposer();
+      setComposerGroupMentionTokens([]);
+      setComposerAgentMentionTokens([]);
+      setSelectedRemoteGroupIds([]);
       if (chatAtBottomRef) chatAtBottomRef.current = shouldLockBottom;
       if (selectedGroupId) {
         setShowScrollButton(selectedGroupId, !shouldLockBottom);
@@ -1348,24 +1615,25 @@ export function useChatTab({
     };
 
     // Local validations that must pass before clearing the composer
-    if (replyTargetSnapshot && isCrossGroup) {
+    if (replyTargetSnapshot && sendsCrossGroup) {
       showError("Cross-group send does not support replies.");
       setDestGroupId(selectedGroupId);
       return;
     }
-    if (quotedPresentationRefSnapshot && isCrossGroup) {
+    if (quotedPresentationRefSnapshot && sendsCrossGroup) {
       showError("Cross-group send does not support quoted presentation views.");
       setDestGroupId(selectedGroupId);
       return;
     }
-    if (!replyTargetSnapshot && isCrossGroup && composerFilesSnapshot.length > 0) {
-      showError("Cross-group send does not support attachments yet.");
+    const localCrossGroupTargets = sendPlanTargets.filter((target) => target.isCrossGroup && !target.isRemote);
+    if (!replyTargetSnapshot && composerFilesSnapshot.length > 0 && localCrossGroupTargets.length > 0) {
+      showError("Local cross-group send does not support attachments yet. Use a remote Group Bridge target or send without attachments.");
       return;
     }
 
     // Optimistic: enqueue to outbox immediately for same-group sends.
     // If the request fails, we remove the pending entry and restore the composer.
-    if (!isCrossGroup) {
+    if (sendsLocal && !sendsCrossGroup) {
       const optimisticAttachments: OptimisticAttachment[] = composerFilesSnapshot.map((file) => ({
         kind: "file",
         path: "",
@@ -1382,7 +1650,7 @@ export function useChatTab({
         group_id: selectedGroupId,
         data: {
           text: txt,
-          to: toTokensSnapshot,
+          to: localToTokensSnapshot,
           priority: prio,
           reply_required: replyRequiredSnapshot,
           client_id: localId,
@@ -1400,14 +1668,14 @@ export function useChatTab({
 
     applyImmediateComposerFeedback();
     sendInFlightRef.current = true;
+    let successfulSendCount = 0;
     try {
-      const to = toTokensSnapshot;
-      let resp;
+      let resp: SendMessageResponse | undefined;
       if (replyTargetSnapshot) {
         resp = await api.replyMessage(
           selectedGroupId,
           txt,
-          to,
+          localToTokensSnapshot,
           replyTargetSnapshot.eventId,
           composerFilesSnapshot.length > 0 ? composerFilesSnapshot : undefined,
           prio,
@@ -1416,36 +1684,67 @@ export function useChatTab({
           refsSnapshot,
         );
       } else {
-        if (isCrossGroup) {
-          resp = await api.sendCrossGroupMessage(selectedGroupId, dstGroup, txt, to, prio, replyRequiredSnapshot);
-        } else {
+        const localTargets = sendPlanTargets.filter((item) => !item.isCrossGroup);
+        for (const target of localTargets) {
+          void target;
           resp = await api.sendMessage(
             selectedGroupId,
             txt,
-            to,
+            localToTokensSnapshot,
             composerFilesSnapshot.length > 0 ? composerFilesSnapshot : undefined,
             prio,
             replyRequiredSnapshot,
             localId,
             refsSnapshot,
           );
+          if (!resp.ok) break;
+          successfulSendCount += 1;
         }
+        if (!resp || resp.ok) {
+          const crossGroupTargets = sendPlanTargets.filter((item) => item.isCrossGroup);
+          if (sendsCrossGroup && crossGroupTargets.length === 0) {
+            resp = { ok: false, error: { code: "missing_cross_group_target", message: "missing cross-group target" } };
+          }
+          for (const target of crossGroupTargets) {
+            const targetTo = Array.isArray(target.recipientTokens) && target.recipientTokens.length > 0
+              ? target.recipientTokens
+              : target.isRemote
+                ? ["@foreman"]
+                : crossToTokensSnapshot;
+            resp = await api.sendCrossGroupMessage(
+              selectedGroupId,
+              target.groupId,
+              txt,
+              targetTo,
+              prio,
+              replyRequiredSnapshot,
+              composerFilesSnapshot.length > 0 ? composerFilesSnapshot : undefined,
+            );
+            if (!resp.ok) break;
+            successfulSendCount += 1;
+          }
+        }
+      }
+      if (!resp) {
+        resp = { ok: false, error: { code: "send_not_dispatched", message: "message send was not dispatched" } };
       }
       if (!resp.ok) {
         // Pending-only outbox: failed sends roll back to the composer.
         removeOutbox(selectedGroupId, localId);
         clearLocalAssistantPlaceholders();
-        restoreComposerState();
+        const shouldRestoreComposer = successfulSendCount === 0;
+        if (shouldRestoreComposer) restoreComposerState();
+        const sendError = resp.error || { code: "send_failed", message: "send failed" };
         showError(formatSendMessageError({
-          code: resp.error.code,
-          message: resp.error.message,
+          code: sendError.code,
+          message: sendError.message,
           groupSendBlockedReason,
           t,
         }));
         return;
       }
       const canonicalEvent =
-        !isCrossGroup && resp.result && typeof resp.result === "object" && "event" in resp.result
+        sendsLocal && !sendsCrossGroup && resp.result && typeof resp.result === "object" && "event" in resp.result
           ? (resp.result.event as LedgerEvent | null | undefined)
           : undefined;
 
@@ -1456,15 +1755,15 @@ export function useChatTab({
       // client_id. Replacing an optimistic attachment preview with the HTTP
       // response event causes a second image load/layout pass, which produces
       // a visible jump while the list is following bottom.
-      if (isCrossGroup) {
+      if (sendsCrossGroup) {
         removeOutbox(selectedGroupId, localId);
       }
       // For same-group sends, rely on SSE to append the canonical event and
       // clear the matching optimistic row. Cross-group sends still need the
       // returned event because they do not stream back into the current group.
-      if (canonicalEvent && isCrossGroup) {
+      if (canonicalEvent && sendsCrossGroup) {
         appendEvent(canonicalEvent, selectedGroupId);
-      } else if (canonicalEvent && !isCrossGroup) {
+      } else if (canonicalEvent && !sendsCrossGroup) {
         const canonicalEventId = String(canonicalEvent.id || "").trim();
         if (canonicalEventId) {
           promoteStreamingEventsByPrefix(`local:${localId}:`, canonicalEventId, selectedGroupId);
@@ -1491,7 +1790,8 @@ export function useChatTab({
       // Pending-only outbox: failed sends roll back to the composer.
       removeOutbox(selectedGroupId, localId);
       clearLocalAssistantPlaceholders();
-      restoreComposerState();
+      const shouldRestoreComposer = successfulSendCount === 0;
+      if (shouldRestoreComposer) restoreComposerState();
       showError(message);
     } finally {
       sendInFlightRef.current = false;
@@ -1501,6 +1801,7 @@ export function useChatTab({
     groupSendBlockedReason,
     tryExecuteSlashCommand,
     validRecipientSet,
+    crossGroupValidRecipientSet,
     inChatWindow,
     appendEvent,
     enqueueOutbox,
@@ -1534,6 +1835,10 @@ export function useChatTab({
     resolveAssistantTargets,
     upsertStreamingEvent,
     t,
+    composerGroupMentionTokens,
+    composerAgentMentionTokens,
+    composerRouteGroups,
+    selectedRemoteGroupIds,
   ]);
 
   const copyMessageLink = useCallback(
@@ -1611,6 +1916,10 @@ export function useChatTab({
       const gid = String(srcGroupId || "").trim();
       const eid = String(srcEventId || "").trim();
       if (!gid || !eid) return;
+      if (!canOpenSourceMessageLocally(groups, gid)) {
+        showError(t("sourceMessageNotLocal", { groupId: gid, defaultValue: "Original message is in a remote group that is not open locally: {{groupId}}" }));
+        return;
+      }
 
       const url = new URL(window.location.href);
       url.searchParams.set("group", gid);
@@ -1622,12 +1931,10 @@ export function useChatTab({
         useUIStore.getState().setActiveTab("chat");
         void openChatWindow(gid, eid);
       } else {
-        // Queue deep link and switch groups
         useGroupStore.getState().setSelectedGroupId(gid);
-        // Note: App.tsx handles the deep link effect
       }
     },
-    [selectedGroupId, openChatWindow]
+    [groups, openChatWindow, selectedGroupId, showError, t]
   );
 
   const exitChatWindow = useCallback(() => {
@@ -1717,7 +2024,11 @@ export function useChatTab({
 
     // Composer state
     composerText,
-    setComposerText,
+    setComposerText: syncMentionRecipientsFromComposerText,
+    composerGroupMentionTokens,
+    setComposerGroupMentionTokens,
+    composerAgentMentionTokens,
+    setComposerAgentMentionTokens,
     composerFiles,
     setComposerFiles,
     removeComposerFile,
@@ -1727,6 +2038,8 @@ export function useChatTab({
     clearQuotedPresentationRef: () => setQuotedPresentationRef(null),
     toTokens,
     toggleRecipient,
+    selectedRemoteGroupIds,
+    toggleRemoteGroupRecipient,
     clearRecipients,
     appendRecipientToken,
     priority,
@@ -1736,6 +2049,7 @@ export function useChatTab({
     destGroupId: sendGroupId,
     setDestGroupId,
     composerGroupSettled,
+    composerRouteGroups,
     mentionSuggestions,
 
     // Agent state

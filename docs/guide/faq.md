@@ -9,7 +9,7 @@ Frequently asked questions about CCCC.
 **vs. native agent teams (Claude Code subagents/agent teams and similar single-vendor features).**
 Native teams give you the smoothest experience inside one vendor and one session — if you only run Claude Code and your work fits in a session, they are a great default. CCCC adds what a single vendor structurally cannot:
 
-- **Cross-vendor groups** — Claude Code, Codex CLI, Gemini CLI, Kimi CLI, ChatGPT Web, and more in one group, so you can route work to whichever model or subscription fits each role.
+- **Cross-vendor groups** — Claude Code, Codex CLI, Grok Build, Kimi CLI, ChatGPT Web, and more in one group, so you can route work to whichever model or subscription fits each role.
 - **Durable state** — groups, messages, read/ack receipts, and tasks live in an append-only ledger owned by a daemon. Restarting a terminal (or your machine) does not dissolve the team.
 - **Remote operations** — check, pause, resume, and redirect a running group from Telegram, Slack, Discord, Feishu, DingTalk, WeCom, or Weixin.
 - **An audit trail** — every message and its delivery state is replayable for review and debugging.
@@ -79,12 +79,19 @@ This checks Python version, available runtimes, and daemon status.
 
 - Claude Code (`claude`)
 - Codex CLI (`codex`)
+- GitHub Copilot CLI (`copilot`)
+- Cursor CLI (`cursor-agent`)
+- Devin CLI (`devin`)
+- Kiro CLI (`kiro-cli`)
+- Kilo Code CLI (`kilo`)
+- Antigravity CLI (`agy`)
 - Droid (`droid`)
-- Gemini CLI (`gemini`)
+- Grok Build (`grok`)
+- Hermes Agent (`hermes`)
 - Kimi CLI (`kimi`)
+- OpenCode (`opencode`)
 - Amp (`amp`)
 - Auggie (`auggie`)
-- Neovate (`neovate`)
 - Custom (manual fallback; provide your own command and MCP wiring)
 
 ### What's the difference between Foreman and Peer?

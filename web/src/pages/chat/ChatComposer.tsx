@@ -1,28 +1,55 @@
 // ChatComposer renders the chat message composer.
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { CSSProperties, Dispatch, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Actor, GroupMeta, LedgerEvent, PresentationMessageRef, ReplyTarget } from "../../types";
 import { classNames } from "../../utils/classNames";
-import { AttachmentIcon, SendIcon, ChevronDownIcon, ReplyIcon, CloseIcon, AlertIcon, SparklesIcon } from "../../components/Icons";
+import { AttachmentIcon, SendIcon, ChevronDownIcon, ReplyIcon, CloseIcon, AlertIcon, SparklesIcon, CopyIcon } from "../../components/Icons";
 import { ScrollFade } from "../../components/ScrollFade";
 import { getPresentationRefChipLabel } from "../../utils/presentationRefs";
 import { useTranslation } from 'react-i18next';
+import { useCopyFeedback } from "../../hooks/useCopyFeedback";
 import { VoiceSecretaryComposerControl, type VoiceSecretaryCaptureMode } from "./VoiceSecretaryComposerControl";
 import { SlashCommandMenu } from "./SlashCommandMenu";
-import { GroupCombobox } from "../../components/GroupCombobox";
 import { useGroupStore } from "../../stores";
-import { getComposerDestGroupDisplayValue } from "../../stores/useComposerStore";
 import { filterSlashCommands, getVisibleSlashCommandPage, type SlashCommandItem } from "../../utils/slashCommands";
 import { getComposerActionVisibility, getComposerCanSend } from "./chatComposerActions";
 import { ComposerFilePreview } from "./ComposerFilePreview";
+import { getMentionMenuLeft, getMentionTriggerX } from "./mentionMenuPosition";
+import { ChatMentionMenu } from "./ChatMentionMenu";
+import { getComposerGroupMentionInsertToken, getGroupRouteDisplayName, resolveComposerHashRouting, type ComposerMentionKind, type ComposerMentionSuggestion } from "./chatMentionSuggestions";
+import type { ComposerAgentMentionToken, ComposerGroupMentionToken } from "../../hooks/composerGroupMentions";
+import {
+  createComposerAgentMentionToken,
+  createComposerGroupMentionToken,
+  pruneComposerAgentMentionTokens,
+  pruneComposerGroupMentionTokens,
+  resolveControlledComposerMentionContext,
+} from "../../hooks/composerGroupMentions";
 import {
   composerTargetAllowsSuggestedUserMessage,
   consumeSuggestedUserMessage,
   latestSuggestedUserMessage,
   readConsumedSuggestedUserMessageIds,
 } from "../../utils/suggestedUserMessage";
+import { formatRecipientIdentifier } from "../../utils/recipientIdentifier";
 
 const SLASH_COMMAND_PAGE_SIZE = 8;
+const MENTION_MENU_DESKTOP_WIDTH = 320;
+
+type RecipientPopoverTarget = {
+  key: string;
+  label: string;
+  kindLabel: string;
+  badgeLabel?: string;
+  identifier: string;
+  idValue?: string;
+};
+
+function getAgentMentionDisplayToken(selected: ComposerMentionSuggestion): string {
+  const label = String(selected.label || selected.value || "").trim();
+  return label.startsWith("@") ? label : `@${label}`;
+}
 
 function cleanVoicePromptContextText(value: unknown, maxLen = 240): string {
   const text = String(value || "").replace(/\s+/g, " ").trim();
@@ -50,12 +77,11 @@ export interface ChatComposerProps {
   isSmallScreen: boolean;
   selectedGroupId: string;
   actors: Actor[];
-  recipientActors: Actor[];
   recipientActorsBusy?: boolean;
-  groups: GroupMeta[];
   destGroupId: string;
   setDestGroupId: (groupId: string) => void;
   composerGroupSettled: boolean;
+  composerRouteGroups?: GroupMeta[];
   selectedGroupActorsHydrating?: boolean;
   destGroupScopeLabel?: string;
   busy: string;
@@ -71,6 +97,9 @@ export interface ChatComposerProps {
   // Recipients
   toTokens: string[];
   onToggleRecipient: (token: string) => void;
+  remoteGroups?: GroupMeta[];
+  selectedRemoteGroupIds?: string[];
+  onToggleRemoteGroup?: (groupId: string) => void;
   onClearRecipients: () => void;
 
   // Files
@@ -92,11 +121,18 @@ export interface ChatComposerProps {
   // Mention menu
   showMentionMenu: boolean;
   setShowMentionMenu: Dispatch<SetStateAction<boolean>>;
-  mentionSuggestions: string[];
+  mentionSuggestions: ComposerMentionSuggestion[];
   mentionSelectedIndex: number;
   setMentionSelectedIndex: Dispatch<SetStateAction<number>>;
   setMentionFilter: Dispatch<SetStateAction<string>>;
-  onAppendRecipientToken: (token: string) => void;
+  setMentionKind: Dispatch<SetStateAction<ComposerMentionKind>>;
+  setMentionActorScope: Dispatch<SetStateAction<"selected" | "destination">>;
+  setMentionTargetGroupId: Dispatch<SetStateAction<string>>;
+  onAppendRecipientToken: (token: string, label?: string) => void;
+  composerGroupMentionTokens: ComposerGroupMentionToken[];
+  setComposerGroupMentionTokens: Dispatch<SetStateAction<ComposerGroupMentionToken[]>>;
+  composerAgentMentionTokens: ComposerAgentMentionToken[];
+  setComposerAgentMentionTokens: Dispatch<SetStateAction<ComposerAgentMentionToken[]>>;
   slashCommands: SlashCommandItem[];
 }
 
@@ -106,12 +142,11 @@ export function ChatComposer({
   isSmallScreen,
   selectedGroupId,
   actors,
-  recipientActors,
   recipientActorsBusy,
-  groups,
   destGroupId,
   setDestGroupId,
   composerGroupSettled,
+  composerRouteGroups = [],
   selectedGroupActorsHydrating,
   destGroupScopeLabel: _destGroupScopeLabel,
   busy,
@@ -123,6 +158,9 @@ export function ChatComposer({
   onClearQuotedPresentationRef,
   toTokens,
   onToggleRecipient,
+  remoteGroups = [],
+  selectedRemoteGroupIds = [],
+  onToggleRemoteGroup,
   onClearRecipients,
   composerFiles,
   onRemoveComposerFile,
@@ -142,7 +180,14 @@ export function ChatComposer({
   mentionSelectedIndex,
   setMentionSelectedIndex,
   setMentionFilter,
+  setMentionKind,
+  setMentionActorScope,
+  setMentionTargetGroupId,
   onAppendRecipientToken,
+  composerGroupMentionTokens,
+  setComposerGroupMentionTokens,
+  composerAgentMentionTokens,
+  setComposerAgentMentionTokens,
   slashCommands,
 }: ChatComposerProps) {
   const composerHeightRef = useRef(0);
@@ -152,13 +197,36 @@ export function ChatComposer({
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
   const [slashVisibleCount, setSlashVisibleCount] = useState(SLASH_COMMAND_PAGE_SIZE);
   const [voiceCaptureMode, setVoiceCaptureMode] = useState<VoiceSecretaryCaptureMode>("prompt");
+  const [mentionMenuLeft, setMentionMenuLeft] = useState(8);
+  const [composerScrollTop, setComposerScrollTop] = useState(0);
   const [sessionConsumedSuggestedUserMessageIds, setSessionConsumedSuggestedUserMessageIds] = useState<Set<string>>(
     () => new Set(),
   );
   const modeMenuRef = useRef<HTMLDivElement | null>(null);
+  const recipientPopoverHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [recipientPopoverTarget, setRecipientPopoverTarget] = useState<RecipientPopoverTarget | null>(null);
+  const [recipientPopoverStyle, setRecipientPopoverStyle] = useState<CSSProperties | null>(null);
   const { t } = useTranslation('chat');
+  const copyWithFeedback = useCopyFeedback();
   const groupSettings = useGroupStore((state) => state.groupSettings);
+  const groups = useGroupStore((state) => state.groups);
+  const routeGroups = composerRouteGroups.length > 0 ? composerRouteGroups : groups;
   const refreshSettings = useGroupStore((state) => state.refreshSettings);
+  const selectedRemoteGroupSet = useMemo(
+    () => new Set((selectedRemoteGroupIds || []).map((groupId) => String(groupId || "").trim()).filter(Boolean)),
+    [selectedRemoteGroupIds],
+  );
+  const availableRemoteGroups = useMemo(
+    () => (remoteGroups || []).filter((group) => String(group.group_id || "").trim() && group.group_bridge_remote),
+    [remoteGroups],
+  );
+  const visibleRecipientPopoverTarget = useMemo(() => {
+    if (!recipientPopoverTarget) return null;
+    if (!recipientPopoverTarget.key.startsWith("remote:")) return recipientPopoverTarget;
+    const groupId = recipientPopoverTarget.key.slice("remote:".length);
+    const stillAvailable = availableRemoteGroups.some((group) => String(group.group_id || "").trim() === groupId);
+    return stillAvailable ? recipientPopoverTarget : null;
+  }, [availableRemoteGroups, recipientPopoverTarget]);
 
   const readRootFontScale = () => {
     if (typeof document === "undefined") return 1;
@@ -179,6 +247,19 @@ export function ChatComposer({
     node.style.height = `${nextHeight}px`;
     composerHeightRef.current = nextHeight;
   }, [baseComposerHeight, maxComposerHeight]);
+
+  const updateMentionMenuPosition = useCallback((textToTrigger: string) => {
+    const el = composerRef.current;
+    if (!el || isSmallScreen) {
+      setMentionMenuLeft(8);
+      return;
+    }
+    setMentionMenuLeft(getMentionMenuLeft({
+      triggerX: getMentionTriggerX(el, textToTrigger),
+      containerWidth: el.clientWidth,
+      menuWidth: MENTION_MENU_DESKTOP_WIDTH,
+    }));
+  }, [composerRef, isSmallScreen]);
 
   // Auto-adjust textarea height when composerText changes programmatically
   // (e.g. mention selection). Skips when handleChange already handled resize.
@@ -239,6 +320,12 @@ export function ChatComposer({
     };
   }, [showModeMenu]);
 
+  useEffect(() => () => {
+    if (recipientPopoverHideTimerRef.current) {
+      clearTimeout(recipientPopoverHideTimerRef.current);
+    }
+  }, []);
+
   useEffect(() => {
     if (!selectedGroupId || groupSettings) return;
     void refreshSettings(selectedGroupId);
@@ -252,6 +339,95 @@ export function ChatComposer({
   const chipInactiveClass = isDark
     ? "bg-white/[0.06] text-[var(--color-text-secondary)] border-white/[0.08] hover:bg-white/[0.1] hover:border-white/[0.14] hover:text-[var(--color-text-primary)]"
     : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)] border-transparent hover:bg-[rgb(237,237,237)] hover:border-black/5 hover:text-[rgb(20,20,22)]";
+  const remoteChipActiveClass = isDark
+    ? "border-sky-200 bg-sky-200 text-slate-950 shadow-none"
+    : "border-sky-700 bg-sky-700 text-white shadow-none";
+  const remoteChipInactiveClass = isDark
+    ? "border-sky-300/20 bg-sky-400/10 text-sky-100 hover:border-sky-300/35 hover:bg-sky-400/15"
+    : "border-sky-100 bg-sky-50 text-sky-950 hover:border-sky-200 hover:bg-sky-100";
+  const cancelRecipientPopoverHide = useCallback(() => {
+    if (recipientPopoverHideTimerRef.current) {
+      clearTimeout(recipientPopoverHideTimerRef.current);
+      recipientPopoverHideTimerRef.current = null;
+    }
+  }, []);
+  const showRecipientPopover = useCallback((target: RecipientPopoverTarget, node: HTMLElement) => {
+    cancelRecipientPopoverHide();
+    const rect = node.getBoundingClientRect();
+    const viewportWidth = typeof window === "undefined" ? 1024 : window.innerWidth;
+    const tooltipWidth = Math.min(196, Math.max(176, viewportWidth - 16));
+    const top = rect.bottom + 6;
+    if (isSmallScreen) {
+      setRecipientPopoverStyle({ top, left: 8, right: 8 });
+    } else {
+      setRecipientPopoverStyle({
+        top,
+        left: Math.min(Math.max(rect.left, 8), Math.max(8, viewportWidth - tooltipWidth - 8)),
+        width: tooltipWidth,
+      });
+    }
+    setRecipientPopoverTarget(target);
+  }, [cancelRecipientPopoverHide, isSmallScreen]);
+  const hideRecipientPopover = useCallback(() => {
+    cancelRecipientPopoverHide();
+    setRecipientPopoverTarget(null);
+    setRecipientPopoverStyle(null);
+  }, [cancelRecipientPopoverHide]);
+  const scheduleRecipientPopoverHide = useCallback(() => {
+    cancelRecipientPopoverHide();
+    recipientPopoverHideTimerRef.current = setTimeout(() => {
+      setRecipientPopoverTarget(null);
+      setRecipientPopoverStyle(null);
+      recipientPopoverHideTimerRef.current = null;
+    }, 120);
+  }, [cancelRecipientPopoverHide]);
+  const getRemoteGroupAccessLabel = useCallback((accessLevel: string) => {
+    const level = String(accessLevel || "").trim().toLowerCase();
+    if (level === "read") return t("remoteGroupAccessRead", { defaultValue: "Read" });
+    if (level === "full") return t("remoteGroupAccessFull", { defaultValue: "Full" });
+    if (level === "unknown") return t("remoteGroupAccessUnknown", { defaultValue: "Unknown" });
+    return t("remoteGroupMessagesOnly", { defaultValue: "Messages" });
+  }, [t]);
+  const copyRecipientIdentifier = useCallback(async (identifier: string) => {
+    const text = String(identifier || "").trim();
+    if (!text) return;
+    await copyWithFeedback(text, {
+      successMessage: t("recipientIdentifierCopied", { defaultValue: "Recipient identifier copied." }),
+      errorMessage: t("common:copyFailed", { defaultValue: "Copy failed." }),
+    });
+  }, [copyWithFeedback, t]);
+  const selectorPopoverTarget = useCallback((selector: string): RecipientPopoverTarget => ({
+    key: `selector:${selector}`,
+    label: selector,
+    kindLabel: t("recipientSelectorDetail", { defaultValue: "Local selector" }),
+    identifier: formatRecipientIdentifier({ kind: "selector", selector }),
+  }), [t]);
+  const actorPopoverTarget = useCallback((actor: Actor): RecipientPopoverTarget => {
+    const id = String(actor.id || "").trim();
+    const label = String(actor.title || id || "actor").trim();
+    const role = String(actor.role || "").trim();
+    return {
+      key: `actor:${id || label}`,
+      label,
+      kindLabel: t("recipientActorDetail", { defaultValue: "Local actor" }),
+      badgeLabel: role || undefined,
+      identifier: formatRecipientIdentifier({ kind: "actor", label, id, role }),
+      idValue: id,
+    };
+  }, [t]);
+  const remoteGroupPopoverTarget = useCallback((group: GroupMeta): RecipientPopoverTarget => {
+    const id = String(group.group_id || "").trim();
+    const label = getGroupRouteDisplayName(group);
+    const accessLevel = String(group.group_bridge_access_level || "").trim() || "unknown";
+    return {
+      key: `remote:${id}`,
+      label,
+      kindLabel: t("recipientRemoteGroupDetail", { defaultValue: "Remote group" }),
+      badgeLabel: accessLevel.toLowerCase() === "unknown" ? undefined : getRemoteGroupAccessLabel(accessLevel),
+      identifier: formatRecipientIdentifier({ kind: "remote_group", label, id, accessLevel }),
+      idValue: id,
+    };
+  }, [getRemoteGroupAccessLabel, t]);
 
   // Get display name for reply target
   const replyByDisplayName = useMemo(() => {
@@ -264,16 +440,6 @@ export function ChatComposer({
     () => (quotedPresentationRef ? getPresentationRefChipLabel(quotedPresentationRef) : ""),
     [quotedPresentationRef],
   );
-  const recipientLabelMap = useMemo(() => {
-    const map = new Map<string, { label: string; secondary?: string }>();
-    for (const actor of recipientActors) {
-      const id = String(actor.id || "").trim();
-      if (!id) continue;
-      const title = String(actor.title || "").trim();
-      map.set(id, title && title !== id ? { label: title, secondary: id } : { label: title || id });
-    }
-    return map;
-  }, [recipientActors]);
   const renderRecipientChipContent = useCallback((label: string) => (
     <span className="truncate">{label}</span>
   ), []);
@@ -283,6 +449,40 @@ export function ChatComposer({
     [slashSuggestions, slashVisibleCount],
   );
   const hasMoreSlashSuggestions = visibleSlashSuggestions.length < slashSuggestions.length;
+  const liveGroupMentionTokens = useMemo(
+    () => pruneComposerGroupMentionTokens({ text: composerText, tokens: composerGroupMentionTokens }),
+    [composerGroupMentionTokens, composerText],
+  );
+  const liveAgentMentionTokens = useMemo(
+    () => pruneComposerAgentMentionTokens({ text: composerText, tokens: composerAgentMentionTokens }),
+    [composerAgentMentionTokens, composerText],
+  );
+
+  const mentionOverlay = useMemo(() => {
+    const ranges = [
+      ...liveGroupMentionTokens.map((token) => ({ ...token, kind: "group" as const })),
+      ...liveAgentMentionTokens.map((token) => ({ ...token, kind: "agent" as const })),
+    ];
+    if (ranges.length === 0) return "";
+    const sorted = ranges.sort((a, b) => a.start - b.start);
+    let cursor = 0;
+    const escapeHtml = (value: string) => value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    const parts: string[] = [];
+    for (const token of sorted) {
+      if (token.start < cursor) continue;
+      parts.push(escapeHtml(composerText.slice(cursor, token.start)));
+      const className = token.kind === "group"
+        ? "rounded-md bg-sky-400/25 px-1 text-transparent ring-1 ring-inset ring-sky-300/60"
+        : "rounded-md bg-violet-400/25 px-1 text-transparent ring-1 ring-inset ring-violet-300/60";
+      parts.push(`<mark class="${className}">${escapeHtml(composerText.slice(token.start, token.end))}</mark>`);
+      cursor = token.end;
+    }
+    parts.push(escapeHtml(composerText.slice(cursor)));
+    return parts.join("");
+  }, [composerText, liveAgentMentionTokens, liveGroupMentionTokens]);
   const consumedSuggestedUserMessageIds = readConsumedSuggestedUserMessageIds();
   for (const eventId of sessionConsumedSuggestedUserMessageIds) {
     consumedSuggestedUserMessageIds.add(eventId);
@@ -386,6 +586,8 @@ export function ChatComposer({
     }
     isUserInputRef.current = true;
     setComposerText(val);
+    setComposerGroupMentionTokens((tokens) => pruneComposerGroupMentionTokens({ text: val, tokens }));
+    setComposerAgentMentionTokens((tokens) => pruneComposerAgentMentionTokens({ text: val, tokens }));
     const target = e.target;
     // Use requestAnimationFrame to avoid forced reflow during layout.
     requestAnimationFrame(() => {
@@ -393,18 +595,34 @@ export function ChatComposer({
     });
 
     const slashModeActive = val === val.trimStart() && val.startsWith("/") && !val.slice(1).includes(" ");
+    // A user's `#<group>` token is a local-group agent delegation hint, not a
+    // cross-group route: keep the destination pinned to the local group so the
+    // message is never sent directly to the referenced group. The token itself
+    // stays in the composer text as delegation context for the local agent.
+    const hashRouting = resolveComposerHashRouting({
+      text: val,
+      selectedGroupId,
+      groups: routeGroups,
+    });
+    if (hashRouting.destGroupId !== destGroupId) {
+      setDestGroupId(hashRouting.destGroupId);
+    }
+
     if (slashModeActive) {
       const nextSuggestions = filterSlashCommands(slashCommands, val);
       setShowSlashMenu(nextSuggestions.length > 0 || val === "/");
       setSlashSelectedIndex(0);
       setSlashVisibleCount(SLASH_COMMAND_PAGE_SIZE);
       setShowMentionMenu(false);
+      setMentionActorScope("selected");
+      setMentionTargetGroupId("");
+      setMentionFilter("");
       return;
     }
     setShowSlashMenu(false);
     setSlashVisibleCount(SLASH_COMMAND_PAGE_SIZE);
 
-    // Detect @ mentions for the recipient helper menu.
+    // Detect @ agent mentions for the recipient helper menu.
     const lastAt = val.lastIndexOf("@");
     if (lastAt >= 0) {
       const afterAt = val.slice(lastAt + 1);
@@ -413,14 +631,52 @@ export function ChatComposer({
         !afterAt.includes(" ") &&
         !afterAt.includes("\n")
       ) {
+        // Context-sensitive scope: a valid, same-segment `#group` before this
+        // `@` targets that group's actors; otherwise it's a local mention. A
+        // bare `@` (no in-segment `#group`) always stays local.
+        const mentionCtx = resolveControlledComposerMentionContext({
+          text: val,
+          atIndex: lastAt,
+          tokens: composerGroupMentionTokens,
+        });
+        setMentionKind("agent");
+        setMentionActorScope(mentionCtx.scope);
+        setMentionTargetGroupId(mentionCtx.mentionTargetGroupId);
         setMentionFilter(afterAt);
         setShowMentionMenu(true);
         setMentionSelectedIndex(0);
+        requestAnimationFrame(() => updateMentionMenuPosition(val.slice(0, lastAt + 1)));
+        return;
+      }
+    }
+
+    // Detect # group route mentions for the destination group helper menu.
+    const lastHash = val.lastIndexOf("#");
+    if (lastHash >= 0) {
+      const afterHash = val.slice(lastHash + 1);
+      if (
+        (lastHash === 0 || val[lastHash - 1] === " " || val[lastHash - 1] === "\n") &&
+        !afterHash.includes(" ") &&
+        !afterHash.includes("\n")
+      ) {
+        setMentionKind("group");
+        setMentionActorScope("selected");
+        setMentionTargetGroupId("");
+        setMentionFilter(afterHash);
+        setShowMentionMenu(true);
+        setMentionSelectedIndex(0);
+        requestAnimationFrame(() => updateMentionMenuPosition(val.slice(0, lastHash + 1)));
       } else {
         setShowMentionMenu(false);
+        setMentionActorScope("selected");
+        setMentionTargetGroupId("");
+        setMentionFilter("");
       }
     } else {
       setShowMentionMenu(false);
+      setMentionActorScope("selected");
+      setMentionTargetGroupId("");
+      setMentionFilter("");
     }
   };
 
@@ -457,7 +713,7 @@ export function ChatComposer({
       }
     }
     if (showMentionMenu && mentionSuggestions.length > 0) {
-      const maxIndex = Math.min(mentionSuggestions.length, 8) - 1;
+      const maxIndex = mentionSuggestions.length - 1;
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setMentionSelectedIndex((prev) => (prev >= maxIndex ? 0 : prev + 1));
@@ -511,17 +767,56 @@ export function ChatComposer({
     }
   };
 
-  // Select a mention from the menu.
-  const selectMention = (selected: string | undefined) => {
+  // Select an agent from @ or a destination group from #.
+  const selectMention = (selected: ComposerMentionSuggestion | undefined) => {
     if (!selected) return;
-    const lastAt = composerText.lastIndexOf("@");
-    if (lastAt >= 0) {
-      const before = composerText.slice(0, lastAt);
-      setComposerText(before + selected + " ");
+    if (selected.kind === "agent") {
+      const lastAt = composerText.lastIndexOf("@");
+      const mentionScope = lastAt >= 0
+        ? resolveControlledComposerMentionContext({ text: composerText, atIndex: lastAt, tokens: composerGroupMentionTokens }).scope
+        : "selected";
+      if (lastAt >= 0) {
+        const before = composerText.slice(0, lastAt);
+        const tokenText = getAgentMentionDisplayToken(selected);
+        const nextText = before + tokenText + " ";
+        setComposerText(nextText);
+        const token = createComposerAgentMentionToken({
+          actorId: selected.value,
+          token: tokenText,
+          start: before.length,
+          scope: mentionScope,
+        });
+        if (token) {
+          setComposerAgentMentionTokens((tokens) => pruneComposerAgentMentionTokens({ text: before, tokens }).concat([token]));
+        }
+      }
+      // Destination-scope `@` names a target-group agent for the delegation
+      // relay (extracted from text at send time) — it must NOT become a local
+      // recipient. Only local (selected-scope) mentions go into `to`.
+      if (mentionScope !== "destination" && !toTokens.includes(selected.value)) {
+        onAppendRecipientToken(selected.value, selected.label);
+      }
+      setShowMentionMenu(false);
+      setMentionSelectedIndex(0);
+      return;
     }
-    if (!toTokens.includes(selected)) {
-      onAppendRecipientToken(selected);
+
+    const lastHash = composerText.lastIndexOf("#");
+    if (lastHash >= 0) {
+      const before = composerText.slice(0, lastHash);
+      const tokenText = getComposerGroupMentionInsertToken(selected);
+      setComposerText(before + tokenText + " ");
+      const token = createComposerGroupMentionToken({
+        groupId: selected.value,
+        token: tokenText,
+        start: before.length,
+      });
+      if (token) {
+        setComposerGroupMentionTokens((tokens) => pruneComposerGroupMentionTokens({ text: before, tokens }).concat([token]));
+      }
     }
+    // Inserting a `#<group>` token is a local-group delegation hint only — it
+    // must NOT set a cross-group destination. The destination stays local.
     setShowMentionMenu(false);
     setMentionSelectedIndex(0);
   };
@@ -541,12 +836,8 @@ export function ChatComposer({
   });
   const isAttention = priority === "attention";
   const isCrossGroup = !!destGroupId && destGroupId !== selectedGroupId;
-  const destGroupDisplayValue = selectedGroupActorsHydrating
-    ? selectedGroupId
-    : getComposerDestGroupDisplayValue(destGroupId, selectedGroupId, composerGroupSettled);
+  const actorChipDisabled = !selectedGroupId || busy === "send" || !!selectedGroupActorsHydrating;
   const actionVisibility = getComposerActionVisibility(isSmallScreen);
-  const canChooseDestGroup =
-    !!selectedGroupId && busy !== "send" && !replyTarget && !quotedPresentationRef && composerFiles.length === 0;
 
   type MessageMode = "normal" | "attention" | "task";
   const modeOptions: Array<{ key: MessageMode; label: string; description: string }> = [
@@ -631,48 +922,6 @@ export function ChatComposer({
   const composerPlaceholder = showSuggestedUserMessage
     ? ""
     : isSmallScreen ? t('messagePlaceholder') : t('messagePlaceholderDesktop');
-
-  const groupOptions = useMemo(() => {
-    const cur = String(selectedGroupId || "").trim();
-    const list = (groups || []).filter((g) => String(g.group_id || "").trim());
-    // Prefer showing the current group first.
-    const sorted = list.slice().sort((a, b) => {
-      const aId = String(a.group_id || "");
-      const bId = String(b.group_id || "");
-      if (aId === cur && bId !== cur) return -1;
-      if (bId === cur && aId !== cur) return 1;
-      const aTitle = String(a.title || "").trim().toLowerCase();
-      const bTitle = String(b.title || "").trim().toLowerCase();
-      if (aTitle && bTitle) return aTitle.localeCompare(bTitle);
-      if (aTitle && !bTitle) return -1;
-      if (!aTitle && bTitle) return 1;
-      return aId.localeCompare(bId);
-    });
-    return sorted.map((g) => {
-      const value = String(g.group_id || "").trim();
-      const title = String(g.title || "").trim();
-      const topic = String(g.topic || "").trim();
-      const label = title || topic || t('untitledGroup');
-      return {
-        value,
-        label,
-        description: label !== value ? value : undefined,
-        keywords: [value, title, topic].filter(Boolean),
-      };
-    });
-  }, [groups, selectedGroupId, t]);
-
-  const groupSelectClass = useMemo(() => {
-    if (!canChooseDestGroup || groupOptions.length === 0) {
-      return isDark
-        ? "bg-white/[0.07] text-[var(--color-text-tertiary)] border-white/[0.08]"
-        : "bg-white text-gray-400 border-gray-200";
-    }
-    if (isCrossGroup) {
-      return chipActiveClass;
-    }
-    return chipInactiveClass;
-  }, [canChooseDestGroup, chipActiveClass, chipInactiveClass, groupOptions.length, isCrossGroup, isDark]);
 
   return (
     <footer
@@ -799,41 +1048,13 @@ export function ChatComposer({
             {/* Row 1 — Recipients */}
             <div
               className={classNames(
-                "flex items-center gap-1.5 border-b px-2.5 py-1",
+                "relative flex items-center gap-1.5 border-b px-2.5 py-1",
                 isDark ? "border-white/[0.04]" : "border-black/[0.04]",
               )}
             >
               <span className={classNames("flex-shrink-0 text-[10px] font-medium tracking-[0.08em]", isDark ? "text-[var(--color-text-tertiary)]" : "text-gray-400")}>
                 {t('to', 'To')}
               </span>
-
-              <div className="flex-shrink-0">
-                <GroupCombobox
-                  items={groupOptions}
-                  value={destGroupDisplayValue}
-                  onChange={setDestGroupId}
-                  placeholder={t('destinationGroup')}
-                  searchPlaceholder={t('searchDestinationGroup', { defaultValue: 'Search groups...' })}
-                  emptyText={t('noMatchingGroups', { defaultValue: 'No matching groups' })}
-                  ariaLabel={t('destinationGroup')}
-                  triggerClassName={classNames(
-                    "inline-flex w-auto min-w-[68px] max-w-[148px] sm:max-w-[196px]",
-                    "h-6 cursor-pointer gap-1 px-2 text-[10px]",
-                    chipBaseClass,
-                    groupSelectClass,
-                  )}
-                  contentClassName="max-w-[min(20rem,calc(100vw-1rem))]"
-                  descriptionClassName="text-[10px]"
-                  caretClassName={classNames(
-                    !canChooseDestGroup || groupOptions.length === 0
-                      ? (isDark ? "text-[var(--color-text-tertiary)]" : "text-gray-400")
-                      : isCrossGroup
-                        ? "text-[var(--color-text-primary)]"
-                        : (isDark ? "text-[var(--color-text-tertiary)]" : "text-gray-500")
-                  )}
-                  disabled={!canChooseDestGroup || groupOptions.length === 0}
-                />
-              </div>
 
               <ScrollFade
                 className="min-w-0 flex-1"
@@ -843,53 +1064,166 @@ export function ChatComposer({
                 <div
                   className={classNames(
                     "flex min-w-max items-center gap-1 transition-opacity",
-                    recipientActorsBusy ? "opacity-50 pointer-events-none" : "",
                   )}
                 >
-                  {["@all", "@foreman", "@peers"].map((tok) => {
-                    const active = toTokens.includes(tok);
+                  <div
+                    className={classNames(
+                      "flex items-center gap-1 transition-opacity",
+                      selectedGroupActorsHydrating ? "opacity-50 pointer-events-none" : "",
+                    )}
+                  >
+                    {["@all", "@foreman", "@peers"].map((tok) => {
+                      const active = toTokens.includes(tok);
+                      const popoverTarget = selectorPopoverTarget(tok);
+                      return (
+                        <button
+                          key={tok}
+                          className={classNames(
+                            chipBaseClass,
+                            active
+                              ? chipActiveClass
+                              : chipInactiveClass,
+                          )}
+                          onClick={() => onToggleRecipient(tok)}
+                          onMouseEnter={(event) => showRecipientPopover(popoverTarget, event.currentTarget)}
+                          onMouseLeave={scheduleRecipientPopoverHide}
+                          onFocus={(event) => showRecipientPopover(popoverTarget, event.currentTarget)}
+                          onBlur={scheduleRecipientPopoverHide}
+                          disabled={!selectedGroupId || busy === "send"}
+                          aria-pressed={active}
+                        >
+                          {renderRecipientChipContent(tok)}
+                        </button>
+                      );
+                    })}
+                    {actors.map((actor) => {
+                      const id = String(actor.id || "");
+                      if (!id) return null;
+                      const active = toTokens.includes(id);
+                      const popoverTarget = actorPopoverTarget(actor);
+                      return (
+                        <button
+                          key={id}
+                          className={classNames(
+                            chipBaseClass,
+                            active
+                              ? chipActiveClass
+                              : chipInactiveClass,
+                          )}
+                          onClick={() => onToggleRecipient(id)}
+                          onMouseEnter={(event) => showRecipientPopover(popoverTarget, event.currentTarget)}
+                          onMouseLeave={scheduleRecipientPopoverHide}
+                          onFocus={(event) => showRecipientPopover(popoverTarget, event.currentTarget)}
+                          onBlur={scheduleRecipientPopoverHide}
+                          disabled={actorChipDisabled}
+                          aria-pressed={active}
+                        >
+                          {renderRecipientChipContent(actor.title || id)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {availableRemoteGroups.length > 0 ? (
+                    <div className={classNames("mx-1 h-4 w-px flex-shrink-0", isDark ? "bg-white/10" : "bg-black/10")} aria-hidden="true" />
+                  ) : null}
+                  {availableRemoteGroups.map((group) => {
+                    const groupId = String(group.group_id || "").trim();
+                    const label = getGroupRouteDisplayName(group);
+                    const active = selectedRemoteGroupSet.has(groupId);
+                    const accessLevel = String(group.group_bridge_access_level || "").trim() || "unknown";
+                    const accessLabel = getRemoteGroupAccessLabel(accessLevel);
+                    const popoverTarget = remoteGroupPopoverTarget(group);
                     return (
-                      <button
-                        key={tok}
+                      <div
+                        key={groupId}
                         className={classNames(
-                          chipBaseClass,
-                          active
-                            ? chipActiveClass
-                            : chipInactiveClass,
+                          "flex h-6 flex-shrink-0 items-center overflow-hidden whitespace-nowrap rounded-lg border text-[10px] font-medium leading-none transition-all sm:text-[11px]",
+                          "max-w-[9rem] sm:max-w-[12rem]",
+                          active ? remoteChipActiveClass : remoteChipInactiveClass,
                         )}
-                        onClick={() => onToggleRecipient(tok)}
-                        disabled={!selectedGroupId || busy === "send"}
-                        aria-pressed={active}
+                        onMouseEnter={(event) => showRecipientPopover(popoverTarget, event.currentTarget as HTMLElement)}
+                        onMouseLeave={scheduleRecipientPopoverHide}
+                        data-remote-group-id={groupId}
+                        data-remote-group-access={accessLabel}
+                        title={label}
                       >
-                        {renderRecipientChipContent(tok)}
-                      </button>
-                    );
-                  })}
-                  {recipientActors.map((actor) => {
-                    const id = String(actor.id || "");
-                    if (!id) return null;
-                    const active = toTokens.includes(id);
-                    return (
-                      <button
-                        key={id}
-                        className={classNames(
-                          chipBaseClass,
-                          active
-                            ? chipActiveClass
-                            : chipInactiveClass,
-                        )}
-                        onClick={() => onToggleRecipient(id)}
-                        disabled={!selectedGroupId || busy === "send" || !!recipientActorsBusy}
-                        aria-pressed={active}
-                      >
-                        {renderRecipientChipContent(actor.title || id)}
-                      </button>
+                        <button
+                          type="button"
+                          className="flex h-full min-w-0 flex-1 items-center justify-center px-2 sm:px-2.5"
+                          onFocus={(event) => showRecipientPopover(popoverTarget, event.currentTarget)}
+                          onBlur={scheduleRecipientPopoverHide}
+                          onClick={() => onToggleRemoteGroup?.(groupId)}
+                          disabled={!selectedGroupId || busy === "send" || !onToggleRemoteGroup}
+                          aria-pressed={active}
+                          aria-label={t("remoteGroupChipLabel", { name: label, defaultValue: "Remote group {{name}}" })}
+                        >
+                          <span className="truncate">{label}</span>
+                        </button>
+                      </div>
                     );
                   })}
                 </div>
               </ScrollFade>
 
-              {toTokens.length > 0 && (
+              {typeof document !== "undefined" && visibleRecipientPopoverTarget && recipientPopoverStyle ? createPortal((
+                <div
+                  className={classNames(
+                    "fixed z-[1000] rounded-lg border px-3 py-2 text-xs shadow-xl backdrop-blur-xl",
+                    isDark
+                      ? "border-white/12 bg-[rgb(24,25,27)] text-slate-100"
+                      : "border-black/10 bg-white text-gray-900",
+                  )}
+                  style={recipientPopoverStyle}
+                  role="dialog"
+                  aria-label={t("recipientDetails", { name: visibleRecipientPopoverTarget.label, defaultValue: "Recipient details for {{name}}" })}
+                  onMouseEnter={cancelRecipientPopoverHide}
+                  onMouseLeave={scheduleRecipientPopoverHide}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                      <span className={classNames(
+                        "min-w-0 truncate text-[11px] font-semibold uppercase tracking-wide",
+                        isDark ? "text-slate-300" : "text-gray-600",
+                      )}>
+                        {visibleRecipientPopoverTarget.kindLabel}
+                      </span>
+                      {visibleRecipientPopoverTarget.badgeLabel ? (
+                        <span className={classNames(
+                          "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold leading-none",
+                          isDark ? "border-white/12 bg-white/[0.06] text-slate-300" : "border-black/10 bg-gray-50 text-gray-600",
+                        )}>
+                          {visibleRecipientPopoverTarget.badgeLabel}
+                        </span>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      className={classNames(
+                        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors",
+                        isDark ? "text-slate-300 hover:bg-white/[0.1] hover:text-white" : "text-gray-500 hover:bg-gray-100 hover:text-gray-950",
+                      )}
+                      onClick={() => {
+                        void copyRecipientIdentifier(visibleRecipientPopoverTarget.identifier);
+                        hideRecipientPopover();
+                      }}
+                      aria-label={t("copyRecipientIdentifier", { defaultValue: "Copy identifier" })}
+                      title={t("copyRecipientIdentifier", { defaultValue: "Copy identifier" })}
+                    >
+                      <CopyIcon size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                  {visibleRecipientPopoverTarget.idValue ? (
+                    <div className={classNames(
+                      "mt-2 truncate rounded-md px-2 py-1 font-mono text-[11px]",
+                      isDark ? "bg-white/[0.08] text-slate-200" : "bg-gray-100 text-gray-800",
+                    )}>
+                      {visibleRecipientPopoverTarget.idValue}
+                    </div>
+                  ) : null}
+                </div>
+              ), document.body) : null}
+
+              {(toTokens.length > 0 || selectedRemoteGroupIds.length > 0) && (
                 <button
                   className={classNames(
                     "flex-shrink-0 h-7 w-7 rounded-full flex items-center justify-center transition-colors opacity-50 hover:opacity-100",
@@ -907,10 +1241,29 @@ export function ChatComposer({
 
             {/* Row 2 — Textarea */}
             <div className="relative min-w-0 flex-1">
+              {mentionOverlay ? (
+                <div
+                  className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words border-0 px-4 py-3 text-transparent"
+                  style={{
+                    minHeight: `${Math.max(baseComposerHeight + 6, 52)}px`,
+                    maxHeight: `${maxComposerHeight}px`,
+                    fontSize: `${composerFontSize}px`,
+                    lineHeight: `${composerLineHeight}px`,
+                  }}
+                  aria-hidden="true"
+                >
+                  <div
+                    style={{
+                      transform: `translateY(-${composerScrollTop}px)`,
+                    }}
+                    dangerouslySetInnerHTML={{ __html: mentionOverlay }}
+                  />
+                </div>
+              ) : null}
               <textarea
                 ref={composerRef as RefObject<HTMLTextAreaElement>}
                 className={classNames(
-                  "w-full bg-transparent border-0 py-3 resize-none overflow-y-auto scrollbar-hide focus:outline-none focus:ring-0 text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
+                  "relative w-full bg-transparent border-0 py-3 resize-none overflow-y-auto scrollbar-hide focus:outline-none focus:ring-0 text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
                   showSuggestedUserMessage ? "pl-11 pr-4" : "px-4",
                 )}
                 style={{
@@ -925,6 +1278,7 @@ export function ChatComposer({
                 onPaste={handlePaste}
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
+                onScroll={(event) => setComposerScrollTop(event.currentTarget.scrollTop)}
                 onBlur={() => setTimeout(() => setShowMentionMenu(false), 150)}
                 aria-label={t('messageInput')}
                 aria-describedby={suggestedUserMessageHelpId}
@@ -969,50 +1323,18 @@ export function ChatComposer({
 
               {/* Mention menu */}
               {showMentionMenu && mentionSuggestions.length > 0 && (
-                <div
-                  className={classNames(
-                    "glass-panel absolute bottom-full left-2 mb-3 w-64 max-h-60 overflow-auto scrollbar-subtle rounded-2xl border shadow-2xl z-30 animate-in fade-in zoom-in-95 duration-200",
-                  )}
-                  role="listbox"
-                >
-                  {mentionSuggestions.slice(0, 8).map((s, idx) => (
-                    (() => {
-                      const option = recipientLabelMap.get(s);
-                      const primaryLabel = option?.label || s;
-                      const secondaryLabel = option?.secondary;
-                      return (
-                        <button
-                          key={s}
-                          className={classNames(
-                            "w-full text-left px-4 py-3 text-sm transition-colors",
-                            isDark ? "text-slate-200 border-b border-white/5" : "text-gray-700 border-b border-black/5",
-                            idx === mentionSelectedIndex
-                              ? "bg-[var(--glass-tab-bg-active)] text-[var(--color-text-primary)] font-medium"
-                              : isDark ? "hover:bg-white/5" : "hover:bg-gray-50",
-                          )}
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            selectMention(s);
-                            composerRef.current?.focus();
-                          }}
-                          onMouseEnter={() => setMentionSelectedIndex(idx)}
-                        >
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="opacity-60 flex-shrink-0">@</span>
-                            <div className="min-w-0">
-                              <div className="truncate">{primaryLabel}</div>
-                              {secondaryLabel ? (
-                                <div className={classNames("truncate text-[11px]", isDark ? "text-slate-400" : "text-gray-500")}>
-                                  @{secondaryLabel}
-                                </div>
-                              ) : null}
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })()
-                  ))}
-                </div>
+                <ChatMentionMenu
+                  isDark={isDark}
+                  isSmallScreen={isSmallScreen}
+                  items={mentionSuggestions}
+                  left={mentionMenuLeft}
+                  selectedIndex={mentionSelectedIndex}
+                  onSelect={(item) => {
+                    selectMention(item);
+                    composerRef.current?.focus();
+                  }}
+                  onHover={setMentionSelectedIndex}
+                />
               )}
 
               {showSlashMenu && visibleSlashSuggestions.length > 0 && (

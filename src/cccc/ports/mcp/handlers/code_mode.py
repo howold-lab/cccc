@@ -35,6 +35,7 @@ _COMMON_WORK_LOOPS = [
         "steps": [
             "cccc_git(action='status')",
             "cccc_git(action='diff')",
+            "cccc_repo(action='search') to find candidate files/symbols",
             "cccc_repo(action='read', start_line/end_line as needed)",
             "cccc_shell or cccc_exec_command for focused tests",
             "cccc_message_reply with findings/evidence",
@@ -57,7 +58,7 @@ _COMMON_WORK_LOOPS = [
             "cccc_file(action='read', rel_path=...) for text blobs delivered by CCCC",
             "cccc_file(action='blob_path', rel_path=...) for binary/local inspection",
             "create output files under the active scope",
-            "cccc_file(action='send', path=..., text=...) to return files as CCCC attachments",
+            "cccc_file(action='send', path=..., text=..., dst_group_id=...) to return files as local or remote CCCC attachments",
         ],
     },
     {
@@ -90,6 +91,7 @@ _TOOL_HELP_ALIASES = {
 }
 _TOOL_HELP_COMPACT_NOTES = {
     "repo": [
+        "Use cccc_repo(action='search') to find candidate files or symbols before broad reads.",
         "Use cccc_repo(action='read') to inspect text and get sha256.",
         "Use cccc_repo_edit(action='replace'|'multi_replace', expected_sha256=...) for exact small edits.",
         "Use cccc_apply_patch only for Codex *** Begin Patch file patches.",
@@ -99,7 +101,7 @@ _TOOL_HELP_COMPACT_NOTES = {
         "CCCC attachments are blob references, not browser uploads.",
         "Use cccc_file(action='read', rel_path=...) for UTF-8 text attachments.",
         "Use cccc_file(action='blob_path', rel_path=...) for binary/local inspection.",
-        "Use cccc_file(action='send', path=..., text=...) to return active-scope files as chat attachments.",
+        "Use cccc_file(action='send', path=..., text=..., dst_group_id=...) to return active-scope files as local or remote chat attachments.",
     ],
     "shell": [
         "Use cccc_shell for short one-shot commands.",

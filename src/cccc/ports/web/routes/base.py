@@ -23,6 +23,8 @@ from ....kernel.web_model_connectors import (
     revoke_web_model_connector,
     verify_web_model_connector_secret,
 )
+from ....kernel.group_bridge.credentials import lookup_pairing_remote_send_credential
+from ....kernel.group_bridge.pairing import active_trust_for_remote_send_credential
 from ....daemon.actors.web_model_actor_policy import require_no_other_chatgpt_web_model_actor
 from ....daemon.runner_state_ops import headless_state_running
 from ....util.conv import coerce_bool
@@ -35,8 +37,10 @@ from ..branding import (
     store_branding_asset,
 )
 from ...mcp.common import MCPError, runtime_context_override
+from ...mcp.group_bridge import GroupBridgeContext, handle_group_bridge_request
 from ...mcp.handlers.cccc_capability import capability_install as mcp_capability_install
 from ...mcp.handlers.cccc_capability import capability_use as mcp_capability_use
+from ..stream_close import close_stream_writer
 from ..schemas import (
     BrandingUpdateRequest,
     DebugClearLogsRequest,
@@ -199,6 +203,11 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
         return {"ok": daemon_ok, "result": result}
 
+    @global_router.get("/api/v1/ready")
+    async def ready() -> Dict[str, Any]:
+        """Readiness endpoint for the supervisor's Web child startup probe."""
+        return {"ok": True, "result": {"web": "ready"}}
+
     def _mcp_jsonrpc_error(req_id: Any, code: int, message: str) -> Dict[str, Any]:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
@@ -355,6 +364,47 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             _reject_live_binding("connector_actor_stopped", "web-model connector actor is stopped")
         return connector
 
+    def _resolve_group_bridge_context(request: Request) -> GroupBridgeContext:
+        authorization = str(request.headers.get("authorization") or "").strip()
+        token = ""
+        if authorization.lower().startswith("bearer "):
+            token = authorization[7:].strip()
+        if not token:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "unauthorized", "message": "missing Group Bridge bearer credentials", "details": {}},
+            )
+        credential = lookup_pairing_remote_send_credential(token, home=ctx.home)
+        if not isinstance(credential, dict):
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "unauthorized", "message": "invalid Group Bridge credentials", "details": {}},
+            )
+        trust = active_trust_for_remote_send_credential(credential, home=ctx.home)
+        if not isinstance(trust, dict):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "bridge_access_revoked",
+                    "message": "Group Bridge access is revoked or unavailable",
+                    "details": {"group_id": str(credential.get("group_id") or ""), "remote_group_id": str(credential.get("remote_group_id") or "")},
+                },
+            )
+        target_group_id = str(trust.get("group_id") or credential.get("group_id") or "").strip()
+        if not target_group_id or load_group(target_group_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "group_not_found", "message": "target group not found", "details": {"group_id": target_group_id}},
+            )
+        return GroupBridgeContext(
+            target_group_id=target_group_id,
+            remote_group_id=str(trust.get("remote_group_id") or credential.get("remote_group_id") or "").strip(),
+            remote_peer_id=str(trust.get("remote_peer_id") or credential.get("remote_peer_id") or "").strip(),
+            trust_id=str(trust.get("trust_id") or "").strip(),
+            access_level=str(trust.get("access_level") or "messages").strip().lower(),
+            credential_ref=str(credential.get("credential_ref") or "").strip(),
+        )
+
     def _record_web_model_connector_probe_activity(connector_id: str) -> None:
         cid = str(connector_id or "").strip()
         if not cid:
@@ -478,6 +528,28 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     )
                     await _record_browser_progress("mcp_tool", activity["tool_name"])
             return resp
+
+        if isinstance(payload, list):
+            responses = []
+            for item in payload:
+                resp = await _handle_one(item)
+                if resp:
+                    responses.append(resp)
+            if not responses:
+                return Response(status_code=202)
+            return JSONResponse(content=responses)
+        if not isinstance(payload, dict):
+            return JSONResponse(content=_mcp_jsonrpc_error(None, -32600, "Invalid Request"), status_code=400)
+        response = await _handle_one(payload)
+        if not response:
+            return Response(status_code=202)
+        return JSONResponse(content=response)
+
+    async def _handle_group_bridge_mcp_payload(payload: Any, *, bridge_context: GroupBridgeContext) -> Response:
+        async def _handle_one(item: Any) -> Dict[str, Any]:
+            if not isinstance(item, dict):
+                return _mcp_jsonrpc_error(None, -32600, "Invalid Request")
+            return await run_in_threadpool(handle_group_bridge_request, item, bridge_context)
 
         if isinstance(payload, list):
             responses = []
@@ -826,11 +898,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     return
                 await proxy_daemon_raw_stream_to_websocket(websocket, reader, writer)
             finally:
-                try:
-                    writer.close()
-                    await writer.wait_closed()
-                except Exception:
-                    pass
+                await close_stream_writer(writer)
             return
 
         try:
@@ -901,21 +969,46 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
             finally:
-                try:
-                    writer.close()
-                    await writer.wait_closed()
-                except Exception:
-                    pass
+                await close_stream_writer(writer)
                 try:
                     await websocket.close(code=1000)
                 except Exception:
                     pass
         finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
+            await close_stream_writer(writer)
+
+    @global_router.post("/mcp/group-bridge")
+    async def group_bridge_mcp_jsonrpc(request: Request) -> Response:
+        bridge_context = _resolve_group_bridge_context(request)
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail={"code": "invalid_json", "message": "invalid JSON body"}) from exc
+        return await _handle_group_bridge_mcp_payload(payload, bridge_context=bridge_context)
+
+    @global_router.get("/mcp/group-bridge")
+    async def group_bridge_mcp_sse_probe(request: Request) -> StreamingResponse:
+        _resolve_group_bridge_context(request)
+
+        async def _events():
+            yield b": cccc group bridge connector ready\n\n"
+
+        return StreamingResponse(
+            _events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @global_router.options("/mcp/group-bridge")
+    async def group_bridge_mcp_options() -> Response:
+        return Response(
+            status_code=204,
+            headers={
+                "Allow": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "authorization, content-type, accept, mcp-protocol-version, mcp-session-id",
+            },
+        )
 
     @global_router.post("/mcp/web-model/{connector_id}")
     async def web_model_mcp_jsonrpc(connector_id: str, request: Request) -> Response:

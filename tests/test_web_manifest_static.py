@@ -70,6 +70,18 @@ class TestWebManifestStatic(unittest.TestCase):
         finally:
             cleanup()
 
+    def test_packaged_ui_dist_contains_remote_pairing_flow(self) -> None:
+        dist = Path(__file__).resolve().parents[1] / "src" / "cccc" / "ports" / "web" / "dist"
+        bundles = list((dist / "assets").glob("*.js"))
+        self.assertTrue(bundles, "JavaScript chunks are missing from packaged web dist")
+        text = "\n".join(bundle.read_text(encoding="utf-8") for bundle in bundles)
+
+        self.assertIn("issuer_endpoint", text)
+        self.assertIn("group_bridge_session", text)
+        self.assertIn("/api/group-bridge/pairing/remote-requests", text)
+        self.assertNotIn("cccc.libp2p.connection_info", text)
+        self.assertNotIn("libp2p_cccc", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import type { Actor, ChatMessageData, GroupSettings, LedgerEvent, ReplyTarget } from "../types";
+import { isGroupBridgeInboundMessage } from "./groupBridgeMessages";
 
 type ReplyComposerState = {
   destGroupId: string;
@@ -47,13 +48,16 @@ export function buildReplyComposerState(
   const messageText = data && typeof data.text === "string" ? String(data.text) : "";
   const text = quoteText || messageText;
   const by = String(event.by || "").trim();
+  const isGroupBridgeMessage = isGroupBridgeInboundMessage(by, data);
   const authorIsActor = by && by !== "user" && actors.some((actor) => String(actor.id || "") === by);
   const originalTo = Array.isArray(data?.to)
     ? data.to.map((token: string) => String(token || "").trim()).filter(Boolean)
     : [];
   const policy = groupSettings?.default_send_to || "foreman";
   const defaultTo =
-    authorIsActor
+    isGroupBridgeMessage
+      ? []
+      : authorIsActor
       ? [by]
       : originalTo.length > 0
         ? originalTo

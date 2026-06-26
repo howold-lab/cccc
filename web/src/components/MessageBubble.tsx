@@ -7,9 +7,11 @@ import { LedgerEvent, Actor, AgentState, Task, getActorAccentColor, ChatMessageD
 import { formatFullTime, formatMessageTimestamp, formatTime } from "../utils/time";
 import { classNames } from "../utils/classNames";
 import { getReplyEventId } from "../utils/chatReply";
+import { isGroupBridgeInboundMessage } from "../utils/groupBridgeMessages";
 import { getPresentationMessageRefs, getPresentationRefChipLabel } from "../utils/presentationRefs";
 import { getTaskMessageRefs, getTaskRefChipLabel, getTaskRefStateKey, type TaskRefStateKey } from "../utils/taskRefs";
 import { isRedundantWecomImagePlaceholder } from "../utils/messageAttachments";
+import { destinationChipKey, getDelegationDisplayText, getDelegationSourceOutboundStatus, isDelegationSourceOutbound } from "./messageBubbleDelegation";
 import { MessageAttachments } from "./messageBubble/MessageAttachments";
 import { MessageFooter, MessageMetadataHeader } from "./messageBubble/MessageBubbleChrome";
 import { withAuthToken } from "../services/api/base";
@@ -179,6 +181,9 @@ function MessageBubbleBody({
     groupLabelById,
     toLabel,
     hasSource,
+    sourceLabel,
+    sourceTitle,
+    isGroupBridgeSource,
     srcGroupId,
     srcEventId,
     hasDestination,
@@ -191,6 +196,7 @@ function MessageBubbleBody({
     taskRefs,
     taskById,
     messageText,
+    bodyText,
     shouldRenderMarkdown,
     blobAttachments,
     blobGroupId,
@@ -206,6 +212,9 @@ function MessageBubbleBody({
     groupLabelById: Record<string, string>;
     toLabel: string;
     hasSource: boolean;
+    sourceLabel: string;
+    sourceTitle: string;
+    isGroupBridgeSource: boolean;
     srcGroupId: string;
     srcEventId: string;
     hasDestination: boolean;
@@ -218,6 +227,7 @@ function MessageBubbleBody({
     taskRefs: TaskMessageRef[];
     taskById: Map<string, Task>;
     messageText: string;
+    bodyText: string;
     shouldRenderMarkdown: boolean;
     blobAttachments: Array<{
         kind: string;
@@ -262,7 +272,7 @@ function MessageBubbleBody({
 
     return (
         <>
-            {(normalizedToLabel || hasSource || hasDestination) ? (
+            {(normalizedToLabel || (hasSource && !isGroupBridgeSource) || hasDestination) ? (
                 <div className="mb-3 flex flex-wrap items-center gap-1.5">
                     {normalizedToLabel ? (
                         <span className={metaChipClass} title={normalizedToLabel}>
@@ -270,7 +280,7 @@ function MessageBubbleBody({
                             <span className="truncate">{normalizedToLabel}</span>
                         </span>
                     ) : null}
-                    {hasSource ? (
+                    {hasSource && !isGroupBridgeSource ? (
                         <button
                             type="button"
                             className={classNames(
@@ -280,25 +290,29 @@ function MessageBubbleBody({
                             )}
                             onClick={() => onOpenSource?.(srcGroupId, srcEventId)}
                             disabled={!onOpenSource}
-                            title={t("openOriginalMessage")}
+                            title={sourceTitle}
                         >
                             <span className="opacity-65">↗</span>
                             <span className="truncate">
-                                {t("relayedFrom", { groupId: srcGroupId, eventId: srcEventId.slice(0, 8) })}
+                                {t("relayedFrom", { label: sourceLabel })}
                             </span>
                         </button>
                     ) : null}
                     {hasDestination ? (() => {
                         const dstLabel = String(groupLabelById?.[dstGroupId] || "").trim() || dstGroupId;
                         const dstToLabel = dstTo.length > 0 ? dstTo.join(", ") : "@all";
+                        // A delegation relay request is an agent contacting the
+                        // target group on the user's behalf — show "Relayed to"
+                        // so it never reads like a user direct cross-send.
+                        const chipKey = destinationChipKey(messageText);
                         return (
                             <div
                                 className={classNames(metaChipClass, relayChipClass)}
-                                title={t("sentTo", { label: dstGroupId, to: dstToLabel })}
+                                title={t(chipKey, { label: dstGroupId, to: dstToLabel })}
                             >
                                 <span className="opacity-65">↗</span>
                                 <span className="truncate">
-                                    {t("sentTo", { label: dstLabel, to: dstToLabel })}
+                                    {t(chipKey, { label: dstLabel, to: dstToLabel })}
                                 </span>
                             </div>
                         );
@@ -401,7 +415,7 @@ function MessageBubbleBody({
             ) : null}
 
             <MessageContent
-                fallbackText={messageText}
+                fallbackText={bodyText}
                 shouldRenderMarkdown={shouldRenderMarkdown}
                 isDark={isDark}
             />
@@ -642,6 +656,7 @@ export const MessageBubble = memo(function MessageBubble({
     const quoteText = msgData?.quote_text;
     const replyToEventId = typeof msgData?.reply_to === "string" ? String(msgData.reply_to || "").trim() : "";
     const senderSnapshotTitle = typeof msgData?.sender_title === "string" ? String(msgData.sender_title || "").trim() : "";
+    const groupBridgeSourceName = typeof msgData?.source_user_name === "string" ? String(msgData.source_user_name || "").trim() : "";
     const senderSnapshotRuntime = typeof msgData?.sender_runtime === "string" ? String(msgData.sender_runtime || "").trim() : "";
     const senderSnapshotAvatarPath = typeof msgData?.sender_avatar_path === "string" ? String(msgData.sender_avatar_path || "").trim() : "";
     const isAttention = String(msgData?.priority || "normal") === "attention";
@@ -658,6 +673,7 @@ export const MessageBubble = memo(function MessageBubble({
     const hasDestination = !!dstGroupId;
     const rawAttachments: MessageAttachment[] = Array.isArray(msgData?.attachments) ? msgData.attachments : [];
     const sourcePlatform = typeof msgData?.source_platform === "string" ? String(msgData.source_platform || "").trim() : "";
+    const isGroupBridgeSource = isGroupBridgeInboundMessage(ev.by, msgData);
     const blobAttachments = rawAttachments
         .filter((a): a is MessageAttachment => a != null && typeof a === "object")
         .map((a) => ({
@@ -675,9 +691,21 @@ export const MessageBubble = memo(function MessageBubble({
         }
         return messageText;
     }, [blobAttachments, messageText, sourcePlatform]);
+    const delegationSourceOutbound = useMemo(() => isDelegationSourceOutbound({
+        rawText: displayMessageText,
+        srcGroupId,
+        dstGroupId,
+    }), [displayMessageText, dstGroupId, srcGroupId]);
+    // Body text shown in the bubble: source-side outbound delegation is a
+    // status, not conversation content. Target-side inbound delegation still
+    // shows the natural contact body while hiding the protocol comment.
+    const bubbleBodyText = useMemo(() => {
+        if (delegationSourceOutbound) return getDelegationSourceOutboundStatus(displayMessageText);
+        return getDelegationDisplayText(displayMessageText);
+    }, [delegationSourceOutbound, displayMessageText]);
     const presentationRefs = useMemo(() => getPresentationMessageRefs(msgData?.refs), [msgData?.refs]);
     const taskRefs = useMemo(() => getTaskMessageRefs(msgData?.refs), [msgData?.refs]);
-    const shouldRenderMarkdown = useMemo(() => !isStreaming && mayContainMarkdown(displayMessageText), [displayMessageText, isStreaming]);
+    const shouldRenderMarkdown = useMemo(() => !isStreaming && mayContainMarkdown(bubbleBodyText), [bubbleBodyText, isStreaming]);
     const streamPhase = String((msgData as { stream_phase?: unknown } | undefined)?.stream_phase || "").trim().toLowerCase();
     const stableMessageAttachmentKey = useMemo(() => {
         const clientId = typeof msgData?.client_id === "string" ? String(msgData.client_id || "").trim() : "";
@@ -785,13 +813,27 @@ export const MessageBubble = memo(function MessageBubble({
             senderId: String(ev.by || ""),
             senderActor,
             senderTitle: senderSnapshotTitle,
+            group_bridgeSourceName: isGroupBridgeSource ? groupBridgeSourceName || t("remoteGroupFallback") : groupBridgeSourceName,
             displayNameMap,
         });
-    }, [displayNameMap, ev.by, senderActor, senderSnapshotTitle]);
+    }, [displayNameMap, ev.by, groupBridgeSourceName, isGroupBridgeSource, senderActor, senderSnapshotTitle, t]);
     const senderAvatarUrl = useMemo(() => {
         return buildSenderAvatarUrl(blobGroupId, senderSnapshotAvatarPath) || String(senderActor?.avatar_url || "").trim();
     }, [blobGroupId, senderActor?.avatar_url, senderSnapshotAvatarPath]);
     const senderRuntime = senderSnapshotRuntime || String(senderActor?.runtime || "").trim();
+    const sourceLabel = useMemo(() => {
+        if (!hasSource || isGroupBridgeSource) return "";
+        return String(groupLabelById?.[srcGroupId] || "").trim() || groupBridgeSourceName || srcGroupId;
+    }, [groupBridgeSourceName, groupLabelById, hasSource, isGroupBridgeSource, srcGroupId]);
+    const sourceTitle = useMemo(() => {
+        if (!hasSource || isGroupBridgeSource) return "";
+        return t("relayedSourceDetails", {
+            label: sourceLabel,
+            groupId: srcGroupId,
+            eventId: srcEventId,
+        });
+    }, [hasSource, isGroupBridgeSource, sourceLabel, srcEventId, srcGroupId, t]);
+    const remoteBadgeLabel = isGroupBridgeSource ? t("remoteBadge", { defaultValue: "Remote" }) : "";
 
     const readPreviewEntries = visibleReadStatusEntries.slice(0, 3);
     const readPreviewOverflow = Math.max(0, visibleReadStatusEntries.length - readPreviewEntries.length);
@@ -888,6 +930,7 @@ export const MessageBubble = memo(function MessageBubble({
                             senderAvatarUrl={senderAvatarUrl || undefined}
                             senderRuntime={senderRuntime || undefined}
                             avatarRingClassName={senderAccent?.ring}
+                            remoteBadgeLabel={remoteBadgeLabel || undefined}
                         />
 
                         <MessageMetadataHeader
@@ -897,6 +940,7 @@ export const MessageBubble = memo(function MessageBubble({
                             senderDisplayName={senderDisplayName}
                             messageTimestamp={messageTimestamp}
                             fullMessageTimestamp={fullMessageTimestamp}
+                            remoteBadgeLabel={remoteBadgeLabel || undefined}
                         />
                     </>
                 ) : null}
@@ -930,7 +974,9 @@ export const MessageBubble = memo(function MessageBubble({
                             : classNames(
                                 "w-full rounded-[22px] rounded-tl-md border-y border-r border-l-4 bg-[var(--glass-panel-bg)] text-[var(--color-text-primary)] shadow-[0_10px_28px_rgba(15,23,42,0.04)] dark:shadow-[0_10px_28px_rgba(0,0,0,0.25)]",
                                 "border-y-[var(--glass-border-subtle)] border-r-[var(--glass-border-subtle)]",
-                                ACCENT_BORDER_CLASSES[senderAccent?.text || ""] || "border-l-[var(--glass-border-subtle)]"
+                                isGroupBridgeSource
+                                    ? "border-l-emerald-500/85 bg-emerald-50/35 dark:border-l-emerald-400/80 dark:bg-emerald-950/15"
+                                    : ACCENT_BORDER_CLASSES[senderAccent?.text || ""] || "border-l-[var(--glass-border-subtle)]"
                               )
                         ,
                         isAttention ? "ring-1 ring-amber-400/40 dark:ring-amber-500/40" : ""
@@ -946,6 +992,9 @@ export const MessageBubble = memo(function MessageBubble({
                         groupLabelById={groupLabelById}
                         toLabel={toLabel}
                         hasSource={hasSource}
+                        sourceLabel={sourceLabel}
+                        sourceTitle={sourceTitle}
+                        isGroupBridgeSource={isGroupBridgeSource}
                         srcGroupId={srcGroupId}
                         srcEventId={srcEventId}
                         hasDestination={hasDestination}
@@ -958,6 +1007,7 @@ export const MessageBubble = memo(function MessageBubble({
                         taskRefs={taskRefs}
                         taskById={taskById}
                         messageText={displayMessageText}
+                        bodyText={bubbleBodyText}
                         shouldRenderMarkdown={shouldRenderMarkdown}
                         blobAttachments={blobAttachments}
                         blobGroupId={blobGroupId}

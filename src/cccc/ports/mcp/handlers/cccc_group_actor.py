@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ....daemon.group_bridge.route_lookup import resolve_remote_group_route_token
 from ....util.conv import coerce_bool
-from ..common import _call_daemon_or_raise
+from ..common import MCPError, _call_daemon_or_raise
 
 
 def _sanitize_group_doc_for_agent(doc: Any) -> Dict[str, Any]:
@@ -138,6 +139,93 @@ def group_list() -> Dict[str, Any]:
             }
         )
     return {"groups": out}
+
+
+def _normalize_group_token(value: Any) -> str:
+    token = str(value or "").strip()
+    while token.startswith("#"):
+        token = token[1:].strip()
+    return token.lower()
+
+
+def _group_matches_token(group: Dict[str, Any], token: str) -> str:
+    if not token:
+        return ""
+    for field in ("group_id", "title", "topic"):
+        value = _normalize_group_token(group.get(field))
+        if value and value == token:
+            return field
+    return ""
+
+
+def _group_bridge_route_resolution(*, group_id: str, token: str) -> Dict[str, Any]:
+    route = resolve_remote_group_route_token(group_id=group_id, token=token)
+    if route is None:
+        return {}
+    return {
+        "group_id": route.remote_group_id,
+        "title": route.remote_group_title or route.remote_group_id,
+        "topic": "",
+        "running": True,
+        "state": "active",
+        "matched_by": "group_bridge_remote_group_title",
+        "token": str(token or "").strip(),
+        "group_bridge": True,
+        "registration_id": route.registration_id,
+        "trust_id": route.trust_id,
+    }
+
+
+def group_resolve(*, token: str, group_id: str = "") -> Dict[str, Any]:
+    """Resolve a natural #group/title token to one real group_id."""
+    raw = str(token or "").strip()
+    normalized = _normalize_group_token(raw)
+    if not normalized:
+        raise MCPError(code="missing_token", message="token is required for cccc_group resolve")
+
+    groups = group_list().get("groups")
+    if not isinstance(groups, list):
+        groups = []
+
+    matches: list[tuple[Dict[str, Any], str]] = []
+    for item in groups:
+        if not isinstance(item, dict):
+            continue
+        matched_by = _group_matches_token(item, normalized)
+        if matched_by:
+            matches.append((item, matched_by))
+
+    if not matches:
+        remote_match = _group_bridge_route_resolution(group_id=group_id, token=raw)
+        if remote_match:
+            return remote_match
+        raise MCPError(
+            code="not_found",
+            message=(
+                f"no group matches token: {raw}. Do not guess dst_group_id. "
+                'For local groups, inspect cccc_group(action="list"). '
+                'For trusted remote Group Bridge targets, inspect cccc_remote_access(action="list") '
+                "and use the returned remote_group_id."
+            ),
+        )
+    if len(matches) > 1:
+        candidates = [{**group, "matched_by": matched_by} for group, matched_by in matches]
+        raise MCPError(
+            code="ambiguous",
+            message=f"multiple groups match token: {raw}. Use one returned group_id explicitly; do not guess dst_group_id.",
+            details={"candidates": candidates},
+        )
+
+    group, matched_by = matches[0]
+    return {
+        "group_id": group.get("group_id") or "",
+        "title": group.get("title") or "",
+        "topic": group.get("topic") or "",
+        "running": coerce_bool(group.get("running"), default=False),
+        "state": group.get("state") or "",
+        "matched_by": matched_by,
+        "token": raw,
+    }
 
 
 def actor_list(*, group_id: str) -> Dict[str, Any]:

@@ -81,6 +81,7 @@ from ....util.conv import coerce_bool
 from ....util.fs import atomic_write_text
 from ....util.time import utc_now_iso
 from ....util.process import pid_is_alive
+from ..stream_close import close_stream_writer
 from ..schemas import (
     AttachRequest,
     AssistantSettingsUpdateRequest,
@@ -3818,11 +3819,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     return
                 await proxy_daemon_raw_stream_to_websocket(websocket, reader, writer)
             finally:
-                try:
-                    writer.close()
-                    await writer.wait_closed()
-                except Exception:
-                    pass
+                await close_stream_writer(writer)
             return
 
         try:
@@ -3897,11 +3894,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             except WebSocketDisconnect:
                 pass
         finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
+            await close_stream_writer(writer)
 
     @group_router.get("/ledger/stream")
     async def ledger_stream(group_id: str) -> StreamingResponse:

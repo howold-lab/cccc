@@ -9,10 +9,10 @@
 
 ### 像群聊一样指挥你的编码智能体
 
-**已读回执、送达追踪、手机远程运维 ——
-Claude Code、Codex、Gemini 等 12 种运行时，在同一个持久协作组里。**
+**已读回执、送达追踪、远端协作组桥接、手机远程运维 ——
+Claude Code、Codex、ChatGPT Web 等 16 种运行时，在同一个持久协作组里。**
 
-让多个 coding agent 作为一支**持久化、可协调的团队**运行 — 而不是一堆各自为政的终端窗口。
+让多个 coding agent 跨运行时、跨机器、跨可信协作组作为一支**持久化、可协调的团队**运行 — 而不是一堆各自为政的终端窗口。
 
 一条 `pip install`。零基础设施，生产级能力。
 
@@ -45,7 +45,8 @@ CCCC 让你的 agent 作为一套持久、可协调的系统运行：
 - **协作可持久** — 工作状态进入 append-only ledger，而不是埋在终端滚动缓冲区里。
 - **触达可验证** — 消息具备路由、已读、ACK、reply-required 追踪，而不是"发过去了应该看到了"。
 - **控制面统一** — Web UI、CLI、MCP、IM 桥接全部围绕同一 daemon 运作，不会出现多套状态。
-- **多运行时是默认能力** — Claude Code、Codex CLI、ChatGPT Web、Gemini CLI 以及其它一线 runtime 可以在同一协作组内协同工作。
+- **多运行时是默认能力** — Claude Code、Codex CLI、ChatGPT Web、Grok Build 以及其它一线 runtime 可以在同一协作组内协同工作。
+- **Group Bridge 连接远端协作组** — 可信 CCCC group 可以显式互发消息，并在授权后读取或操作彼此的本地资源。
 - **本地优先但可远程值守** — 单条 `pip install` 即可启动，运行时状态放在 `CCCC_HOME`，需要时再通过 Web / IM 远程运维。
 
 ## CCCC 能做什么
@@ -57,7 +58,8 @@ CCCC 只需一条 `pip install`，零外部依赖 — 不需要数据库、不�
 | **唯一事实源** | append-only ledger（`ledger.jsonl`）记录所有消息和事件 — 可回放、可审计、永不丢失 |
 | **可靠的消息语义** | 已读游标、attention ACK、reply-required 义务追踪 — 谁看到了什么一清二楚 |
 | **统一控制面** | Web UI、CLI、MCP 工具、IM 桥接全部对接同一 daemon — 不存在状态分裂 |
-| **多运行时编排** | Claude Code、Codex CLI、Grok Build、OpenCode、ChatGPT Web、Gemini CLI 等 12 种一线运行时可混用，此外还支持 `custom` 运行时兜底 |
+| **多运行时编排** | Claude Code、Codex CLI、GitHub Copilot CLI、Cursor CLI、Devin CLI、Kiro CLI、Kilo Code CLI、Antigravity CLI、Grok Build、OpenCode、ChatGPT Web 等 16 种一线运行时可混用，此外还支持 `custom` 运行时兜底 |
+| **Group Bridge** | 连接跨机器或跨团队的可信远端协作组，从显式消息开始，并可按需授予 read/full 本地访问权限 |
 | **角色化协调** | Foreman + Peer 角色模型，权限边界清晰，收件人路由精确（`@all`、`@peers`、`@foreman`） |
 | **本地优先的运行时状态** | 运行时数据保存在 `CCCC_HOME` 而不是代码仓库里，同时仍可通过 Web Access 与 IM 做远程运维 |
 
@@ -134,8 +136,8 @@ graph TB
         A1["Claude Code"]
         A2["Codex CLI"]
         A3["ChatGPT Web<br/>GPT-5.x via MCP"]
-        A4["Gemini CLI"]
-        A5["+ 6 种 + custom"]
+        A4["Grok Build"]
+        A5["+ 12 种 + custom"]
     end
 
     subgraph Daemon["CCCC Daemon · 单写者"]
@@ -164,6 +166,12 @@ graph TB
         WX["微信"]
     end
 
+    subgraph Remote["远端 CCCC Groups"]
+        direction LR
+        RG1["可信协作组"]
+        RG2["另一台机器/团队"]
+    end
+
     A1 <-->|MCP 工具<br/>PTY/headless| Daemon
     A2 <-->|MCP 工具<br/>PTY/headless| Daemon
     A3 <-->|浏览器投递<br/>远程 MCP| Daemon
@@ -171,6 +179,8 @@ graph TB
     A5 <-->|MCP 工具| Daemon
     Daemon <--> Ports
     Web <--> IM
+    Daemon <-->|Group Bridge<br/>messages · read · full| RG1
+    Daemon <-->|Group Bridge<br/>messages · read · full| RG2
 
 ```
 
@@ -179,32 +189,42 @@ graph TB
 - **Daemon 单写者** — 所有状态变更经由同一进程，杜绝竞态条件
 - **Ledger append-only** — 事件不可篡改，历史可靠且可调试
 - **入口薄层化** — Web、CLI、MCP、IM 桥接均为无状态前端；daemon 拥有全部真相
+- **远端协作组是显式信任关系** — Group Bridge 默认从 message-only 协调开始，read/full 访问必须按远端 group 单独授权
 - **运行时目录 `CCCC_HOME`**（默认 `~/.cccc/`）— 运行时状态与代码仓库严格分离
 
 ## 支持的运行时
 
-CCCC 跨 12 种一线运行时编排 agent，除此之外还支持 `custom` 运行时兜底。同一协作组内，每个 actor 可使用不同的运行时。
+CCCC 跨 16 种一线运行时编排 agent，除此之外还支持 `custom` 运行时兜底。同一协作组内，每个 actor 可使用不同的运行时。
 
-| 运行时 | 接入方式 | 命令 / 表面 |
+| 运行时 | 接入方式 | 入口 / 表面 |
 |---------|----------|-------------|
 | Claude Code | 自动 MCP 配置 | `claude` |
 | Codex CLI | 自动 MCP 配置 | `codex` |
+| GitHub Copilot CLI | 自动 MCP 配置 | `copilot` |
+| Cursor CLI | 提示词辅助 MCP 配置 | `cursor-agent` |
+| Devin CLI | 自动 MCP 配置 | `devin` |
+| Kiro CLI | 自动 MCP 配置 | `kiro-cli` |
+| Kilo Code CLI | 提示词辅助 MCP 配置 | `kilo` |
+| Antigravity CLI | 提示词辅助 MCP 配置 | `agy` |
 | ChatGPT Web | 远程 MCP + 浏览器投递 | `chatgpt.com` 对话 |
-| Gemini CLI | 自动 MCP 配置 | `gemini` |
 | Grok Build | 自动 MCP 配置 | `grok` |
 | Hermes Agent | 自动 MCP 配置 | `hermes` |
 | Droid | 自动 MCP 配置 | `droid` |
 | Amp | 自动 MCP 配置 | `amp` |
 | Auggie | 自动 MCP 配置 | `auggie` |
 | Kimi CLI | 自动 MCP 配置 | `kimi` |
-| Neovate | 自动 MCP 配置 | `neovate` |
 | OpenCode | 通过运行时配置自动 MCP 配置 | `opencode` |
 | Custom | 手动配置 | 任意命令 |
 
+这里列的是稳定的运行时入口或使用表面。CCCC 会自动套用各运行时的启动默认设置；actor/profile 的命令可在设置中查看和自定义。
+
 ```bash
-cccc setup --runtime claude    # 自动配置该运行时的 MCP
-cccc runtime list --all        # 列出所有可用运行时
-cccc doctor                    # 检查环境和运行时可用性
+cccc setup --runtime claude       # 自动配置该运行时的 MCP
+cccc setup --runtime cursor       # 显示提示词辅助 MCP 配置协议
+cccc setup --runtime kilo         # 显示提示词辅助 MCP 配置协议
+cccc setup --runtime antigravity  # 显示提示词辅助 MCP 配置协议
+cccc runtime list --all           # 列出所有可用运行时
+cccc doctor                       # 检查环境和运行时可用性
 ```
 
 Actor 可以以 **PTY**（嵌入式终端）或 **headless**（无终端的结构化 I/O）模式运行。Claude Code 和 Codex CLI 支持两种模式；headless 模式下 daemon 对投递和流式传输具有更精细的控制。
@@ -214,6 +234,20 @@ Actor 可以以 **PTY**（嵌入式终端）或 **headless**（无终端的结�
 ChatGPT Web 可以作为真正的 CCCC actor 加入协作组，而不只是外部聊天窗口：CCCC 通过浏览器投递把组消息送进绑定的 ChatGPT 对话，GPT-5.x 再经由 actor 绑定的远程 MCP connector 回连 CCCC —— 接收路由消息、可见回复、查看和编辑仓库文件、运行受 scope 限制的 shell/git 命令，体验接近原生本地编码 agent。这也能把闲置的 ChatGPT Web 用量转化为额外的本地开发 agent 容量。
 
 配置需要通过公网 HTTPS URL 暴露 MCP connector（Cloudflare Tunnel、ngrok、Tailscale Funnel 或反向代理）。注意 GPT-5.x Pro 会话目前不支持此用法 —— 它不暴露第三方 MCP connector。完整配置与排障见 [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+
+## Group Bridge：连接远端协作组
+
+Group Bridge 将 CCCC 从一个本地 working group 扩展为一组可信协作组网络。你可以让 Windows 工作站上的 group 与 WSL、Mac、服务器，或队友的 CCCC 实例协作，而不需要合并彼此的运行时状态，也不会破坏本地优先模型。
+
+访问能力按层级授予：
+
+| 层级 | 能力 |
+|------|------|
+| **Messages** | 向远端 foreman 显式发送跨 group 消息，必要时可携带附件 |
+| **Read** | 允许可信远端 group 通过 remote MCP 工具查看本地 context、仓库和 git 状态 |
+| **Full** | 允许高度可信的远端 group 通过与本地 actor 相同的访问面修改文件、运行命令 |
+
+这让 CCCC 适用于多机器开发、跨环境 lead/worker 协作，以及可信团队之间请求状态、证据或实现帮助的场景。它不是公开访客访问功能：只有在你愿意让对方查看或操作目标工作区时，才授予 read/full 权限。
 
 ## 消息与协调
 
@@ -225,6 +259,7 @@ CCCC 实现的是 IM 级消息语义，而不是"往终端里粘贴一段文字"
 - **Attention ACK** — 高优先级消息要求显式确认
 - **Reply-required 义务** — 持续追踪直到收件人回复
 - **自动唤醒** — 收到消息时，已停用的 actor 自动启动
+- **远端协作组收件人** — Group Bridge 目标以显式 remote recipient 出现，而不是隐藏广播
 
 普通 `send` 适合聊天、询问和轻量请求。需要明确负责人、完成标准、证据、交接或验收轨迹的委派工作，应使用 `tracked-send`。`@all` 仍可用于公告或紧急共享约束，但不应作为具体任务分派的默认方式。
 
@@ -260,6 +295,7 @@ CCCC 实现的是 IM 级消息语义，而不是"往终端里粘贴一段文字"
 - **Context 面板** — 共享 vision、sketch、里程碑和任务
 - **Group Space** — NotebookLM 集成，共享知识管理
 - **ChatGPT Web Model 设置** — 将一个 ChatGPT Web 对话接入为 CCCC actor
+- **Group Bridge 设置** — 配对可信远端协作组，并为每条连接选择 messages/read/full 访问层级
 - **IM 桥接配置** — 连接 Telegram/Slack/Discord/飞书/钉钉/企业微信/微信
 - **设置** — 消息策略、触达调优、终端日志控制
 - **文本缩放** — 90% / 100% / 125% 三级字体大小，按浏览器持久化
@@ -353,6 +389,7 @@ Agent 通过一套紧凑的 action-oriented MCP surface 与 CCCC 交互。核心
 | **消息与文件** | `cccc_inbox_list`、`cccc_inbox_mark_read`、`cccc_message_send`、`cccc_message_reply`、`cccc_file` |
 | **协作组与 actor 控制** | `cccc_group`、`cccc_actor` |
 | **协调与状态** | `cccc_context_get`、`cccc_coordination`、`cccc_task`、`cccc_agent_state`、`cccc_context_sync` |
+| **远端协作组访问** | `cccc_remote_access`、`cccc_remote_context`、`cccc_remote_repo`、`cccc_remote_git`、`cccc_remote_apply_patch`、`cccc_remote_exec_command` |
 | **自动化与记忆** | `cccc_automation`、`cccc_memory`、`cccc_memory_admin` |
 | **按需扩展能力** | `cccc_capability_*`、`cccc_space`、`cccc_terminal`、`cccc_debug`、`cccc_im_bind` |
 
@@ -365,7 +402,8 @@ Agent 通过一套紧凑的 action-oriented MCP surface 与 CCCC 交互。核心
 | 多个 coding agent 在同一代码库中协作 | ✅ 核心场景 |
 | 人类 + 智能体协调，具备完整审计轨迹 | ✅ 核心场景 |
 | 长时间运行的协作组，通过手机/IM 远程管理 | ✅ 强适配 |
-| 混合运行时团队（如 Claude + Codex + Gemini） | ✅ 强适配 |
+| 混合运行时团队（如 Claude + Codex + Kimi） | ✅ 强适配 |
+| 可信协作组跨机器或跨团队协作 | ✅ 强适配 |
 | 单 agent 本地编码辅助 | ⚠️ 可用，但 CCCC 的价值在多参与者时才充分体现 |
 | 纯 DAG 工作流编排 | ❌ 建议使用专用编排器，CCCC 可作为协作层补充 |
 
@@ -375,7 +413,7 @@ CCCC 是**协作内核** — 它拥有协调层，与外部 CI/CD、编排器、
 
 | 如果你在用 | 它的强项 | CCCC 补上的 |
 |---|---|---|
-| **原生 agent 团队**（如 Claude Code subagents/teams） | 单厂商、单会话内体验最顺滑 | 跨厂商混编（Claude + Codex + Gemini + Kimi…）、重启不丢的持久状态、手机/IM 远程运维、完整审计 ledger |
+| **原生 agent 团队**（如 Claude Code subagents/teams） | 单厂商、单会话内体验最顺滑 | 跨厂商混编（Claude + Codex + Grok + Kimi…）、重启不丢的持久状态、手机/IM 远程运维、完整审计 ledger |
 | **并行任务执行器**（worktree/任务板类工具） | 隔离的并行任务执行 | 一个协调层：agent 之间对话、交接、ACK、被催办 —— 外加 7×24 daemon 运维 |
 | **IM 助理网关** | 住在聊天软件里的个人助理 | 面向真实工作的投递语义：tracked task、已读/ACK 回执、多 agent 协作组、持久审计链 |
 
@@ -387,6 +425,7 @@ CCCC 不替代你的 agent —— 它是让它们成为一个团队的那一层�
 - **Daemon IPC 无认证。** 默认仅绑定 localhost。
 - **IM bot token** 从环境变量读取，不存储在配置文件中。
 - **运行时状态** 存放在 `CCCC_HOME`（`~/.cccc/`），不在代码仓库内。
+- **Group Bridge 是基于信任的连接。** message-only 是最安全的默认层级；只有在远端 group 可以查看或操作目标工作区时，才授予 read/full 访问。
 - **能力白名单** 管控 agent 可启用的可选 MCP 能力面。策略由内置默认值与 `CCCC_HOME/config/` 下的用户覆盖层组合而成。
 
 详细安全指南见 [SECURITY.md](SECURITY.md)。
@@ -460,7 +499,7 @@ cd docker
 docker compose up -d  # 然后先在 Settings > Web Access 中创建管理员访问令牌，再对外暴露
 ```
 
-Docker 镜像内置 Claude Code、Codex CLI、Gemini CLI 和 Factory CLI。完整配置见 [`docker/`](docker/)。
+Docker 镜像内置 Claude Code、Codex CLI 和 Factory CLI。完整配置见 [`docker/`](docker/)。
 
 ### 从 0.3.x 升级
 

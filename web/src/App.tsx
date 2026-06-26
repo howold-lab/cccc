@@ -19,7 +19,6 @@ import { useViewportHeight } from "./hooks/useViewportHeight";
 import { useAppChrome } from "./hooks/useAppChrome";
 import { useAppGroupLifecycle } from "./hooks/useAppGroupLifecycle";
 import { useAppTabState } from "./hooks/useAppTabState";
-import { getEffectiveComposerDestGroupId } from "./stores/useComposerStore";
 import {
   useGroupStore,
   useUIStore,
@@ -30,9 +29,11 @@ import {
 } from "./stores";
 import { useChatOutboxStore } from "./stores/chatOutboxStore";
 import type { ChatMessageData, LedgerEvent } from "./types";
+import type { ComposerMentionKind } from "./pages/chat/chatMentionSuggestions";
 import { shouldMountAppModals } from "./utils/appLazyMount";
 import { publishCapabilityChanged } from "./utils/capabilityEvents";
 import { filterVisibleRuntimeActors } from "./utils/runtimeVisibility";
+import { getEffectiveComposerDestGroupId } from "./stores/useComposerStore";
 
 // ============ Main App Component ============
 
@@ -131,7 +132,12 @@ export default function App() {
   } = useActorActions(selectedGroupId);
 
   const [showMentionMenu, setShowMentionMenu] = React.useState(false);
-  const [_mentionFilter, setMentionFilter] = React.useState("");
+  const [mentionFilter, setMentionFilter] = React.useState("");
+  const [mentionKind, setMentionKind] = React.useState<ComposerMentionKind>("agent");
+  const [mentionActorScope, setMentionActorScope] = React.useState<"selected" | "destination">("selected");
+  // Group whose actors feed the `@` destination menu (set when typing `#group @`).
+  // Decoupled from destGroupId so it never turns the message into a cross-send.
+  const [mentionTargetGroupId, setMentionTargetGroupId] = React.useState<string>("");
   const [mentionSelectedIndex, setMentionSelectedIndex] = React.useState(0);
   const internalRuntimeActors = useMemo(
     () => internalRuntimeActorsByGroup[String(selectedGroupId || "").trim()] || [],
@@ -229,6 +235,7 @@ export default function App() {
     selectedGroupId,
     composerGroupId: activeGroupId,
     sendGroupId: computedSendGroupId,
+    mentionTargetGroupId,
     selectedGroupActorsHydrating,
   });
   const sendGroupId = computedSendGroupId;
@@ -359,7 +366,6 @@ export default function App() {
       <AppShell
         orderedGroups={orderedGroups}
         archivedGroupIds={archivedGroupIds}
-        groups={groups}
         selectedGroupId={selectedGroupId}
         groupDoc={groupDoc}
         groupContext={groupContext}
@@ -385,6 +391,9 @@ export default function App() {
         textScale={textScale}
         sseStatus={sseStatus}
         groupLabelById={groupLabelById}
+        mentionFilter={mentionFilter}
+        mentionKind={mentionKind}
+        mentionActorScope={mentionActorScope}
         mentionSelectedIndex={mentionSelectedIndex}
         showMentionMenu={showMentionMenu}
         composerRef={composerRef}
@@ -435,6 +444,9 @@ export default function App() {
         onTabChange={handleTabChange}
         appendComposerFiles={handleAppendComposerFiles}
         setMentionFilter={setMentionFilter}
+        setMentionKind={setMentionKind}
+        setMentionActorScope={setMentionActorScope}
+        setMentionTargetGroupId={setMentionTargetGroupId}
         setMentionSelectedIndex={setMentionSelectedIndex}
         setShowMentionMenu={setShowMentionMenu}
         getTermEpoch={getTermEpoch}

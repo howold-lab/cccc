@@ -20,6 +20,7 @@ import { getStoppedTerminalOutputText } from "../utils/stoppedTerminalOutput";
 import { fetchTerminalTail } from "../services/api/diagnostics";
 import { useAgentTerminalConnection } from "./agentTerminal/useAgentTerminalConnection";
 import { actorHasRuntimeResumeFailure, shouldFetchStoppedTerminalTail } from "./AgentTab.model";
+import { ActorAvatar } from "./ActorAvatar";
 
 const EMPTY_STREAMING_ACTIVITIES: StreamingActivity[] = [];
 const EMPTY_HEADLESS_PREVIEW_SESSIONS: HeadlessPreviewSession[] = [];
@@ -27,6 +28,19 @@ const EMPTY_HEADLESS_RAW_EVENTS: HeadlessStreamEvent[] = [];
 const STOPPED_TAIL_FETCH_DELAY_MS = 350;
 
 const copyToClipboard = copyTextToClipboard;
+
+function normalizeActorGroupRole(role: unknown): "foreman" | "peer" {
+  return String(role || "").trim().toLowerCase() === "foreman" ? "foreman" : "peer";
+}
+
+function actorGroupRoleBadgeClass(role: "foreman" | "peer"): string {
+  return classNames(
+    "rounded-md border px-1.5 py-0.5 text-[10px] font-medium",
+    role === "foreman"
+      ? "border-amber-500/25 bg-amber-500/12 text-amber-700 dark:text-amber-300"
+      : "border-slate-400/25 bg-slate-500/10 text-slate-600 dark:border-slate-400/20 dark:bg-slate-400/10 dark:text-slate-300",
+  );
+}
 
 function fitTerminalToContainer(
   fitAddon: FitAddon | null,
@@ -533,6 +547,7 @@ export function AgentTab({
   const stateTask = String(agentState?.hot?.active_task_id || "").trim();
   const blockerCount = Array.isArray(agentState?.hot?.blockers) ? agentState.hot.blockers.length : 0;
   const stateNext = String(agentState?.hot?.next_action || "").trim();
+  const actorGroupRole = normalizeActorGroupRole(actor.role);
 
   return (
     <div className="flex flex-col h-full">
@@ -545,36 +560,51 @@ export function AgentTab({
       )}>
         <div className="flex items-center justify-between gap-4">
           <div className="flex min-w-0 items-center gap-4">
-            <span
-              className={classNames(
-                "relative inline-flex h-2.5 w-2.5 flex-shrink-0 rounded-full transition-all",
-                statusTone.dotClass
-              )}
-            >
-              {statusTone.pulse && (
-                <span
-                  className={classNames(
-                    "absolute inset-[-3px] rounded-full motion-reduce:animate-none",
-                    statusTone.strongPulse
-                      ? "animate-ping bg-emerald-300/35"
-                      : "animate-pulse bg-current/20"
-                  )}
-                />
-              )}
-              {statusTone.strongPulse && (
-                <span className="absolute inset-[-7px] rounded-full border border-emerald-300/35 animate-ping motion-reduce:animate-none [animation-duration:1.6s]" />
-              )}
-            </span>
+            <div className="relative flex-shrink-0">
+              <ActorAvatar
+                avatarUrl={actor.avatar_url || undefined}
+                runtime={actor.runtime}
+                title={actor.title || actor.id}
+                isDark={isDark}
+                sizeClassName={isSmallScreen ? "h-8 w-8" : "h-9 w-9"}
+                textClassName="text-xs"
+                className={classNames(
+                  "shadow-[0_14px_28px_-20px_rgba(15,23,42,0.68)]",
+                  isDark ? "bg-slate-900" : "bg-white",
+                )}
+              />
+              <span
+                className={classNames(
+                  "absolute -bottom-0.5 -right-0.5 inline-flex h-2.5 w-2.5 rounded-full ring-2 transition-all",
+                  isDark ? "ring-slate-950" : "ring-white",
+                  statusTone.dotClass
+                )}
+              >
+                {statusTone.pulse && (
+                  <span
+                    className={classNames(
+                      "absolute inset-[-3px] rounded-full motion-reduce:animate-none",
+                      statusTone.strongPulse
+                        ? "animate-ping bg-emerald-300/35"
+                        : "animate-pulse bg-current/20"
+                    )}
+                  />
+                )}
+                {statusTone.strongPulse && (
+                  <span className="absolute inset-[-7px] rounded-full border border-emerald-300/35 animate-ping motion-reduce:animate-none [animation-duration:1.6s]" />
+                )}
+              </span>
+            </div>
 
             <div className="flex min-w-0 items-center gap-3">
               <div className="min-w-0 shrink-0">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="min-w-0 truncate font-semibold text-[var(--color-text-primary)]">{actor.title || actor.id}</span>
-                  {actor.role === "foreman" && (
-                    <span className="rounded-md border border-amber-500/25 bg-amber-500/12 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
-                      {t('foreman')}
-                    </span>
-                  )}
+                  <span className={actorGroupRoleBadgeClass(actorGroupRole)}>
+                    {actorGroupRole === "foreman"
+                      ? t("groupRoleForeman", { defaultValue: "Foreman" })
+                      : t("groupRolePeer", { defaultValue: "Peer" })}
+                  </span>
                 </div>
                 <div className={classNames("mt-0.5 text-xs truncate", "text-[var(--color-text-tertiary)]")}>
                   {rtInfo?.label || t('custom')} • {runtimeStatusText}

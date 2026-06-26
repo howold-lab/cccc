@@ -25,14 +25,17 @@ const { localStorageMock } = vi.hoisted(() => {
 
 import {
   CHAT_SCROLL_SNAPSHOT_MAX_AGE_MS,
+  buildComposerTrustFetchGroupId,
   buildUnfilteredLiveChatMessages,
   buildComposerSendRoutingSnapshot,
+  buildComposerSendRecipientTokens,
   buildReplyAnchorTsMap,
   buildReplySlotTsMap,
   collapseActorStreamingPlaceholders,
   dedupeStreamingEvents,
   mergeVisibleChatMessages,
   parseComposerRecipientTokens,
+  pruneMissingMentionRecipientTokens,
   restoreFailedSendComposerState,
   sortChatMessages,
   shouldLockChatToBottomForSend,
@@ -240,6 +243,33 @@ describe("buildComposerSendRoutingSnapshot", () => {
   });
 });
 
+describe("buildComposerTrustFetchGroupId", () => {
+  it("fetches only the selected group's trusts for # routing suggestions", () => {
+    expect(buildComposerTrustFetchGroupId("g_current")).toBe("g_current");
+    expect(buildComposerTrustFetchGroupId("")).toBeUndefined();
+  });
+});
+
+describe("buildComposerSendRecipientTokens", () => {
+  it("keeps current-group actor tokens for same-group sends", () => {
+    expect(buildComposerSendRecipientTokens({
+      toText: "peer-architect, @foreman, missing",
+      isCrossGroup: false,
+      validRecipientSet: new Set(["peer-architect", "@foreman"]),
+      crossGroupValidRecipientSet: new Set(["@foreman"]),
+    })).toEqual(["peer-architect", "@foreman"]);
+  });
+
+  it("filters current-group actor tokens from cross-group sends", () => {
+    expect(buildComposerSendRecipientTokens({
+      toText: "peer-architect, @foreman, target-peer",
+      isCrossGroup: true,
+      validRecipientSet: new Set(["peer-architect", "@foreman", "target-peer"]),
+      crossGroupValidRecipientSet: new Set(["@foreman", "target-peer"]),
+    })).toEqual(["@foreman", "target-peer"]);
+  });
+});
+
 describe("buildUnfilteredLiveChatMessages", () => {
   it("keeps later user replies in the suggestion freshness source even when a view could be filtered", () => {
     const events: LedgerEvent[] = [
@@ -350,6 +380,56 @@ describe("parseComposerRecipientTokens", () => {
   });
 });
 
+describe("pruneMissingMentionRecipientTokens", () => {
+  it("keeps mention-added recipients while the matching @ token remains in the composer", () => {
+    expect(pruneMissingMentionRecipientTokens({
+      toText: "peer-reviewer, @foreman",
+      mentionRecipientTokens: new Set(["peer-reviewer"]),
+      liveAgentMentionTokens: [{ actorId: "peer-reviewer", token: "@peer-reviewer", start: 2, end: 16, scope: "selected" }],
+      validRecipientSet: new Set(["peer-reviewer", "@foreman"]),
+    })).toEqual({
+      toText: "peer-reviewer, @foreman",
+      mentionRecipientTokens: new Set(["peer-reviewer"]),
+    });
+  });
+
+  it("keeps mention-added recipients when the composer shows the actor display name", () => {
+    expect(pruneMissingMentionRecipientTokens({
+      toText: "peer-reviewer",
+      mentionRecipientTokens: new Set(["peer-reviewer"]),
+      liveAgentMentionTokens: [{ actorId: "peer-reviewer", token: "@Code Reviewer", start: 2, end: 16, scope: "selected" }],
+      validRecipientSet: new Set(["peer-reviewer"]),
+    })).toEqual({
+      toText: "peer-reviewer",
+      mentionRecipientTokens: new Set(["peer-reviewer"]),
+    });
+  });
+
+  it("keeps built-in @ recipients while their composer token remains", () => {
+    expect(pruneMissingMentionRecipientTokens({
+      toText: "@foreman",
+      mentionRecipientTokens: new Set(["@foreman"]),
+      liveAgentMentionTokens: [{ actorId: "@foreman", token: "@foreman", start: 2, end: 10, scope: "selected" }],
+      validRecipientSet: new Set(["@foreman"]),
+    })).toEqual({
+      toText: "@foreman",
+      mentionRecipientTokens: new Set(["@foreman"]),
+    });
+  });
+
+  it("removes only mention-added recipients when their @ token is deleted from the composer", () => {
+    expect(pruneMissingMentionRecipientTokens({
+      toText: "peer-reviewer, @foreman",
+      mentionRecipientTokens: new Set(["peer-reviewer"]),
+      liveAgentMentionTokens: [],
+      validRecipientSet: new Set(["peer-reviewer", "@foreman"]),
+    })).toEqual({
+      toText: "@foreman",
+      mentionRecipientTokens: new Set<string>(),
+    });
+  });
+});
+
 describe("isFormalChatMessageEvent", () => {
   it("keeps headless streaming events out of the standard chat message list", () => {
     expect(isFormalChatMessageEvent({
@@ -377,7 +457,7 @@ describe("isFormalChatMessageEvent", () => {
 });
 
 describe("group send blocked state", () => {
-  it("blocks only explicit paused lifecycle before optimistic send feedback", () => {
+  it("blocks only explicit paused lifecycle states before optimistic send feedback", () => {
     expect(getGroupSendBlockedReason({
       lifecycleState: "paused",
       runtimeRunning: true,

@@ -15,6 +15,13 @@ export type GroupMeta = {
   group_id: string;
   title?: string;
   topic?: string;
+  group_bridge_remote?: boolean;
+  group_bridge_local_group_id?: string;
+  group_bridge_remote_endpoint?: string;
+  group_bridge_remote_peer_id?: string;
+  group_bridge_trust_id?: string;
+  group_bridge_registration_id?: string;
+  group_bridge_access_level?: string;
   updated_at?: string;
   created_at?: string;
   running?: boolean;
@@ -97,6 +104,19 @@ export type TaskMessageRef = MessageRef & {
   handoff_to?: string | null;
 };
 
+export type GroupBridgeRouteMessageRef = MessageRef & {
+  kind: "group_bridge_route";
+  local_group_id?: string;
+  remote_group_id: string;
+  remote_group_title?: string;
+  remote_endpoint?: string;
+  remote_peer_id?: string;
+  trust_id?: string;
+  access_level?: string;
+  recipient_identifier?: string;
+  token?: string;
+};
+
 export type StreamingActivity = {
   id: string;
   kind: "queued" | "thinking" | "plan" | "search" | "command" | "patch" | "tool" | "reply" | string;
@@ -145,6 +165,8 @@ export type ChatMessageData = {
   sender_runtime?: string;
   sender_avatar_path?: string;
   source_platform?: string;
+  source_user_id?: string;
+  source_user_name?: string;
   reply_to?: string;
   stream_id?: string;
   stream_phase?: string;
@@ -758,7 +780,10 @@ export type AssistantServiceModel = {
   artifact_index?: number;
   artifact_count?: number;
   error?: Record<string, unknown>;
-  artifacts?: Array<{ path?: string; size_bytes?: number }>;
+  last_update_error?: Record<string, unknown>;
+  installed_manifest_sha256?: string;
+  update_available?: boolean;
+  artifacts?: Array<{ path?: string; url?: string; sha256?: string; size_bytes?: number; archive?: string }>;
 };
 
 export type AssistantServiceRuntime = {
@@ -769,6 +794,14 @@ export type AssistantServiceRuntime = {
   install_dir?: string;
   python?: string;
   packages?: string[];
+  primary_package?: string;
+  package_versions?: Record<string, string>;
+  installed_version?: string;
+  latest_version?: string;
+  latest_versions?: Record<string, string>;
+  latest_checked_at?: string;
+  latest_check_error?: Record<string, unknown>;
+  update_available?: boolean;
   modules?: Record<string, boolean>;
   missing_modules?: string[];
   installed_at?: string;
@@ -1378,11 +1411,15 @@ export type PresentationWorkspaceListing = {
 export const SUPPORTED_RUNTIMES = [
   "claude",
   "codex",
+  "copilot",
+  "cursor",
+  "devin",
+  "kiro",
+  "kilo",
+  "antigravity",
   "droid",
   "amp",
   "auggie",
-  "neovate",
-  "gemini",
   "grok",
   "hermes",
   "kimi",
@@ -1398,12 +1435,16 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   auggie: { label: "Auggie (Augment)", desc: "" },
   claude: { label: "Claude Code", desc: "" },
   codex: { label: "Codex CLI", desc: "" },
+  copilot: { label: "GitHub Copilot CLI", desc: "Uses Copilot CLI MCP setup with the PTY runner" },
+  cursor: { label: "Cursor CLI", desc: "Uses an idempotent MCP setup prompt inside the PTY runner" },
+  devin: { label: "Devin CLI", desc: "Uses Devin MCP CLI setup with the PTY runner" },
+  kiro: { label: "Kiro CLI", desc: "Uses Kiro MCP CLI setup with the PTY runner" },
+  kilo: { label: "Kilo Code CLI", desc: "Uses an idempotent MCP setup prompt inside the PTY runner" },
+  antigravity: { label: "Antigravity CLI", desc: "Uses an idempotent MCP setup prompt inside the PTY runner" },
   droid: { label: "Droid", desc: "" },
-  gemini: { label: "Gemini CLI", desc: "" },
   grok: { label: "Grok Build", desc: "Uses Grok MCP CLI setup with the PTY runner" },
   hermes: { label: "Hermes Agent", desc: "Uses your Hermes profile with CCCC MCP" },
   kimi: { label: "Kimi CLI", desc: "" },
-  neovate: { label: "Neovate Code", desc: "" },
   opencode: { label: "OpenCode", desc: "Uses inline OpenCode MCP config at actor launch" },
   web_model: { label: "ChatGPT Web Model", desc: "ChatGPT browser delivery + remote MCP connector" },
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
@@ -1440,13 +1481,33 @@ export const RUNTIME_COLORS: Record<string, {
     bg: "bg-emerald-900/30", text: "text-emerald-300", border: "border-emerald-600/50", dot: "bg-emerald-400",
     bgLight: "bg-emerald-50", textLight: "text-emerald-700", borderLight: "border-emerald-300", dotLight: "bg-emerald-500"
   },
+  copilot: {
+    bg: "bg-slate-900/40", text: "text-slate-200", border: "border-slate-500/60", dot: "bg-slate-300",
+    bgLight: "bg-slate-100", textLight: "text-slate-800", borderLight: "border-slate-300", dotLight: "bg-slate-600"
+  },
+  cursor: {
+    bg: "bg-zinc-900/40", text: "text-zinc-200", border: "border-zinc-500/60", dot: "bg-zinc-300",
+    bgLight: "bg-zinc-100", textLight: "text-zinc-800", borderLight: "border-zinc-300", dotLight: "bg-zinc-600"
+  },
+  devin: {
+    bg: "bg-sky-900/30", text: "text-sky-300", border: "border-sky-600/50", dot: "bg-sky-400",
+    bgLight: "bg-sky-50", textLight: "text-sky-700", borderLight: "border-sky-300", dotLight: "bg-sky-500"
+  },
+  kiro: {
+    bg: "bg-purple-900/30", text: "text-purple-300", border: "border-purple-600/50", dot: "bg-purple-400",
+    bgLight: "bg-purple-50", textLight: "text-purple-700", borderLight: "border-purple-300", dotLight: "bg-purple-500"
+  },
+  kilo: {
+    bg: "bg-lime-900/30", text: "text-lime-300", border: "border-lime-600/50", dot: "bg-lime-400",
+    bgLight: "bg-lime-50", textLight: "text-lime-800", borderLight: "border-lime-300", dotLight: "bg-lime-500"
+  },
+  antigravity: {
+    bg: "bg-blue-900/30", text: "text-blue-300", border: "border-blue-600/50", dot: "bg-blue-400",
+    bgLight: "bg-blue-50", textLight: "text-blue-700", borderLight: "border-blue-300", dotLight: "bg-blue-500"
+  },
   droid: { 
     bg: "bg-violet-900/30", text: "text-violet-300", border: "border-violet-600/50", dot: "bg-violet-400",
     bgLight: "bg-violet-50", textLight: "text-violet-700", borderLight: "border-violet-300", dotLight: "bg-violet-500"
-  },
-  gemini: {
-    bg: "bg-yellow-900/30", text: "text-yellow-300", border: "border-yellow-600/50", dot: "bg-yellow-400",
-    bgLight: "bg-yellow-50", textLight: "text-yellow-700", borderLight: "border-yellow-300", dotLight: "bg-yellow-500"
   },
   grok: {
     bg: "bg-neutral-900/40", text: "text-neutral-200", border: "border-neutral-500/60", dot: "bg-neutral-300",
@@ -1459,10 +1520,6 @@ export const RUNTIME_COLORS: Record<string, {
   kimi: {
     bg: "bg-lime-900/30", text: "text-lime-300", border: "border-lime-600/50", dot: "bg-lime-400",
     bgLight: "bg-lime-50", textLight: "text-lime-700", borderLight: "border-lime-300", dotLight: "bg-lime-500"
-  },
-  neovate: {
-    bg: "bg-fuchsia-900/30", text: "text-fuchsia-300", border: "border-fuchsia-600/50", dot: "bg-fuchsia-400",
-    bgLight: "bg-fuchsia-50", textLight: "text-fuchsia-700", borderLight: "border-fuchsia-300", dotLight: "bg-fuchsia-500"
   },
   opencode: {
     bg: "bg-stone-900/40", text: "text-stone-200", border: "border-stone-500/60", dot: "bg-stone-300",

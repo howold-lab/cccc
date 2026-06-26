@@ -107,7 +107,15 @@ def _web_mode() -> Literal["normal", "exhibit"]:
     return "normal"
 
 
-_PUBLIC_API_PATHS = frozenset({"/api/v1/health", "/api/v1/branding"})
+_PUBLIC_API_PATHS = frozenset({
+    "/api/v1/health",
+    "/api/v1/ready",
+    "/api/v1/branding",
+    "/api/group-bridge/pairing/requests/remote",
+    "/api/group-bridge/pairing/requests/remote/status",
+    "/api/group-bridge/session/ws",
+    "/api/group-bridge/session/send",
+})
 
 
 def _is_public_ui_path(request: Request) -> bool:
@@ -123,6 +131,7 @@ def _is_public_path(request: Request) -> bool:
         or path in _PUBLIC_API_PATHS
         or path.startswith("/api/v1/branding/assets/")
         or path.startswith("/mcp/web-model/")
+        or path.startswith("/mcp/group-bridge")
         or path.startswith("/nomcp/s/")
     )
 
@@ -208,6 +217,7 @@ def create_app() -> FastAPI:
         runtime_launch_source = str(os.environ.get("CCCC_WEB_LAUNCH_SOURCE") or "").strip() or "unknown"
         supervisor_watchdog_stop = threading.Event()
         supervisor_watchdog_thread: Optional[threading.Thread] = None
+        remote_outbox_worker: Optional[Any] = None
 
         if runtime_binding_known:
             write_web_runtime_state(
@@ -260,9 +270,23 @@ def create_app() -> FastAPI:
             )
             supervisor_watchdog_thread.start()
 
+        if not _is_truthy_env(str(os.environ.get("CCCC_GROUP_BRIDGE_OUTBOX_WORKER_DISABLED") or "")):
+            try:
+                from ...daemon.group_bridge.remote_outbox_worker import RemoteOutboxWorker
+
+                remote_outbox_worker = RemoteOutboxWorker(home=home)
+                remote_outbox_worker.start()
+            except Exception:
+                logger.exception("failed to start Group Bridge remote outbox worker")
+
         try:
             yield
         finally:
+            if remote_outbox_worker is not None:
+                try:
+                    remote_outbox_worker.stop(timeout=1.0)
+                except Exception:
+                    pass
             supervisor_watchdog_stop.set()
             if supervisor_watchdog_thread is not None:
                 try:
@@ -473,6 +497,7 @@ def create_app() -> FastAPI:
     from .routes.actors import create_routers as create_actor_routers
     from .routes.im import register_im_routes
     from .routes.access_tokens import create_routers as create_access_token_routers
+    from .routes.group_bridge import create_routers as create_group_bridge_routers
     from .routes.nomcp import create_routers as create_nomcp_routers
 
     route_ctx = RouteContext(
@@ -498,6 +523,8 @@ def create_app() -> FastAPI:
         app.include_router(router)
     register_im_routes(app, ctx=route_ctx)
     for router in create_access_token_routers(route_ctx):
+        app.include_router(router)
+    for router in create_group_bridge_routers(route_ctx):
         app.include_router(router)
     for router in create_nomcp_routers(route_ctx):
         app.include_router(router)

@@ -2,6 +2,8 @@ import os
 import tempfile
 import unittest
 from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -96,6 +98,42 @@ class TestWebMessagingClientId(unittest.TestCase):
                 reply_event = ((reply_body.get("result") or {}).get("event")) or {}
                 self.assertEqual((((reply_event.get("data") or {}).get("client_id")) or ""), "local-reply-1")
                 self.assertEqual((((reply_event.get("data") or {}).get("refs")) or [])[0].get("slot_id"), "slot-2")
+        finally:
+            cleanup()
+
+    def test_send_preserves_group_bridge_provenance_fields(self) -> None:
+        from cccc.kernel.group import create_group
+        from cccc.kernel.registry import load_registry
+
+        _, cleanup = self._with_home()
+        try:
+            reg = load_registry()
+            group = create_group(reg, title="group_bridge-provenance", topic="")
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._local_call_daemon):
+                client = self._client()
+                resp = client.post(
+                    f"/api/v1/groups/{group.group_id}/send",
+                    json={
+                        "text": "hello from peer",
+                        "by": "group_bridge:peer_a",
+                        "to": ["user"],
+                        "source_platform": "group_bridge_session",
+                        "source_user_id": "peer_a",
+                        "source_user_name": "Remote Group",
+                        "src_group_id": "g_remote",
+                        "src_event_id": "remote-event-1",
+                    },
+                )
+
+            self.assertEqual(resp.status_code, 200)
+            body = resp.json()
+            self.assertTrue(bool(body.get("ok")))
+            data = (((body.get("result") or {}).get("event") or {}).get("data")) or {}
+            self.assertEqual(data.get("source_platform"), "group_bridge_session")
+            self.assertEqual(data.get("source_user_id"), "peer_a")
+            self.assertEqual(data.get("source_user_name"), "Remote Group")
+            self.assertEqual(data.get("src_group_id"), "g_remote")
+            self.assertEqual(data.get("src_event_id"), "remote-event-1")
         finally:
             cleanup()
 
@@ -221,6 +259,56 @@ class TestWebMessagingClientId(unittest.TestCase):
         finally:
             cleanup()
 
+    def test_cross_group_upload_routes_remote_attachments_to_daemon(self) -> None:
+        from cccc.kernel.group import create_group
+        from cccc.kernel.registry import load_registry
+
+        captured: list[dict] = []
+
+        def fake_call_daemon(req: dict):
+            captured.append(req)
+            return {"ok": True, "result": {"remote_send": {"status": "sent"}}}
+
+        _, cleanup = self._with_home()
+        try:
+            reg = load_registry()
+            group = create_group(reg, title="remote-upload", topic="")
+            with (
+                patch("cccc.ports.web.app.call_daemon", side_effect=fake_call_daemon),
+                patch(
+                    "cccc.ports.web.routes.messaging.resolve_remote_group_route",
+                    return_value=SimpleNamespace(remote_group_id="g_remote", registration_id="reg_remote"),
+                ),
+            ):
+                client = self._client()
+                resp = client.post(
+                    f"/api/v1/groups/{group.group_id}/send_cross_group_upload",
+                    data={
+                        "by": "user",
+                        "text": "remote upload",
+                        "dst_group_id": "g_remote",
+                        "to_json": "[\"@foreman\"]",
+                    },
+                    files={"files": ("shot.png", BytesIO(b"png-bytes"), "image/png")},
+                )
+
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json().get("ok"))
+            sends = [item for item in captured if item.get("op") == "send_cross_group"]
+            self.assertEqual(len(sends), 1)
+            req = sends[0]
+            self.assertEqual(req.get("op"), "send_cross_group")
+            args = req.get("args") or {}
+            self.assertEqual(args.get("dst_group_id"), "g_remote")
+            self.assertEqual(args.get("to"), ["@foreman"])
+            attachments = args.get("attachments") or []
+            self.assertEqual(len(attachments), 1)
+            self.assertEqual(attachments[0].get("title"), "shot.png")
+            self.assertEqual(attachments[0].get("mime_type"), "image/png")
+            self.assertTrue(str(attachments[0].get("path") or "").startswith("state/blobs/"))
+        finally:
+            cleanup()
+
     def test_reply_upload_returns_400_when_default_reply_recipient_is_invalid(self) -> None:
         from cccc.kernel.group import create_group
         from cccc.kernel.ledger import append_event
@@ -255,6 +343,74 @@ class TestWebMessagingClientId(unittest.TestCase):
                 error = resp.json().get("error") or {}
                 self.assertEqual(error.get("code"), "invalid_recipient")
                 self.assertIn("unknown recipient", str(error.get("message") or ""))
+        finally:
+            cleanup()
+
+    def test_reply_upload_rejects_legacy_group_bridge_reply_before_storing_blob(self) -> None:
+        from cccc.contracts.v1.message import ChatMessageData
+        from cccc.kernel.group_bridge.pairing import _save_store
+        from cccc.kernel.group import create_group
+        from cccc.kernel.ledger import append_event
+        from cccc.kernel.registry import load_registry
+
+        home, cleanup = self._with_home()
+        try:
+            reg = load_registry()
+            group = create_group(reg, title="reply-upload-legacy-group_bridge", topic="")
+            _save_store(
+                {
+                    "invites": {},
+                    "requests": {},
+                    "outbounds": {},
+                    "trusts": {
+                        "ptrust_legacy": {
+                            "trust_id": "ptrust_legacy",
+                            "group_id": group.group_id,
+                            "remote_group_id": "g_remote",
+                            "remote_peer_id": "peer_remote",
+                            "registration_id": "reg_remote",
+                            "transport": "group_bridge_session",
+                            "remote_endpoint": "http://remote.example:8848",
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-01-01T00:00:00Z",
+                        }
+                    },
+                }
+            )
+            original = append_event(
+                group.ledger_path,
+                kind="chat.message",
+                group_id=group.group_id,
+                scope_key=str(group.doc.get("active_scope_key") or ""),
+                by="group_bridge:peer_remote",
+                data=ChatMessageData(
+                    text="legacy remote message",
+                    to=["@foreman"],
+                    source_platform="group_bridge_session",
+                    source_user_id="peer_remote",
+                    src_group_id="g_remote",
+                    src_event_id="remote-event-1",
+                ).model_dump(),
+            )
+
+            with patch("cccc.ports.web.app.call_daemon", side_effect=self._local_call_daemon):
+                client = self._client()
+                resp = client.post(
+                    f"/api/v1/groups/{group.group_id}/reply_upload",
+                    data={
+                        "by": "user",
+                        "text": "upload reply",
+                        "reply_to": str(original.get("id") or ""),
+                    },
+                    files={"files": ("reply.txt", BytesIO(b"reply"), "text/plain")},
+                )
+
+            self.assertEqual(resp.status_code, 400)
+            detail = resp.json().get("detail") or resp.json().get("error") or {}
+            self.assertEqual(detail.get("code"), "missing_remote_recipient")
+            blob_dir = Path(home) / "groups" / group.group_id / "state" / "blobs"
+            self.assertFalse(blob_dir.exists() and any(blob_dir.iterdir()))
         finally:
             cleanup()
 

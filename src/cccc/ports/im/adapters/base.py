@@ -5,8 +5,38 @@ Base class for IM platform adapters.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypedDict
+
+
+DEFAULT_IM_CAPABILITIES: Dict[str, str] = {
+    "text_in": "no",
+    "text_out": "no",
+    "files_in": "no",
+    "files_out": "no",
+    "threads": "no",
+    "reactions": "no",
+    "typing": "no",
+    "streaming": "no",
+    "voice_in": "no",
+    "markdown": "no",
+}
+
+_CAPABILITY_STATES = frozenset({"yes", "partial", "no"})
+
+
+def normalize_im_capabilities(capabilities: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Return a stable capability map for IM status/diagnostics."""
+    merged = dict(DEFAULT_IM_CAPABILITIES)
+    if isinstance(capabilities, dict):
+        for key, value in capabilities.items():
+            if key not in merged:
+                continue
+            normalized = str(value or "").strip().lower()
+            merged[key] = normalized if normalized in _CAPABILITY_STATES else "no"
+    return merged
 
 
 class OutboundStreamHandle(TypedDict):
@@ -14,6 +44,24 @@ class OutboundStreamHandle(TypedDict):
 
     stream_id: str
     platform_handle: Any  # Platform-specific handle (e.g., DingTalk card instance ID)
+
+
+class IMProcessingOutcome(str, Enum):
+    """Result of processing an inbound IM message."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class IMProcessingContext:
+    """Platform context for best-effort processing feedback."""
+
+    chat_id: str
+    thread_id: int = 0
+    message_id: str = ""
+    platform: str = "unknown"
 
 
 class IMAdapter(ABC):
@@ -28,6 +76,16 @@ class IMAdapter(ABC):
     """
 
     platform: str = "unknown"
+    capabilities: Dict[str, str] = {}
+    capability_notes: Dict[str, str] = {}
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Expose adapter capabilities for user-facing diagnostics."""
+        return {
+            "platform": str(getattr(self, "platform", "") or "unknown"),
+            "features": normalize_im_capabilities(getattr(self, "capabilities", {})),
+            "notes": dict(getattr(self, "capability_notes", {}) or {}),
+        }
 
     def _log(self, msg: str) -> None:
         """Log a message. Subclasses should override with actual logging."""
@@ -143,6 +201,30 @@ class IMAdapter(ABC):
         Default: no-op.
         """
         return False
+
+    def on_processing_start(self, context: IMProcessingContext) -> Optional[str]:
+        """Start platform feedback for an accepted inbound message."""
+        if context.message_id:
+            reaction_id = self.add_reaction(context.message_id)
+            if reaction_id:
+                return f"reaction:{reaction_id}"
+        if self.send_chat_action(context.chat_id, "typing"):
+            return "typing"
+        return None
+
+    def on_processing_complete(
+        self,
+        context: IMProcessingContext,
+        outcome: IMProcessingOutcome,
+        handle: Optional[str],
+    ) -> None:
+        """Complete platform feedback for a previously accepted inbound message."""
+        _ = outcome
+        if not handle or not handle.startswith("reaction:"):
+            return
+        reaction_id = handle.removeprefix("reaction:")
+        if context.message_id and reaction_id:
+            self.remove_reaction(context.message_id, reaction_id)
 
     def download_attachment(self, attachment: Dict[str, Any]) -> bytes:
         """Download an inbound attachment to bytes (platform-specific)."""

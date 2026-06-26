@@ -28,6 +28,9 @@ _COMMON_ACTOR = {
 _COMMON_BY = {
     "by": {"type": "string", "description": "Caller actor id override (normally auto-resolved)"},
 }
+_REMOTE_GROUP = {
+    "remote_group_id": {"type": "string", "description": "Target remote group id for Group Bridge access."},
+}
 
 
 MCP_TOOLS = [
@@ -108,12 +111,20 @@ MCP_TOOLS = [
     },
     {
         "name": "cccc_message_send",
-        "description": "Send a visible chat message. Choose `to` deliberately; use @all only when the whole group needs it.",
+        "description": (
+            "Start a new visible chat message. Do not use this to answer an existing delivered message/event; "
+            "use cccc_message_reply with that event_id instead. Choose `to` deliberately; use @all only when the whole group needs it. "
+            "For a trusted remote Group Bridge target, get remote_group_id from cccc_remote_access(action=\"list\") "
+            "and send with dst_group_id=<remote_group_id>, to=[\"@foreman\"] unless a more specific remote recipient is known."
+        ),
         "inputSchema": _obj(
             {
                 **_COMMON_GROUP,
                 **_COMMON_ACTOR,
-                "dst_group_id": {"type": "string"},
+                "dst_group_id": {
+                    "type": "string",
+                    "description": "Optional local or trusted remote group_id. For remote groups, use remote_group_id returned by cccc_remote_access(action=\"list\").",
+                },
                 "text": {"type": "string"},
                 "to": {
                     "anyOf": [
@@ -123,6 +134,7 @@ MCP_TOOLS = [
                 },
                 "priority": {"type": "string", "enum": ["normal", "attention"], "default": "normal"},
                 "reply_required": {"type": "boolean", "default": False},
+                "idempotency_key": {"type": "string", "description": "Stable caller retry key; used for Group Bridge remote delivery when dst_group_id targets a trusted remote group"},
                 "refs": {"type": "array", "items": {"type": "object"}},
                 "suggested_user_message": {
                     "type": "string",
@@ -277,7 +289,7 @@ MCP_TOOLS = [
         "name": "cccc_file",
         "description": (
             "CCCC chat attachment operations. Use read/blob_path/info for delivered state/blobs attachments; "
-            "use send to attach an active-scope local file back to the user or peers."
+            "use send to attach an active-scope local file back to the user, peers, or a trusted remote Group Bridge target."
         ),
         "inputSchema": _obj(
             {
@@ -285,13 +297,17 @@ MCP_TOOLS = [
                 **_COMMON_ACTOR,
                 "action": {"type": "string", "enum": ["send", "blob_path", "info", "read"], "default": "send"},
                 "path": {"type": "string", "description": "Required for action=send. Relative to the active scope, or an absolute path under that scope."},
+                "dst_group_id": {
+                    "type": "string",
+                    "description": "Optional trusted remote group_id for action=send. Use remote_group_id from cccc_remote_access(action=\"list\") to send this file through Group Bridge.",
+                },
                 "text": {"type": "string", "description": "Optional caption/message when action=send."},
                 "to": {
                     "anyOf": [
                         {"type": "string"},
                         {"type": "array", "items": {"type": "string"}},
                     ],
-                    "description": "Optional recipient or recipients for action=send. Omit for normal group routing.",
+                    "description": "Optional recipient or recipients for action=send. For remote Group Bridge file sends, use [\"@foreman\"] unless a more specific remote recipient is known.",
                 },
                 "priority": {"type": "string", "enum": ["normal", "attention"], "default": "normal"},
                 "reply_required": {"type": "boolean", "default": False},
@@ -368,7 +384,7 @@ MCP_TOOLS = [
         "name": "cccc_repo",
         "description": (
             "Read-only active workspace repository inspection for remote runtimes: "
-            "action=info|list|list_dir|read. All paths are constrained to the group's active scope root. "
+            "action=info|list|list_dir|read|search. All paths are constrained to the group's active scope root. "
             "Read returns sha256 and supports start_line/end_line; pass sha256 back as expected_sha256 before writing. "
             "Use cccc_repo_edit or cccc_apply_patch for writes."
         ),
@@ -378,11 +394,12 @@ MCP_TOOLS = [
                 **_COMMON_GROUP,
                 "action": {
                     "type": "string",
-                    "enum": ["info", "list", "list_dir", "read"],
+                    "enum": ["info", "list", "list_dir", "read", "search"],
                     "default": "info",
                 },
                 "path": {"type": "string", "description": "Relative path under the active workspace root."},
                 "file_path": {"type": "string", "description": "Alias for path."},
+                "query": {"type": "string", "description": "Required for action=search."},
                 "max_bytes": {"type": "integer", "default": 200000, "minimum": 1, "maximum": 1000000},
                 "limit": {"type": "integer", "default": 200, "minimum": 1, "maximum": 500},
                 "offset": {"type": "integer", "default": 1, "minimum": 1, "description": "For action=list_dir, 1-indexed entry offset."},
@@ -390,6 +407,12 @@ MCP_TOOLS = [
                 "start_line": {"type": "integer", "minimum": 1, "description": "For action=read, first 1-indexed line to return."},
                 "end_line": {"type": "integer", "minimum": 1, "description": "For action=read, final 1-indexed line to return."},
                 "include_hidden": {"type": "boolean", "default": False},
+                "case_sensitive": {"type": "boolean", "default": False},
+                "regex": {"type": "boolean", "default": False},
+                "include_globs": {"type": "array", "items": {"type": "string"}},
+                "exclude_globs": {"type": "array", "items": {"type": "string"}},
+                "context_lines": {"type": "integer", "default": 0, "minimum": 0, "maximum": 10},
+                "max_file_bytes": {"type": "integer", "default": 200000, "minimum": 1, "maximum": 1000000},
             }
         ),
     },
@@ -561,12 +584,16 @@ MCP_TOOLS = [
     },
     {
         "name": "cccc_group",
-        "description": "Group operations: action=info|list|set_state.",
+        "description": "Group operations: action=info|list|resolve|set_state. Use resolve to turn natural #group/title tokens into a real group_id before cross-group messaging.",
         "inputSchema": _obj(
             {
                 **_COMMON_GROUP,
                 **_COMMON_ACTOR,
-                "action": {"type": "string", "enum": ["info", "list", "set_state"], "default": "info"},
+                "action": {"type": "string", "enum": ["info", "list", "resolve", "set_state"], "default": "info"},
+                "token": {
+                    "type": "string",
+                    "description": "Required when action=resolve; accepts #group, title, topic, or group_id and returns only a unique exact match.",
+                },
                 "state": {
                     "type": "string",
                     "enum": ["active", "idle", "paused", "stopped"],
@@ -1102,10 +1129,10 @@ MCP_TOOLS = [
         ),
     },
     {
-        "name": "cccc_role_notes",
+        "name": "cccc_actor_notes",
         "description": (
-            "Manage actor-scoped role notes in CCCC_HELP.md (`## @actor: <actor_id>` blocks): action=get|set|clear. "
-            "Foreman can read/write any actor's role notes; other actors can only read their own notes."
+            "Manage actor-scoped notes in CCCC_HELP.md (`## @actor: <actor_id>` blocks): action=get|set|clear. "
+            "Foreman can read/write any actor's notes; other actors can only read their own notes."
         ),
         "inputSchema": _obj(
             {
@@ -1113,7 +1140,7 @@ MCP_TOOLS = [
                 "action": {"type": "string", "enum": ["get", "set", "clear"], "default": "get"},
                 "target_actor_id": {
                     "type": "string",
-                    "description": "The actor whose help-scoped role notes to read/write. Omit for get only when listing all as foreman.",
+                    "description": "The actor whose help-scoped notes to read/write. Omit for get only when listing all as foreman.",
                 },
                 "content": {
                     "type": "string",
@@ -1257,6 +1284,186 @@ MCP_TOOLS = [
                 "key": {"type": "string"},
             },
             required=["key"],
+        ),
+    },
+    {
+        "name": "cccc_remote_access",
+        "description": "List Group Bridge targets and inspect what access the remote group grants to this group.",
+        "annotations": {"readOnlyHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "action": {"type": "string", "enum": ["list", "status", "explain_permissions"], "default": "list"},
+            }
+        ),
+    },
+    {
+        "name": "cccc_remote_context",
+        "description": "Read a target Group Bridge group's context snapshot. Requires the target group to grant Read access.",
+        "annotations": {"readOnlyHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "action": {"type": "string", "enum": ["get"], "default": "get"},
+                "include_archived": {"type": "boolean", "default": False},
+            },
+            required=["remote_group_id"],
+        ),
+    },
+    {
+        "name": "cccc_remote_repo",
+        "description": (
+            "Read-only repo inspection for a target Group Bridge group: info|list|list_dir|read|search. "
+            "Requires target Read access and stays under the target group's active scope for path-based operations."
+        ),
+        "annotations": {"readOnlyHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "action": {"type": "string", "enum": ["info", "list", "list_dir", "read", "search"], "default": "info"},
+                "path": {"type": "string"},
+                "file_path": {"type": "string"},
+                "query": {"type": "string", "description": "Required for action=search."},
+                "max_bytes": {"type": "integer", "default": 200000, "minimum": 1, "maximum": 1000000},
+                "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500},
+                "offset": {"type": "integer", "default": 1, "minimum": 1},
+                "depth": {"type": "integer", "default": 2, "minimum": 1, "maximum": 8},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
+                "include_hidden": {"type": "boolean", "default": False},
+                "case_sensitive": {"type": "boolean", "default": False},
+                "regex": {"type": "boolean", "default": False},
+                "include_globs": {"type": "array", "items": {"type": "string"}},
+                "exclude_globs": {"type": "array", "items": {"type": "string"}},
+                "context_lines": {"type": "integer", "default": 0, "minimum": 0, "maximum": 10},
+                "max_file_bytes": {"type": "integer", "default": 200000, "minimum": 1, "maximum": 1000000},
+            },
+            required=["remote_group_id"],
+        ),
+    },
+    {
+        "name": "cccc_remote_git",
+        "description": (
+            "Git operations for a target Group Bridge group. Read access allows status|diff|log; Full access also allows add|commit."
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "action": {"type": "string", "enum": ["status", "diff", "log", "add", "commit"], "default": "status"},
+                "path": {"type": "string"},
+                "paths": {"type": "array", "items": {"type": "string"}},
+                "staged": {"type": "boolean", "default": False},
+                "all_changes": {"type": "boolean", "default": False},
+                "message": {"type": "string"},
+                "count": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                "max_output_bytes": {"type": "integer", "default": 200000, "minimum": 1, "maximum": 1000000},
+            },
+            required=["remote_group_id"],
+        ),
+    },
+    {
+        "name": "cccc_remote_repo_edit",
+        "description": (
+            "Full access repo mutation for a target Group Bridge group. "
+            "Use only for trusted groups; path guardrails are not a security sandbox."
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "action": {"type": "string", "enum": ["replace", "multi_replace", "write", "mkdir", "delete", "move"], "default": "replace"},
+                "path": {"type": "string"},
+                "file_path": {"type": "string"},
+                "dest_path": {"type": "string"},
+                "to_path": {"type": "string"},
+                "content": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+                "replacements": {"type": "array", "items": {"type": "object"}},
+                "expected_sha256": {"type": "string"},
+                "expected_replacements": {"type": "integer", "minimum": 1, "maximum": 10000},
+                "replace_all": {"type": "boolean", "default": False},
+                "recursive": {"type": "boolean", "default": False},
+                "exist_ok": {"type": "boolean", "default": True},
+            },
+            required=["remote_group_id"],
+        ),
+    },
+    {
+        "name": "cccc_remote_apply_patch",
+        "description": "Full access Codex-style apply_patch for a trusted target Group Bridge group.",
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "patch": {"type": "string"},
+                "input": {"type": "string"},
+            },
+            required=["remote_group_id"],
+        ),
+    },
+    {
+        "name": "cccc_remote_shell",
+        "description": (
+            "Full access one-shot shell command in the target group's active workspace. "
+            "This can change files and run local commands; it is not a sandbox."
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "command": {"type": "string"},
+                "cwd": {"type": "string", "default": "."},
+                "timeout_s": {"type": "integer", "default": 60, "minimum": 1, "maximum": 600},
+                "max_output_bytes": {"type": "integer", "default": 200000, "minimum": 1, "maximum": 1000000},
+                "env": {"type": "object", "additionalProperties": {"type": "string"}},
+            },
+            required=["remote_group_id", "command"],
+        ),
+    },
+    {
+        "name": "cccc_remote_exec_command",
+        "description": "Full access long-running shell command. Returned session_id is bound to the bridge and rechecked on write/poll.",
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "command": {"type": "string"},
+                "cmd": {"type": "string"},
+                "cwd": {"type": "string", "default": "."},
+                "workdir": {"type": "string"},
+                "yield_time_ms": {"type": "integer", "default": 1000, "minimum": 0, "maximum": 30000},
+                "timeout_s": {"type": "integer", "default": 600, "minimum": 1, "maximum": 600},
+                "max_output_bytes": {"type": "integer", "default": 200000, "minimum": 1, "maximum": 1000000},
+                "env": {"type": "object", "additionalProperties": {"type": "string"}},
+            },
+            required=["remote_group_id"],
+        ),
+    },
+    {
+        "name": "cccc_remote_write_stdin",
+        "description": "Full access write/poll/terminate for a remote exec session. Full access is rechecked on every call.",
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "inputSchema": _obj(
+            {
+                **_COMMON_GROUP,
+                **_REMOTE_GROUP,
+                "session_id": {"type": "string"},
+                "chars": {"type": "string"},
+                "yield_time_ms": {"type": "integer", "default": 1000, "minimum": 0, "maximum": 30000},
+                "max_output_bytes": {"type": "integer", "default": 200000, "minimum": 1, "maximum": 1000000},
+                "terminate": {"type": "boolean", "default": False},
+            },
+            required=["remote_group_id", "session_id"],
         ),
     },
 ]

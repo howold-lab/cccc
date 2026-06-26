@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import mimetypes
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ....daemon.group_bridge.route_lookup import resolve_remote_group_route
 from ....kernel.actors import find_actor
 from ....kernel.blobs import resolve_blob_attachment_path, store_blob_bytes
 from ....kernel.group import load_group
+from ....kernel.recipient_syntax import (
+    CROSS_GROUP_HASH_RECIPIENT_MESSAGE,
+    has_hash_recipient_token,
+    normalize_recipient_tokens,
+)
 from ....util.conv import coerce_bool
 from ..common import MCPError, _call_daemon_or_raise
 
@@ -19,6 +26,15 @@ _FILENAME_MIME_FALLBACKS = {
     ".md": "text/markdown",
     ".markdown": "text/markdown",
 }
+POST_REPLY_RESUME_CHECKPOINT = (
+    "Reply sent. Reorient after this interruption: review unfinished work, "
+    "open loops, commitments, and the larger goal; resume the highest-value "
+    "next step. If nothing remains, do one brief quality/risk pass and stop cleanly."
+)
+POST_SEND_TOOL_BOUNDARY = (
+    "New message sent. If you were answering an existing delivered message/event, "
+    "use cccc_message_reply(event_id=...) next time."
+)
 
 
 def _guess_mime_type(filename: str) -> str:
@@ -61,6 +77,29 @@ def _normalize_runtime_escaped_text(*, group_id: str, actor_id: str, text: str) 
     return normalized
 
 
+def _remote_message_idempotency_key(value: str = "") -> str:
+    explicit = str(value or "").strip()
+    return explicit or f"mcpmsg_{uuid.uuid4().hex}"
+
+
+def _with_post_reply_hint(result: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(result or {})
+    out["post_reply_hint"] = {
+        "kind": "resume_checkpoint",
+        "message": POST_REPLY_RESUME_CHECKPOINT,
+    }
+    return out
+
+
+def _with_post_send_hint(result: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(result or {})
+    out["post_send_hint"] = {
+        "kind": "message_tool_boundary",
+        "message": POST_SEND_TOOL_BOUNDARY,
+    }
+    return out
+
+
 def message_send(
     *,
     group_id: str,
@@ -70,6 +109,7 @@ def message_send(
     to: Optional[List[str]] = None,
     priority: str = "normal",
     reply_required: bool = False,
+    idempotency_key: str = "",
     refs: Optional[List[Dict[str, Any]]] = None,
     suggested_user_message: str = "",
 ) -> Dict[str, Any]:
@@ -92,37 +132,71 @@ def message_send(
                 code="suggested_user_message_not_supported",
                 message="suggested_user_message is only supported for messages in the current group",
             )
-        return _call_daemon_or_raise(
+        if has_hash_recipient_token(normalize_recipient_tokens(to)):
+            raise MCPError(code="invalid_recipient_syntax", message=CROSS_GROUP_HASH_RECIPIENT_MESSAGE)
+        group_bridge_route = resolve_remote_group_route(group_id=group_id, remote_group_id=dst_gid)
+        if group_bridge_route is not None:
+            remote_to = normalize_recipient_tokens(to)
+            if not remote_to:
+                raise MCPError(
+                    code="missing_remote_recipient",
+                    message="remote messages require explicit to across Group Bridge; use '@foreman', '@all', or a target actor",
+                )
+            return _with_post_send_hint(
+                _call_daemon_or_raise(
+                    {
+                        "op": "remote_send",
+                        "args": {
+                            "group_id": group_id,
+                            "by": actor_id,
+                            "registration_id": group_bridge_route.registration_id,
+                            "idempotency_key": _remote_message_idempotency_key(idempotency_key),
+                            "payload": {
+                                "text": text,
+                                "to": remote_to,
+                                "priority": prio,
+                                "reply_required": reply_required_flag,
+                                "refs": refs if refs is not None else [],
+                            },
+                        },
+                    }
+                )
+            )
+        return _with_post_send_hint(
+            _call_daemon_or_raise(
+                {
+                    "op": "send_cross_group",
+                    "args": {
+                        "group_id": group_id,
+                        "dst_group_id": dst_gid,
+                        "text": text,
+                        "by": actor_id,
+                        "to": to if to is not None else [],
+                        "priority": prio,
+                        "reply_required": reply_required_flag,
+                        "refs": refs if refs is not None else [],
+                    },
+                }
+            )
+        )
+
+    return _with_post_send_hint(
+        _call_daemon_or_raise(
             {
-                "op": "send_cross_group",
+                "op": "send",
                 "args": {
                     "group_id": group_id,
-                    "dst_group_id": dst_gid,
                     "text": text,
                     "by": actor_id,
                     "to": to if to is not None else [],
+                    "path": "",
                     "priority": prio,
                     "reply_required": reply_required_flag,
                     "refs": refs if refs is not None else [],
+                    "suggested_user_message": suggestion,
                 },
             }
         )
-
-    return _call_daemon_or_raise(
-        {
-            "op": "send",
-            "args": {
-                "group_id": group_id,
-                "text": text,
-                "by": actor_id,
-                "to": to if to is not None else [],
-                "path": "",
-                "priority": prio,
-                "reply_required": reply_required_flag,
-                "refs": refs if refs is not None else [],
-                "suggested_user_message": suggestion,
-            },
-        }
     )
 
 
@@ -207,21 +281,23 @@ def message_reply(
     if prio not in ("normal", "attention"):
         raise MCPError(code="invalid_priority", message="priority must be 'normal' or 'attention'")
     reply_required_flag = coerce_bool(reply_required, default=False)
-    return _call_daemon_or_raise(
-        {
-            "op": "reply",
-            "args": {
-                "group_id": group_id,
-                "text": text,
-                "by": actor_id,
-                "reply_to": reply_to,
-                "to": to if to is not None else [],
-                "priority": prio,
-                "reply_required": reply_required_flag,
-                "refs": refs if refs is not None else [],
-                "suggested_user_message": suggestion,
-            },
-        }
+    return _with_post_reply_hint(
+        _call_daemon_or_raise(
+            {
+                "op": "reply",
+                "args": {
+                    "group_id": group_id,
+                    "text": text,
+                    "by": actor_id,
+                    "reply_to": reply_to,
+                    "to": to if to is not None else [],
+                    "priority": prio,
+                    "reply_required": reply_required_flag,
+                    "refs": refs if refs is not None else [],
+                    "suggested_user_message": suggestion,
+                },
+            }
+        )
     )
 
 
@@ -301,6 +377,7 @@ def file_send(
     actor_id: str,
     path: str,
     text: str = "",
+    dst_group_id: str = "",
     to: Optional[List[str]] = None,
     priority: str = "normal",
     reply_required: bool = False,
@@ -361,6 +438,25 @@ def file_send(
     if prio not in ("normal", "attention"):
         raise MCPError(code="invalid_priority", message="priority must be 'normal' or 'attention'")
     reply_required_flag = coerce_bool(reply_required, default=False)
+    dst_gid = str(dst_group_id or "").strip()
+    if dst_gid and dst_gid != gid:
+        if has_hash_recipient_token(normalize_recipient_tokens(to)):
+            raise MCPError(code="invalid_recipient_syntax", message=CROSS_GROUP_HASH_RECIPIENT_MESSAGE)
+        return _call_daemon_or_raise(
+            {
+                "op": "send_cross_group",
+                "args": {
+                    "group_id": gid,
+                    "dst_group_id": dst_gid,
+                    "text": msg,
+                    "by": actor_id,
+                    "to": to if to is not None else [],
+                    "attachments": [att],
+                    "priority": prio,
+                    "reply_required": reply_required_flag,
+                },
+            }
+        )
     return _call_daemon_or_raise(
         {
             "op": "send",

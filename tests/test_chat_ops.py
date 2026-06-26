@@ -220,6 +220,546 @@ class TestChatOps(unittest.TestCase):
         finally:
             cleanup()
 
+    def test_reply_to_group_bridge_session_message_relays_over_remote_send(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.kernel.group_bridge.pairing import _save_store
+
+            create, _ = self._call("group_create", {"title": "chat-group_bridge-reply", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+
+            _save_store(
+                {
+                    "invites": {},
+                    "requests": {},
+                    "outbounds": {},
+                    "trusts": {
+                        "ptrust_old": {
+                            "trust_id": "ptrust_old",
+                            "group_id": group_id,
+                            "remote_group_id": "g_remote",
+                            "remote_peer_id": "peer_old",
+                            "registration_id": "reg_old",
+                            "transport": "group_bridge_session",
+                            "remote_endpoint": "http://old.example:8848",
+                            "status": "active",
+                            "created_at": "2025-01-01T00:00:00Z",
+                            "updated_at": "2025-01-01T00:00:00Z",
+                        },
+                        "ptrust_1": {
+                            "trust_id": "ptrust_1",
+                            "group_id": group_id,
+                            "remote_group_id": "g_remote",
+                            "remote_peer_id": "peer_remote",
+                            "registration_id": "reg_remote",
+                            "transport": "group_bridge_session",
+                            "remote_endpoint": "http://remote.example:8848",
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-01-01T00:00:00Z",
+                        }
+                    },
+                }
+            )
+
+            from cccc.contracts.v1.message import ChatMessageData
+            from cccc.kernel.group import load_group
+            from cccc.kernel.ledger import append_event
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            inbound_event = append_event(
+                group.ledger_path,  # type: ignore[union-attr]
+                kind="chat.message",
+                group_id=group_id,
+                scope_key="",
+                by="group_bridge:peer_remote",
+                data=ChatMessageData(
+                    text="hello from remote",
+                    to=["@foreman"],
+                    source_platform="group_bridge_session",
+                    source_user_id="peer_remote",
+                    src_group_id="g_remote",
+                ).model_dump(),
+            )
+
+            captured: list[dict] = []
+
+            def fake_remote_send(args):
+                captured.append(dict(args))
+                from cccc.contracts.v1.ipc import DaemonResponse
+
+                return DaemonResponse(ok=True, result={"receipt": {"status": "queued"}})
+
+            with patch("cccc.daemon.group_bridge.reply_relay.handle_remote_send", side_effect=fake_remote_send):
+                reply, _ = self._call(
+                    "reply",
+                    {
+                        "group_id": group_id,
+                        "by": "peer1",
+                        "reply_to": str(inbound_event.get("id") or ""),
+                        "text": "reply over group_bridge",
+                        "to": ["user"],
+                        "priority": "attention",
+                    },
+                )
+
+            self.assertTrue(reply.ok, getattr(reply, "error", None))
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["group_id"], group_id)
+            self.assertEqual(captured[0]["by"], "peer1")
+            self.assertEqual(captured[0]["registration_id"], "reg_remote")
+            self.assertTrue(str(captured[0]["idempotency_key"]).startswith("reply:"))
+            self.assertEqual(
+                captured[0]["payload"],
+                {
+                    "text": "reply over group_bridge",
+                    "to": ["user"],
+                    "priority": "attention",
+                    "reply_required": False,
+                    "refs": [],
+                },
+            )
+        finally:
+            cleanup()
+
+    def test_reply_to_group_bridge_session_message_from_remote_user_defaults_to_remote_user(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.contracts.v1.message import ChatMessageData
+            from cccc.kernel.group_bridge.pairing import _save_store
+            from cccc.kernel.group import load_group
+            from cccc.kernel.ledger import append_event
+
+            create, _ = self._call("group_create", {"title": "chat-group_bridge-reply-user", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+
+            _save_store(
+                {
+                    "invites": {},
+                    "requests": {},
+                    "outbounds": {},
+                    "trusts": {
+                        "ptrust_1": {
+                            "trust_id": "ptrust_1",
+                            "group_id": group_id,
+                            "remote_group_id": "g_remote",
+                            "remote_peer_id": "peer_remote",
+                            "registration_id": "reg_remote",
+                            "transport": "group_bridge_session",
+                            "remote_endpoint": "http://remote.example:8848",
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-01-01T00:00:00Z",
+                        }
+                    },
+                }
+            )
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            inbound_event = append_event(
+                group.ledger_path,  # type: ignore[union-attr]
+                kind="chat.message",
+                group_id=group_id,
+                scope_key="",
+                by="group_bridge:peer_remote",
+                data=ChatMessageData(
+                    text="hello from remote user",
+                    to=["@foreman"],
+                    source_platform="group_bridge_session",
+                    source_user_id="peer_remote",
+                    src_group_id="g_remote",
+                    src_event_id="remote-event-1",
+                    src_by="user",
+                    remote_reply_to=["user"],
+                ).model_dump(),
+            )
+
+            captured: list[dict] = []
+
+            def fake_remote_send(args):
+                captured.append(dict(args))
+                from cccc.contracts.v1.ipc import DaemonResponse
+
+                return DaemonResponse(ok=True, result={"receipt": {"status": "queued"}})
+
+            with patch("cccc.daemon.group_bridge.reply_relay.handle_remote_send", side_effect=fake_remote_send):
+                reply, _ = self._call(
+                    "reply",
+                    {
+                        "group_id": group_id,
+                        "by": "peer1",
+                        "reply_to": str(inbound_event.get("id") or ""),
+                        "text": "reply to the remote user",
+                        "to": [],
+                    },
+                )
+
+            self.assertTrue(reply.ok, getattr(reply, "error", None))
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["registration_id"], "reg_remote")
+            self.assertEqual(captured[0]["by"], "peer1")
+            self.assertEqual(captured[0]["payload"]["to"], ["user"])
+            reply_event = (reply.result or {}).get("event") if isinstance(reply.result, dict) else {}
+            self.assertEqual((reply_event.get("data") or {}).get("to"), ["user"])
+        finally:
+            cleanup()
+
+    def test_reply_to_group_bridge_session_message_relays_before_local_self_recipient_rejection(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.contracts.v1.message import ChatMessageData
+            from cccc.kernel.group_bridge.pairing import _save_store
+            from cccc.kernel.group import load_group
+            from cccc.kernel.ledger import append_event
+
+            create, _ = self._call("group_create", {"title": "chat-group_bridge-single-actor", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+            add_actor, _ = self._call(
+                "actor_add",
+                {
+                    "group_id": group_id,
+                    "actor_id": "codex-1",
+                    "title": "Codex",
+                    "runtime": "codex",
+                    "runner": "headless",
+                    "role": "foreman",
+                    "enabled": True,
+                    "by": "user",
+                },
+            )
+            self.assertTrue(add_actor.ok, getattr(add_actor, "error", None))
+
+            _save_store(
+                {
+                    "invites": {},
+                    "requests": {},
+                    "outbounds": {},
+                    "trusts": {
+                        "ptrust_1": {
+                            "trust_id": "ptrust_1",
+                            "group_id": group_id,
+                            "remote_group_id": "g_remote",
+                            "remote_peer_id": "peer_remote",
+                            "registration_id": "reg_remote",
+                            "transport": "group_bridge_session",
+                            "remote_endpoint": "http://remote.example:8848",
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-01-01T00:00:00Z",
+                        }
+                    },
+                }
+            )
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            inbound_event = append_event(
+                group.ledger_path,  # type: ignore[union-attr]
+                kind="chat.message",
+                group_id=group_id,
+                scope_key="",
+                by="group_bridge:peer_remote",
+                data=ChatMessageData(
+                    text="hello from remote foreman",
+                    to=["codex-1"],
+                    source_platform="group_bridge_session",
+                    source_user_id="peer_remote",
+                    src_group_id="g_remote",
+                ).model_dump(),
+            )
+
+            captured: list[dict] = []
+            deliveries: list[dict] = []
+
+            def fake_remote_send(args):
+                captured.append(dict(args))
+                from cccc.contracts.v1.ipc import DaemonResponse
+
+                return DaemonResponse(ok=True, result={"receipt": {"status": "queued"}})
+
+            def capture_delivery(**kwargs):
+                deliveries.append(dict(kwargs))
+
+            with (
+                patch("cccc.daemon.group_bridge.reply_relay.handle_remote_send", side_effect=fake_remote_send),
+                patch("cccc.daemon.messaging.chat_ops.deliver_appended_chat_message", side_effect=capture_delivery),
+            ):
+                reply, _ = self._call(
+                    "reply",
+                    {
+                        "group_id": group_id,
+                        "by": "codex-1",
+                        "reply_to": str(inbound_event.get("id") or ""),
+                        "text": "reply back to remote",
+                        "to": ["@foreman"],
+                    },
+                )
+
+            self.assertTrue(reply.ok, getattr(reply, "error", None))
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["registration_id"], "reg_remote")
+            self.assertEqual(captured[0]["by"], "codex-1")
+            self.assertEqual(captured[0]["payload"]["to"], ["@foreman"])
+        finally:
+            cleanup()
+
+    def test_reply_to_group_bridge_session_message_relays_over_remote_send_route(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.contracts.v1.message import ChatMessageData
+            from cccc.kernel.group_bridge.pairing import _save_store
+            from cccc.kernel.group import load_group
+            from cccc.kernel.ledger import append_event
+
+            create, _ = self._call("group_create", {"title": "chat-group-bridge-session-reply", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+
+            _save_store(
+                {
+                    "invites": {},
+                    "requests": {},
+                    "outbounds": {},
+                    "trusts": {
+                        "ptrust_session": {
+                            "trust_id": "ptrust_session",
+                            "group_id": group_id,
+                            "remote_group_id": "g_remote",
+                            "remote_peer_id": "peer_remote",
+                            "registration_id": "reg_session",
+                            "transport": "group_bridge_session",
+                            "remote_endpoint": "http://remote.example:8848",
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-01-01T00:00:00Z",
+                        }
+                    },
+                }
+            )
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            inbound_event = append_event(
+                group.ledger_path,  # type: ignore[union-attr]
+                kind="chat.message",
+                group_id=group_id,
+                scope_key="",
+                by="group_bridge:peer_remote",
+                data=ChatMessageData(
+                    text="hello via Group Bridge session",
+                    to=["@foreman"],
+                    source_platform="group_bridge_session",
+                    source_user_id="peer_remote",
+                    src_group_id="g_remote",
+                    src_event_id="remote-event-1",
+                ).model_dump(),
+            )
+
+            captured: list[dict] = []
+
+            def fake_remote_send(args):
+                captured.append(dict(args))
+                from cccc.contracts.v1.ipc import DaemonResponse
+
+                return DaemonResponse(ok=True, result={"receipt": {"status": "queued"}})
+
+            with patch("cccc.daemon.group_bridge.reply_relay.handle_remote_send", side_effect=fake_remote_send):
+                reply, _ = self._call(
+                    "reply",
+                    {
+                        "group_id": group_id,
+                        "by": "user",
+                        "reply_to": str(inbound_event.get("id") or ""),
+                        "text": "reply via Group Bridge session",
+                        "to": ["@foreman"],
+                    },
+                )
+
+            self.assertTrue(reply.ok, getattr(reply, "error", None))
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["registration_id"], "reg_session")
+            self.assertEqual(captured[0]["by"], "user")
+            self.assertTrue(str(captured[0]["idempotency_key"]).startswith("reply:"))
+            self.assertNotEqual(captured[0]["idempotency_key"], captured[0].get("source_event_id"))
+            self.assertTrue(str(captured[0].get("source_event_id") or "").strip())
+            self.assertEqual(captured[0].get("reply_to_remote_event_id"), "remote-event-1")
+            self.assertEqual(captured[0]["payload"]["text"], "reply via Group Bridge session")
+        finally:
+            cleanup()
+
+    def test_reply_to_group_bridge_session_message_without_to_is_rejected(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.contracts.v1.message import ChatMessageData
+            from cccc.kernel.group_bridge.pairing import _save_store
+            from cccc.kernel.group import load_group
+            from cccc.kernel.inbox import iter_events
+            from cccc.kernel.ledger import append_event
+
+            create, _ = self._call("group_create", {"title": "chat-group-bridge-session-reply-no-local", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+
+            _save_store(
+                {
+                    "invites": {},
+                    "requests": {},
+                    "outbounds": {},
+                    "trusts": {
+                        "ptrust_session": {
+                            "trust_id": "ptrust_session",
+                            "group_id": group_id,
+                            "remote_group_id": "g_remote",
+                            "remote_peer_id": "peer_remote",
+                            "registration_id": "reg_session",
+                            "transport": "group_bridge_session",
+                            "remote_endpoint": "http://remote.example:8848",
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-01-01T00:00:00Z",
+                        }
+                    },
+                }
+            )
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            inbound_event = append_event(
+                group.ledger_path,  # type: ignore[union-attr]
+                kind="chat.message",
+                group_id=group_id,
+                scope_key="",
+                by="group_bridge:peer_remote",
+                data=ChatMessageData(
+                    text="hello via Group Bridge session",
+                    to=["@foreman"],
+                    source_platform="group_bridge_session",
+                    source_user_id="peer_remote",
+                    src_group_id="g_remote",
+                    src_event_id="remote-event-1",
+                ).model_dump(),
+            )
+
+            captured: list[dict] = []
+            deliveries: list[dict] = []
+
+            def fake_remote_send(args):
+                captured.append(dict(args))
+                from cccc.contracts.v1.ipc import DaemonResponse
+
+                return DaemonResponse(ok=True, result={"receipt": {"status": "queued"}})
+
+            def capture_delivery(**kwargs):
+                deliveries.append(dict(kwargs))
+
+            with (
+                patch("cccc.daemon.group_bridge.reply_relay.handle_remote_send", side_effect=fake_remote_send),
+                patch("cccc.daemon.messaging.chat_ops.deliver_appended_chat_message", side_effect=capture_delivery),
+            ):
+                reply, _ = self._call(
+                    "reply",
+                    {
+                        "group_id": group_id,
+                        "by": "user",
+                        "reply_to": str(inbound_event.get("id") or ""),
+                        "text": "reply via Group Bridge session",
+                        "to": [],
+                    },
+                )
+
+            self.assertFalse(reply.ok)
+            self.assertEqual(getattr(reply.error, "code", ""), "missing_remote_recipient")
+            self.assertEqual(captured, [])
+            events = list(iter_events(group.ledger_path))  # type: ignore[union-attr]
+            reply_events = [event for event in events if (event.get("data") or {}).get("reply_to") == inbound_event.get("id")]
+            self.assertEqual(reply_events, [])
+            self.assertEqual(deliveries, [])
+        finally:
+            cleanup()
+
+    def test_group_bridge_reply_relay_exception_does_not_fail_local_reply(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            from cccc.contracts.v1.message import ChatMessageData
+            from cccc.kernel.group_bridge.pairing import _save_store
+            from cccc.kernel.group import load_group
+            from cccc.kernel.ledger import append_event
+
+            create, _ = self._call("group_create", {"title": "chat-group_bridge-reply-error", "topic": "", "by": "user"})
+            self.assertTrue(create.ok, getattr(create, "error", None))
+            group_id = str((create.result or {}).get("group_id") or "").strip()
+            self.assertTrue(group_id)
+
+            _save_store(
+                {
+                    "invites": {},
+                    "requests": {},
+                    "outbounds": {},
+                    "trusts": {
+                        "ptrust_1": {
+                            "trust_id": "ptrust_1",
+                            "group_id": group_id,
+                            "remote_group_id": "g_remote",
+                            "remote_peer_id": "peer_remote",
+                            "registration_id": "reg_remote",
+                            "transport": "group_bridge_session",
+                            "remote_endpoint": "http://remote.example:8848",
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-01-01T00:00:00Z",
+                        }
+                    },
+                }
+            )
+
+            group = load_group(group_id)
+            self.assertIsNotNone(group)
+            inbound_event = append_event(
+                group.ledger_path,  # type: ignore[union-attr]
+                kind="chat.message",
+                group_id=group_id,
+                scope_key="",
+                by="group_bridge:peer_remote",
+                data=ChatMessageData(
+                    text="hello from remote",
+                    to=["@foreman"],
+                    source_platform="group_bridge_session",
+                    source_user_id="peer_remote",
+                    src_group_id="g_remote",
+                ).model_dump(),
+            )
+
+            with patch("cccc.daemon.group_bridge.reply_relay.handle_remote_send", side_effect=RuntimeError("relay boom")):
+                reply, _ = self._call(
+                    "reply",
+                    {
+                        "group_id": group_id,
+                        "by": "peer1",
+                        "reply_to": str(inbound_event.get("id") or ""),
+                        "text": "local reply survives",
+                        "to": ["user"],
+                    },
+                )
+
+            self.assertTrue(reply.ok, getattr(reply, "error", None))
+            result = reply.result or {}
+            self.assertIn("event", result)
+            group_bridge_reply = result.get("group_bridge_reply")
+            self.assertIsInstance(group_bridge_reply, dict)
+            self.assertEqual(group_bridge_reply.get("error", {}).get("code"), "group_bridge_reply_failed")
+        finally:
+            cleanup()
+
     def test_send_preserves_explicit_quote_text(self) -> None:
         _, cleanup = self._with_home()
         try:
@@ -1381,6 +1921,29 @@ class TestMCPToCoercion(unittest.TestCase):
                         pass
 
         self.assertEqual(captured.get("to"), ["user"])
+
+    def test_mcp_file_send_handler_forwards_dst_group_id(self) -> None:
+        from cccc.ports.mcp.server import _handle_cccc_namespace
+        from unittest.mock import patch
+
+        captured = {}
+
+        def fake_file_send(**kwargs):
+            captured.update(kwargs)
+            return {"event": {}}
+
+        with patch("cccc.ports.mcp.server.file_send", side_effect=fake_file_send):
+            with patch("cccc.ports.mcp.server._resolve_group_id", return_value="g_test"):
+                with patch("cccc.ports.mcp.server._resolve_self_actor_id", return_value="peer1"):
+                    _handle_cccc_namespace("cccc_file", {
+                        "action": "send",
+                        "dst_group_id": "g_remote",
+                        "to": ["@foreman"],
+                        "path": "shot.png",
+                    })
+
+        self.assertEqual(captured.get("dst_group_id"), "g_remote")
+        self.assertEqual(captured.get("to"), ["@foreman"])
 
     def test_mcp_file_send_handler_none_to_is_none(self) -> None:
         """MCP cccc_file_send handler: missing `to` → None."""

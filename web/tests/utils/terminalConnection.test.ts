@@ -10,6 +10,7 @@ import {
   isTerminalAttachStartupRaceErrorCode,
   parseTerminalBinaryFrame,
   shouldSuppressTerminalAttachErrorOutput,
+  shouldSuppressTerminalGeneratedInput,
   TERMINAL_FRAME_ATTACH,
   TERMINAL_FRAME_INPUT,
   TERMINAL_FRAME_INPUT_ACK,
@@ -52,6 +53,45 @@ describe("buildTerminalConnectionKey", () => {
     expect(shouldSuppressTerminalAttachErrorOutput("actor_not_running")).toBe(true);
     expect(shouldSuppressTerminalAttachErrorOutput("actor_not_found")).toBe(false);
     expect(shouldSuppressTerminalAttachErrorOutput("daemon_unavailable")).toBe(false);
+  });
+});
+
+describe("shouldSuppressTerminalGeneratedInput", () => {
+  it("suppresses terminal query replies for codex PTY actors", () => {
+    expect(shouldSuppressTerminalGeneratedInput("\x1b[?1;2c", "codex")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b[?;2c", "codex")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b[>0;0;0c", "codex")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b]10;rgb:e2e2/e8e8/f0f0\x07", "codex")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b]11;rgb:0f0f/1717/2a2a\x1b\\", "codex")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b[I", "codex")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b[O", "codex")).toBe(true);
+  });
+
+  it("suppresses combined terminal query replies in one data event", () => {
+    const combined = "\x1b[?1;2c\x1b]10;rgb:e2e2/e8e8/f0f0\x07\x1b]11;rgb:0f0f/1717/2a2a\x1b\\";
+    expect(shouldSuppressTerminalGeneratedInput(combined, "codex")).toBe(true);
+  });
+
+  it("keeps normal input and unsupported runtimes untouched", () => {
+    expect(shouldSuppressTerminalGeneratedInput("hello", "codex")).toBe(false);
+    expect(shouldSuppressTerminalGeneratedInput("\r", "codex")).toBe(false);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b[?1;2c", "custom")).toBe(false);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b]10;rgb:e2e2/e8e8/f0f0\x07", undefined)).toBe(false);
+  });
+
+  it("preserves existing suppression for runtimes that already needed it", () => {
+    expect(shouldSuppressTerminalGeneratedInput("\x1b[?1;2c", "droid")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b]11;rgb:0f0f/1717/2a2a\x1b\\", "droid")).toBe(true);
+  });
+
+  it("suppresses terminal color query replies for Devin PTY actors", () => {
+    expect(shouldSuppressTerminalGeneratedInput("\x1b]10;rgb:1e1e/2929/3b3b\x07", "devin")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("\x1b]11;rgb:fafa/fafa/fafa\x1b\\", "devin")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("10;rgb:1e1e/2929/3b3b11;rgb:fafa/fafa/fafa", "devin")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("10;rgb:1e1e/2929/3b3b", "devin")).toBe(true);
+    expect(shouldSuppressTerminalGeneratedInput("hello", "devin")).toBe(false);
+    expect(shouldSuppressTerminalGeneratedInput("\r", "devin")).toBe(false);
+    expect(shouldSuppressTerminalGeneratedInput("10;rgb is not a full terminal reply", "devin")).toBe(false);
   });
 });
 

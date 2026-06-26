@@ -38,8 +38,12 @@ class SendRequest(BaseModel):
     quote_text: str = Field(default="")
     priority: Literal["normal", "attention"] = "normal"
     reply_required: bool = False
+    source_platform: str = Field(default="")
+    source_user_name: str = Field(default="")
+    source_user_id: str = Field(default="")
     src_group_id: str = Field(default="")
     src_event_id: str = Field(default="")
+    source_multiaddrs: list[str] = Field(default_factory=list)
     client_id: str = Field(default="")
     refs: list[dict[str, Any]] = Field(default_factory=list)
     suggested_user_message: str = Field(default="")
@@ -52,6 +56,18 @@ class SendCrossGroupRequest(BaseModel):
     to: list[str] = Field(default_factory=list)
     priority: Literal["normal", "attention"] = "normal"
     reply_required: bool = False
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DelegateContactRequest(BaseModel):
+    text: str
+    dst_group_id: str
+    by: str = Field(default="user")
+    delegation_token: str = Field(default="")
+    relay_sender: str = Field(default="")
+    source_event_id: str = Field(default="")
+    target_actor: str = Field(default="")
+    contact_text: str = Field(default="")
 
 
 class TrackedSendRequest(BaseModel):

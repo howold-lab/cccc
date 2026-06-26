@@ -590,8 +590,9 @@ def _append_runtime_help_addenda(markdown: str, *, group_id: str, actor_id: str)
                     "`cccc_exec_command`, `cccc_write_stdin`, `cccc_shell`, and `cccc_git`.",
                     "- Delivered CCCC attachments are blob references, not browser uploads. Read text attachments with "
                     "`cccc_file(action=\"read\", rel_path=...)`; use `blob_path` for binary files or local inspection.",
-                    "- When you create a file that the user or a peer should receive, keep it under the active scope and "
-                    "send it back with `cccc_file(action=\"send\", path=..., text=...)` instead of only mentioning a path.",
+                    "- When you create a file that the user, a peer, or a trusted remote Group Bridge target should receive, "
+                    "keep it under the active scope and send it back with `cccc_file(action=\"send\", path=..., text=..., "
+                    "dst_group_id=...)` instead of only mentioning a path.",
                     "- Inside `cccc_code_exec`, call nested tools as `await tools.cccc_repo({...})`, "
                     "`await tools.cccc_apply_patch({...})`; inspect `COMMON_WORK_LOOPS`, `tool_names(\"repo\")`, "
                     "`list_tools(\"repo\")`, or `tool_help(\"repo\")` if a tool name or loop is unclear; "
@@ -727,9 +728,7 @@ def _append_runtime_help_addenda(markdown: str, *, group_id: str, actor_id: str)
                 _append_skill_preview(lines, item)
         lines.extend(
             [
-                "- Capsule skill is runtime capsule activation, not a full local skill-package install.",
-                "- Runtime success is mainly visible via `capability_state.active_capsule_skills`; `dynamic_tools` may stay unchanged.",
-                "- Install repository, URL, and local `SKILL.md` sources through `cccc_capability_install` so they remain CCCC capability records.",
+                "- Treat active skills as additional working rules for the current task; ignore them when they do not apply.",
             ]
         )
         sections.append("\n".join(lines).rstrip())

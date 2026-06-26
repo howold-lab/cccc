@@ -305,20 +305,29 @@ Recommended options:
 
 ### Supported Runtimes
 
-| Runtime | Integration | Description |
-|---------|-------------|-------------|
+| Runtime | Entrypoint / Surface | Description |
+|---------|----------------------|-------------|
 | amp | `amp` | Amp |
 | auggie | `auggie` | Auggie (Augment CLI) |
 | claude | `claude` | Claude Code |
 | codex | `codex` | Codex CLI |
+| copilot | `copilot` | GitHub Copilot CLI |
+| cursor | `cursor-agent` | Cursor CLI |
+| devin | `devin` | Devin CLI |
+| kiro | `kiro-cli` | Kiro CLI |
+| kilo | `kilo` | Kilo Code CLI |
+| antigravity | `agy` | Antigravity CLI |
 | droid | `droid` | Droid |
-| gemini | `gemini` | Gemini CLI |
-| kimi | `kimi --yolo` | Kimi CLI |
-| neovate | `neovate` | Neovate Code |
-| web_model | Remote MCP + browser delivery | ChatGPT Web conversation with an MCP-capable GPT-5.x session; GPT-5.x Pro is advisory-only and has no reliable CCCC local access |
-| custom | Custom | Any command |
+| grok | `grok` | Grok Build |
+| hermes | `hermes` | Hermes Agent |
+| kimi | `kimi` | Kimi CLI |
+| opencode | `opencode` | OpenCode |
+| web_model | ChatGPT Web conversation | ChatGPT Web conversation with an MCP-capable GPT-5.x session; GPT-5.x Pro is advisory-only and has no reliable CCCC local access |
+| custom | Any command | Any command |
 
-CCCC first-class runtime support is the nine named runtimes above. `custom` remains the manual fallback for any other command.
+These entries show stable runtime entrypoints or surfaces, not every runtime-specific launch flag. CCCC applies launch defaults automatically and actor/profile commands can be reviewed or customized in settings.
+
+CCCC first-class runtime support is the named runtimes above. `custom` remains the manual fallback for any other command.
 
 ### Setup Commands
 
@@ -328,9 +337,13 @@ cccc setup --runtime codex
 cccc setup --runtime droid
 cccc setup --runtime amp
 cccc setup --runtime auggie
-cccc setup --runtime neovate
-cccc setup --runtime gemini
+cccc setup --runtime grok
+cccc setup --runtime hermes
 cccc setup --runtime kimi
+cccc setup --runtime opencode
+cccc setup --runtime cursor       # Prompt-assisted setup inside Cursor CLI
+cccc setup --runtime kilo         # Prompt-assisted setup inside Kilo Code CLI
+cccc setup --runtime antigravity  # Prompt-assisted setup inside Antigravity
 cccc setup --runtime custom
 ```
 

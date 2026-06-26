@@ -122,6 +122,7 @@ from .serve_ops import (
     start_bootstrap_thread,
     cleanup_after_stop,
 )
+from .group_bridge.ws_manager import start_group_bridge_session_manager_thread
 from .space.group_space_memory_sync import process_due_memory_space_syncs
 from .space.group_space_runtime import process_due_space_jobs
 from .space.group_space_sync import process_due_space_syncs, sync_group_space_files
@@ -293,15 +294,19 @@ def _can_read_terminal_transcript(group: Any, *, by: str, target_actor_id: str) 
 
 SUPPORTED_RUNTIMES = (
     "amp",
+    "antigravity",
     "auggie",
     "claude",
     "codex",
+    "copilot",
+    "cursor",
+    "devin",
+    "kiro",
+    "kilo",
     "droid",
-    "gemini",
     "grok",
     "hermes",
     "kimi",
-    "neovate",
     "opencode",
     "web_model",
     "custom",
@@ -310,11 +315,12 @@ SUPPORTED_RUNTIMES = (
 AUTO_MCP_RUNTIMES = (
     "claude",
     "codex",
+    "copilot",
+    "devin",
+    "kiro",
     "droid",
     "amp",
     "auggie",
-    "neovate",
-    "gemini",
     "grok",
     "hermes",
     "kimi",
@@ -354,7 +360,13 @@ def _is_mcp_installed(runtime: str) -> bool:
 
 
 def _ensure_mcp_installed(runtime: str, cwd: Path, *, env: Dict[str, str] | None = None) -> bool:
-    return runtime_ensure_mcp_installed(runtime, cwd, auto_mcp_runtimes=AUTO_MCP_RUNTIMES, env=env)
+    return runtime_ensure_mcp_installed(
+        runtime,
+        cwd,
+        auto_mcp_runtimes=AUTO_MCP_RUNTIMES,
+        env=env,
+        raise_on_error=True,
+    )
 
 
 def _prepare_pty_env(env: Dict[str, Any]) -> Dict[str, str]:
@@ -1024,6 +1036,12 @@ def serve_forever(paths: Optional[DaemonPaths] = None) -> int:
         stop_event=stop_event,
         tick_space_jobs=_tick_space_jobs,
         interval_seconds=1.0,
+    )
+
+    start_group_bridge_session_manager_thread(
+        home=p.home,
+        stop_event=stop_event,
+        interval_seconds=10.0,
     )
 
     def _tick_space_sync() -> None:

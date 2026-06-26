@@ -3,7 +3,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from "react";
 import { BookmarkIcon, CompassIcon, InfoIcon } from "../../components/Icons";
-import { Actor, GroupMeta, HeadlessPreviewSession, LedgerEvent, PresentationMessageRef, StreamingActivity, TaskMessageRef } from "../../types";
+import { Actor, HeadlessPreviewSession, LedgerEvent, PresentationMessageRef, StreamingActivity, TaskMessageRef } from "../../types";
 import { VirtualMessageList } from "../../components/VirtualMessageList";
 import { classNames } from "../../utils/classNames";
 import { ChatComposer } from "./ChatComposer";
@@ -31,6 +31,7 @@ import {
 } from "../../utils/chatGptAppPermissionHint";
 import type { StreamingReplySession } from "../../stores/chatStreamingSessions";
 import { buildLiveWorkCards } from "./liveWorkCards";
+import { getGroupRouteDisplayName, type ComposerMentionKind } from "./chatMentionSuggestions";
 
 const PresentationRail = lazy(() =>
   import("../../components/presentation/PresentationRail").then((module) => ({ default: module.PresentationRail }))
@@ -105,13 +106,15 @@ export interface ChatTabProps {
   groupLabelById: Record<string, string>;
   actors: Actor[];
   runtimeActors: Actor[];
-  groups: GroupMeta[];
   activeRuntimeActorId?: string;
 
   // Recipient actors for cross-group messaging
   recipientActors: Actor[];
   recipientActorsBusy?: boolean;
   destGroupScopeLabel?: string;
+  mentionFilter?: string;
+  mentionKind?: ComposerMentionKind;
+  mentionActorScope?: "selected" | "destination";
 
   // Refs (shared with App for external interactions)
   scrollRef: MutableRefObject<HTMLDivElement | null>;
@@ -134,6 +137,9 @@ export interface ChatTabProps {
   mentionSelectedIndex: number;
   setMentionSelectedIndex: React.Dispatch<React.SetStateAction<number>>;
   setMentionFilter: React.Dispatch<React.SetStateAction<string>>;
+  setMentionKind: React.Dispatch<React.SetStateAction<ComposerMentionKind>>;
+  setMentionActorScope: React.Dispatch<React.SetStateAction<"selected" | "destination">>;
+  setMentionTargetGroupId: React.Dispatch<React.SetStateAction<string>>;
 }
 
 export function ChatTab({
@@ -146,11 +152,13 @@ export function ChatTab({
   groupLabelById,
   actors,
   runtimeActors,
-  groups,
   activeRuntimeActorId,
   recipientActors,
   recipientActorsBusy,
   destGroupScopeLabel,
+  mentionFilter,
+  mentionKind,
+  mentionActorScope,
   scrollRef,
   composerRef,
   fileInputRef,
@@ -163,6 +171,9 @@ export function ChatTab({
   mentionSelectedIndex,
   setMentionSelectedIndex,
   setMentionFilter,
+  setMentionKind,
+  setMentionActorScope,
+  setMentionTargetGroupId,
 }: ChatTabProps) {
   // Use the refactored hook for business logic
   const {
@@ -199,6 +210,10 @@ export function ChatTab({
     // Composer state
     composerText,
     setComposerText,
+    composerGroupMentionTokens,
+    setComposerGroupMentionTokens,
+    composerAgentMentionTokens,
+    setComposerAgentMentionTokens,
     composerFiles,
     removeComposerFile,
     replyTarget,
@@ -207,6 +222,8 @@ export function ChatTab({
     clearQuotedPresentationRef,
     toTokens,
     toggleRecipient,
+    selectedRemoteGroupIds,
+    toggleRemoteGroupRecipient,
     clearRecipients,
     appendRecipientToken,
     priority,
@@ -216,6 +233,7 @@ export function ChatTab({
     destGroupId,
     setDestGroupId,
     composerGroupSettled,
+    composerRouteGroups,
     mentionSuggestions,
     slashCommands,
 
@@ -241,11 +259,27 @@ export function ChatTab({
     selectedGroupRunning,
     actors,
     recipientActors,
+    mentionFilter,
+    mentionKind,
+    mentionActorScope,
     composerRef,
     fileInputRef,
     chatAtBottomRef,
     scrollRef,
   });
+
+  const remoteRouteGroups = useMemo(
+    () => composerRouteGroups.filter((group) => group.group_bridge_remote),
+    [composerRouteGroups],
+  );
+  const messageGroupLabelById = useMemo(() => {
+    const labels = { ...groupLabelById };
+    for (const group of remoteRouteGroups) {
+      const groupId = String(group.group_id || "").trim();
+      if (groupId) labels[groupId] = getGroupRouteDisplayName(group);
+    }
+    return labels;
+  }, [groupLabelById, remoteRouteGroups]);
 
   const { t } = useTranslation('chat');
   const groupPresentation = useGroupStore((state) => state.groupPresentation);
@@ -775,7 +809,7 @@ export function ChatTab({
                   isDark={isDark}
                   readOnly={readOnly}
                   groupId={selectedGroupId}
-                  groupLabelById={groupLabelById}
+                  groupLabelById={messageGroupLabelById}
                   webModelDeliveryStatusByEventId={webModelDeliveryStatusByEventId}
                   viewKey={chatViewKey}
                   initialScrollTargetId={chatInitialScrollTargetId}
@@ -936,13 +970,12 @@ export function ChatTab({
             isSmallScreen={isSmallScreen}
             selectedGroupId={selectedGroupId}
             actors={actors}
-            recipientActors={recipientActors}
             recipientActorsBusy={recipientActorsBusy}
             selectedGroupActorsHydrating={selectedGroupActorsHydrating}
-            groups={groups}
             destGroupId={destGroupId}
             setDestGroupId={setDestGroupId}
             composerGroupSettled={composerGroupSettled}
+            composerRouteGroups={composerRouteGroups}
             destGroupScopeLabel={destGroupScopeLabel}
             busy={busy}
             recentMessages={chatMessages}
@@ -953,6 +986,9 @@ export function ChatTab({
             onClearQuotedPresentationRef={clearQuotedPresentationRef}
             toTokens={toTokens}
             onToggleRecipient={toggleRecipient}
+            remoteGroups={remoteRouteGroups}
+            selectedRemoteGroupIds={selectedRemoteGroupIds}
+            onToggleRemoteGroup={toggleRemoteGroupRecipient}
             onClearRecipients={clearRecipients}
             composerFiles={composerFiles}
             onRemoveComposerFile={removeComposerFile}
@@ -961,6 +997,10 @@ export function ChatTab({
             composerRef={composerRef}
             composerText={composerText}
             setComposerText={setComposerText}
+            composerGroupMentionTokens={composerGroupMentionTokens}
+            setComposerGroupMentionTokens={setComposerGroupMentionTokens}
+            composerAgentMentionTokens={composerAgentMentionTokens}
+            setComposerAgentMentionTokens={setComposerAgentMentionTokens}
             priority={priority}
             replyRequired={replyRequired}
             setPriority={setPriority}
@@ -972,6 +1012,9 @@ export function ChatTab({
             mentionSelectedIndex={mentionSelectedIndex}
             setMentionSelectedIndex={setMentionSelectedIndex}
             setMentionFilter={setMentionFilter}
+            setMentionKind={setMentionKind}
+            setMentionActorScope={setMentionActorScope}
+            setMentionTargetGroupId={setMentionTargetGroupId}
             onAppendRecipientToken={appendRecipientToken}
             slashCommands={slashCommands}
           />

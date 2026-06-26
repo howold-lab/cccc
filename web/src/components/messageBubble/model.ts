@@ -16,7 +16,7 @@ export function buildToLabel({
     if (hasDestination) {
         return "";
     }
-    if (!recipients || recipients.length === 0) return "@all";
+    if (!recipients || recipients.length === 0) return "@foreman";
     return recipients
         .map((recipient) => getRecipientDisplayName(recipient, displayNameMap))
         .join(", ");
@@ -26,14 +26,18 @@ export function getSenderDisplayName({
     senderId,
     senderActor,
     senderTitle,
+    group_bridgeSourceName,
     displayNameMap,
 }: {
     senderId: string;
     senderActor: Actor | null;
     senderTitle?: string;
+    group_bridgeSourceName?: string;
     displayNameMap: Map<string, string>;
 }): string {
     if (!senderId || senderId === "user") return senderId;
+    const sourceName = String(group_bridgeSourceName || "").trim();
+    if (senderId.startsWith("group_bridge:") && sourceName) return sourceName;
     return String(senderTitle || "").trim() || String(senderActor?.title || "").trim() || displayNameMap.get(senderId) || senderId;
 }
 

@@ -1,11 +1,18 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 # Env vars that _resolve_group_id / _resolve_self_actor_id read at runtime.
 # Tests must isolate from the host environment to avoid group_id_mismatch.
 _CLEAN_ENV = {"CCCC_GROUP_ID": "", "CCCC_ACTOR_ID": ""}
+
+
+def _isolated_runtime_context():
+    from cccc.ports.mcp.common import runtime_context_override
+
+    return runtime_context_override(home="/tmp/cccc-mcp-test", group_id="", actor_id="")
 
 
 class TestMcpMessageSendReplyRequired(unittest.TestCase):
@@ -19,7 +26,8 @@ class TestMcpMessageSendReplyRequired(unittest.TestCase):
             captured["req"] = req
             return {"ok": True, "result": {"event_id": "ev_test"}}
 
-        with patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+        with _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
              patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
             out = mcp_server.handle_tool_call(
                 "cccc_message_send",
@@ -50,7 +58,8 @@ class TestMcpMessageSendReplyRequired(unittest.TestCase):
 
         refs = [{"kind": "presentation_ref", "slot_id": "slot-2", "label": "P2", "locator_label": "PDF p.12"}]
 
-        with patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+        with _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
              patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
             out = mcp_server.handle_tool_call(
                 "cccc_message_send",
@@ -106,7 +115,8 @@ class TestMcpMessageSendReplyRequired(unittest.TestCase):
             captured["req"] = req
             return {"ok": True, "result": {"src_event": {"id": "src-1"}, "dst_event": {"id": "dst-1"}}}
 
-        with patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+        with _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
              patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
             out = mcp_server.handle_tool_call(
                 "cccc_message_send",
@@ -126,6 +136,145 @@ class TestMcpMessageSendReplyRequired(unittest.TestCase):
         self.assertEqual(args.get("group_id"), "g_runtime")
         self.assertEqual(args.get("dst_group_id"), "g_selected")
         self.assertEqual(args.get("to"), ["@foreman"])
+
+    def test_message_send_routes_group_bridge_remote_destination_to_remote_send(self) -> None:
+        from cccc.kernel.group_bridge import pairing as pairing_kernel
+        from cccc.ports.mcp import server as mcp_server
+        from cccc.ports.mcp import common as mcp_common
+
+        captured = {}
+
+        def _fake_call_daemon(req):
+            captured["req"] = req
+            return {"ok": True, "result": {"queued": False, "receipt": {"status": "sent", "remote_event_id": "ev_remote"}}}
+
+        with tempfile.TemporaryDirectory() as td, \
+             _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+             patch("cccc.kernel.group_bridge.pairing.ensure_home", return_value=Path(td)), \
+             patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
+            request = pairing_kernel.create_pairing_request(
+                pairing_kernel.create_pairing_invite(group_id="g_runtime")["pairing_code"],
+                requester_group_id="g_remote",
+                requester_group_title="Remote Group",
+                requester_peer_id="peer_remote",
+                requester_endpoint="http://remote.example:8848",
+            )
+            approved = pairing_kernel.approve_pairing_request(request["request_id"], approver_user_id="user-a")
+
+            out = mcp_server.handle_tool_call(
+                "cccc_message_send",
+                {
+                    "group_id": "g_runtime",
+                    "dst_group_id": "g_remote",
+                    "actor_id": "peer1",
+                    "text": "hello remote",
+                    "to": ["@foreman"],
+                    "priority": "attention",
+                    "reply_required": "true",
+                    "idempotency_key": "caller-key-1",
+                    "refs": [{"kind": "note", "id": "ref-1"}],
+                },
+            )
+
+        self.assertEqual((out.get("receipt") or {}).get("remote_event_id"), "ev_remote")
+        req = captured.get("req") or {}
+        self.assertEqual(req.get("op"), "remote_send")
+        args = req.get("args") if isinstance(req.get("args"), dict) else {}
+        self.assertEqual(args.get("group_id"), "g_runtime")
+        self.assertEqual(args.get("registration_id"), approved["registration"]["registration_id"])
+        self.assertEqual(args.get("idempotency_key"), "caller-key-1")
+        payload = args.get("payload") if isinstance(args.get("payload"), dict) else {}
+        self.assertEqual(payload.get("text"), "hello remote")
+        self.assertEqual(payload.get("to"), ["@foreman"])
+        self.assertEqual(payload.get("priority"), "attention")
+        self.assertEqual(payload.get("reply_required"), True)
+        self.assertEqual(payload.get("refs"), [{"kind": "note", "id": "ref-1"}])
+
+    def test_message_send_requires_explicit_recipient_for_group_bridge_remote_destination(self) -> None:
+        from cccc.kernel.group_bridge import pairing as pairing_kernel
+        from cccc.ports.mcp import server as mcp_server
+        from cccc.ports.mcp import common as mcp_common
+
+        with tempfile.TemporaryDirectory() as td, \
+             _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+             patch("cccc.kernel.group_bridge.pairing.ensure_home", return_value=Path(td)), \
+             patch.object(mcp_common, "call_daemon") as call_daemon:
+            request = pairing_kernel.create_pairing_request(
+                pairing_kernel.create_pairing_invite(group_id="g_runtime")["pairing_code"],
+                requester_group_id="g_remote",
+                requester_group_title="Remote Group",
+                requester_peer_id="peer_remote",
+                requester_endpoint="http://remote.example:8848",
+            )
+            pairing_kernel.approve_pairing_request(request["request_id"], approver_user_id="user-a")
+
+            with self.assertRaises(mcp_server.MCPError) as raised:
+                mcp_server.handle_tool_call(
+                    "cccc_message_send",
+                    {
+                        "group_id": "g_runtime",
+                        "dst_group_id": "g_remote",
+                        "actor_id": "peer1",
+                        "text": "hello remote",
+                    },
+                )
+
+        self.assertEqual(raised.exception.code, "missing_remote_recipient")
+        call_daemon.assert_not_called()
+
+    def test_message_send_rejects_hash_recipient_for_cross_group_string_to(self) -> None:
+        from cccc.ports.mcp import server as mcp_server
+        from cccc.ports.mcp import common as mcp_common
+
+        with _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+             patch.object(mcp_common, "call_daemon") as call_daemon:
+            with self.assertRaises(mcp_server.MCPError) as raised:
+                mcp_server.handle_tool_call(
+                    "cccc_message_send",
+                    {
+                        "group_id": "g_runtime",
+                        "dst_group_id": "g_selected",
+                        "actor_id": "peer1",
+                        "text": "hello",
+                        "to": "#self-agent",
+                    },
+                )
+
+        self.assertEqual(raised.exception.code, "invalid_recipient_syntax")
+        self.assertIn("#group tokens are routing hints, not recipients", str(raised.exception))
+        self.assertIn('cccc_group(action="resolve"', str(raised.exception))
+        self.assertIn("unique real group_id", str(raised.exception))
+        self.assertIn("cccc_message_send(dst_group_id=<g_...>", str(raised.exception))
+        self.assertIn("to='@foreman' or target actor id", str(raised.exception))
+        self.assertIn("text=<your own natural message to the target>", str(raised.exception))
+        call_daemon.assert_not_called()
+
+    def test_message_send_rejects_hash_recipient_for_cross_group_list_to(self) -> None:
+        from cccc.ports.mcp import server as mcp_server
+        from cccc.ports.mcp import common as mcp_common
+
+        with _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+             patch.object(mcp_common, "call_daemon") as call_daemon:
+            with self.assertRaises(mcp_server.MCPError) as raised:
+                mcp_server.handle_tool_call(
+                    "cccc_message_send",
+                    {
+                        "group_id": "g_runtime",
+                        "dst_group_id": "g_selected",
+                        "actor_id": "peer1",
+                        "text": "hello",
+                        "to": ["#self-agent"],
+                    },
+                )
+
+        self.assertEqual(raised.exception.code, "invalid_recipient_syntax")
+        self.assertIn("Do not put #group in to", str(raised.exception))
+        self.assertIn("do not forward a template", str(raised.exception))
+        call_daemon.assert_not_called()
 
     def test_message_send_rejects_suggested_user_message_for_cross_group(self) -> None:
         from cccc.ports.mcp import server as mcp_server
@@ -163,7 +312,8 @@ class TestMcpMessageSendReplyRequired(unittest.TestCase):
 
         refs = [{"kind": "presentation_ref", "slot_id": "slot-4", "label": "P4", "locator_label": "Web"}]
 
-        with patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+        with _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
              patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
             out = mcp_server.handle_tool_call(
                 "cccc_message_reply",
@@ -208,6 +358,47 @@ class TestMcpMessageSendReplyRequired(unittest.TestCase):
         req = captured.get("req") or {}
         args = req.get("args") if isinstance(req.get("args"), dict) else {}
         self.assertEqual(args.get("suggested_user_message"), "Please run the next implementation pass.")
+        hint = out.get("post_reply_hint") if isinstance(out.get("post_reply_hint"), dict) else {}
+        self.assertEqual(hint.get("kind"), "resume_checkpoint")
+        message = str(hint.get("message") or "")
+        self.assertIn("Reply sent.", message)
+        self.assertIn("Reorient after this interruption", message)
+        self.assertIn("unfinished work", message)
+        self.assertIn("open loops", message)
+        self.assertIn("commitments", message)
+        self.assertIn("larger goal", message)
+        self.assertIn("highest-value next step", message)
+        self.assertIn("brief quality/risk pass", message)
+
+    def test_message_send_adds_lightweight_tool_boundary_hint(self) -> None:
+        from cccc.ports.mcp import server as mcp_server
+        from cccc.ports.mcp import common as mcp_common
+
+        def _fake_call_daemon(req):
+            return {"ok": True, "result": {"event_id": "ev_send"}}
+
+        with patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+             patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
+            out = mcp_server.handle_tool_call(
+                "cccc_message_send",
+                {
+                    "group_id": "g_test",
+                    "actor_id": "peer1",
+                    "text": "ordinary send",
+                    "to": ["user"],
+                },
+            )
+
+        self.assertEqual(out.get("event_id"), "ev_send")
+        self.assertNotIn("post_reply_hint", out)
+        hint = out.get("post_send_hint") if isinstance(out.get("post_send_hint"), dict) else {}
+        self.assertEqual(hint.get("kind"), "message_tool_boundary")
+        message = str(hint.get("message") or "")
+        self.assertIn("New message sent.", message)
+        self.assertIn("answering an existing delivered message/event", message)
+        self.assertIn("cccc_message_reply(event_id=...)", message)
+        self.assertNotIn("unfinished work", message)
+        self.assertNotIn("quality/risk pass", message)
 
     def test_tracked_send_passes_task_contract_args(self) -> None:
         from cccc.ports.mcp import server as mcp_server
@@ -220,7 +411,8 @@ class TestMcpMessageSendReplyRequired(unittest.TestCase):
             return {"ok": True, "result": {"task_id": "T001", "message_sent": True}}
 
         checklist = [{"text": "Check"}, {"text": "Report", "status": "pending"}]
-        with patch.dict(os.environ, _CLEAN_ENV, clear=False), \
+        with _isolated_runtime_context(), \
+             patch.dict(os.environ, _CLEAN_ENV, clear=False), \
              patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
             out = mcp_server.handle_tool_call(
                 "cccc_tracked_send",
@@ -281,7 +473,7 @@ class TestMcpMessageSendReplyRequired(unittest.TestCase):
             )
             self.assertTrue(add_resp.ok, getattr(add_resp, "error", None))
 
-            with patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
+            with _isolated_runtime_context(), patch.object(mcp_common, "call_daemon", side_effect=_fake_call_daemon):
                 out = mcp_server.handle_tool_call(
                     "cccc_message_send",
                     {

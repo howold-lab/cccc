@@ -16,6 +16,10 @@ interface UseCrossGroupRecipientsOptions {
   composerGroupId: string;
   /** Target group ID for sending (from useComposerStore.destGroupId) */
   sendGroupId: string;
+  /** Group whose actors should populate the `@` destination mention menu. This
+   *  is decoupled from sendGroupId so `#group @` can show the target group's
+   *  actors WITHOUT making the message a direct cross-group send (T411/T400). */
+  mentionTargetGroupId?: string;
   /** Whether the selected group's actors are currently hydrating */
   selectedGroupActorsHydrating?: boolean;
 }
@@ -27,6 +31,27 @@ interface UseCrossGroupRecipientsResult {
   recipientActorsBusy: boolean;
   /** Label for the target group's active scope */
   destGroupScopeLabel: string;
+}
+
+const REMOTE_ACTORS_REFRESH_MS = 60000;
+
+export function getRemoteActorsFetchDecision({
+  canFetchRemoteRecipients,
+  hasCachedActors,
+  fetchedAtMs,
+  nowMs,
+}: {
+  canFetchRemoteRecipients: boolean;
+  hasCachedActors: boolean;
+  fetchedAtMs?: number;
+  nowMs: number;
+}): { shouldFetch: boolean; noCache: boolean } {
+  if (!canFetchRemoteRecipients) return { shouldFetch: false, noCache: false };
+  if (!hasCachedActors) return { shouldFetch: true, noCache: false };
+  const fetchedAt = Number(fetchedAtMs || 0);
+  if (!fetchedAt) return { shouldFetch: true, noCache: true };
+  const stale = nowMs - fetchedAt >= REMOTE_ACTORS_REFRESH_MS;
+  return { shouldFetch: stale, noCache: stale };
 }
 
 export function resolveRecipientActorsForComposer({
@@ -71,16 +96,22 @@ export function useCrossGroupRecipients({
   selectedGroupId,
   composerGroupId,
   sendGroupId,
+  mentionTargetGroupId,
   selectedGroupActorsHydrating,
 }: UseCrossGroupRecipientsOptions): UseCrossGroupRecipientsResult {
   const selectedGid = String(selectedGroupId || "").trim();
   const composerGid = String(composerGroupId || "").trim();
   const sendGid = String(sendGroupId || "").trim();
-  const canFetchRemoteRecipients = !!sendGid && !!selectedGid && sendGid !== selectedGid && composerGid === selectedGid;
+  // Recipient-actor source for the `@` menu: the explicit mention target group
+  // (when typing `#group @`) takes precedence over the send destination.
+  const recipientGid = String(mentionTargetGroupId || "").trim() || sendGid;
+  const canFetchRemoteRecipients = !!recipientGid && !!selectedGid && recipientGid !== selectedGid && composerGid === selectedGid;
 
   // Remote fetch caches (state drives re-render).
   const [remoteActorsByGroup, setRemoteActorsByGroup] = useState<Record<string, Actor[]>>({});
+  const [remoteActorsFetchedAtByGroup, setRemoteActorsFetchedAtByGroup] = useState<Record<string, number>>({});
   const [remoteGroupDocsByGroup, setRemoteGroupDocsByGroup] = useState<Record<string, GroupDoc>>({});
+  const [remoteActorsRefreshTick, setRemoteActorsRefreshTick] = useState(0);
 
   const remoteDocForSend = canFetchRemoteRecipients ? remoteGroupDocsByGroup[sendGid] : undefined;
   useEffect(() => {
@@ -100,29 +131,47 @@ export function useCrossGroupRecipients({
     };
   }, [canFetchRemoteRecipients, remoteDocForSend, sendGid]);
 
-  const remoteActorsForSend = canFetchRemoteRecipients ? remoteActorsByGroup[sendGid] : undefined;
+  const remoteActorsForSend = canFetchRemoteRecipients ? remoteActorsByGroup[recipientGid] : undefined;
+  const remoteActorsFetchedAtForSend = canFetchRemoteRecipients ? remoteActorsFetchedAtByGroup[recipientGid] : undefined;
+
   useEffect(() => {
-    if (!canFetchRemoteRecipients) return;
-    if (remoteActorsForSend) return;
+    if (!canFetchRemoteRecipients) return undefined;
+    const interval = window.setInterval(() => {
+      setRemoteActorsRefreshTick((value) => value + 1);
+    }, REMOTE_ACTORS_REFRESH_MS);
+    return () => window.clearInterval(interval);
+  }, [canFetchRemoteRecipients, recipientGid]);
+
+  useEffect(() => {
+    const decision = getRemoteActorsFetchDecision({
+      canFetchRemoteRecipients,
+      hasCachedActors: remoteActorsForSend !== undefined,
+      fetchedAtMs: remoteActorsFetchedAtForSend,
+      nowMs: Date.now(),
+    });
+    if (!decision.shouldFetch) return;
 
     let cancelled = false;
-    void api.fetchActors(sendGid, false).then((resp) => {
+    void api.fetchActors(recipientGid, false, decision.noCache ? { noCache: true } : undefined).then((resp) => {
       if (cancelled) return;
+      const fetchedAt = Date.now();
       if (!resp.ok) {
         setRemoteActorsByGroup((prev) => {
-          if (Object.prototype.hasOwnProperty.call(prev, sendGid)) return prev;
-          return { ...prev, [sendGid]: [] };
+          if (Object.prototype.hasOwnProperty.call(prev, recipientGid)) return prev;
+          return { ...prev, [recipientGid]: [] };
         });
+        setRemoteActorsFetchedAtByGroup((prev) => ({ ...prev, [recipientGid]: fetchedAt }));
         return;
       }
       const next = resp.result.actors || [];
-      setRemoteActorsByGroup((prev) => ({ ...prev, [sendGid]: next }));
+      setRemoteActorsByGroup((prev) => ({ ...prev, [recipientGid]: next }));
+      setRemoteActorsFetchedAtByGroup((prev) => ({ ...prev, [recipientGid]: fetchedAt }));
     });
 
     return () => {
       cancelled = true;
     };
-  }, [canFetchRemoteRecipients, remoteActorsForSend, sendGid]);
+  }, [canFetchRemoteRecipients, remoteActorsFetchedAtForSend, remoteActorsForSend, remoteActorsRefreshTick, recipientGid]);
 
   const destGroupScopeLabel = useMemo(() => {
     if (!sendGid) return "";
@@ -137,20 +186,20 @@ export function useCrossGroupRecipients({
       remoteActorsByGroup,
       selectedGroupId: selectedGid,
       composerGroupId: composerGid,
-      sendGroupId: sendGid,
+      sendGroupId: recipientGid,
       selectedGroupActorsHydrating,
     });
-  }, [actors, composerGid, remoteActorsByGroup, selectedGid, sendGid, selectedGroupActorsHydrating]);
+  }, [actors, composerGid, remoteActorsByGroup, selectedGid, recipientGid, selectedGroupActorsHydrating]);
 
   const recipientActorsBusy = useMemo(() => {
     if (selectedGroupActorsHydrating) return true;
-    if (!sendGid) return false;
+    if (!recipientGid) return false;
     if (!selectedGid) return false;
     if (composerGid !== selectedGid) return true;
-    if (sendGid === selectedGid) return false;
+    if (recipientGid === selectedGid) return false;
     if (!canFetchRemoteRecipients) return false;
-    return !Object.prototype.hasOwnProperty.call(remoteActorsByGroup, sendGid);
-  }, [canFetchRemoteRecipients, composerGid, remoteActorsByGroup, selectedGid, sendGid, selectedGroupActorsHydrating]);
+    return !Object.prototype.hasOwnProperty.call(remoteActorsByGroup, recipientGid);
+  }, [canFetchRemoteRecipients, composerGid, remoteActorsByGroup, selectedGid, recipientGid, selectedGroupActorsHydrating]);
 
   return { recipientActors, recipientActorsBusy, destGroupScopeLabel };
 }
