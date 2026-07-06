@@ -179,6 +179,8 @@ export type ChatMessageData = {
   src_event_id?: string;
   dst_group_id?: string;
   dst_to?: string[];
+  dst_event_id?: string;
+  remote_event_id?: string;
   activities?: StreamingActivity[];
   refs?: MessageRef[];
   attachments?: MessageAttachment[];
@@ -495,7 +497,6 @@ export type AgentStateWarm = {
   environment_summary?: string | null;
   user_model?: string | null;
   persona_notes?: string | null;
-  resume_hint?: string | null;
 };
 
 export type AgentState = {
@@ -529,6 +530,9 @@ export type ReplyTarget = {
   eventId: string;
   by: string;
   text: string;
+  remoteDstGroupId?: string;
+  remoteDstTo?: string[];
+  remoteReplyToEventId?: string;
 } | null;
 
 export type TaskStep = {

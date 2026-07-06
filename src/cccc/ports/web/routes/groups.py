@@ -17,7 +17,8 @@ from typing import Any, Dict, Optional
 from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from ....contracts.v1.automation import AutomationRuleSet
@@ -25,7 +26,7 @@ from ....daemon.codex_app_sessions import SUPERVISOR as codex_app_supervisor
 from ....daemon.server import get_daemon_endpoint
 from ....daemon.group.presentation_ops import load_presentation_snapshot, resolve_workspace_asset_path
 from ....daemon.ops.group_copy_ops import (
-    group_copy_export as run_group_copy_export,
+    group_copy_export_file as run_group_copy_export_file,
     group_copy_import as run_group_copy_import,
     group_copy_preview_import as run_group_copy_preview_import,
 )
@@ -127,6 +128,11 @@ from .browser_surface_proxy import (
     proxy_daemon_raw_stream_to_websocket,
     send_daemon_attach_request,
 )
+from .group_copy_uploads import (
+    cleanup_group_copy_uploads_once,
+    group_copy_upload_path as _group_copy_upload_path,
+    spool_group_copy_upload as _spool_group_copy_upload,
+)
 
 _VOICE_DIARIZATION_INTERVAL_MS = 8_000
 _VOICE_DIARIZATION_MIN_AUDIO_MS = 10_000
@@ -147,7 +153,6 @@ def _voice_streaming_pcm16_max_bytes() -> int:
     )
 _VOICE_PCM16_BYTES_PER_SAMPLE = 2
 _VOICE_PCM16_ACTIVE_THRESHOLD = 800
-WEB_MAX_GROUP_COPY_PACKAGE_BYTES = 100 * 1024 * 1024
 
 
 def _response_to_dict(resp: Any) -> Dict[str, Any]:
@@ -1167,6 +1172,72 @@ def _apply_ledger_event_statuses(events: list[dict[str, Any]], status_by_event_i
             ev["_web_model_delivery_status"] = payload["web_model_delivery_status"]
 
 
+def _hydrate_cross_group_receipts_for_chat_events(group: Any, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_ids: set[str] = set()
+    for event in events:
+        if not isinstance(event, dict) or str(event.get("kind") or "").strip() != "chat.message":
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if not str(data.get("dst_group_id") or "").strip():
+            continue
+        if str(data.get("dst_event_id") or "").strip() and str(data.get("remote_event_id") or "").strip():
+            continue
+        event_id = str(event.get("id") or "").strip()
+        if event_id:
+            source_ids.add(event_id)
+    if not source_ids:
+        return events
+
+    ledger_path = getattr(group, "ledger_path", None)
+    if ledger_path is None:
+        return events
+
+    anchors_by_source_id: dict[str, dict[str, str]] = {}
+    try:
+        from ....kernel.inbox import iter_events
+
+        for event in iter_events(ledger_path):
+            if str(event.get("kind") or "").strip() != "chat.cross_group_receipt":
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            source_event_id = str(data.get("source_event_id") or "").strip()
+            if source_event_id not in source_ids:
+                continue
+            dst_event_id = str(data.get("dst_event_id") or "").strip()
+            remote_event_id = str(data.get("remote_event_id") or "").strip()
+            if not (dst_event_id or remote_event_id):
+                continue
+            anchor = anchors_by_source_id.setdefault(source_event_id, {})
+            if dst_event_id:
+                anchor["dst_event_id"] = dst_event_id
+            if remote_event_id:
+                anchor["remote_event_id"] = remote_event_id
+    except Exception:
+        return events
+
+    if not anchors_by_source_id:
+        return events
+
+    hydrated: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict) or str(event.get("kind") or "").strip() != "chat.message":
+            hydrated.append(event)
+            continue
+        anchor = anchors_by_source_id.get(str(event.get("id") or "").strip())
+        if not anchor:
+            hydrated.append(event)
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        hydrated.append({
+            **event,
+            "data": {
+                **data,
+                **anchor,
+            },
+        })
+    return hydrated
+
+
 def create_routers(ctx: RouteContext) -> list[APIRouter]:
     # --- global router (user/admin scope, per-route guard where needed) ---
     global_router = APIRouter(prefix="/api/v1")
@@ -1317,34 +1388,81 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
 
     @global_router.post("/groups/copy/preview_import", dependencies=[Depends(require_admin)])
     async def group_copy_preview_import(file: UploadFile = File(...)) -> Dict[str, Any]:
-        raw = await file.read()
-        if len(raw) > WEB_MAX_GROUP_COPY_PACKAGE_BYTES:
-            raise HTTPException(status_code=413, detail={"code": "copy_package_too_large", "message": "group copy too large"})
-        package_b64 = base64.b64encode(raw).decode("ascii")
-        resp = await run_in_threadpool(run_group_copy_preview_import, {"package_b64": package_b64})
-        return _response_to_dict(resp)
+        upload_id, package_path, package_size = await _spool_group_copy_upload(file)
+        try:
+            resp = await run_in_threadpool(run_group_copy_preview_import, {"package_path": str(package_path)})
+            out = _response_to_dict(resp)
+            if not bool(out.get("ok")):
+                try:
+                    package_path.unlink()
+                except FileNotFoundError:
+                    pass
+                return out
+            result = out.get("result") if isinstance(out.get("result"), dict) else {}
+            result = dict(result or {})
+            result["upload_id"] = upload_id
+            result["package_size_bytes"] = package_size
+            out = dict(out)
+            out["result"] = result
+            return out
+        except Exception:
+            try:
+                package_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
 
     @global_router.post("/groups/copy/import", dependencies=[Depends(require_admin)])
     async def group_copy_import(
         workspace_root: str = Form(""),
         title: str = Form(""),
         by: str = Form("user"),
-        file: UploadFile = File(...),
+        upload_id: str = Form(""),
+        file: Optional[UploadFile] = File(None),
     ) -> Dict[str, Any]:
-        raw = await file.read()
-        if len(raw) > WEB_MAX_GROUP_COPY_PACKAGE_BYTES:
-            raise HTTPException(status_code=413, detail={"code": "copy_package_too_large", "message": "group copy too large"})
-        package_b64 = base64.b64encode(raw).decode("ascii")
-        resp = await run_in_threadpool(
-            run_group_copy_import,
-            {
-                "package_b64": package_b64,
-                "workspace_root": workspace_root,
-                "title": title,
-                "by": by,
-            }
-        )
-        return _response_to_dict(resp)
+        package_path: Optional[Path] = None
+        consume_upload = False
+        if str(upload_id or "").strip():
+            package_path = _group_copy_upload_path(upload_id)
+            consume_upload = True
+        elif file is not None:
+            _upload_id, package_path, _package_size = await _spool_group_copy_upload(file)
+            consume_upload = True
+        else:
+            raise HTTPException(status_code=400, detail={"code": "missing_copy_package", "message": "missing group copy upload"})
+
+        try:
+            resp = await run_in_threadpool(
+                run_group_copy_import,
+                {
+                    "package_path": str(package_path),
+                    "workspace_root": workspace_root,
+                    "title": title,
+                    "by": by,
+                },
+            )
+            out = _response_to_dict(resp)
+            if bool(out.get("ok")) and consume_upload and package_path is not None:
+                try:
+                    package_path.unlink()
+                except FileNotFoundError:
+                    pass
+            return out
+        finally:
+            if not str(upload_id or "").strip() and consume_upload and package_path is not None:
+                try:
+                    package_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    @global_router.delete("/groups/copy/uploads/{upload_id}", dependencies=[Depends(require_admin)])
+    async def group_copy_upload_cleanup(upload_id: str) -> Dict[str, Any]:
+        package_path = _group_copy_upload_path(upload_id)
+        try:
+            package_path.unlink()
+        except FileNotFoundError:
+            pass
+        return {"ok": True, "result": {"upload_id": upload_id, "deleted": True}}
 
     @global_router.get("/events/stream", dependencies=[Depends(require_user)])
     async def global_events_stream() -> StreamingResponse:
@@ -1438,19 +1556,25 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
     @group_router.get("/copy/export", response_model=None)
     async def group_copy_export(group_id: str, request: Request) -> Any:
         require_admin(request)
-        resp_obj = await run_in_threadpool(run_group_copy_export, {"group_id": group_id, "by": "user"})
+        resp_obj = await run_in_threadpool(run_group_copy_export_file, {"group_id": group_id, "by": "user"})
         resp = _response_to_dict(resp_obj)
         if not bool(resp.get("ok")):
+            error = resp.get("error") if isinstance(resp.get("error"), dict) else {}
+            if str(error.get("code") or "") == "copy_package_too_large":
+                return JSONResponse(resp, status_code=413)
             return resp
         result = resp.get("result") if isinstance(resp.get("result"), dict) else {}
-        package_b64 = str((result or {}).get("package_b64") or "")
-        try:
-            package_bytes = base64.b64decode(package_b64.encode("ascii"), validate=True)
-        except Exception:
-            return {"ok": False, "error": {"code": "copy_export_invalid", "message": "daemon returned invalid copy package"}}
+        package_path = Path(str((result or {}).get("package_path") or "")).expanduser()
+        if not package_path.is_file():
+            return {"ok": False, "error": {"code": "copy_export_invalid", "message": "daemon returned invalid copy package path"}}
         filename = str((result or {}).get("filename") or f"cccc-group--{group_id}.zip")
         headers = {"Content-Disposition": _download_content_disposition(filename)}
-        return StreamingResponse(iter([package_bytes]), media_type="application/zip", headers=headers)
+        return FileResponse(
+            package_path,
+            media_type="application/zip",
+            headers=headers,
+            background=BackgroundTask(lambda: package_path.unlink(missing_ok=True)),
+        )
 
     @group_router.get("/tasks")
     async def group_tasks(group_id: str, task_id: Optional[str] = None) -> Dict[str, Any]:
@@ -2217,6 +2341,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
         prompt_request_id: str = "",
         view: str = "",
     ) -> Dict[str, Any]:
+        view_mode = str(view or "").strip()
         return await ctx.daemon(
             {
                 "op": "assistant_state",
@@ -2224,7 +2349,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     "group_id": group_id,
                     "assistant_id": str(assistant_id or "").strip(),
                     "prompt_request_id": str(prompt_request_id or "").strip(),
-                    "view": str(view or "").strip(),
+                    "view": view_mode,
+                    "suppress_retry_notify": view_mode in {"voice_status", "voice_workspace"},
                 },
             }
         )
@@ -3505,6 +3631,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     after_id="",
                     limit=effective_limit,
                 )
+                if kind_filter == "chat":
+                    events = _hydrate_cross_group_receipts_for_chat_events(group, events)
             else:
                 raw_lines = read_last_lines(group.ledger_path, effective_limit)
                 events = []
@@ -3581,6 +3709,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                 after_id=after,
                 limit=clamped_limit,
             )
+            if kind_filter == "chat":
+                events = _hydrate_cross_group_receipts_for_chat_events(group, events)
 
             if with_read_status or with_ack_status or with_obligation_status:
                 _apply_ledger_event_statuses(
@@ -3655,6 +3785,8 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
             )
 
             events = [*before_events, center_event, *after_events]
+            if kind_filter == "chat":
+                events = _hydrate_cross_group_receipts_for_chat_events(group, events)
 
             if with_read_status or with_ack_status or with_obligation_status:
                 _apply_ledger_event_statuses(

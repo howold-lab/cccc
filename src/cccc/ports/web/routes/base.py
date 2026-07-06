@@ -1617,7 +1617,15 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                         "is_dir": entry.is_dir(),
                     })
             except PermissionError:
-                return {"ok": False, "error": {"code": "PERMISSION_DENIED", "message": f"Permission denied: {path}"}}
+                return {
+                    "ok": True,
+                    "result": {
+                        "path": str(target),
+                        "parent": str(target.parent) if target.parent != target else None,
+                        "items": [],
+                        "readable": False,
+                    },
+                }
 
             return {
                 "ok": True,
@@ -1625,6 +1633,7 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     "path": str(target),
                     "parent": str(target.parent) if target.parent != target else None,
                     "items": items[:100],  # Limit to 100 items
+                    "readable": True,
                 },
             }
         except Exception as e:
@@ -1776,6 +1785,42 @@ def create_routers(ctx: RouteContext) -> list[APIRouter]:
                     "actor_id": str(actor_id or "user").strip() or "user",
                     "capability_id": str(capability_id or "").strip(),
                     "view": str(view or "").strip(),
+                },
+            }
+        )
+
+    @group_router.post("/slash_skill_dispatch")
+    async def slash_skill_dispatch(group_id: str, request: Request) -> Dict[str, Any]:
+        """Dispatch a CCCC capsule skill as a hidden actor turn, not a visible chat message."""
+        if ctx.read_only:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "read_only",
+                    "message": "Slash skill dispatch is disabled in read-only (exhibit) mode.",
+                },
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail={"code": "invalid_request", "message": "request body must be an object"})
+        return await ctx.daemon(
+            {
+                "op": "slash_skill_dispatch",
+                "args": {
+                    "group_id": group_id,
+                    "by": "user",
+                    "task_text": str(payload.get("task_text") or "").strip(),
+                    "command": str(payload.get("command") or "").strip(),
+                    "capability_id": str(payload.get("capability_id") or "").strip(),
+                    "to": payload.get("to") if isinstance(payload.get("to"), list) else [],
+                    "priority": str(payload.get("priority") or "normal").strip() or "normal",
+                    "reply_required": coerce_bool(payload.get("reply_required", False), default=False),
+                    "client_id": str(payload.get("client_id") or "").strip(),
+                    "reply_to": str(payload.get("reply_to") or "").strip(),
+                    "quote_text": str(payload.get("quote_text") or "").strip(),
                 },
             }
         )

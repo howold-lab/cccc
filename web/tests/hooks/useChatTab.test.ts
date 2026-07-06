@@ -35,11 +35,12 @@ import {
   dedupeStreamingEvents,
   mergeVisibleChatMessages,
   parseComposerRecipientTokens,
-  pruneMissingMentionRecipientTokens,
   restoreFailedSendComposerState,
+  shouldShowInConversation,
   sortChatMessages,
   shouldLockChatToBottomForSend,
   shouldRestoreDetachedScrollSnapshot,
+  toVisibleConversationEvent,
 } from "../../src/hooks/useChatTab";
 import {
   useComposerStore,
@@ -112,6 +113,34 @@ function makeStreamingEvent({
 }
 
 describe("dedupeStreamingEvents", () => {
+  it("shows hidden slash skill dispatch events as the original slash command", () => {
+    const event = {
+      id: "slashskill-1",
+      kind: "chat.message",
+      by: "user",
+      data: {
+        text: "[CCCC] INTERNAL CONTROL",
+        to: ["architect"],
+        refs: [
+          {
+            kind: "text",
+            title: "slash_skill_dispatch",
+            hidden: true,
+            control_kind: "slash_skill_dispatch",
+            command: "/using-superpowers",
+            capability_id: "skill:agent_self_proposed:using-superpowers",
+            task_text: "开始执行",
+          },
+        ],
+      },
+    } as LedgerEvent;
+
+    expect(shouldShowInConversation(event)).toBe(true);
+    const visible = toVisibleConversationEvent(event);
+    expect((visible.data as { text?: string }).text).toBe("/using-superpowers 开始执行");
+    expect((visible.data as { refs?: unknown[] }).refs).toEqual([]);
+  });
+
   it("keeps distinct text-bearing stream ids for the same pending event", () => {
     const events = dedupeStreamingEvents([
       makeStreamingEvent({
@@ -377,56 +406,6 @@ describe("parseComposerRecipientTokens", () => {
       "@foreman",
       "peer-1",
     ]);
-  });
-});
-
-describe("pruneMissingMentionRecipientTokens", () => {
-  it("keeps mention-added recipients while the matching @ token remains in the composer", () => {
-    expect(pruneMissingMentionRecipientTokens({
-      toText: "peer-reviewer, @foreman",
-      mentionRecipientTokens: new Set(["peer-reviewer"]),
-      liveAgentMentionTokens: [{ actorId: "peer-reviewer", token: "@peer-reviewer", start: 2, end: 16, scope: "selected" }],
-      validRecipientSet: new Set(["peer-reviewer", "@foreman"]),
-    })).toEqual({
-      toText: "peer-reviewer, @foreman",
-      mentionRecipientTokens: new Set(["peer-reviewer"]),
-    });
-  });
-
-  it("keeps mention-added recipients when the composer shows the actor display name", () => {
-    expect(pruneMissingMentionRecipientTokens({
-      toText: "peer-reviewer",
-      mentionRecipientTokens: new Set(["peer-reviewer"]),
-      liveAgentMentionTokens: [{ actorId: "peer-reviewer", token: "@Code Reviewer", start: 2, end: 16, scope: "selected" }],
-      validRecipientSet: new Set(["peer-reviewer"]),
-    })).toEqual({
-      toText: "peer-reviewer",
-      mentionRecipientTokens: new Set(["peer-reviewer"]),
-    });
-  });
-
-  it("keeps built-in @ recipients while their composer token remains", () => {
-    expect(pruneMissingMentionRecipientTokens({
-      toText: "@foreman",
-      mentionRecipientTokens: new Set(["@foreman"]),
-      liveAgentMentionTokens: [{ actorId: "@foreman", token: "@foreman", start: 2, end: 10, scope: "selected" }],
-      validRecipientSet: new Set(["@foreman"]),
-    })).toEqual({
-      toText: "@foreman",
-      mentionRecipientTokens: new Set(["@foreman"]),
-    });
-  });
-
-  it("removes only mention-added recipients when their @ token is deleted from the composer", () => {
-    expect(pruneMissingMentionRecipientTokens({
-      toText: "peer-reviewer, @foreman",
-      mentionRecipientTokens: new Set(["peer-reviewer"]),
-      liveAgentMentionTokens: [],
-      validRecipientSet: new Set(["peer-reviewer", "@foreman"]),
-    })).toEqual({
-      toText: "@foreman",
-      mentionRecipientTokens: new Set<string>(),
-    });
   });
 });
 

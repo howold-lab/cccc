@@ -128,7 +128,6 @@ export interface ChatComposerProps {
   setMentionKind: Dispatch<SetStateAction<ComposerMentionKind>>;
   setMentionActorScope: Dispatch<SetStateAction<"selected" | "destination">>;
   setMentionTargetGroupId: Dispatch<SetStateAction<string>>;
-  onAppendRecipientToken: (token: string, label?: string) => void;
   composerGroupMentionTokens: ComposerGroupMentionToken[];
   setComposerGroupMentionTokens: Dispatch<SetStateAction<ComposerGroupMentionToken[]>>;
   composerAgentMentionTokens: ComposerAgentMentionToken[];
@@ -183,7 +182,6 @@ export function ChatComposer({
   setMentionKind,
   setMentionActorScope,
   setMentionTargetGroupId,
-  onAppendRecipientToken,
   composerGroupMentionTokens,
   setComposerGroupMentionTokens,
   composerAgentMentionTokens,
@@ -356,14 +354,16 @@ export function ChatComposer({
     const rect = node.getBoundingClientRect();
     const viewportWidth = typeof window === "undefined" ? 1024 : window.innerWidth;
     const tooltipWidth = Math.min(196, Math.max(176, viewportWidth - 16));
-    const top = rect.bottom + 6;
+    const top = rect.top;
+    const transform = "translateY(calc(-100% - 6px))";
     if (isSmallScreen) {
-      setRecipientPopoverStyle({ top, left: 8, right: 8 });
+      setRecipientPopoverStyle({ top, left: 8, right: 8, transform });
     } else {
       setRecipientPopoverStyle({
         top,
         left: Math.min(Math.max(rect.left, 8), Math.max(8, viewportWidth - tooltipWidth - 8)),
         width: tooltipWidth,
+        transform,
       });
     }
     setRecipientPopoverTarget(target);
@@ -790,12 +790,8 @@ export function ChatComposer({
           setComposerAgentMentionTokens((tokens) => pruneComposerAgentMentionTokens({ text: before, tokens }).concat([token]));
         }
       }
-      // Destination-scope `@` names a target-group agent for the delegation
-      // relay (extracted from text at send time) — it must NOT become a local
-      // recipient. Only local (selected-scope) mentions go into `to`.
-      if (mentionScope !== "destination" && !toTokens.includes(selected.value)) {
-        onAppendRecipientToken(selected.value, selected.label);
-      }
+      // @ mentions are text references/autocomplete only. Delivery routing is
+      // controlled by explicit recipient chips / the serialized `to` field.
       setShowMentionMenu(false);
       setMentionSelectedIndex(0);
       return;
@@ -1168,7 +1164,7 @@ export function ChatComposer({
               {typeof document !== "undefined" && visibleRecipientPopoverTarget && recipientPopoverStyle ? createPortal((
                 <div
                   className={classNames(
-                    "fixed z-[1000] rounded-lg border px-3 py-2 text-xs shadow-xl backdrop-blur-xl",
+                    "fixed pointer-events-none z-[1000] rounded-lg border px-3 py-2 text-xs shadow-xl backdrop-blur-xl",
                     isDark
                       ? "border-white/12 bg-[rgb(24,25,27)] text-slate-100"
                       : "border-black/10 bg-white text-gray-900",
@@ -1199,7 +1195,7 @@ export function ChatComposer({
                     <button
                       type="button"
                       className={classNames(
-                        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors",
+                        "pointer-events-auto inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors",
                         isDark ? "text-slate-300 hover:bg-white/[0.1] hover:text-white" : "text-gray-500 hover:bg-gray-100 hover:text-gray-950",
                       )}
                       onClick={() => {

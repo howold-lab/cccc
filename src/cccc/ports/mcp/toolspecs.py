@@ -1106,7 +1106,11 @@ MCP_TOOLS = [
     },
     {
         "name": "cccc_agent_state",
-        "description": "Per-actor working-memory tool: action=get|update|clear. Keep hot fields fresh; use warm fields only when they improve recovery, recall, or signal quality.",
+        "description": (
+            "Per-actor working-memory tool: action=get|update|clear. Keep hot fields fresh; use warm fields only "
+            "when they improve recovery, recall, or signal quality. update returns the post-write agent_state and "
+            "context_hygiene confirmation."
+        ),
         "inputSchema": _obj(
             {
                 **_COMMON_GROUP,
@@ -1119,12 +1123,22 @@ MCP_TOOLS = [
                 "blockers": {"type": "array", "items": {"type": "string"}},
                 "next_action": {"type": "string"},
                 "what_changed": {"type": "string"},
-                "open_loops": {"type": "array", "items": {"type": "string"}},
-                "commitments": {"type": "array", "items": {"type": "string"}},
+                "open_loops": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Current memo: unfinished work, unresolved facts, risks, assumptions, exit criteria (concrete stop-and-rethink conditions), and follow-ups; tie each entry to a concrete referent, not a slogan.",
+                },
+                "commitments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Promises made to the user or other actors.",
+                },
                 "environment_summary": {"type": "string"},
                 "user_model": {"type": "string"},
-                "persona_notes": {"type": "string"},
-                "resume_hint": {"type": "string"},
+                "persona_notes": {
+                    "type": "string",
+                    "description": "Durable stance or preference notes, not temporary task memos.",
+                },
             }
         ),
     },

@@ -32,6 +32,7 @@ import {
   getGroupSendBlockedMessage,
   getGroupSendBlockedReason,
   isFormalChatMessageEvent,
+  shouldBlockLocalCrossGroupAttachments,
   supportsChatStreamingPlaceholder,
 } from "../utils/chatSend";
 import { copyTextToClipboard } from "../utils/copy";
@@ -98,7 +99,52 @@ function canOpenSourceMessageLocally(groups: GroupMeta[], srcGroupId: string): b
 }
 
 export function shouldShowInConversation(event: LedgerEvent): boolean {
+  const data = event.data && typeof event.data === "object"
+    ? event.data as { hidden?: unknown; refs?: unknown }
+    : {};
+  if (data.hidden === true && !getSlashSkillDispatchRef(event)) return false;
   return !isDelegationSourceOutboundEvent(event.data);
+}
+
+function isSlashSkillDispatchRef(ref: unknown): ref is {
+  hidden?: unknown;
+  control_kind?: unknown;
+  title?: unknown;
+  command?: unknown;
+  task_text?: unknown;
+} {
+  if (!ref || typeof ref !== "object") return false;
+  const record = ref as { hidden?: unknown; control_kind?: unknown; title?: unknown };
+  return record.hidden === true
+    && (String(record.control_kind || "").trim() === "slash_skill_dispatch"
+      || String(record.title || "").trim() === "slash_skill_dispatch");
+}
+
+function getSlashSkillDispatchRef(event: LedgerEvent) {
+  const data = event.data && typeof event.data === "object"
+    ? event.data as { refs?: unknown }
+    : {};
+  const refs = Array.isArray(data.refs) ? data.refs : [];
+  return refs.find(isSlashSkillDispatchRef) || null;
+}
+
+export function toVisibleConversationEvent(event: LedgerEvent): LedgerEvent {
+  const ref = getSlashSkillDispatchRef(event);
+  if (!ref) return event;
+  const command = String(ref.command || "").trim();
+  const taskText = String(ref.task_text || "").trim();
+  const visibleText = [command, taskText].filter(Boolean).join(" ").trim();
+  if (!visibleText) return event;
+  const data = event.data && typeof event.data === "object" ? event.data as ChatMessageData : {};
+  return {
+    ...event,
+    data: {
+      ...data,
+      text: visibleText,
+      refs: [],
+      attachments: [],
+    },
+  };
 }
 
 function mergeStreamingCandidates(primary: LedgerEvent, secondary: LedgerEvent): LedgerEvent {
@@ -687,7 +733,7 @@ export function buildUnfilteredLiveChatMessages(
   outboxEntries: Pick<OutboxEntry, "localId" | "event">[],
   orderState: LogicalMessageOrderState,
 ): LedgerEvent[] {
-  const all = events.filter(isFormalChatMessageEvent);
+  const all = events.filter(isFormalChatMessageEvent).filter(shouldShowInConversation).map(toVisibleConversationEvent);
   const renderableCanonicalClientIds = new Set(
     all
       .filter((ev: LedgerEvent) => hasRenderableChatMessageContent(ev))
@@ -852,41 +898,6 @@ export function buildComposerSendRecipientTokens({
   );
 }
 
-export function pruneMissingMentionRecipientTokens({
-  toText,
-  mentionRecipientTokens: previousMentionRecipientTokens,
-  liveAgentMentionTokens,
-  validRecipientSet,
-}: {
-  toText: string;
-  mentionRecipientTokens?: Set<string>;
-  liveAgentMentionTokens: ComposerAgentMentionToken[];
-  validRecipientSet: Set<string>;
-}): { toText: string; mentionRecipientTokens: Set<string> } {
-  const previousMentionTokens = previousMentionRecipientTokens || new Set<string>();
-  const mentionRecipientTokens = new Set(
-    (liveAgentMentionTokens || [])
-      .filter((token) => token.scope === "selected")
-      .map((token) => String(token.actorId || "").trim())
-      .filter((token) => token && validRecipientSet.has(token)),
-  );
-  if (mentionRecipientTokens.size === 0 && previousMentionTokens.size === 0) {
-    return { toText: String(toText || ""), mentionRecipientTokens: new Set() };
-  }
-
-  const nextTokens = parseComposerRecipientTokens(toText, validRecipientSet)
-    .filter((token) => !previousMentionTokens.has(token) || mentionRecipientTokens.has(token));
-  for (const token of mentionRecipientTokens) {
-    if (!nextTokens.includes(token)) {
-      nextTokens.push(token);
-    }
-  }
-  return {
-    toText: nextTokens.join(", "),
-    mentionRecipientTokens,
-  };
-}
-
 export function useChatTab({
   selectedGroupId,
   selectedGroupRunning,
@@ -977,7 +988,6 @@ export function useChatTab({
   const enqueueOutbox = useChatOutboxStore((s) => s.enqueue);
   const removeOutbox = useChatOutboxStore((s) => s.remove);
   const sendInFlightRef = useRef(false);
-  const mentionRecipientTokensRef = useRef<Set<string>>(new Set());
   const [composerGroupMentionTokens, setComposerGroupMentionTokens] = useState<ComposerGroupMentionToken[]>([]);
   const [composerAgentMentionTokens, setComposerAgentMentionTokens] = useState<ComposerAgentMentionToken[]>([]);
 
@@ -1103,7 +1113,7 @@ export function useChatTab({
     setSelectedRemoteGroupIds((current) => current.filter((groupId) => validRemoteIds.has(groupId)));
   }, [remoteRouteGroups]);
 
-  // Message-body mentions: @ selects current-route recipients; # selects the destination group.
+  // Message-body mentions are text helpers: @ autocompletes names/references, # adds delegation hints.
   const mentionSuggestions = useMemo(() => {
     const mentionActors = mentionKind === "agent" && mentionActorScope === "selected" ? actors : recipientActors;
     return buildComposerMentionSuggestions({
@@ -1217,7 +1227,7 @@ export function useChatTab({
 
   // Filtered live chat messages (canonical + optimistic pending merged)
   const liveChatMessages = useMemo(() => {
-    const all = events.filter(isFormalChatMessageEvent).filter(shouldShowInConversation);
+    const all = events.filter(isFormalChatMessageEvent).filter(shouldShowInConversation).map(toVisibleConversationEvent);
     const renderableCanonicalClientIds = new Set(
       all
         .filter((ev: LedgerEvent) => hasRenderableChatMessageContent(ev))
@@ -1262,7 +1272,12 @@ export function useChatTab({
 
   // Chat messages (window or live)
   const chatMessages = useMemo(() => {
-    if (inChatWindow && chatWindow) return (chatWindow.events || []).filter(isFormalChatMessageEvent).filter(shouldShowInConversation);
+    if (inChatWindow && chatWindow) {
+      return (chatWindow.events || [])
+        .filter(isFormalChatMessageEvent)
+        .filter(shouldShowInConversation)
+        .map(toVisibleConversationEvent);
+    }
     return liveChatMessages;
   }, [chatWindow, inChatWindow, liveChatMessages]);
 
@@ -1397,21 +1412,9 @@ export function useChatTab({
   }, []);
 
   const clearRecipients = useCallback(() => {
-    mentionRecipientTokensRef.current = new Set();
-    setComposerAgentMentionTokens((tokens) => tokens.filter((token) => token.scope !== "selected"));
     setSelectedRemoteGroupIds([]);
     setToText("");
   }, [setToText]);
-
-  const appendRecipientToken = useCallback(
-    (token: string) => {
-      const normalized = String(token || "").trim();
-      if (!normalized) return;
-      mentionRecipientTokensRef.current.add(normalized);
-      setToText(toText ? toText + ", " + normalized : normalized);
-    },
-    [toText, setToText]
-  );
 
   const syncMentionRecipientsFromComposerText = useCallback(
     (textOrUpdater: string | ((prev: string) => string)) => {
@@ -1421,19 +1424,9 @@ export function useChatTab({
       if (liveAgentMentionTokens.length !== composerAgentMentionTokens.length) {
         setComposerAgentMentionTokens(liveAgentMentionTokens);
       }
-      const result = pruneMissingMentionRecipientTokens({
-        toText,
-        mentionRecipientTokens: mentionRecipientTokensRef.current,
-        liveAgentMentionTokens,
-        validRecipientSet,
-      });
-      mentionRecipientTokensRef.current = result.mentionRecipientTokens;
-      if (result.toText !== toText) {
-        setToText(result.toText);
-      }
       setComposerText(text);
     },
-    [composerAgentMentionTokens, composerText, setComposerText, setToText, toText, validRecipientSet],
+    [composerAgentMentionTokens, composerText, setComposerText],
   );
 
   const removeComposerFile = useCallback(
@@ -1509,6 +1502,10 @@ export function useChatTab({
     }
 
     const replyTargetSnapshot = composerStateSnapshot.replyTarget;
+    const remoteReplyDstGroupId = String(replyTargetSnapshot?.remoteDstGroupId || "").trim();
+    const remoteReplyDstTo = Array.isArray(replyTargetSnapshot?.remoteDstTo)
+      ? replyTargetSnapshot.remoteDstTo.map((token) => String(token || "").trim()).filter(Boolean)
+      : [];
     const quotedPresentationRefSnapshot = composerStateSnapshot.quotedPresentationRef;
     const refsSnapshot: MessageRef[] = [
       ...(quotedPresentationRefSnapshot ? [quotedPresentationRefSnapshot] : []),
@@ -1615,7 +1612,7 @@ export function useChatTab({
     };
 
     // Local validations that must pass before clearing the composer
-    if (replyTargetSnapshot && sendsCrossGroup) {
+    if (replyTargetSnapshot && sendsCrossGroup && !remoteReplyDstGroupId) {
       showError("Cross-group send does not support replies.");
       setDestGroupId(selectedGroupId);
       return;
@@ -1625,8 +1622,10 @@ export function useChatTab({
       setDestGroupId(selectedGroupId);
       return;
     }
-    const localCrossGroupTargets = sendPlanTargets.filter((target) => target.isCrossGroup && !target.isRemote);
-    if (!replyTargetSnapshot && composerFilesSnapshot.length > 0 && localCrossGroupTargets.length > 0) {
+    if (shouldBlockLocalCrossGroupAttachments({
+      attachmentCount: composerFilesSnapshot.length,
+      targets: sendPlanTargets,
+    })) {
       showError("Local cross-group send does not support attachments yet. Use a remote Group Bridge target or send without attachments.");
       return;
     }
@@ -1671,7 +1670,25 @@ export function useChatTab({
     let successfulSendCount = 0;
     try {
       let resp: SendMessageResponse | undefined;
-      if (replyTargetSnapshot) {
+      if (replyTargetSnapshot && remoteReplyDstGroupId) {
+        const targetTo = remoteReplyDstTo.length > 0 ? remoteReplyDstTo : crossToTokensSnapshot;
+        resp = await api.sendCrossGroupMessage(
+          selectedGroupId,
+          remoteReplyDstGroupId,
+          txt,
+          targetTo.length > 0 ? targetTo : ["@foreman"],
+          prio,
+          replyRequiredSnapshot,
+          composerFilesSnapshot.length > 0 ? composerFilesSnapshot : undefined,
+          {
+            replyTo: replyTargetSnapshot.eventId,
+            quoteText: replyTargetSnapshot.text,
+            clientId: localId,
+            remoteReplyToEventId: replyTargetSnapshot.remoteReplyToEventId || "",
+          },
+        );
+        if (resp.ok) successfulSendCount += 1;
+      } else if (replyTargetSnapshot) {
         resp = await api.replyMessage(
           selectedGroupId,
           txt,
@@ -2041,7 +2058,6 @@ export function useChatTab({
     selectedRemoteGroupIds,
     toggleRemoteGroupRecipient,
     clearRecipients,
-    appendRecipientToken,
     priority,
     replyRequired,
     setPriority,

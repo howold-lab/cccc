@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
-import re
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -17,7 +16,7 @@ from ...contracts.v1 import (
     DaemonResponse,
     SUGGESTED_USER_MESSAGE_MAX_CHARS,
 )
-from ...kernel.actors import find_actor, list_actors, resolve_recipient_tokens
+from ...kernel.actors import find_actor, resolve_recipient_tokens
 from ...kernel.group import get_group_state, load_group, set_group_state
 from ...kernel.chat_idempotency import find_existing_reply_result
 from ...kernel.inbox import find_event_with_chat_ack, is_message_for_actor
@@ -35,6 +34,7 @@ from ...util.time import utc_now_iso
 from ..group_bridge.reply_relay import (
     can_relay_group_bridge_reply,
     default_group_bridge_reply_recipients,
+    group_bridge_reply_return_recipients,
     relay_group_bridge_reply,
 )
 from ..claude_app_sessions import SUPERVISOR as claude_app_supervisor
@@ -280,6 +280,7 @@ def handle_send(
     by = str(args.get("by") or "user").strip()
     priority = str(args.get("priority") or "normal").strip() or "normal"
     reply_required = coerce_bool(args.get("reply_required"))
+    reply_to = str(args.get("reply_to") or "").strip()
     quote_text = str(args.get("quote_text") or "").strip()
     src_group_id = str(args.get("src_group_id") or "").strip()
     src_event_id = str(args.get("src_event_id") or "").strip()
@@ -374,20 +375,6 @@ def handle_send(
         return diag.finish_response(resp)
     diag.mark("resolve_recipients")
 
-    if not to:
-        mention_pattern = re.compile(r"@(\w[\w-]*)")
-        mentions = mention_pattern.findall(text)
-        if mentions:
-            actors = list_actors(group)
-            actor_ids = {str(actor.get("id") or "") for actor in actors if isinstance(actor, dict)}
-            valid_mentions = [m for m in mentions if m in actor_ids or m in ("all", "peers", "foreman")]
-            if valid_mentions:
-                mention_tokens = [f"@{m}" if m in ("all", "peers", "foreman") else m for m in valid_mentions]
-                try:
-                    to = resolve_recipient_tokens(group, mention_tokens)
-                except Exception:
-                    pass
-
     if not to and not to_explicitly_set and get_default_send_to(group.doc) == "foreman":
         to = ["@foreman"]
 
@@ -469,6 +456,7 @@ def handle_send(
             format="plain",
             priority=priority,
             reply_required=reply_required,
+            reply_to=reply_to or None,
             quote_text=quote_text or None,
             to=to,
             refs=refs,
@@ -874,6 +862,20 @@ def handle_reply(
     refs = _normalize_refs(args.get("refs"))
     if not text.strip() and not attachments:
         return diag.finish_response(_error("empty_message", "message text cannot be empty"))
+    group_bridge_remote_to = (
+        group_bridge_reply_return_recipients(
+            original_data=original_data,
+            fallback=to,
+            fallback_was_explicit=to_explicitly_set,
+        )
+        if relayable_group_bridge_reply
+        else []
+    )
+    group_bridge_remote_group_id = (
+        str(original_data.get("src_group_id") or "").strip()
+        if relayable_group_bridge_reply
+        else ""
+    )
 
     event = append_event(
         group.ledger_path,
@@ -895,6 +897,8 @@ def handle_reply(
             source_user_name=original_source_user_name or None,
             source_user_id=original_source_user_id or None,
             mention_user_ids=original_mention_user_ids or None,
+            dst_group_id=group_bridge_remote_group_id or None,
+            dst_to=group_bridge_remote_to or None,
             **build_sender_snapshot(group, by=by),
             client_id=client_id or None,
             suggested_user_message=suggested_user_message,

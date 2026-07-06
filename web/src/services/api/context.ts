@@ -543,6 +543,36 @@ export async function sendMessage(
   });
 }
 
+export async function dispatchSlashSkill(
+  groupId: string,
+  payload: {
+    taskText: string;
+    command: string;
+    capabilityId: string;
+    to: string[];
+    priority?: "normal" | "attention";
+    replyRequired?: boolean;
+    clientId?: string;
+    replyTo?: string;
+    quoteText?: string;
+  },
+) {
+  return apiJson(`/api/v1/groups/${encodeURIComponent(groupId)}/slash_skill_dispatch`, {
+    method: "POST",
+    body: JSON.stringify({
+      task_text: payload.taskText,
+      command: payload.command,
+      capability_id: payload.capabilityId,
+      to: payload.to || [],
+      priority: payload.priority || "normal",
+      reply_required: Boolean(payload.replyRequired),
+      client_id: payload.clientId || "",
+      reply_to: payload.replyTo || "",
+      quote_text: payload.quoteText || "",
+    }),
+  });
+}
+
 export async function trackedSendMessage(
   groupId: string,
   payload: {
@@ -651,7 +681,19 @@ export async function sendCrossGroupMessage(
   priority: "normal" | "attention" = "normal",
   replyRequired = false,
   files?: File[],
+  options?: {
+    replyTo?: string;
+    quoteText?: string;
+    clientId?: string;
+    remoteReplyToEventId?: string;
+  },
 ) {
+  const replyMetadata = {
+    ...(options?.replyTo ? { reply_to: options.replyTo } : {}),
+    ...(options?.quoteText ? { quote_text: options.quoteText } : {}),
+    ...(options?.clientId ? { client_id: options.clientId } : {}),
+    ...(options?.remoteReplyToEventId ? { remote_reply_to_event_id: options.remoteReplyToEventId } : {}),
+  };
   if (files && files.length > 0) {
     const form = new FormData();
     form.append("by", "user");
@@ -660,6 +702,10 @@ export async function sendCrossGroupMessage(
     form.append("to_json", JSON.stringify(to));
     form.append("priority", priority);
     form.append("reply_required", replyRequired ? "true" : "false");
+    if (options?.replyTo) form.append("reply_to", options.replyTo);
+    if (options?.quoteText) form.append("quote_text", options.quoteText);
+    if (options?.clientId) form.append("client_id", options.clientId);
+    if (options?.remoteReplyToEventId) form.append("remote_reply_to_event_id", options.remoteReplyToEventId);
     for (const file of files) form.append("files", file);
     return apiForm(`/api/v1/groups/${encodeURIComponent(srcGroupId)}/send_cross_group_upload`, form);
   }
@@ -672,6 +718,7 @@ export async function sendCrossGroupMessage(
       to,
       priority,
       reply_required: replyRequired,
+      ...replyMetadata,
     }),
   });
 }

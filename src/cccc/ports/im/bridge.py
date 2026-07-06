@@ -75,6 +75,7 @@ def _acquire_singleton_lock(lock_path: Path) -> Optional[Any]:
     try:
         f.seek(0)
         f.write((str(os.getpid()) + "\n").encode("utf-8", errors="replace"))
+        f.truncate()
         f.flush()
     except Exception:
         # Best-effort: the lock is the important part.
@@ -498,7 +499,7 @@ class IMBridge:
                 # When routed (@bot or DM), treat plain text as implicit /send.
                 if routed or chat_type in ("private",):
                     mention_user_ids = msg.get("mention_user_ids") if isinstance(msg.get("mention_user_ids"), list) else []
-                    # Build a SEND-like ParsedCommand so _handle_message can extract @targets from args.
+                    # Build a SEND-like ParsedCommand so _handle_message can extract leading explicit targets.
                     implicit_args = parsed.text.split() if parsed.text else []
                     implicit_send = ParsedCommand(
                         type=CommandType.SEND,
@@ -1153,20 +1154,6 @@ class IMBridge:
             # Explicit /send but empty.
             return
 
-        # If no explicit recipients were provided, try @mentions in the message text first.
-        if not to and msg_text:
-            mention_tokens: List[str] = []
-            for m in re.findall(r"@(\w[\w-]*)", msg_text):
-                if not m:
-                    continue
-                if m in ("all", "peers", "foreman"):
-                    mention_tokens.append(f"@{m}")
-                    continue
-                if m in _actor_ids:
-                    mention_tokens.append(m)
-            if mention_tokens:
-                to = mention_tokens
-
         # If still empty, apply the group policy for empty-recipient sends.
         if not to and get_default_send_to(group.doc) == "foreman":
             to = ["@foreman"]
@@ -1537,6 +1524,7 @@ def start_bridge(group_id: str, platform: str = "telegram") -> None:
             app_id=feishu_app_id,
             app_secret=feishu_app_secret,
             domain=str(im_config.get("feishu_domain") or "https://open.feishu.cn"),
+            bot_name=str(im_config.get("feishu_bot_name") or os.environ.get("FEISHU_BOT_NAME") or "cccc"),
             log_path=log_path,
         )
     elif platform.lower() == "dingtalk":

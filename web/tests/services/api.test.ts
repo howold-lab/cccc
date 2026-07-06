@@ -938,6 +938,45 @@ describe("api.message refs", () => {
     );
   });
 
+  it("dispatches slash skills through the hidden dispatch endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { delivered: true } }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.dispatchSlashSkill("g-demo", {
+      taskText: "开始执行",
+      command: "/using-superpowers",
+      capabilityId: "skill:agent_self_proposed:using-superpowers",
+      to: ["worker-1"],
+      priority: "attention",
+      replyRequired: true,
+      clientId: "client-1",
+      replyTo: "evt-parent",
+      quoteText: "原始消息",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/slash_skill_dispatch",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          task_text: "开始执行",
+          command: "/using-superpowers",
+          capability_id: "skill:agent_self_proposed:using-superpowers",
+          to: ["worker-1"],
+          priority: "attention",
+          reply_required: true,
+          client_id: "client-1",
+          reply_to: "evt-parent",
+          quote_text: "原始消息",
+        }),
+      }),
+    );
+  });
+
   it("sends cross-group messages through the source group endpoint with explicit dst_group_id", async () => {
     fetchMock.mockResolvedValue({
       status: 200,
@@ -962,6 +1001,74 @@ describe("api.message refs", () => {
         }),
       }),
     );
+  });
+
+  it("preserves reply metadata on cross-group source sends", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { src_event: { id: "src-1" } } }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.sendCrossGroupMessage("g-src", "g-dst", "你好", ["@foreman"], "normal", false, undefined, {
+      replyTo: "evt-original",
+      quoteText: "原消息",
+      clientId: "local-1",
+      remoteReplyToEventId: "evt-remote-original",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-src/send_cross_group",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          text: "你好",
+          by: "user",
+          dst_group_id: "g-dst",
+          to: ["@foreman"],
+          priority: "normal",
+          reply_required: false,
+          reply_to: "evt-original",
+          quote_text: "原消息",
+          client_id: "local-1",
+          remote_reply_to_event_id: "evt-remote-original",
+        }),
+      }),
+    );
+  });
+
+  it("preserves remote reply metadata on cross-group upload sends", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { src_event: { id: "src-1" } } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    await api.sendCrossGroupMessage("g-src", "g-dst", "你好", ["@foreman"], "attention", true, [file], {
+      replyTo: "evt-local-source",
+      quoteText: "原消息",
+      clientId: "local-1",
+      remoteReplyToEventId: "evt-remote-original",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-src/send_cross_group_upload",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+    const body = fetchMock.mock.calls[0]?.[1]?.body;
+    expect(body).toBeInstanceOf(FormData);
+    const form = body as FormData;
+    expect(form.get("reply_to")).toBe("evt-local-source");
+    expect(form.get("quote_text")).toBe("原消息");
+    expect(form.get("client_id")).toBe("local-1");
+    expect(form.get("remote_reply_to_event_id")).toBe("evt-remote-original");
+    expect(form.get("reply_required")).toBe("true");
+    expect(form.get("priority")).toBe("attention");
   });
 
   it("sends tracked delegation payloads through the daemon endpoint", async () => {
@@ -1110,7 +1217,7 @@ describe("copy groups api entrypoints", () => {
     const file = new File(["zip"], "copy.zip", { type: "application/zip" });
 
     await api.previewGroupCopy(file);
-    await api.importGroupCopy(file, "/tmp/demo", "Demo");
+    await api.importGroupCopy({ file, uploadId: "upload-123" }, "/tmp/demo", "Demo");
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -1120,6 +1227,10 @@ describe("copy groups api entrypoints", () => {
         body: expect.any(FormData),
       }),
     );
+    const previewInit = fetchMock.mock.calls[0][1] as RequestInit;
+    const previewForm = previewInit.body as FormData;
+    expect(previewForm.get("file")).toBe(file);
+
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       "/api/v1/groups/copy/import",
@@ -1127,6 +1238,27 @@ describe("copy groups api entrypoints", () => {
         method: "POST",
         body: expect.any(FormData),
       }),
+    );
+    const importInit = fetchMock.mock.calls[1][1] as RequestInit;
+    const importForm = importInit.body as FormData;
+    expect(importForm.get("upload_id")).toBe("upload-123");
+    expect(importForm.get("file")).toBeNull();
+  });
+
+  it("can clean up staged group copy uploads", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { deleted: true } }),
+    });
+
+    const api = await import("../../src/services/api");
+
+    await api.cleanupGroupCopyUpload("upload-123");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/copy/uploads/upload-123",
+      expect.objectContaining({ method: "DELETE" }),
     );
   });
 });
