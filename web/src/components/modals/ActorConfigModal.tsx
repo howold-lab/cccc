@@ -1,24 +1,41 @@
-import { ActorProfile, RuntimeInfo, SupportedRuntime, SUPPORTED_RUNTIMES, RUNTIME_INFO } from "../../types";
+import {
+  ActorProfile,
+  RuntimeInfo,
+  SupportedRuntime,
+  SUPPORTED_RUNTIMES,
+  RUNTIME_INFO,
+} from "../../types";
 import { useTranslation } from "react-i18next";
 import { BASIC_MCP_CONFIG_SNIPPET } from "../../utils/mcpConfigSnippets";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../../services/api";
 import { useModalA11y } from "../../hooks/useModalA11y";
-import { parsePrivateEnvSetText, parsePrivateEnvUnsetText } from "../../utils/privateEnvInput";
 import { formatCapabilityIdInput, parseCapabilityIdInput } from "../../utils/capabilityAutoload";
 import { actorProfileIdentityKey } from "../../utils/actorProfiles";
 import { CapabilityPicker } from "../CapabilityPicker";
 import { RolePresetPicker } from "../RolePresetPicker";
 import { ActorAvatarField } from "../ActorAvatarField";
 import { SelectCombobox } from "../SelectCombobox";
-import { normalizeActorRunner, supportsStandardWebHeadlessRuntime } from "../../utils/headlessRuntimeSupport";
+import {
+  normalizeActorRunner,
+  supportsStandardWebHeadlessRuntime,
+} from "../../utils/headlessRuntimeSupport";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Surface } from "../ui/surface";
 import { Textarea } from "../ui/textarea";
+import { ActorConfigTabs } from "./ActorConfigTabs";
+import { ActorSecretManager } from "./ActorSecretManager";
+import {
+  buildActorSecretSaveChanges,
+  emptyActorSecretChanges,
+  normalizeLoadedActorSecretKeys,
+  type ActorSecretChanges,
+} from "./actorSecretManagerModel";
 import { ModalFrame } from "./ModalFrame";
 
 type ConfigMode = "custom" | "profile";
+type AdvancedTabId = "connection" | "environment" | "capabilities" | "profile";
 
 export interface EditActorSavePayload {
   mode: ConfigMode;
@@ -116,8 +133,6 @@ export interface CreateActorConfigProps extends ActorConfigBaseProps {
 
 export type ActorConfigModalProps = EditActorConfigProps | CreateActorConfigProps;
 
-type SecretSource = "none" | "actor" | "profile-preview";
-
 /** Runtime-specific placeholder hints for secret environment variables */
 const SECRETS_PLACEHOLDER: Record<string, { set: string; unset: string }> = {
   claude: {
@@ -136,10 +151,7 @@ const SECRETS_PLACEHOLDER: Record<string, { set: string; unset: string }> = {
     set: "# Configure Cursor CLI auth with `cursor-agent login` before starting this actor.",
     unset: "",
   },
-  devin: {
-    set: "# Configure Devin auth and providers through Devin CLI setup.",
-    unset: "",
-  },
+  devin: { set: "# Configure Devin auth and providers through Devin CLI setup.", unset: "" },
   kiro: {
     set: "# Configure Kiro auth with kiro-cli login and providers through Kiro CLI setup.",
     unset: "",
@@ -172,11 +184,16 @@ const DEFAULT_SECRETS_PLACEHOLDER = {
 };
 
 function commandPreview(command: string[] | undefined): string {
-  const cmd = Array.isArray(command) ? command.filter((item) => typeof item === "string" && item.trim()) : [];
+  const cmd = Array.isArray(command)
+    ? command.filter((item) => typeof item === "string" && item.trim())
+    : [];
   return cmd.join(" ");
 }
 
-function profileScopeLabel(profile: ActorProfile, t: (key: string, options?: Record<string, unknown>) => string): string {
+function profileScopeLabel(
+  profile: ActorProfile,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
   if (String(profile.scope || "global").trim() === "user") {
     return t("profileScopeOwnedBy", { owner: String(profile.owner_id || "").trim() || "?" });
   }
@@ -184,7 +201,11 @@ function profileScopeLabel(profile: ActorProfile, t: (key: string, options?: Rec
 }
 
 function isWebModelProfile(profile: ActorProfile): boolean {
-  return String(profile.runtime || "").trim().toLowerCase() === "web_model";
+  return (
+    String(profile.runtime || "")
+      .trim()
+      .toLowerCase() === "web_model"
+  );
 }
 
 function modeButtonClass(selected: boolean): string {
@@ -197,7 +218,11 @@ function modeButtonClass(selected: boolean): string {
 }
 
 function normalizeGroupRole(role: unknown): "foreman" | "peer" {
-  return String(role || "").trim().toLowerCase() === "foreman" ? "foreman" : "peer";
+  return String(role || "")
+    .trim()
+    .toLowerCase() === "foreman"
+    ? "foreman"
+    : "peer";
 }
 
 function groupRoleBadgeClass(role: "foreman" | "peer"): string {
@@ -253,7 +278,11 @@ function CreateActorConfigModal({
   const { modalRef } = useModalA11y(isOpen, onCancel);
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [capabilitiesPrimed, setCapabilitiesPrimed] = useState(false);
-  const avatarPreviewUrl = useMemo(() => (avatarFile ? URL.createObjectURL(avatarFile) : null), [avatarFile]);
+  const [advancedTab, setAdvancedTab] = useState<AdvancedTabId>("environment");
+  const avatarPreviewUrl = useMemo(
+    () => (avatarFile ? URL.createObjectURL(avatarFile) : null),
+    [avatarFile],
+  );
 
   useEffect(() => {
     return () => {
@@ -268,13 +297,17 @@ function CreateActorConfigModal({
 
   useEffect(() => {
     if (!isOpen || !useProfile || !String(profileId || "").trim()) return;
-    const selected = selectableActorProfiles.some((profile) => actorProfileIdentityKey(profile) === String(profileId || "").trim());
+    const selected = selectableActorProfiles.some(
+      (profile) => actorProfileIdentityKey(profile) === String(profileId || "").trim(),
+    );
     if (!selected) onChangeProfileId("");
   }, [isOpen, onChangeProfileId, profileId, selectableActorProfiles, useProfile]);
 
   if (!isOpen) return null;
 
-  const selectedProfile = selectableActorProfiles.find((item) => actorProfileIdentityKey(item) === String(profileId || "").trim());
+  const selectedProfile = selectableActorProfiles.find(
+    (item) => actorProfileIdentityKey(item) === String(profileId || "").trim(),
+  );
   const selectedProfileRuntime = String(selectedProfile?.runtime || "").trim() as SupportedRuntime;
   const selectedProfileCommand = commandPreview(selectedProfile?.command);
   const selectedProfileRunner = normalizeActorRunner(selectedProfile?.runner || runner);
@@ -292,10 +325,20 @@ function CreateActorConfigModal({
   const sectionCardClass = "rounded-2xl p-4 sm:p-5 glass-panel";
   const sectionTitleClass = "text-sm font-semibold text-[var(--color-text-primary)]";
   const sectionHintClass = "mt-1 text-xs text-[var(--color-text-muted)]";
-  const collapsibleSummaryClass = "flex cursor-pointer list-none items-start justify-between gap-3 [&::-webkit-details-marker]:hidden";
-  const collapsibleLabelClass = "text-xs font-medium text-[var(--color-text-secondary)]";
-  const collapsibleChevronClass = "text-sm transition-transform group-open:rotate-180 text-[var(--color-text-tertiary)]";
-  const nestedCardClass = "group rounded-xl border p-3 border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] transition-all duration-300 hover:border-[var(--glass-border)]";
+  const createAdvancedTabIds: AdvancedTabId[] = [
+    ...(showRuntimeSetup ? ["connection" as const] : []),
+    ...(!useProfile ? ["environment" as const] : []),
+    ...(previewRuntime ? ["capabilities" as const] : []),
+    ...(!useProfile && !webModelSetupIsActorBound ? ["profile" as const] : []),
+  ];
+  const activeAdvancedTab = createAdvancedTabIds.includes(advancedTab)
+    ? advancedTab
+    : createAdvancedTabIds[0];
+  const selectAdvancedTab = (id: string) => {
+    const next = id as AdvancedTabId;
+    setAdvancedTab(next);
+    if (next === "capabilities") setCapabilitiesPrimed(true);
+  };
 
   const handleSubmit = async () => {
     try {
@@ -319,7 +362,9 @@ function CreateActorConfigModal({
       titleId="actor-config-create-title"
       title={
         <div>
-          <div className="text-lg font-semibold text-[var(--color-text-primary)]">{t("addAiAgent")}</div>
+          <div className="text-lg font-semibold text-[var(--color-text-primary)]">
+            {t("addAiAgent")}
+          </div>
           <div className="text-sm mt-1 text-[var(--color-text-muted)]">{t("addActorSubtitle")}</div>
         </div>
       }
@@ -348,7 +393,12 @@ function CreateActorConfigModal({
           ) : null}
 
           <div className="flex flex-col-reverse sm:flex-row gap-3 sm:justify-end">
-            <Button type="button" variant="secondary" className="w-full sm:w-auto" onClick={handleCancel}>
+            <Button
+              type="button"
+              variant="secondary"
+              className="w-full sm:w-auto"
+              onClick={handleCancel}
+            >
               {t("common:cancel")}
             </Button>
             <div className="w-full sm:w-auto sm:min-w-[14rem]">
@@ -358,17 +408,23 @@ function CreateActorConfigModal({
                 onClick={() => void handleSubmit()}
                 disabled={!canSubmit}
               >
-                {busy === "actor-add" ? t("adding") : useProfile ? t("createFromProfile") : t("addAgent")}
+                {busy === "actor-add"
+                  ? t("adding")
+                  : useProfile
+                    ? t("createFromProfile")
+                    : t("addAgent")}
               </Button>
               {submitDisabledReason ? (
-                <div className="text-[10px] text-amber-700 dark:text-amber-400 mt-1.5">{submitDisabledReason}</div>
+                <div className="text-[10px] text-amber-700 dark:text-amber-400 mt-1.5">
+                  {submitDisabledReason}
+                </div>
               ) : null}
             </div>
           </div>
         </>
       }
     >
-      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.92),rgba(255,255,255,0)_30%),linear-gradient(180deg,rgb(251,250,247),rgb(245,244,241))] p-4 dark:bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(17,18,22,0.98),rgba(11,12,15,1))] sm:p-6">
+      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.92),rgba(255,255,255,0)_30%),linear-gradient(180deg,var(--color-bg-primary),var(--color-sidebar-bg))] p-4 dark:bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(17,18,22,0.98),rgba(11,12,15,1))] sm:p-6">
         <div className="mx-auto w-full max-w-6xl space-y-4">
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.08fr)_minmax(22rem,0.92fr)] xl:items-start">
             <Surface className={sectionCardClass}>
@@ -393,17 +449,35 @@ function CreateActorConfigModal({
 
                   <div className="min-w-0 space-y-4">
                     <div>
-                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("agentId", { defaultValue: "Agent ID" })}</label>
-                      <Input value={actorId} onChange={(e) => onChangeActorId(e.target.value)} placeholder={suggestedActorId} disabled={busy === "actor-add"} />
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                        {t("agentId", { defaultValue: "Agent ID" })}
+                      </label>
+                      <Input
+                        value={actorId}
+                        onChange={(e) => onChangeActorId(e.target.value)}
+                        placeholder={suggestedActorId}
+                        disabled={busy === "actor-add"}
+                      />
                       <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
-                        {t("leaveEmptyToUse")} <code className="px-1 rounded bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]">{suggestedActorId}</code>
+                        {t("leaveEmptyToUse")}{" "}
+                        <code className="px-1 rounded bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]">
+                          {suggestedActorId}
+                        </code>
                       </div>
                     </div>
 
                     <div>
-                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("agentRole", { defaultValue: "Agent role" })}</label>
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                        {t("agentRole", { defaultValue: "Agent role" })}
+                      </label>
                       <div className="grid grid-cols-2 gap-2">
-                        <Button type="button" variant="outline" className={modeButtonClass(role === "peer")} onClick={() => onChangeRole("peer")} disabled={busy === "actor-add"}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className={modeButtonClass(role === "peer")}
+                          onClick={() => onChangeRole("peer")}
+                          disabled={busy === "actor-add"}
+                        >
                           {t("peerRole")}
                         </Button>
                         <Button
@@ -412,19 +486,33 @@ function CreateActorConfigModal({
                           className={modeButtonClass(role === "foreman")}
                           onClick={() => onChangeRole("foreman")}
                           disabled={busy === "actor-add" || hasForeman}
-                          title={hasForeman ? t("foremanAlreadyConfigured", { defaultValue: "Foreman already configured" }) : undefined}
+                          title={
+                            hasForeman
+                              ? t("foremanAlreadyConfigured", {
+                                  defaultValue: "Foreman already configured",
+                                })
+                              : undefined
+                          }
                         >
                           {t("foremanRole")}
                         </Button>
                       </div>
-                      <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">{hasForeman ? t("foremanLeads") : t("firstAgentForeman")}</div>
+                      <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                        {hasForeman ? t("foremanLeads") : t("firstAgentForeman")}
+                      </div>
                     </div>
                   </div>
                 </div>
 
                 <div>
-                  <RolePresetPicker draftValue={actorNotes} onChangeDraft={onChangeActorNotes} disabled={busy === "actor-add"} />
-                  <label className="block text-xs font-medium mt-3 mb-2 text-[var(--color-text-muted)]">{t("actorNotes")}</label>
+                  <RolePresetPicker
+                    draftValue={actorNotes}
+                    onChangeDraft={onChangeActorNotes}
+                    disabled={busy === "actor-add"}
+                  />
+                  <label className="block text-xs font-medium mt-3 mb-2 text-[var(--color-text-muted)]">
+                    {t("actorNotes")}
+                  </label>
                   <Textarea
                     className="min-h-[144px]"
                     value={actorNotes}
@@ -433,7 +521,9 @@ function CreateActorConfigModal({
                     spellCheck={false}
                     disabled={busy === "actor-add"}
                   />
-                  <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">{t("newActorNotesHint")}</div>
+                  <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                    {t("newActorNotesHint")}
+                  </div>
                 </div>
               </div>
             </Surface>
@@ -443,7 +533,9 @@ function CreateActorConfigModal({
               <div className={sectionHintClass}>{t("sectionRuntimeHint")}</div>
 
               <div className="mt-4">
-                <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("creationMode")}</label>
+                <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                  {t("creationMode")}
+                </label>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <Button
                     type="button"
@@ -460,8 +552,10 @@ function CreateActorConfigModal({
                     className={modeButtonClass(useProfile)}
                     onClick={() => {
                       onChangeUseProfile(true);
-                      if (!actorProfilesBusy && selectableActorProfiles.length <= 0) void onRequestActorProfiles?.();
-                      if (selectableActorProfiles.length > 0 && !profileId) onChangeProfileId(actorProfileIdentityKey(selectableActorProfiles[0]));
+                      if (!actorProfilesBusy && selectableActorProfiles.length <= 0)
+                        void onRequestActorProfiles?.();
+                      if (selectableActorProfiles.length > 0 && !profileId)
+                        onChangeProfileId(actorProfileIdentityKey(selectableActorProfiles[0]));
                     }}
                     disabled={busy === "actor-add"}
                   >
@@ -474,7 +568,9 @@ function CreateActorConfigModal({
                 {useProfile ? (
                   <>
                     <div>
-                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("actorProfile")}</label>
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                        {t("actorProfile")}
+                      </label>
                       <SelectCombobox
                         className="w-full rounded-xl border px-3 py-2 text-sm min-h-[40px] glass-input text-[var(--color-text-primary)]"
                         value={profileId}
@@ -482,7 +578,12 @@ function CreateActorConfigModal({
                         disabled={actorProfilesBusy || busy === "actor-add"}
                         ariaLabel={t("actorProfile")}
                         items={[
-                          { value: "", label: actorProfilesBusy ? t("loadingProfiles") : t("selectActorProfile") },
+                          {
+                            value: "",
+                            label: actorProfilesBusy
+                              ? t("loadingProfiles")
+                              : t("selectActorProfile"),
+                          },
                           ...selectableActorProfiles.map((profile) => ({
                             value: actorProfileIdentityKey(profile),
                             label: `${profile.name || profile.id} · ${profileScopeLabel(profile, t)}`,
@@ -492,23 +593,38 @@ function CreateActorConfigModal({
                       />
                     </div>
                     {selectedProfile ? (
-                      <Surface className="px-3 py-2 text-xs text-[var(--color-text-secondary)]" variant="subtle" radius="md" padding="none">
-                        <div className="font-medium">{selectedProfile.name || selectedProfile.id}</div>
+                      <Surface
+                        className="px-3 py-2 text-xs text-[var(--color-text-secondary)]"
+                        variant="subtle"
+                        radius="md"
+                        padding="none"
+                      >
+                        <div className="font-medium">
+                          {selectedProfile.name || selectedProfile.id}
+                        </div>
                         <div className="mt-1">{profileScopeLabel(selectedProfile, t)}</div>
                         <div className="mt-1 flex flex-wrap items-center gap-2">
-                          <span>{RUNTIME_INFO[selectedProfileRuntime]?.label || selectedProfileRuntime}</span>
+                          <span>
+                            {RUNTIME_INFO[selectedProfileRuntime]?.label || selectedProfileRuntime}
+                          </span>
                           <span className="rounded-full border border-[var(--glass-border-subtle)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-muted)]">
-                            {selectedProfileRunner === "headless" ? t("headless") : t("pty", { defaultValue: "PTY" })}
+                            {selectedProfileRunner === "headless"
+                              ? t("headless")
+                              : t("pty", { defaultValue: "PTY" })}
                           </span>
                         </div>
-                        {selectedProfileCommand ? <div className="mt-1 font-mono break-all">{selectedProfileCommand}</div> : null}
+                        {selectedProfileCommand ? (
+                          <div className="mt-1 font-mono break-all">{selectedProfileCommand}</div>
+                        ) : null}
                       </Surface>
                     ) : null}
                   </>
                 ) : (
                   <div className="space-y-4">
                     <div>
-                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("runtime")}</label>
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                        {t("runtime")}
+                      </label>
                       <SelectCombobox
                         className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)]"
                         value={runtime}
@@ -538,9 +654,18 @@ function CreateActorConfigModal({
                     </div>
 
                     {runtime ? (
-                      <Surface className="px-3 py-2 text-xs text-[var(--color-text-secondary)]" variant="subtle" radius="md" padding="none">
+                      <Surface
+                        className="px-3 py-2 text-xs text-[var(--color-text-secondary)]"
+                        variant="subtle"
+                        radius="md"
+                        padding="none"
+                      >
                         <div className="flex flex-wrap items-center justify-between gap-3">
-                          <span>{runtimeAvailable ? t("available") : t("notAvailable", { defaultValue: "Not available" })}</span>
+                          <span>
+                            {runtimeAvailable
+                              ? t("available")
+                              : t("notAvailable", { defaultValue: "Not available" })}
+                          </span>
                           <span>{runtime === "custom" ? t("custom") : defaultCommand || "—"}</span>
                         </div>
                       </Surface>
@@ -548,12 +673,26 @@ function CreateActorConfigModal({
 
                     {supportsStandardWebHeadlessRuntime(runtime) ? (
                       <div>
-                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("runnerMode")}</label>
+                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                          {t("runnerMode")}
+                        </label>
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                          <Button type="button" variant="outline" className={modeButtonClass(runner === "pty")} onClick={() => onChangeRunner("pty")} disabled={webModelRunnerLockedToHeadless}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className={modeButtonClass(runner === "pty")}
+                            onClick={() => onChangeRunner("pty")}
+                            disabled={webModelRunnerLockedToHeadless}
+                          >
                             {t("pty", { defaultValue: "PTY" })}
                           </Button>
-                          <Button type="button" variant="outline" className={modeButtonClass(runner === "headless")} onClick={() => onChangeRunner("headless")} disabled={customRunnerLockedToPty}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className={modeButtonClass(runner === "headless")}
+                            onClick={() => onChangeRunner("headless")}
+                            disabled={customRunnerLockedToPty}
+                          >
                             {t("headless")}
                           </Button>
                         </div>
@@ -574,7 +713,9 @@ function CreateActorConfigModal({
 
                     {showCommandEditor ? (
                       <div>
-                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{runtime === "custom" ? t("command") : t("customCommandOverride")}</label>
+                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                          {runtime === "custom" ? t("command") : t("customCommandOverride")}
+                        </label>
                         <Input
                           className="font-mono"
                           value={command}
@@ -587,10 +728,15 @@ function CreateActorConfigModal({
 
                     {webModelSetupIsActorBound ? (
                       <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/20 bg-sky-500/5 text-sky-700 dark:text-sky-300">
-                        <div className="font-medium">{t("webModelActorBoundConnectorTitle", { defaultValue: "Single ChatGPT Web Model actor" })}</div>
+                        <div className="font-medium">
+                          {t("webModelActorBoundConnectorTitle", {
+                            defaultValue: "Single ChatGPT Web Model actor",
+                          })}
+                        </div>
                         <div className="mt-1">
                           {t("webModelActorBoundConnectorHint", {
-                            defaultValue: "Manage the ChatGPT MCP URL and target conversation in Settings > ChatGPT Web Model. CCCC supports one ChatGPT Web Model actor in this instance.",
+                            defaultValue:
+                              "Manage the ChatGPT MCP URL and target conversation in Settings > ChatGPT Web Model. CCCC supports one ChatGPT Web Model actor in this instance.",
                           })}
                         </div>
                       </div>
@@ -601,110 +747,115 @@ function CreateActorConfigModal({
             </Surface>
           </div>
 
-          <details className={`group ${sectionCardClass}`}>
-            <summary className={collapsibleSummaryClass}>
-              <div>
-                <div className={sectionTitleClass}>{t("sectionAdvanced")}</div>
-                <div className={sectionHintClass}>{t("sectionAdvancedHint")}</div>
-              </div>
-              <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-            </summary>
-
-            <div className="mt-4 space-y-4 border-t border-[var(--glass-border-subtle)] pt-4">
-              {showRuntimeSetup ? (
-                <details className={nestedCardClass}>
-                  <summary className={collapsibleSummaryClass}>
-                    <div>
-                      <div className={collapsibleLabelClass}>{t("runtimeSetupSection")}</div>
-                      <div className={sectionHintClass}>{t("runtimeSetupSectionHint")}</div>
-                    </div>
-                    <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-                  </summary>
-                  <div className="mt-4 rounded-xl border px-3 py-2 text-[11px] border-amber-500/20 bg-amber-500/5 text-amber-700 dark:text-amber-400">
-                    <div className="font-medium">{t("manualMcpRequired")}</div>
-                    <div className="mt-1">
-                      {t("configureMcpStdio")} <code className="px-1 rounded bg-amber-500/15">cccc</code> {t("thatRuns")} <code className="px-1 rounded bg-amber-500/15">cccc mcp</code>.
-                    </div>
-                    <pre className="mt-1.5 p-2 rounded overflow-x-auto whitespace-pre bg-amber-500/10 text-amber-800 dark:text-amber-100">
-                      <code>{BASIC_MCP_CONFIG_SNIPPET}</code>
-                    </pre>
-                    <div className="mt-1 text-[10px] text-amber-700/80 dark:text-amber-400/80">{t("restartAfterConfig")}</div>
-                  </div>
-                </details>
-              ) : null}
-
-              {!useProfile ? (
-                <details className={nestedCardClass}>
-                  <summary className={collapsibleSummaryClass}>
-                    <div>
-                      <div className={collapsibleLabelClass}>{t("secretsSection")}</div>
-                      <div className={sectionHintClass}>{t("secretsSectionHint")}</div>
-                    </div>
-                    <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-                  </summary>
-                  <div className="mt-4">
-                    <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("secretsWriteOnly")}</label>
-                    <Textarea
-                      className="min-h-[96px] font-mono"
-                      value={secretsSetText}
-                      onChange={(e) => onChangeSecretsSetText(e.target.value)}
-                      placeholder={secretsPlaceholder}
-                      disabled={busy === "actor-add"}
-                    />
-                    <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">{t("secretsStoredLocally").replace(/<1>|<\/1>/g, "")}</div>
-                    <div className="text-[10px] mt-1 text-[var(--color-text-muted)]">{t("secretsFormat").replace(/<1>|<\/1>|<2>|<\/2>/g, "")}</div>
-                  </div>
-                </details>
-              ) : null}
-
-              {previewRuntime ? (
-                <details
-                  className={nestedCardClass}
-                  onToggle={(event) => {
-                    const open = (event.currentTarget as HTMLDetailsElement).open;
-                    if (!open || capabilitiesPrimed) return;
-                    setCapabilitiesPrimed(true);
-                  }}
-                >
-                  <summary className={collapsibleSummaryClass}>
-                    <div>
-                      <div className={collapsibleLabelClass}>{t("capabilitiesSection")}</div>
-                      <div className={sectionHintClass}>{t("capabilitiesSectionHint")}</div>
-                    </div>
-                    <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-                  </summary>
-                  <div className="mt-4">
-                    <CapabilityPicker
-                      isDark={isDark}
-                      value={parseCapabilityIdInput(capabilityAutoloadText)}
-                      onChange={(next) => onChangeCapabilityAutoloadText(formatCapabilityIdInput(next))}
-                      disabled={busy === "actor-add"}
-                      active={capabilitiesPrimed}
-                      label={t("autoloadCapabilities")}
-                      hint={t("autoloadCapabilitiesHint")}
-                    />
-                  </div>
-                </details>
-              ) : null}
-
-              {!useProfile && !webModelSetupIsActorBound ? (
-                <details className={nestedCardClass}>
-                  <summary className={collapsibleSummaryClass}>
-                    <div>
-                      <div className={collapsibleLabelClass}>{t("profileToolsSection")}</div>
-                      <div className={sectionHintClass}>{t("profileToolsSectionHint")}</div>
-                    </div>
-                    <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-                  </summary>
-                  <div className="mt-4 flex flex-wrap gap-3">
-                    <Button type="button" variant="secondary" onClick={() => void onSaveAsProfile()} disabled={busy === "actor-profile-save" || busy === "actor-add"}>
-                      {busy === "actor-profile-save" ? t("savingProfile") : t("addToActorProfiles")}
-                    </Button>
-                  </div>
-                </details>
-              ) : null}
+          <Surface className={sectionCardClass}>
+            <div className={sectionTitleClass}>{t("sectionAdvanced")}</div>
+            <div className={sectionHintClass}>{t("sectionAdvancedHint")}</div>
+            <div className="mt-4">
+              <ActorConfigTabs
+                ariaLabel={t("sectionAdvanced")}
+                activeId={activeAdvancedTab || ""}
+                onChange={selectAdvancedTab}
+                tabs={[
+                  ...(showRuntimeSetup
+                    ? [
+                        {
+                          id: "connection",
+                          label: t("runtimeSetupSection"),
+                          panel: (
+                            <div className="rounded-xl border px-3 py-2 text-[11px] border-amber-500/20 bg-amber-500/5 text-amber-700 dark:text-amber-400">
+                              <div className="font-medium">{t("manualMcpRequired")}</div>
+                              <div className="mt-1">
+                                {t("configureMcpStdio")}{" "}
+                                <code className="px-1 rounded bg-amber-500/15">cccc</code>{" "}
+                                {t("thatRuns")}{" "}
+                                <code className="px-1 rounded bg-amber-500/15">cccc mcp</code>.
+                              </div>
+                              <pre className="mt-1.5 p-2 rounded overflow-x-auto whitespace-pre bg-amber-500/10 text-amber-800 dark:text-amber-100">
+                                <code>{BASIC_MCP_CONFIG_SNIPPET}</code>
+                              </pre>
+                              <div className="mt-1 text-[10px] text-amber-700/80 dark:text-amber-400/80">
+                                {t("restartAfterConfig")}
+                              </div>
+                            </div>
+                          ),
+                        },
+                      ]
+                    : []),
+                  ...(!useProfile
+                    ? [
+                        {
+                          id: "environment",
+                          label: t("secretsSection"),
+                          panel: (
+                            <div>
+                              <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                                {t("secretsWriteOnly")}
+                              </label>
+                              <Textarea
+                                className="min-h-[96px] font-mono"
+                                value={secretsSetText}
+                                onChange={(e) => onChangeSecretsSetText(e.target.value)}
+                                placeholder={secretsPlaceholder}
+                                disabled={busy === "actor-add"}
+                              />
+                              <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                                {t("secretsStoredLocally").replace(/<1>|<\/1>/g, "")}
+                              </div>
+                              <div className="text-[10px] mt-1 text-[var(--color-text-muted)]">
+                                {t("secretsFormat").replace(/<1>|<\/1>|<2>|<\/2>/g, "")}
+                              </div>
+                            </div>
+                          ),
+                        },
+                      ]
+                    : []),
+                  ...(previewRuntime
+                    ? [
+                        {
+                          id: "capabilities",
+                          label: t("capabilitiesSection"),
+                          panel: (
+                            <CapabilityPicker
+                              isDark={isDark}
+                              value={parseCapabilityIdInput(capabilityAutoloadText)}
+                              onChange={(next) =>
+                                onChangeCapabilityAutoloadText(formatCapabilityIdInput(next))
+                              }
+                              disabled={busy === "actor-add"}
+                              active={capabilitiesPrimed || activeAdvancedTab === "capabilities"}
+                              label={t("autoloadCapabilities")}
+                              hint={t("autoloadCapabilitiesHint")}
+                            />
+                          ),
+                        },
+                      ]
+                    : []),
+                  ...(!useProfile && !webModelSetupIsActorBound
+                    ? [
+                        {
+                          id: "profile",
+                          label: t("profileToolsSection"),
+                          panel: (
+                            <div className="flex flex-wrap gap-3">
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                onClick={() => void onSaveAsProfile()}
+                                disabled={busy === "actor-profile-save" || busy === "actor-add"}
+                              >
+                                {busy === "actor-profile-save"
+                                  ? t("savingProfile")
+                                  : t("addToActorProfiles")}
+                              </Button>
+                            </div>
+                          ),
+                        },
+                      ]
+                    : []),
+                ]}
+              />
             </div>
-          </details>
+          </Surface>
         </div>
       </div>
     </ModalFrame>
@@ -760,19 +911,18 @@ function EditActorConfigModal({
   const { modalRef } = useModalA11y(isOpen, onCancel);
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
   const [secretMasks, setSecretMasks] = useState<Record<string, string>>({});
-  const [secretsSetText, setSecretsSetText] = useState("");
-  const [secretsUnsetText, setSecretsUnsetText] = useState("");
-  const [secretsClearAll, setSecretsClearAll] = useState(false);
+  const [secretChanges, setSecretChanges] = useState<ActorSecretChanges>(emptyActorSecretChanges);
   const [secretsError, setSecretsError] = useState("");
   const [secretsBusy, setSecretsBusy] = useState(false);
+  const [secretsRefreshing, setSecretsRefreshing] = useState(false);
+  const [secretKeysLoadFailed, setSecretKeysLoadFailed] = useState(false);
   const [attachProfileId, setAttachProfileId] = useState("");
   const [editMode, setEditMode] = useState<ConfigMode>("custom");
   const [pendingConvertToCustom, setPendingConvertToCustom] = useState(false);
   const [localNotice, setLocalNotice] = useState("");
-  const [secretSource, setSecretSource] = useState<SecretSource>("none");
   const [avatarBusy, setAvatarBusy] = useState<"" | "upload" | "clear">("");
-  const [secretsPrimed, setSecretsPrimed] = useState(false);
   const [capabilitiesPrimed, setCapabilitiesPrimed] = useState(false);
+  const [advancedTab, setAdvancedTab] = useState<AdvancedTabId>("environment");
   const secretFetchSeqRef = useRef(0);
   const modalStateRef = useRef<{
     groupId: string;
@@ -792,18 +942,34 @@ function EditActorConfigModal({
 
   const linked = Boolean(String(linkedProfileId || "").trim());
   const effectiveLinked = linked && !pendingConvertToCustom;
+  const showRuntimeSetup = !effectiveLinked && editMode === "custom" && runtime === "custom";
+  const editAdvancedTabIds: AdvancedTabId[] = [
+    ...(showRuntimeSetup ? ["connection" as const] : []),
+    ...(editMode === "custom" ? ["environment" as const] : []),
+    "capabilities",
+    ...(editMode === "custom" ? ["profile" as const] : []),
+  ];
+  const activeAdvancedTab = editAdvancedTabIds.includes(advancedTab)
+    ? advancedTab
+    : editAdvancedTabIds[0];
   const selectableActorProfiles = useMemo(
-    () => actorProfiles.filter((profile) => !isWebModelProfile(profile) || actorProfileIdentityKey(profile) === String(attachProfileId || "").trim()),
-    [actorProfiles, attachProfileId]
+    () =>
+      actorProfiles.filter(
+        (profile) =>
+          !isWebModelProfile(profile) ||
+          actorProfileIdentityKey(profile) === String(attachProfileId || "").trim(),
+      ),
+    [actorProfiles, attachProfileId],
   );
   const selectedProfile = useMemo(
-    () => selectableActorProfiles.find((profile) => actorProfileIdentityKey(profile) === String(attachProfileId || "").trim()),
-    [selectableActorProfiles, attachProfileId]
+    () =>
+      selectableActorProfiles.find(
+        (profile) => actorProfileIdentityKey(profile) === String(attachProfileId || "").trim(),
+      ),
+    [selectableActorProfiles, attachProfileId],
   );
   const selectedProfileName = String(selectedProfile?.name || "").trim();
   const selectedProfileRunner = normalizeActorRunner(selectedProfile?.runner || runner);
-
-  const secretsPlaceholder = SECRETS_PLACEHOLDER[runtime] ?? DEFAULT_SECRETS_PLACEHOLDER;
 
   useEffect(() => {
     modalStateRef.current = {
@@ -818,25 +984,35 @@ function EditActorConfigModal({
 
   const refreshSecretKeys = async () => {
     if (editMode !== "custom") {
+      setSecretsRefreshing(false);
+      setSecretKeysLoadFailed(false);
       setSecretKeys([]);
       setSecretMasks({});
-      setSecretSource("none");
       return;
     }
 
     if (linked && pendingConvertToCustom) {
       const profileId = String(linkedProfileId || "").trim();
       if (!profileId) {
+        setSecretsRefreshing(false);
+        setSecretKeysLoadFailed(false);
         setSecretKeys([]);
         setSecretMasks({});
-        setSecretSource("none");
         return;
       }
       const requestSeq = ++secretFetchSeqRef.current;
-      const resp = await api.fetchActorProfilePrivateEnvKeys(profileId, {
-        scope: linkedProfileScope,
-        ownerId: linkedProfileOwner,
-      });
+      setSecretsRefreshing(true);
+      setSecretKeysLoadFailed(false);
+      const resp = await (async () => {
+        try {
+          return await api.fetchActorProfilePrivateEnvKeys(profileId, {
+            scope: linkedProfileScope,
+            ownerId: linkedProfileOwner,
+          });
+        } finally {
+          if (requestSeq === secretFetchSeqRef.current) setSecretsRefreshing(false);
+        }
+      })();
       if (requestSeq !== secretFetchSeqRef.current) return;
       const now = modalStateRef.current;
       if (
@@ -851,37 +1027,45 @@ function EditActorConfigModal({
 
       if (!resp.ok) {
         setSecretsError(resp.error?.message || t("failedToLoadSecrets"));
+        setSecretKeysLoadFailed(true);
         setSecretKeys([]);
         setSecretMasks({});
-        setSecretSource("none");
         return;
       }
 
-      const mergedKeys = Array.isArray(resp.result?.keys) ? resp.result.keys : [];
-      const mergedMasks =
-        resp.result?.masked_values && typeof resp.result.masked_values === "object"
-          ? resp.result.masked_values
-          : {};
-
-      setSecretsError("");
-      setSecretKeys(mergedKeys);
-      setSecretMasks(mergedMasks);
-      setSecretSource("profile-preview");
+      const loaded = normalizeLoadedActorSecretKeys(resp.result);
+      setSecretsError(loaded.error);
+      setSecretKeysLoadFailed(loaded.loadFailed);
+      setSecretKeys(loaded.keys);
+      setSecretMasks(loaded.masks);
       return;
     }
 
     if (effectiveLinked) {
+      setSecretsRefreshing(false);
+      setSecretKeysLoadFailed(false);
       setSecretKeys([]);
       setSecretMasks({});
-      setSecretSource("none");
       return;
     }
 
-    if (!groupId || !actorId) return;
+    if (!groupId || !actorId) {
+      setSecretsRefreshing(false);
+      setSecretKeysLoadFailed(false);
+      return;
+    }
     const requestForGroupId = groupId;
     const requestForActorId = actorId;
     const requestSeq = ++secretFetchSeqRef.current;
-    const resp = await api.fetchActorPrivateEnvKeys(requestForGroupId, requestForActorId);
+    setSecretsRefreshing(true);
+    setSecretKeysLoadFailed(false);
+    const resp = await (async () => {
+      try {
+        return await api.fetchActorPrivateEnvKeys(requestForGroupId, requestForActorId);
+      } finally {
+        if (requestSeq === secretFetchSeqRef.current) setSecretsRefreshing(false);
+      }
+    })();
     if (requestSeq !== secretFetchSeqRef.current) return;
     const now = modalStateRef.current;
     if (
@@ -897,22 +1081,22 @@ function EditActorConfigModal({
       if (code === "actor_profile_linked_readonly") {
         // Treat as state transition, not a user-facing error.
         setSecretsError("");
+        setSecretKeysLoadFailed(false);
         setSecretKeys([]);
         setSecretMasks({});
-        setSecretSource("none");
         return;
       }
       setSecretsError(resp.error?.message || t("failedToLoadSecrets"));
+      setSecretKeysLoadFailed(true);
       setSecretKeys([]);
       setSecretMasks({});
-      setSecretSource("none");
       return;
     }
-    const keys = Array.isArray(resp.result?.keys) ? resp.result.keys : [];
-    const masked = resp.result?.masked_values && typeof resp.result.masked_values === "object" ? resp.result.masked_values : {};
-    setSecretKeys(keys);
-    setSecretMasks(masked);
-    setSecretSource("actor");
+    const loaded = normalizeLoadedActorSecretKeys(resp.result);
+    setSecretsError(loaded.error);
+    setSecretKeysLoadFailed(loaded.loadFailed);
+    setSecretKeys(loaded.keys);
+    setSecretMasks(loaded.masks);
   };
 
   useEffect(() => {
@@ -928,34 +1112,33 @@ function EditActorConfigModal({
             scope: linkedProfileScope || "global",
             owner_id: linkedProfileOwner || "",
           })
-        : ""
+        : "",
     );
     setLocalNotice("");
     setSecretsError("");
+    setSecretsRefreshing(false);
+    setSecretKeysLoadFailed(false);
     setSecretMasks({});
-    setSecretsSetText("");
-    setSecretsUnsetText("");
-    setSecretsClearAll(false);
+    setSecretChanges(emptyActorSecretChanges());
     setSecretKeys([]);
-    setSecretSource("none");
   }, [groupId, actorId, isOpen, linkedProfileId, linkedProfileOwner, linkedProfileScope]);
 
   useEffect(() => {
     if (!isOpen) return;
     if (editMode === "profile") {
       secretFetchSeqRef.current += 1;
+      setSecretsRefreshing(false);
+      setSecretKeysLoadFailed(false);
       setSecretKeys([]);
       setSecretMasks({});
-      setSecretSource("none");
       return;
     }
-    if (!effectiveLinked && secretsPrimed) void refreshSecretKeys();
+    if (!effectiveLinked) void refreshSecretKeys();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, effectiveLinked, secretsPrimed]);
+  }, [isOpen, groupId, actorId, editMode, effectiveLinked]);
 
   useEffect(() => {
     if (!isOpen) return;
-    setSecretsPrimed(false);
     setCapabilitiesPrimed(false);
   }, [isOpen, groupId, actorId]);
 
@@ -964,7 +1147,13 @@ function EditActorConfigModal({
   const rtInfo = runtimes.find((r) => r.name === runtime);
   const available = rtInfo?.available ?? false;
   const defaultCommand = rtInfo?.recommended_command || "";
-  const requireCommand = !effectiveLinked && editMode === "custom" && (runtime === "custom" || !available);
+  const requireCommand =
+    !effectiveLinked && editMode === "custom" && (runtime === "custom" || !available);
+  const selectAdvancedTab = (id: string) => {
+    const next = id as AdvancedTabId;
+    setAdvancedTab(next);
+    if (next === "capabilities") setCapabilitiesPrimed(true);
+  };
 
   const convertToCustomDraft = () => {
     if (!linked || busy === "actor-update") return;
@@ -983,11 +1172,11 @@ function EditActorConfigModal({
       if (profileId && result?.useNow) {
         setPendingConvertToCustom(false);
         setEditMode("profile");
-        setAttachProfileId(actorProfileIdentityKey({ id: profileId, scope: "global", owner_id: "" }));
+        setAttachProfileId(
+          actorProfileIdentityKey({ id: profileId, scope: "global", owner_id: "" }),
+        );
         setLocalNotice(
-          t("profileSelectedPendingSave", {
-            name: String(result.profileName || profileId),
-          })
+          t("profileSelectedPendingSave", { name: String(result.profileName || profileId) }),
         );
       }
     } catch (e) {
@@ -1081,25 +1270,16 @@ function EditActorConfigModal({
     }
 
     setSecretsError("");
-    const setParsed = parsePrivateEnvSetText(secretsSetText);
-    if (!setParsed.ok) {
-      setSecretsError(setParsed.error);
-      return;
-    }
-    const unsetParsed = parsePrivateEnvUnsetText(secretsUnsetText);
-    if (!unsetParsed.ok) {
-      setSecretsError(unsetParsed.error);
-      return;
-    }
+    const secretSaveChanges = buildActorSecretSaveChanges(secretChanges);
 
     setSecretsBusy(true);
     try {
       await callback({
         mode: "custom",
         runner,
-        setVars: setParsed.setVars,
-        unsetKeys: unsetParsed.unsetKeys,
-        clear: secretsClearAll,
+        setVars: secretSaveChanges.setVars,
+        unsetKeys: secretSaveChanges.unsetKeys,
+        clear: secretSaveChanges.clear,
         capabilityAutoload: parseCapabilityIdInput(capabilityAutoloadText),
         convertToCustom: linked && pendingConvertToCustom,
       });
@@ -1121,25 +1301,22 @@ function EditActorConfigModal({
   const sectionCardClass = "rounded-2xl p-4 sm:p-5 glass-panel";
   const sectionTitleClass = "text-sm font-semibold text-[var(--color-text-primary)]";
   const sectionHintClass = "mt-1 text-xs text-[var(--color-text-muted)]";
-  const collapsibleSummaryClass = `flex cursor-pointer list-none items-start justify-between gap-3 [&::-webkit-details-marker]:hidden`;
-  const collapsibleLabelClass = "text-xs font-medium text-[var(--color-text-secondary)]";
-  const collapsibleChevronClass = "text-sm transition-transform group-open:rotate-180 text-[var(--color-text-tertiary)]";
-  const nestedCardClass = "group rounded-xl border p-3 border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] transition-all duration-300 hover:border-[var(--glass-border)]";
   const saveDisabled =
     busy === "actor-update" ||
     avatarBusy !== "" ||
     secretsBusy ||
+    secretsRefreshing ||
     actorNotesBusy ||
     (editMode === "custom" && effectiveLinked) ||
     (editMode === "custom" && requireCommand && !command.trim()) ||
     (editMode === "profile" && !String(attachProfileId || "").trim());
-  const showRuntimeSetup = !effectiveLinked && editMode === "custom" && runtime === "custom";
   const customRunnerLockedToPty = !supportsStandardWebHeadlessRuntime(runtime);
   const webModelRunnerLockedToHeadless = runtime === "web_model";
   const normalizedGroupRole = normalizeGroupRole(groupRole);
-  const groupRoleLabel = normalizedGroupRole === "foreman"
-    ? t("groupRoleForeman", { defaultValue: "Foreman" })
-    : t("groupRolePeer", { defaultValue: "Peer" });
+  const groupRoleLabel =
+    normalizedGroupRole === "foreman"
+      ? t("groupRoleForeman", { defaultValue: "Foreman" })
+      : t("groupRolePeer", { defaultValue: "Peer" });
 
   return (
     <ModalFrame
@@ -1208,13 +1385,16 @@ function EditActorConfigModal({
         </>
       }
     >
-      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.92),rgba(255,255,255,0)_30%),linear-gradient(180deg,rgb(251,250,247),rgb(245,244,241))] p-4 dark:bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(17,18,22,0.98),rgba(11,12,15,1))] sm:p-6">
+      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.92),rgba(255,255,255,0)_30%),linear-gradient(180deg,var(--color-bg-primary),var(--color-sidebar-bg))] p-4 dark:bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(255,255,255,0)_34%),linear-gradient(180deg,rgba(17,18,22,0.98),rgba(11,12,15,1))] sm:p-6">
         <div className="mx-auto w-full max-w-6xl space-y-4">
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.08fr)_minmax(22rem,0.92fr)] xl:items-start">
             <Surface className={sectionCardClass}>
               <div className={sectionTitleClass}>{t("sectionBasics", "Basics")}</div>
               <div className={sectionHintClass}>
-                {t("sectionBasicsHint", "Edit the actor label, group role, actor preset, and actor notes here.")}
+                {t(
+                  "sectionBasicsHint",
+                  "Edit the actor label, group role, actor preset, and actor notes here.",
+                )}
               </div>
 
               <div className="mt-4 space-y-4">
@@ -1237,16 +1417,24 @@ function EditActorConfigModal({
                   </div>
 
                   <div className="min-w-0">
-                    <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("displayName")}</label>
+                    <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                      {t("displayName")}
+                    </label>
                     <Input
                       value={title}
                       onChange={(e) => onChangeTitle(e.target.value)}
                       placeholder={actorId}
                     />
-                    <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">{t("leaveEmptyForId")}</div>
+                    <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                      {t("leaveEmptyForId")}
+                    </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <span className="text-xs font-medium text-[var(--color-text-muted)]">{t("groupRole", { defaultValue: "Group role" })}</span>
-                      <span className={groupRoleBadgeClass(normalizedGroupRole)}>{groupRoleLabel}</span>
+                      <span className="text-xs font-medium text-[var(--color-text-muted)]">
+                        {t("groupRole", { defaultValue: "Group role" })}
+                      </span>
+                      <span className={groupRoleBadgeClass(normalizedGroupRole)}>
+                        {groupRoleLabel}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -1257,7 +1445,9 @@ function EditActorConfigModal({
                     onChangeDraft={onChangeActorNotes}
                     disabled={actorNotesBusy || busy === "actor-update"}
                   />
-                  <label className="block text-xs font-medium mt-3 mb-2 text-[var(--color-text-muted)]">{t("actorNotes")}</label>
+                  <label className="block text-xs font-medium mt-3 mb-2 text-[var(--color-text-muted)]">
+                    {t("actorNotes")}
+                  </label>
                   <Textarea
                     className="min-h-[144px]"
                     value={actorNotes}
@@ -1266,8 +1456,14 @@ function EditActorConfigModal({
                     spellCheck={false}
                     disabled={actorNotesBusy}
                   />
-                  <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">{t("actorNotesHint")}</div>
-                  {actorNotesBusy ? <div className="text-[10px] mt-1 text-[var(--color-text-muted)]">{t("loadingActorNotes")}</div> : null}
+                  <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                    {t("actorNotesHint")}
+                  </div>
+                  {actorNotesBusy ? (
+                    <div className="text-[10px] mt-1 text-[var(--color-text-muted)]">
+                      {t("loadingActorNotes")}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </Surface>
@@ -1279,9 +1475,16 @@ function EditActorConfigModal({
               </div>
 
               <div className="mt-4">
-                <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("creationMode")}</label>
+                <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                  {t("creationMode")}
+                </label>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <Button type="button" variant="outline" className={modeButtonClass(editMode === "custom")} onClick={() => setEditMode("custom")}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className={modeButtonClass(editMode === "custom")}
+                    onClick={() => setEditMode("custom")}
+                  >
                     {t("customAgent")}
                   </Button>
                   <Button
@@ -1306,7 +1509,9 @@ function EditActorConfigModal({
                 {editMode === "profile" ? (
                   <>
                     <div>
-                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("actorProfile")}</label>
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                        {t("actorProfile")}
+                      </label>
                       <SelectCombobox
                         className="w-full rounded-xl border px-3 py-2 text-sm min-h-[40px] glass-input text-[var(--color-text-primary)]"
                         value={attachProfileId}
@@ -1314,7 +1519,12 @@ function EditActorConfigModal({
                         disabled={actorProfilesBusy || busy === "actor-update"}
                         ariaLabel={t("actorProfile")}
                         items={[
-                          { value: "", label: actorProfilesBusy ? t("loadingProfiles") : t("selectActorProfile") },
+                          {
+                            value: "",
+                            label: actorProfilesBusy
+                              ? t("loadingProfiles")
+                              : t("selectActorProfile"),
+                          },
                           ...selectableActorProfiles.map((profile) => ({
                             value: actorProfileIdentityKey(profile),
                             label: `${profile.name || profile.id} · ${profileScopeLabel(profile, t)}`,
@@ -1322,7 +1532,9 @@ function EditActorConfigModal({
                         ]}
                         searchable
                       />
-                      {!actorProfilesBusy && actorProfiles.length > 0 && selectableActorProfiles.length === 0 ? (
+                      {!actorProfilesBusy &&
+                      actorProfiles.length > 0 &&
+                      selectableActorProfiles.length === 0 ? (
                         <div className="mt-1.5 text-[10px] text-[var(--color-text-muted)]">
                           ChatGPT Web Model is managed directly in Settings &gt; ChatGPT Web Model.
                         </div>
@@ -1330,25 +1542,49 @@ function EditActorConfigModal({
                     </div>
 
                     {selectedProfile ? (
-                      <Surface className="px-3 py-2 text-xs text-[var(--color-text-secondary)]" variant="subtle" radius="md" padding="none">
-                        <div className="font-medium">{selectedProfile.name || selectedProfile.id}</div>
+                      <Surface
+                        className="px-3 py-2 text-xs text-[var(--color-text-secondary)]"
+                        variant="subtle"
+                        radius="md"
+                        padding="none"
+                      >
+                        <div className="font-medium">
+                          {selectedProfile.name || selectedProfile.id}
+                        </div>
                         <div className="mt-1">{profileScopeLabel(selectedProfile, t)}</div>
                         <div className="mt-1 flex flex-wrap items-center gap-2">
-                          <span>{RUNTIME_INFO[String(selectedProfile.runtime) as SupportedRuntime]?.label || selectedProfile.runtime}</span>
+                          <span>
+                            {RUNTIME_INFO[String(selectedProfile.runtime) as SupportedRuntime]
+                              ?.label || selectedProfile.runtime}
+                          </span>
                           <span className="rounded-full border border-[var(--glass-border-subtle)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-muted)]">
-                            {selectedProfileRunner === "headless" ? t("headless") : t("pty", { defaultValue: "PTY" })}
+                            {selectedProfileRunner === "headless"
+                              ? t("headless")
+                              : t("pty", { defaultValue: "PTY" })}
                           </span>
                         </div>
-                        {commandPreview(selectedProfile.command) ? <div className="mt-1 font-mono break-all">{commandPreview(selectedProfile.command)}</div> : null}
+                        {commandPreview(selectedProfile.command) ? (
+                          <div className="mt-1 font-mono break-all">
+                            {commandPreview(selectedProfile.command)}
+                          </div>
+                        ) : null}
                       </Surface>
                     ) : null}
                   </>
                 ) : effectiveLinked ? (
-                  <Surface className="border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] px-3 py-3 text-[var(--color-text-primary)]" radius="md" padding="none">
+                  <Surface
+                    className="border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] px-3 py-3 text-[var(--color-text-primary)]"
+                    radius="md"
+                    padding="none"
+                  >
                     <div className="text-sm font-medium">
-                      {selectedProfileName ? t("managedByProfileName", { name: selectedProfileName }) : t("managedByProfile")}
+                      {selectedProfileName
+                        ? t("managedByProfileName", { name: selectedProfileName })
+                        : t("managedByProfile")}
                     </div>
-                    <div className="mt-1 text-xs text-[var(--color-text-secondary)]">{t("managedByProfileCustomHint")}</div>
+                    <div className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                      {t("managedByProfileCustomHint")}
+                    </div>
                     <Button
                       type="button"
                       variant="secondary"
@@ -1363,7 +1599,9 @@ function EditActorConfigModal({
                 ) : (
                   <div className="space-y-4">
                     <div>
-                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("runtime")}</label>
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                        {t("runtime")}
+                      </label>
                       <SelectCombobox
                         className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)]"
                         value={runtime}
@@ -1392,67 +1630,87 @@ function EditActorConfigModal({
                       />
                     </div>
 
-	                    {supportsStandardWebHeadlessRuntime(runtime) ? (
-	                      <div>
-	                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
-                           {t("runnerMode", { defaultValue: "Runner mode" })}
-                         </label>
-                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                           <Button
-                             type="button"
-                             variant="outline"
-                             className={modeButtonClass(runner === "pty")}
-                             onClick={() => onChangeRunner("pty")}
-                             disabled={webModelRunnerLockedToHeadless}
-                           >
-                             {t("pty", { defaultValue: "PTY" })}
-                           </Button>
-                           <Button
-                             type="button"
-                             variant="outline"
-                             className={modeButtonClass(runner === "headless")}
-                             onClick={() => onChangeRunner("headless")}
-                             disabled={customRunnerLockedToPty}
-                           >
-                             {t("headless")}
-                           </Button>
-                         </div>
-                         <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
-                           {webModelRunnerLockedToHeadless
-                             ? t("runnerModeWebModelNote", { defaultValue: "ChatGPT Web Model runs through browser delivery and a remote MCP connector, so it is fixed to Headless." })
-                             : customRunnerLockedToPty
-                             ? t("runnerModeHeadlessNote", { defaultValue: "Only some runtimes, such as codex and claude, support Headless mode. Other runtimes are fixed to PTY." })
-                             : t("runnerModeHint", { defaultValue: "PTY uses terminal interaction; Headless uses structured event flow." })}
-	                        </div>
-	                      </div>
-	                    ) : null}
+                    {supportsStandardWebHeadlessRuntime(runtime) ? (
+                      <div>
+                        <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                          {t("runnerMode", { defaultValue: "Runner mode" })}
+                        </label>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className={modeButtonClass(runner === "pty")}
+                            onClick={() => onChangeRunner("pty")}
+                            disabled={webModelRunnerLockedToHeadless}
+                          >
+                            {t("pty", { defaultValue: "PTY" })}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className={modeButtonClass(runner === "headless")}
+                            onClick={() => onChangeRunner("headless")}
+                            disabled={customRunnerLockedToPty}
+                          >
+                            {t("headless")}
+                          </Button>
+                        </div>
+                        <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                          {webModelRunnerLockedToHeadless
+                            ? t("runnerModeWebModelNote", {
+                                defaultValue:
+                                  "ChatGPT Web Model runs through browser delivery and a remote MCP connector, so it is fixed to Headless.",
+                              })
+                            : customRunnerLockedToPty
+                              ? t("runnerModeHeadlessNote", {
+                                  defaultValue:
+                                    "Only some runtimes, such as codex and claude, support Headless mode. Other runtimes are fixed to PTY.",
+                                })
+                              : t("runnerModeHint", {
+                                  defaultValue:
+                                    "PTY uses terminal interaction; Headless uses structured event flow.",
+                                })}
+                        </div>
+                      </div>
+                    ) : null}
 
-	                    {runtime === "web_model" ? (
-	                      <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/20 bg-sky-500/5 text-sky-700 dark:text-sky-300">
-	                        <div className="font-medium">
-	                          {t("webModelActorBoundConnectorTitle", { defaultValue: "Single ChatGPT Web Model actor" })}
-	                        </div>
-	                        <div className="mt-1">
-	                          {t("webModelActorBoundConnectorHint", {
-	                            defaultValue:
-	                              "Manage the ChatGPT MCP URL and target conversation in Settings > ChatGPT Web Model. CCCC supports one ChatGPT Web Model actor in this instance.",
-	                          })}
-	                        </div>
-	                      </div>
-	                    ) : null}
+                    {runtime === "web_model" ? (
+                      <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/20 bg-sky-500/5 text-sky-700 dark:text-sky-300">
+                        <div className="font-medium">
+                          {t("webModelActorBoundConnectorTitle", {
+                            defaultValue: "Single ChatGPT Web Model actor",
+                          })}
+                        </div>
+                        <div className="mt-1">
+                          {t("webModelActorBoundConnectorHint", {
+                            defaultValue:
+                              "Manage the ChatGPT MCP URL and target conversation in Settings > ChatGPT Web Model. CCCC supports one ChatGPT Web Model actor in this instance.",
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
 
-	                    <div>
-                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">{t("command")}</label>
+                    <div>
+                      <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
+                        {t("command")}
+                      </label>
                       <Input
                         className="font-mono"
                         value={command}
                         onChange={(e) => onChangeCommand(e.target.value)}
                         placeholder={defaultCommand || t("enterCommand")}
                       />
-                      {isRunning ? <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">{t("runtimeChangesNote")}</div> : null}
+                      {isRunning ? (
+                        <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                          {t("runtimeChangesNote")}
+                        </div>
+                      ) : null}
                       {defaultCommand.trim() ? (
                         <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
-                          {t("default")} <code className="px-1 rounded bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]">{defaultCommand}</code>
+                          {t("default")}{" "}
+                          <code className="px-1 rounded bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]">
+                            {defaultCommand}
+                          </code>
                         </div>
                       ) : null}
                     </div>
@@ -1460,188 +1718,120 @@ function EditActorConfigModal({
                 )}
               </div>
             </Surface>
-            </div>
-
-            <details className={`group ${sectionCardClass}`}>
-              <summary className={collapsibleSummaryClass}>
-                <div>
-                  <div className={sectionTitleClass}>{t("sectionAdvanced", "Advanced")}</div>
-                  <div className={sectionHintClass}>{t("sectionAdvancedHint", "Keep low-frequency configuration here so the main edit path stays short.")}</div>
-                </div>
-                <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-              </summary>
-
-              <div className="mt-4 space-y-4 border-t border-[var(--glass-border-subtle)] pt-4">
-                {showRuntimeSetup ? (
-                  <details className={nestedCardClass}>
-                    <summary className={collapsibleSummaryClass}>
-                      <div>
-                        <div className={collapsibleLabelClass}>{t("runtimeSetupSection", "Connection setup")}</div>
-                        <div className={sectionHintClass}>{t("runtimeSetupSectionHint", "Show runtime-specific MCP setup only when you need to wire a client manually.")}</div>
-                      </div>
-                      <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-                    </summary>
-                    <div className="mt-4 rounded-xl border px-3 py-2 text-[11px] border-amber-500/20 bg-amber-500/5 text-amber-700 dark:text-amber-400">
-                      <div className="font-medium">{t("manualMcpRequired")}</div>
-                      {runtime === "custom" ? (
-                        <div className="mt-1">
-                          {t("configureMcpStdio")} <code className="px-1 rounded bg-amber-500/15">cccc</code> {t("thatRuns")} <code className="px-1 rounded bg-amber-500/15">cccc mcp</code>.
-                        </div>
-                      ) : null}
-                      {runtime === "custom" ? (
-                        <pre className="mt-1.5 p-2 rounded overflow-x-auto whitespace-pre bg-amber-500/10 text-amber-800 dark:text-amber-100">
-                          <code>{BASIC_MCP_CONFIG_SNIPPET}</code>
-                        </pre>
-                      ) : null}
-                      <div className="mt-1 text-[10px] text-amber-700/80 dark:text-amber-400/80">{t("restartAfterConfig")}</div>
-                    </div>
-                  </details>
-                ) : null}
-
-                {editMode === "custom" ? (
-                  <details
-                    className={nestedCardClass}
-                    onToggle={(event) => {
-                      const open = (event.currentTarget as HTMLDetailsElement).open;
-                      if (!open || secretsPrimed) return;
-                      setSecretsPrimed(true);
-                      void refreshSecretKeys();
-                    }}
-                  >
-                    <summary className={collapsibleSummaryClass}>
-                      <div>
-                        <div className={collapsibleLabelClass}>{t("secretsSection", "Secrets & Environment")}</div>
-                        <div className={sectionHintClass}>{t("secretsSectionHint", "Only open this when you need to rotate keys or change private runtime environment.")}</div>
-                      </div>
-                      <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-                    </summary>
-                    <div className="mt-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <label className="block text-xs font-medium text-[var(--color-text-muted)]">{t("secretsWriteOnly")}</label>
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => void refreshSecretKeys()}
-                          disabled={secretsBusy}
-                          title={t("refreshConfiguredKeys")}
-                        >
-                          {t("refresh")}
-                        </Button>
-                      </div>
-                      <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
-                        {t("secretsStoredLocallyEdit").replace(/<1>|<\/1>/g, "")} {secretKeys.length ? (
-                          <>
-                            {t("configuredKeys")}
-                            <div className="mt-1.5 flex flex-wrap gap-1.5">
-                              {secretKeys.map((key) => {
-                                const masked = String(secretMasks[key] || "******");
-                                return (
-                                  <span
-                                    key={key}
-                                    className="inline-flex items-center rounded-md border px-2 py-0.5 font-mono text-[10px] border-[var(--glass-border-subtle)] text-[var(--color-text-secondary)] bg-[var(--glass-panel-bg)]"
-                                    title={`${t("maskedPreview")}: ${masked}`}
-                                  >
-                                    {key}
-                                  </span>
-                                );
-                              })}
-                            </div>
-                            <div className="mt-1">{t("hoverToPreviewMasked")}</div>
-                            {secretSource === "profile-preview" ? <div className="mt-1">{t("pendingConvertSecretsPreview")}</div> : null}
-                          </>
-                        ) : (
-                          <>{t("noKeysConfigured")}</>
-                        )}
-                      </div>
-                      <div className="text-[10px] mt-1 text-[var(--color-text-muted)]">{t("secretsAppliedNote").replace(/<1>|<\/1>/g, "")}</div>
-
-                      <label className="block text-[11px] font-medium mt-3 mb-1.5 text-[var(--color-text-secondary)]">{t("setUpdate")}</label>
-                      <Textarea
-                        className="min-h-[96px] font-mono"
-                        value={secretsSetText}
-                        onChange={(e) => setSecretsSetText(e.target.value)}
-                        placeholder={secretsPlaceholder.set}
-                      />
-
-                      <label className="block text-[11px] font-medium mt-3 mb-1.5 text-[var(--color-text-secondary)]">{t("unset")}</label>
-                      <Textarea
-                        className="min-h-[72px] font-mono"
-                        value={secretsUnsetText}
-                        onChange={(e) => setSecretsUnsetText(e.target.value)}
-                        placeholder={secretsPlaceholder.unset}
-                      />
-
-                      <label className="flex items-center gap-2 text-[11px] font-medium mt-3 text-[var(--color-text-secondary)]">
-                        <input
-                          type="checkbox"
-                          checked={secretsClearAll}
-                          onChange={(e) => setSecretsClearAll(e.target.checked)}
-                          disabled={secretsBusy || busy === "actor-update"}
-                        />
-                        {t("clearAllKeys")}
-                      </label>
-                    </div>
-                  </details>
-                ) : null}
-
-                <details
-                  className={nestedCardClass}
-                  onToggle={(event) => {
-                    const open = (event.currentTarget as HTMLDetailsElement).open;
-                    if (!open || capabilitiesPrimed) return;
-                    setCapabilitiesPrimed(true);
-                  }}
-                >
-                  <summary className={collapsibleSummaryClass}>
-                    <div>
-                      <div className={collapsibleLabelClass}>{t("capabilitiesSection", "Capabilities")}</div>
-                      <div className={sectionHintClass}>{t("capabilitiesSectionHint", "Only open this when you need to change autoloaded capabilities for the actor.")}</div>
-                    </div>
-                    <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-                  </summary>
-                  <div className="mt-4">
-                    <CapabilityPicker
-                      isDark={isDark}
-                      value={parseCapabilityIdInput(capabilityAutoloadText)}
-                      onChange={(next) => onChangeCapabilityAutoloadText(formatCapabilityIdInput(next))}
-                      disabled={busy === "actor-update"}
-                      active={capabilitiesPrimed}
-                      label={t("autoloadCapabilities")}
-                      hint={t("autoloadCapabilitiesHint")}
-                    />
-                  </div>
-                </details>
-
-                {editMode === "custom" && runtime === "web_model" ? (
-                  <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/20 bg-sky-500/5 text-sky-700 dark:text-sky-300">
-                    ChatGPT Web Model is managed in Settings &gt; ChatGPT Web Model instead of being saved as a Runtime Profile.
-                  </div>
-                ) : editMode === "custom" ? (
-                  <details className={nestedCardClass}>
-                    <summary className={collapsibleSummaryClass}>
-                      <div>
-                        <div className={collapsibleLabelClass}>{t("profileToolsSection", "Profile tools")}</div>
-                        <div className={sectionHintClass}>{t("profileToolsSectionHint", "Save the current custom runtime setup into the reusable actor profile library.")}</div>
-                      </div>
-                      <span aria-hidden="true" className={collapsibleChevronClass}>⌄</span>
-                    </summary>
-                    <div className="mt-4 flex flex-wrap gap-3">
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={() => void saveAsProfile()}
-                        disabled={busy === "actor-profile-save" || busy === "actor-update"}
-                      >
-                        {busy === "actor-profile-save" ? t("savingProfile") : t("addToActorProfiles")}
-                      </Button>
-                    </div>
-                  </details>
-                ) : null}
-              </div>
-            </details>
           </div>
+
+          <Surface className={sectionCardClass}>
+            <div className={sectionTitleClass}>{t("sectionAdvanced", "Advanced")}</div>
+            <div className={sectionHintClass}>
+              {t(
+                "sectionAdvancedHint",
+                "Keep low-frequency configuration here so the main edit path stays short.",
+              )}
+            </div>
+            <div className="mt-4">
+              <ActorConfigTabs
+                ariaLabel={t("sectionAdvanced", "Advanced")}
+                activeId={activeAdvancedTab}
+                onChange={selectAdvancedTab}
+                tabs={[
+                  ...(showRuntimeSetup
+                    ? [
+                        {
+                          id: "connection",
+                          label: t("runtimeSetupSection", "Connection setup"),
+                          panel: (
+                            <div className="rounded-xl border px-3 py-2 text-[11px] border-amber-500/20 bg-amber-500/5 text-amber-700 dark:text-amber-400">
+                              <div className="font-medium">{t("manualMcpRequired")}</div>
+                              <div className="mt-1">
+                                {t("configureMcpStdio")}{" "}
+                                <code className="px-1 rounded bg-amber-500/15">cccc</code>{" "}
+                                {t("thatRuns")}{" "}
+                                <code className="px-1 rounded bg-amber-500/15">cccc mcp</code>.
+                              </div>
+                              <pre className="mt-1.5 p-2 rounded overflow-x-auto whitespace-pre bg-amber-500/10 text-amber-800 dark:text-amber-100">
+                                <code>{BASIC_MCP_CONFIG_SNIPPET}</code>
+                              </pre>
+                              <div className="mt-1 text-[10px] text-amber-700/80 dark:text-amber-400/80">
+                                {t("restartAfterConfig")}
+                              </div>
+                            </div>
+                          ),
+                        },
+                      ]
+                    : []),
+                  ...(editMode === "custom"
+                    ? [
+                        {
+                          id: "environment",
+                          label: t("secretsSection", "Environment variables"),
+                          panel: (
+                            <ActorSecretManager
+                              keys={secretKeys}
+                              masks={secretMasks}
+                              changes={secretChanges}
+                              loading={secretsRefreshing}
+                              keysLoadFailed={secretKeysLoadFailed}
+                              disabled={secretsBusy || secretsRefreshing || busy === "actor-update"}
+                              onRefresh={() => void refreshSecretKeys()}
+                              onChangesChange={setSecretChanges}
+                            />
+                          ),
+                        },
+                      ]
+                    : []),
+                  {
+                    id: "capabilities",
+                    label: t("capabilitiesSection", "Capabilities"),
+                    panel: (
+                      <CapabilityPicker
+                        isDark={isDark}
+                        value={parseCapabilityIdInput(capabilityAutoloadText)}
+                        onChange={(next) =>
+                          onChangeCapabilityAutoloadText(formatCapabilityIdInput(next))
+                        }
+                        disabled={busy === "actor-update"}
+                        active={capabilitiesPrimed || activeAdvancedTab === "capabilities"}
+                        label={t("autoloadCapabilities")}
+                        hint={t("autoloadCapabilitiesHint")}
+                      />
+                    ),
+                  },
+                  ...(editMode === "custom"
+                    ? [
+                        {
+                          id: "profile",
+                          label: t("profileToolsSection", "Profile tools"),
+                          panel:
+                            runtime === "web_model" ? (
+                              <div className="rounded-xl border px-3 py-2 text-[11px] border-sky-500/20 bg-sky-500/5 text-sky-700 dark:text-sky-300">
+                                ChatGPT Web Model is managed in Settings &gt; ChatGPT Web Model
+                                instead of being saved as a Runtime Profile.
+                              </div>
+                            ) : (
+                              <div className="flex flex-wrap gap-3">
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  onClick={() => void saveAsProfile()}
+                                  disabled={
+                                    busy === "actor-profile-save" || busy === "actor-update"
+                                  }
+                                >
+                                  {busy === "actor-profile-save"
+                                    ? t("savingProfile")
+                                    : t("addToActorProfiles")}
+                                </Button>
+                              </div>
+                            ),
+                        },
+                      ]
+                    : []),
+                ]}
+              />
+            </div>
+          </Surface>
         </div>
-      </ModalFrame>
+      </div>
+    </ModalFrame>
   );
 }

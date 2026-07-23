@@ -71,6 +71,22 @@ Click on an agent's tab to see its terminal output.
 1. Type in the message input at the bottom
 2. Press `Ctrl+Enter` / `Cmd+Enter`, or click Send
 
+With an empty message input, press `Up` to recall your most recent message in the current Group.
+Continue with `Up` / `Down` to browse the already loaded message history. Editing or repositioning
+the cursor leaves history mode. Recall restores message text only; recipients, reply context,
+attachments, and delivery options remain those currently shown in the composer.
+
+### Message diagrams
+
+In Chat and Inbox messages, a fenced code block labeled `mermaid` is rendered as a diagram after
+the message is complete. Use **View source** to inspect or copy the original definition. Invalid or
+oversized diagrams fall back to the source automatically; other Markdown surfaces continue to show
+Mermaid fences as ordinary code blocks. Flowchart image shapes (`@{ img: ... }`) also remain as
+source because Mermaid waits on browser image decoding before completing the diagram and can
+otherwise block later message diagrams. Click a rendered diagram, or use **Expand**, to open a
+near-fullscreen viewer. The viewer reuses the completed SVG without rendering the diagram again;
+small diagrams expand to the available canvas while large diagrams remain scrollable.
+
 ### @Mentions
 
 Type `@` to trigger autocomplete:

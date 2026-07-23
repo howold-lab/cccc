@@ -6,6 +6,53 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ## [Unreleased]
 
+## [0.4.32] — 2026-07-18
+
+### Added
+- **Peer Insight adds a structured second channel to agent-to-agent messaging.** Built-in MCP peer sends now carry operational `text` plus a provisional higher-order `insight`, with end-to-end projection through the ledger, Web UI, Group Bridge, IM, search, replies, files, and tracked delegation.
+- **The Insight Loop places reflective checkpoints at collaboration boundaries.** Missing peer Insight is rejected before task, blob, wake, or ledger side effects; successful message operations return a short perspective reset; and bootstrap adds a conditional takeover cue when real unfinished work is recoverable.
+- **The Web composer can recall loaded message history with Up and Down.** Recall restores text only while preserving the composer's current recipients, reply target, attachments, priority, and delivery mode.
+- **Linux projected-browser readiness is visible in `cccc doctor`.** The report distinguishes the required system browser and Xvfb isolation from the optional x11vnc viewer.
+
+### Changed
+- **The default collaboration surface is leaner.** Ordinary actors receive a compact 13-tool protocol core, optional tools stay available through capability use, and general reasoning or writing doctrine has been removed from the base system prompt and help reference.
+- **Heuristic nudges are off by default for newly created groups.** Generic nudge, unread, keepalive, and periodic help reminders no longer add background pressure unless configured; explicit reply-required and attention acknowledgement reminders remain available for reliability. Existing group settings are not migrated.
+- **ChatGPT Web delivery can safely queue prompts while ChatGPT is already responding.** CCCC uses only a verified composer-local Send prompt control, defers without advancing the cursor when no safe control exists, and uses bounded single-flight retries instead of reporting a premature delivery failure.
+- **Linux projected browsers now require CCCC-owned Xvfb isolation.** CCCC no longer falls back to the host desktop display; x11vnc remains optional because the embedded viewer can use CDP screencasting.
+- **Grok Build PTY actors preserve provider sessions across restarts.** CCCC assigns an actor-specific session ID, resumes it with Grok's native flags, preserves user-owned session arguments, and exposes deliberate new-session restart behavior.
+- **Release validation now uses durable quality boundaries.** Web checks run through Vite+ with Oxfmt/Oxlint, Python tests use deterministic PR shards plus a serial nightly reference run, Windows retains focused PTY smoke coverage, and package-only Web artifact contracts run after the bundle is built.
+
+### Fixed
+- **Ambiguous ChatGPT submit clicks no longer create automatic duplicate deliveries.** Confirmed pre-submit deferrals remain retryable, while dispatch-unknown clicks follow an explicit at-most-once policy.
+- **Projected browser sessions no longer leak physical Chrome windows onto Linux desktops** when isolation dependencies are missing or persisted browser metadata is not trustworthy.
+- **Recipient detail popovers remain usable when the pointer moves from the recipient chip into the popover**, and message history Escape handling no longer cancels an unrelated reply draft.
+- **Terminal option changes no longer recreate the live xterm session**, preserving its WebSocket-bound input and resize behavior.
+- **Deleted groups no longer leave stale Group Space memory bindings that interfere with synchronization.**
+
+### Tests
+- Expanded backend and frontend coverage for Peer Insight validation and projection, bootstrap takeover gating, ChatGPT browser delivery ambiguity and retry boundaries, Linux projected-browser isolation, Grok session reuse and rotation, composer history navigation, recipient popovers, quality workflow contracts, packaging, and Windows PTY smoke behavior.
+
+## [0.4.31] — 2026-07-12
+
+### Added
+- **Actor environment variables now have a dedicated management surface** with masked configured keys, staged add/update/remove operations, batch paste, undo, and explicit clear-all handling.
+- **Exited PTY sessions retain bounded terminal snapshots**, allowing terminal tail and history diagnostics to remain available after an actor stops or exits.
+
+### Changed
+- **PTY lifecycle operations are coordinated across actor, group, and global start/stop paths**, reducing duplicate sessions and start/stop races while preserving concurrency between unrelated groups.
+- **Codex PTY state follows the terminal command when profiles, provider overrides, OSS mode, or local-provider flags make app-server state incomplete**. Grok Build and OpenCode default launches now include their autonomous execution flags.
+- **Runtime and Group Bridge documentation is easier to navigate**, with dedicated guides, a generated release hub, a standards index, and refreshed CCCC branding assets.
+
+### Fixed
+- **Derived ledger indexes recover from corruption at every indexed read boundary**, rebuilding from the append-only ledger after explicit `SQLITE_CORRUPT` or `SQLITE_NOTADB` failures without masking lock, permission, or unrelated database errors.
+- **Long Web chat histories preserve the user's visual anchor more reliably** while older messages are prepended and virtualized rows are remeasured.
+- **Actor configuration keeps unfinished environment-variable drafts when switching advanced tabs**, refreshes configured keys across actor/edit sessions, and disables destructive clearing when key metadata cannot be loaded.
+- **Terminal output is drained and preserved more reliably during fast exits and shutdown**, including Windows ConPTY sessions, with clearer exited-session diagnostics.
+- **Agent mention suggestions prioritize concrete actors before broad recipient tokens**, making direct recipients easier to select.
+
+### Tests
+- Expanded backend and frontend coverage for PTY lifecycle concurrency, exited-session snapshots, Windows output draining, runtime-state inference, ledger-index corruption recovery, actor environment-variable drafts, Web history prepend compensation, and mention ordering.
+
 ## [0.4.30] — 2026-07-03
 
 ### Added

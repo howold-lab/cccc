@@ -1,6 +1,8 @@
 # Guide
 
-Use this section based on your role and goal.
+CCCC coordinates coding agents as a durable group chat: messages are routed, read state is visible, operations are controlled through one daemon, and the same group can be reached from Web UI, CLI, MCP, and IM bridges.
+
+Use this section based on what you are trying to do next.
 
 ## If You Are New to CCCC
 
@@ -18,7 +20,10 @@ Use this section based on your role and goal.
 
 - [Operations Runbook](/guide/operations) for triage, recovery, and upgrade flow
 - [Web UI Guide](/guide/web-ui) for control-plane behavior
+- [Supported Runtimes](/guide/runtimes) for Claude Code, Codex, ChatGPT Web, Grok, Kimi, and other actor runtimes
+- [Group Bridge](/guide/group-bridge) for trusted cross-group messaging and remote access
 - [Capability Allowlist Baseline](/guide/capability-allowlist) for MCP/skill curation levels
+- [Contributor Quality Gates](/guide/quality-gates) for local checks, CI boundaries, and stable Python shards
 - [ChatGPT Web Model Runtime](/guide/web-model-runtime) for MCP-capable ChatGPT GPT-5.x setup
 - [IM Bridge](/guide/im-bridge/) for mobile/remote operations
 
@@ -33,3 +38,4 @@ Use this section based on your role and goal.
 - **Scope**: a directory context attached to a group
 - **Ledger**: append-only collaboration event stream
 - **Daemon**: single writer and source of operational truth
+- **Group Bridge**: an explicit trust edge between local-first CCCC groups

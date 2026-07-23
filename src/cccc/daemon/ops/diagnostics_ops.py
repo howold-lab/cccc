@@ -263,8 +263,6 @@ def handle_terminal_tail(
     runner_kind = str(actor.get("runner") or "pty").strip()
     if runner_kind != "pty":
         return _error("not_pty_actor", "terminal transcript is only available for PTY actors", details={"runner": runner_kind})
-    if not pty_runner.SUPERVISOR.actor_running(group_id, actor_id):
-        return _error("actor_not_running", "actor is not running (no live transcript available)")
     if max_chars <= 0:
         max_chars = 8000
     if max_chars > 200_000:
@@ -272,7 +270,11 @@ def handle_terminal_tail(
     try:
         raw = b""
         try:
-            raw = pty_runner.SUPERVISOR.tail_output(group_id=group_id, actor_id=actor_id, max_bytes=pty_backlog_bytes())
+            raw = pty_runner.SUPERVISOR.tail_output(
+                group_id=group_id,
+                actor_id=actor_id,
+                max_bytes=pty_backlog_bytes(),
+            )
         except Exception:
             raw = b""
         raw_text = raw.decode("utf-8", errors="replace")
@@ -351,8 +353,6 @@ def handle_terminal_history(
     runner_kind = str(actor.get("runner") or "pty").strip()
     if runner_kind != "pty":
         return _error("not_pty_actor", "terminal transcript is only available for PTY actors", details={"runner": runner_kind})
-    if not pty_runner.SUPERVISOR.actor_running(group_id, actor_id):
-        return _error("actor_not_running", "actor is not running (no live transcript available)")
     try:
         page = pty_runner.SUPERVISOR.history_page(
             group_id=group_id,

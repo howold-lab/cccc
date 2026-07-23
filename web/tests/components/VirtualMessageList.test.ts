@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   getAutoFollowTrigger,
   getStableMessageKey,
+  shouldApplyExternalForceStickToBottom,
   shouldAutoScrollToBottom,
   shouldDetachChatFollowOnScroll,
   shouldNotifyScrollChange,
@@ -20,11 +21,7 @@ describe("getStableMessageKey", () => {
       kind: "chat.message",
       by: "coder",
       _streaming: true,
-      data: {
-        text: "",
-        to: ["user"],
-        stream_id: "local:msg-1:coder",
-      },
+      data: { text: "", to: ["user"], stream_id: "local:msg-1:coder" },
     };
 
     const promoted: LedgerEvent = {
@@ -50,10 +47,7 @@ describe("getStableMessageKey", () => {
     const completed: LedgerEvent = {
       ...liveStream,
       _streaming: false,
-      data: {
-        ...liveStream.data,
-        text: "最终回复",
-      },
+      data: { ...liveStream.data, text: "最终回复" },
     };
 
     expect(getStableMessageKey(base, 0)).toBe("message-event:local:msg-1:coder");
@@ -308,14 +302,17 @@ describe("shouldAutoScrollToBottom", () => {
   });
 });
 
+describe("shouldApplyExternalForceStickToBottom", () => {
+  it("accepts parent force-stick tokens only while the list is already following", () => {
+    expect(shouldApplyExternalForceStickToBottom({ followMode: "follow" })).toBe(true);
+    expect(shouldApplyExternalForceStickToBottom({ followMode: "detached" })).toBe(false);
+  });
+});
+
 describe("shouldPromoteScrollToFollow", () => {
   it("keeps detached history detached when the scroll position is unchanged", () => {
     expect(
-      shouldPromoteScrollToFollow({
-        followMode: "detached",
-        previousTop: 240,
-        currentTop: 240,
-      }),
+      shouldPromoteScrollToFollow({ followMode: "detached", previousTop: 240, currentTop: 240 }),
     ).toBe(false);
   });
 });

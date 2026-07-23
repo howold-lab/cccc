@@ -31,8 +31,7 @@ One `pip install`. Zero infrastructure, production-grade power.
 
 <div align="center">
 
-<video src="https://github.com/user-attachments/assets/460b6719-428b-4c1c-8879-0ebf8b8cee4f" controls="controls" muted="muted" autoplay="autoplay" loop="loop" style="max-width: 100%;">
-</video>
+<img src="screenshots/overview.webp" alt="CCCC Web UI overview" width="100%">
 
 </div>
 
@@ -217,7 +216,7 @@ CCCC orchestrates agents across 16 first-class runtimes, with `custom` available
 | OpenCode | Auto MCP setup via runtime config | `opencode` |
 | Custom | Manual | Any command |
 
-These are stable runtime entrypoints or surfaces. CCCC applies runtime-specific launch defaults automatically; actor/profile commands can be reviewed and customized in settings.
+These are stable runtime entrypoints or surfaces. CCCC applies runtime-specific launch defaults automatically; actor/profile commands can be reviewed and customized in settings. The [Supported Runtimes guide](https://chesterra.github.io/cccc/guide/runtimes) lists the default autonomy flags, including approval-bypass modes such as `agy --dangerously-skip-permissions`, `grok --always-approve`, and `opencode --auto`.
 
 ```bash
 cccc setup --runtime claude       # auto-configures MCP for this runtime
@@ -229,6 +228,8 @@ cccc doctor                       # verify environment and runtime availability
 ```
 
 Actors can run as **PTY** (embedded terminal) or **headless** (structured I/O without a terminal). Claude Code and Codex CLI support both modes; headless gives the daemon tighter delivery and streaming control.
+
+For setup commands, runner-mode guidance, and troubleshooting for every supported runtime, see the [Supported Runtimes guide](https://chesterra.github.io/cccc/guide/runtimes).
 
 ### ChatGPT Web / GPT-5.x as a local development actor
 
@@ -249,6 +250,8 @@ Access is intentionally layered:
 | **Full** | Let a highly trusted remote group edit files and run commands through the same local-access surface used by native actors |
 
 This makes CCCC useful for multi-machine work, lead/worker coordination across several environments, or trusted team collaboration where one group needs to ask another group for status, evidence, or implementation help. It is not a public guest-access feature: grant read/full access only to remote groups you trust with the target workspace.
+
+Start from **Settings > Group Bridge** in the Web UI: one side generates a one-time pairing invitation, the other side submits it, and the issuer approves the request. After approval, remote groups appear as explicit recipients, and agents can discover available access with `cccc_remote_access(action="list")`. For setup steps, message flow, remote MCP tools, and troubleshooting, see the [Group Bridge guide](https://chesterra.github.io/cccc/guide/group-bridge).
 
 ## Messaging & Coordination
 
@@ -382,19 +385,19 @@ cccc im start|stop|status
 
 ## MCP Tools
 
-Agents interact with CCCC through a compact action-oriented MCP surface. Core tools are always present, and optional capability packs add more surfaces only when enabled.
+Ordinary actors always see a 13-tool collaboration core. Other built-in tools remain directly callable through `cccc_capability_use`, without exposing their full packs in every session. Web Model connectors and specialized assistants keep runtime-specific fixed surfaces where refresh or transport constraints require them.
 
 | Surface | Examples |
 |---------|----------|
-| **Session & guidance** | `cccc_bootstrap`, `cccc_help`, `cccc_project_info` |
-| **Messaging & files** | `cccc_inbox_list`, `cccc_inbox_mark_read`, `cccc_message_send`, `cccc_message_reply`, `cccc_file` |
-| **Group & actor control** | `cccc_group`, `cccc_actor` |
-| **Coordination & state** | `cccc_context_get`, `cccc_coordination`, `cccc_task`, `cccc_agent_state`, `cccc_context_sync` |
+| **Always-visible protocol core** | `cccc_bootstrap`, `cccc_help`, capability search/use, inbox, messaging, files, `cccc_context_get`, `cccc_coordination`, `cccc_task`, `cccc_agent_state` |
+| **Project context & memory (on demand)** | `cccc_project_info`, `cccc_tracked_send`, `cccc_memory`, `cccc_context_sync` |
+| **Group & actor control (on demand)** | `cccc_group`, `cccc_actor`, `cccc_runtime_list` |
+| **Workspace utilities (on demand)** | `cccc_repo`, `cccc_presentation`, `cccc_terminal`, `cccc_debug` |
 | **Remote group access** | `cccc_remote_access`, `cccc_remote_context`, `cccc_remote_repo`, `cccc_remote_git`, `cccc_remote_apply_patch`, `cccc_remote_exec_command` |
-| **Automation & memory** | `cccc_automation`, `cccc_memory`, `cccc_memory_admin` |
-| **Capability-managed extras** | `cccc_capability_*`, `cccc_space`, `cccc_terminal`, `cccc_debug`, `cccc_im_bind` |
+| **Other capability-backed tools** | `cccc_automation`, `cccc_space`, capability administration, `cccc_im_bind` |
 
-Agents with MCP access can self-organize: read inbox state, reply visibly, coordinate around tasks, refresh agent state, and enable extra capabilities when the current job actually needs them.
+The reduced core preserves the collaboration protocol while leaving workflow, reasoning style, and optional machinery to the agent and current task.
+`cccc_help` remains the on-demand reference for CCCC-specific state, recovery, delegation, and capability routes; it does not prescribe a general reasoning or writing method.
 
 ## Where CCCC Fits
 
