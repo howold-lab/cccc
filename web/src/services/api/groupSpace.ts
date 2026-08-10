@@ -250,8 +250,8 @@ export async function actionGroupSpaceArtifact(args: {
         .trim()
         .toLowerCase(),
       options: args.options || {},
-      wait: args.wait ?? true,
-      save_to_space: args.saveToSpace ?? true,
+      wait: args.wait ?? false,
+      save_to_space: args.saveToSpace ?? false,
       output_path: String(args.outputPath || ""),
       output_format: String(args.outputFormat || ""),
       artifact_id: String(args.artifactId || ""),
@@ -371,7 +371,7 @@ export async function checkGroupSpaceProviderHealth(provider: string = "notebook
 
 export async function controlGroupSpaceProviderAuth(args: {
   provider?: string;
-  action: "status" | "start" | "cancel" | "disconnect";
+  action: "status" | "start" | "complete" | "cancel" | "disconnect";
   timeoutSeconds?: number;
   forceReauth?: boolean;
   projected?: boolean;

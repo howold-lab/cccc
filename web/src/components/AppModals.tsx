@@ -10,6 +10,7 @@ import {
   type EditActorSavePayload,
   type SaveActorProfileResult,
 } from "./modals/ActorConfigModal";
+import { resolveNewActorId } from "./modals/actorCreateModel";
 import { GroupEditModal } from "./modals/GroupEditModal";
 import { InboxModal } from "./modals/InboxModal";
 import { PresentationPinModal } from "./presentation/PresentationPinModal";
@@ -84,13 +85,6 @@ interface AppModalsProps {
   onSetGroupState: (state: "active" | "idle" | "paused") => Promise<void>;
   fetchContext: ContextModalFetch;
   canManageGroups: boolean;
-}
-
-function getErrorDetailGroupId(err: unknown): string {
-  if (!err || typeof err !== "object") return "";
-  const details = (err as { details?: unknown }).details;
-  if (!details || typeof details !== "object") return "";
-  return String((details as { group_id?: unknown }).group_id || "").trim();
 }
 
 function sortPresentationSlotIds(slotIds: string[]): string[] {
@@ -1053,29 +1047,15 @@ export function AppModals({
     const dirName = path.split("/").filter(Boolean).pop() || "working-group";
     const title = createGroupName.trim() || dirName;
     setBusy("create");
+    setDirBrowseError("");
     try {
-      const resp = await api.createGroup(title);
+      const resp = await api.createGroupWithScope(title, path);
       if (!resp.ok) {
-        if (resp.error?.code === "scope_already_attached") {
-          const existing = getErrorDetailGroupId(resp.error);
-          if (existing) {
-            showError(t("scopeAlreadyAttached"));
-            closeModal("createGroup");
-            resetCreateGroupForm();
-            await refreshGroups();
-            setSelectedGroupId(existing);
-            return;
-          }
-        }
+        setDirBrowseError(`${resp.error.code}: ${resp.error.message}`);
         showError(`${resp.error.code}: ${resp.error.message}`);
         return;
       }
       const groupId = resp.result.group_id;
-      const attachResp = await api.attachScope(groupId, path);
-      if (!attachResp.ok) {
-        showError(t("createdButFailedAttach", { message: attachResp.error.message }));
-      }
-
       resetCreateGroupForm();
       closeModal("createGroup");
       await refreshGroups();
@@ -1087,7 +1067,7 @@ export function AppModals({
 
   const handleAddActor = async (avatarFile?: File | null): Promise<boolean> => {
     if (!selectedGroupId) return false;
-    const actorId = newActorId.trim();
+    const actorId = resolveNewActorId(newActorId, suggestedActorId);
     const secretsText = String(newActorSecretsSetText || "");
     const actorNotes = String(newActorNotes || "").trim();
     const selectedProfile =

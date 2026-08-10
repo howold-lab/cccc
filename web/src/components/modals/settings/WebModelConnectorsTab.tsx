@@ -12,6 +12,11 @@ import {
   targetDraftMatchesSaved,
 } from "../../../utils/webModelTargetDraft";
 import type { TargetDraftMode } from "../../../utils/webModelTargetDraft";
+import {
+  matchesWebModelActorSelection,
+  resolveWebModelActorSelection,
+} from "../../../utils/webModelSelection";
+import { webModelConnectorMcpUrl } from "../../../utils/webModelConnector";
 import { ProjectedBrowserSurfacePanel } from "../../browser/ProjectedBrowserSurfacePanel";
 import {
   dangerButtonClass,
@@ -60,29 +65,6 @@ function formatTime(value?: string): string {
   } catch {
     return String(value || "");
   }
-}
-
-function connectorUrlWithToken(connectorUrl: string, secret: string): string {
-  const url = String(connectorUrl || "").trim();
-  const token = String(secret || "").trim();
-  if (!url || !token) return "";
-  try {
-    const parsed = new URL(url);
-    parsed.searchParams.set("token", token);
-    return parsed.toString();
-  } catch {
-    const sep = url.includes("?") ? "&" : "?";
-    return `${url}${sep}token=${encodeURIComponent(token)}`;
-  }
-}
-
-function connectorMcpUrl(connector?: api.WebModelConnector | null, secret?: string): string {
-  const stored = String(connector?.connector_url_with_token || "").trim();
-  if (stored) return stored;
-  return connectorUrlWithToken(
-    String(connector?.connector_url || "").trim(),
-    String(secret || "").trim(),
-  );
 }
 
 function connectorActivityLabel(connector: api.WebModelConnector, wm: Translate): string {
@@ -367,7 +349,7 @@ export default function WebModelConnectorsTab({
     : "";
   const selectedActorRunning = Boolean(selectedActor?.running);
   const queuedCount = webModelQueuedCount(selectedActor);
-  const selectedMcpUrl = connectorMcpUrl(selectedConnector || null);
+  const selectedMcpUrl = webModelConnectorMcpUrl(selectedConnector || null);
   const selectedConnectorUrl = String(selectedConnector?.connector_url || "").trim();
   const selectedMcpUrlForValidation = selectedMcpUrl || selectedConnectorUrl;
   const mcpUrlLocalWarning =
@@ -485,18 +467,27 @@ export default function WebModelConnectorsTab({
 
   const loadBrowserSession = useCallback(
     async (gid: string = groupId, aid: string = actorId) => {
-      if ((gid && !aid) || (!gid && aid)) {
+      const selection = resolveWebModelActorSelection(gid, aid);
+      if (!selection) {
         setBrowserSession(null);
         return;
       }
-      const resp = await api.fetchWebModelBrowserSession(gid, aid, { inspect: false });
+      const resp = await api.fetchWebModelBrowserSession(selection.groupId, selection.actorId, {
+        inspect: false,
+      });
+      if (
+        !matchesWebModelActorSelection(
+          currentSelectionRef.current,
+          selection.groupId,
+          selection.actorId,
+        )
+      )
+        return;
       if (resp.ok) {
         const nextSession = resp.result?.browser_session || null;
-        const key = browserSessionKey(gid, aid);
+        const key = browserSessionKey(selection.groupId, selection.actorId);
         setBrowserSessionsByActor((current) => ({ ...current, [key]: nextSession || {} }));
-        const currentSelection = currentSelectionRef.current;
-        if (gid === currentSelection.groupId && aid === currentSelection.actorId)
-          setBrowserSession(nextSession);
+        setBrowserSession(nextSession);
       } else {
         setError(resp.error?.message || wm("errors.loadBrowserSessionFailed"));
       }
@@ -531,12 +522,14 @@ export default function WebModelConnectorsTab({
 
   const loadActorsForGroup = useCallback(
     async (gid: string) => {
-      if (!gid) {
+      const normalizedGroupId = String(gid || "").trim();
+      if (!normalizedGroupId) {
         setActors([]);
         setActorId("");
         return;
       }
-      const resp = await api.fetchActors(gid, true, { noCache: true });
+      const resp = await api.fetchActors(normalizedGroupId, true, { noCache: true });
+      if (String(currentSelectionRef.current.groupId || "").trim() !== normalizedGroupId) return;
       if (resp.ok) {
         const nextActors = resp.result?.actors || [];
         setActors(nextActors);
@@ -563,6 +556,7 @@ export default function WebModelConnectorsTab({
     const gid = groupId;
     const aid = actorId;
     const resp = await api.fetchWebModelBrowserSurfaceSession(gid, aid, { inspect: true });
+    if (!matchesWebModelActorSelection(currentSelectionRef.current, gid, aid)) return resp;
     if (resp.ok) {
       const nextSession = resp.result.browser_session || null;
       const key = browserSessionKey(gid, aid);
@@ -587,6 +581,7 @@ export default function WebModelConnectorsTab({
         height: size.height,
         inspect: true,
       });
+      if (!matchesWebModelActorSelection(currentSelectionRef.current, gid, aid)) return resp;
       if (resp.ok) {
         const nextSession = resp.result.browser_session || null;
         const key = browserSessionKey(gid, aid);
@@ -696,10 +691,6 @@ export default function WebModelConnectorsTab({
     if (!isActive) {
       setBrowserSession(null);
       setShowBrowserSurface(false);
-      return;
-    }
-    if (!groupId && !actorId) {
-      void loadBrowserSession("", "");
       return;
     }
     if (!groupId || !actorId) {
@@ -1200,6 +1191,7 @@ export default function WebModelConnectorsTab({
                       key={`chatgpt-actor-surface:${groupId}:${actorId}:${browserSurfaceRestartNonce}`}
                       isDark={isDark}
                       refreshNonce={browserSurfaceRefreshNonce}
+                      defaultViewerMode="browser"
                       viewportClassName="h-[68vh] min-h-[460px] max-h-[780px]"
                       loadSession={loadBrowserSurfaceSession}
                       startSession={startBrowserSurfaceSession}

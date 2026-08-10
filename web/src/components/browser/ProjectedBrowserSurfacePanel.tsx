@@ -12,6 +12,14 @@ import type { ApiResponse } from "../../services/api";
 import type { PresentationBrowserSurfaceState } from "../../types";
 import { classNames } from "../../utils/classNames";
 import { CollapseIcon, ExpandIcon } from "../Icons";
+import { mapContainedImagePoint } from "./projectedBrowserCoordinates";
+import { resolveBrowserObserverDisconnect } from "./projectedBrowserConnection";
+import {
+  projectedBrowserEffectiveViewerMode,
+  projectedBrowserSocketViewerMode,
+  shouldReuseProjectedBrowserSession,
+  type ProjectedBrowserViewerMode,
+} from "./projectedBrowserViewerMode";
 
 type RfbInstance = {
   viewOnly: boolean;
@@ -41,6 +49,9 @@ export type ProjectedBrowserFrame = {
 type ProjectedBrowserSurfacePanelProps = {
   isDark: boolean;
   refreshNonce: number;
+  reuseActiveSession?: boolean;
+  sessionIdentity?: string;
+  defaultViewerMode?: ProjectedBrowserViewerMode;
   chromeMode?: "standalone" | "embedded";
   viewportClassName?: string;
   onFrameUpdate?: (frame: ProjectedBrowserFrame | null) => void;
@@ -59,16 +70,20 @@ type ProjectedBrowserSurfacePanelProps = {
     closed: string;
     reconnecting: string;
     reconnect: string;
+    refreshPending: string;
+    refreshing: string;
+    refreshed: string;
+    refreshFailed: string;
     back: string;
     frameAlt: string;
     fullScreen: string;
     exitFullScreen: string;
     viewerLabel: string;
-    viewerVnc: string;
-    viewerScreencast: string;
-    viewerFallback: string;
-    viewerTooltipVnc: string;
-    viewerTooltipScreencast: string;
+    viewerPage: string;
+    viewerBrowser: string;
+    viewerPageTooltip: string;
+    viewerBrowserTooltip: string;
+    viewerBrowserUnavailable: string;
     viewerFallbackReason: string;
     viewerReasonX11vncNotFound: string;
     viewerReasonWaylandEnv: string;
@@ -94,6 +109,7 @@ type BrowserEventPayload =
       url?: string | null;
       mime?: string | null;
     }
+  | { t: "command_result"; id?: string | null; ok?: boolean; message?: string | null }
   | { t: "error"; code?: string | null; message?: string | null };
 
 const SPECIAL_KEY_MAP: Record<string, string> = {
@@ -180,6 +196,9 @@ function ProjectedBrowserExpandIcon({ expanded }: { expanded: boolean }) {
 export function ProjectedBrowserSurfacePanel({
   isDark,
   refreshNonce,
+  reuseActiveSession = true,
+  sessionIdentity = "",
+  defaultViewerMode = "page",
   chromeMode = "standalone",
   viewportClassName,
   onFrameUpdate,
@@ -196,6 +215,7 @@ export function ProjectedBrowserSurfacePanel({
   const rfbRef = useRef<RfbInstance | null>(null);
   const frameRef = useRef<ProjectedBrowserFrame | null>(null);
   const renderedFrameRef = useRef<ProjectedBrowserFrame | null>(null);
+  const frameRenderTokenRef = useRef(0);
   const lastFrameCallbackAtRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
   const loadSessionRef = useRef(loadSession);
@@ -204,7 +224,10 @@ export function ProjectedBrowserSurfacePanel({
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const runIdRef = useRef(0);
+  const activeLifecycleKeyRef = useRef("");
   const lastRefreshNonceRef = useRef(refreshNonce);
+  const pendingRefreshIdRef = useRef("");
+  const refreshFeedbackTimerRef = useRef<number | null>(null);
 
   const texts = {
     starting:
@@ -225,6 +248,16 @@ export function ProjectedBrowserSurfacePanel({
       t("presentationBrowserReconnecting", { defaultValue: "Reconnecting interactive view..." }),
     reconnect:
       labels?.reconnect || t("presentationBrowserReconnect", { defaultValue: "Reconnect" }),
+    refreshPending:
+      labels?.refreshPending ||
+      t("presentationBrowserRefreshPending", { defaultValue: "Refresh queued" }),
+    refreshing:
+      labels?.refreshing || t("presentationBrowserRefreshing", { defaultValue: "Refreshing..." }),
+    refreshed:
+      labels?.refreshed || t("presentationBrowserRefreshed", { defaultValue: "Refreshed" }),
+    refreshFailed:
+      labels?.refreshFailed ||
+      t("presentationBrowserRefreshFailed", { defaultValue: "Refresh failed" }),
     back: labels?.back || t("presentationBrowserBack", { defaultValue: "Back" }),
     frameAlt:
       labels?.frameAlt ||
@@ -236,24 +269,25 @@ export function ProjectedBrowserSurfacePanel({
       t("presentationExitFullScreenAction", { defaultValue: "Exit full screen" }),
     viewerLabel:
       labels?.viewerLabel || t("presentationBrowserViewerLabel", { defaultValue: "Viewer" }),
-    viewerVnc: labels?.viewerVnc || t("presentationBrowserViewerVnc", { defaultValue: "VNC" }),
-    viewerScreencast:
-      labels?.viewerScreencast ||
-      t("presentationBrowserViewerScreencast", { defaultValue: "CDP screencast" }),
-    viewerFallback:
-      labels?.viewerFallback ||
-      t("presentationBrowserViewerFallback", { defaultValue: "CDP fallback" }),
-    viewerTooltipVnc:
-      labels?.viewerTooltipVnc ||
-      t("presentationBrowserViewerTooltipVnc", {
+    viewerPage: labels?.viewerPage || t("presentationBrowserViewerPage", { defaultValue: "Page" }),
+    viewerBrowser:
+      labels?.viewerBrowser || t("presentationBrowserViewerBrowser", { defaultValue: "Browser" }),
+    viewerPageTooltip:
+      labels?.viewerPageTooltip ||
+      t("presentationBrowserViewerPageTooltip", {
         defaultValue:
-          "Interactive view is using the VNC stream. Browser automation still uses the daemon-controlled browser session.",
+          "Show the website content directly. The site still runs in the same daemon-controlled browser.",
       }),
-    viewerTooltipScreencast:
-      labels?.viewerTooltipScreencast ||
-      t("presentationBrowserViewerTooltipScreencast", {
+    viewerBrowserTooltip:
+      labels?.viewerBrowserTooltip ||
+      t("presentationBrowserViewerBrowserTooltip", {
         defaultValue:
-          "Interactive view is using the CDP screencast fallback. Browser automation still uses the daemon-controlled browser session.",
+          "Show the complete browser window for browser UI, sign-in prompts, and native interaction.",
+      }),
+    viewerBrowserUnavailable:
+      labels?.viewerBrowserUnavailable ||
+      t("presentationBrowserViewerBrowserUnavailable", {
+        defaultValue: "Complete browser view is unavailable; page view remains active.",
       }),
     viewerFallbackReason:
       labels?.viewerFallbackReason ||
@@ -301,8 +335,12 @@ export function ProjectedBrowserSurfacePanel({
   const [renderedFrame, setRenderedFrame] = useState<ProjectedBrowserFrame | null>(null);
   const [panelError, setPanelError] = useState("");
   const [isExpanded, setIsExpanded] = useState(false);
+  const [viewerMode, setViewerMode] = useState<ProjectedBrowserViewerMode>(defaultViewerMode);
   const [vncConnected, setVncConnected] = useState(false);
   const [vncFailed, setVncFailed] = useState(false);
+  const [refreshFeedback, setRefreshFeedback] = useState<
+    "" | "pending" | "refreshing" | "refreshed" | "failed"
+  >("");
 
   useEffect(() => {
     loadSessionRef.current = loadSession;
@@ -331,6 +369,7 @@ export function ProjectedBrowserSurfacePanel({
       }
       frameRef.current = null;
       renderedFrameRef.current = null;
+      frameRenderTokenRef.current += 1;
       const ws = wsRef.current;
       wsRef.current = null;
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -343,6 +382,10 @@ export function ProjectedBrowserSurfacePanel({
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
+      }
+      if (refreshFeedbackTimerRef.current !== null) {
+        window.clearTimeout(refreshFeedbackTimerRef.current);
+        refreshFeedbackTimerRef.current = null;
       }
     };
   }, [onFrameUpdate]);
@@ -358,13 +401,30 @@ export function ProjectedBrowserSurfacePanel({
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [isExpanded]);
 
-  const sendCommand = (payload: Record<string, unknown>) => {
+  const sendCommand = (payload: Record<string, unknown>): boolean => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(payload));
+    return true;
+  };
+
+  const scheduleRefreshFeedbackReset = () => {
+    if (refreshFeedbackTimerRef.current !== null) {
+      window.clearTimeout(refreshFeedbackTimerRef.current);
+    }
+    refreshFeedbackTimerRef.current = window.setTimeout(() => {
+      refreshFeedbackTimerRef.current = null;
+      setRefreshFeedback("");
+    }, 2000);
   };
 
   useEffect(() => {
+    const lifecycleKey = `${sessionIdentity}\u0000${webSocketUrl}\u0000${runNonce}`;
+    const reuseCurrentSession = shouldReuseProjectedBrowserSession(
+      reuseActiveSession,
+      activeLifecycleKeyRef.current,
+      lifecycleKey,
+    );
     const runId = runIdRef.current + 1;
     runIdRef.current = runId;
     let disposed = false;
@@ -388,9 +448,17 @@ export function ProjectedBrowserSurfacePanel({
     };
 
     const attachSocket = () => {
-      const viewerMode = vncFailed ? "screencast" : "auto";
-      const ws = new WebSocket(urlWithViewerParam(webSocketUrl, "viewer_mode", viewerMode));
+      const socketViewerMode = projectedBrowserSocketViewerMode(viewerMode, vncFailed);
+      const ws = new WebSocket(urlWithViewerParam(webSocketUrl, "viewer_mode", socketViewerMode));
       wsRef.current = ws;
+
+      ws.onopen = () => {
+        const pendingId = pendingRefreshIdRef.current;
+        if (!pendingId) return;
+        if (sendCommand({ t: "refresh", id: pendingId })) {
+          setRefreshFeedback("refreshing");
+        }
+      };
 
       ws.onmessage = (event) => {
         if (disposed || runIdRef.current !== runId) return;
@@ -407,6 +475,7 @@ export function ProjectedBrowserSurfacePanel({
           if (payload.t === "frame") {
             const rawBase64 = String(payload.data_base64 || "").trim();
             if (!rawBase64) return;
+            reconnectAttemptsRef.current = 0;
             const mime = String(payload.mime || "image/jpeg").trim() || "image/jpeg";
             const nextFrame = {
               seq: Number(payload.seq || 0) || 0,
@@ -417,25 +486,45 @@ export function ProjectedBrowserSurfacePanel({
               url: String(payload.url || "").trim(),
             };
             frameRef.current = nextFrame;
-            if (imageRef.current) {
-              // High-frequency browser frames bypass React state so input handling stays responsive.
-              imageRef.current.src = nextFrame.dataUrl;
-            }
-            const rendered = renderedFrameRef.current;
-            if (
-              !rendered ||
-              rendered.width !== nextFrame.width ||
-              rendered.height !== nextFrame.height
-            ) {
+            const renderToken = frameRenderTokenRef.current + 1;
+            frameRenderTokenRef.current = renderToken;
+            const decoded = new Image();
+            decoded.onload = () => {
+              if (
+                disposed ||
+                runIdRef.current !== runId ||
+                frameRenderTokenRef.current !== renderToken
+              ) {
+                return;
+              }
               renderedFrameRef.current = nextFrame;
-              setRenderedFrame(nextFrame);
-            }
+              if (imageRef.current) {
+                // Keep the previous frame visible until the replacement JPEG is decoded.
+                imageRef.current.src = nextFrame.dataUrl;
+              } else {
+                setRenderedFrame(nextFrame);
+              }
+            };
+            decoded.src = nextFrame.dataUrl;
             if (onFrameUpdate) {
               const now = window.performance?.now?.() ?? Date.now();
               if (!lastFrameCallbackAtRef.current || now - lastFrameCallbackAtRef.current >= 250) {
                 lastFrameCallbackAtRef.current = now;
                 onFrameUpdate(nextFrame);
               }
+            }
+            return;
+          }
+          if (payload.t === "command_result") {
+            const commandId = String(payload.id || "").trim();
+            if (!commandId || commandId !== pendingRefreshIdRef.current) return;
+            pendingRefreshIdRef.current = "";
+            if (payload.ok) {
+              setRefreshFeedback("refreshed");
+              scheduleRefreshFeedbackReset();
+            } else {
+              setRefreshFeedback("failed");
+              setPanelError(String(payload.message || texts.refreshFailed).trim());
             }
             return;
           }
@@ -454,50 +543,39 @@ export function ProjectedBrowserSurfacePanel({
         void (async () => {
           const info = await loadSessionRef.current();
           if (disposed || runIdRef.current !== runId) return;
-          if (
-            info.ok &&
-            info.result.browser_surface.active &&
-            (info.result.browser_surface.state === "ready" ||
-              info.result.browser_surface.state === "starting") &&
-            reconnectAttemptsRef.current < 3
-          ) {
+          if (info.ok) {
+            const resolution = resolveBrowserObserverDisconnect({
+              surface: info.result.browser_surface,
+              reconnectAttempts: reconnectAttemptsRef.current,
+              maxReconnectAttempts: 3,
+              reconnectingMessage: texts.reconnecting,
+              closedMessage: texts.closed,
+            });
+            setSessionState(normalizeState(resolution.state));
+            if (!resolution.shouldReconnect) {
+              const message = String(
+                info.result.browser_surface.error?.message ||
+                  info.result.browser_surface.message ||
+                  "",
+              ).trim();
+              if (message && info.result.browser_surface.state === "failed") {
+                setPanelError(message);
+              }
+              return;
+            }
             reconnectAttemptsRef.current += 1;
-            setSessionState(
-              normalizeState({ ...info.result.browser_surface, message: texts.reconnecting }),
-            );
             reconnectTimerRef.current = window.setTimeout(() => {
               reconnectTimerRef.current = null;
               attachSocket();
             }, 800);
             return;
           }
-          if (info.ok) {
-            setSessionState(
-              normalizeState({
-                ...info.result.browser_surface,
-                active: false,
-                state: info.result.browser_surface.state === "failed" ? "failed" : "closed",
-                message:
-                  info.result.browser_surface.state === "failed"
-                    ? info.result.browser_surface.message
-                    : texts.closed,
-              }),
-            );
-            const message = String(
-              info.result.browser_surface.error?.message ||
-                info.result.browser_surface.message ||
-                "",
-            ).trim();
-            if (message && info.result.browser_surface.state === "failed") {
-              setPanelError(message);
-            }
-            return;
-          }
-          setSessionState(
+          setSessionState((current) =>
             normalizeState({
-              active: false,
-              state: "closed",
-              message: texts.closed,
+              ...current,
+              active: current.active,
+              state: current.active ? "disconnected" : "closed",
+              message: current.active ? texts.reconnecting : texts.closed,
               error: { code: info.error.code, message: info.error.message },
             }),
           );
@@ -517,6 +595,7 @@ export function ProjectedBrowserSurfacePanel({
       vncTargetRef.current?.replaceChildren();
       frameRef.current = null;
       renderedFrameRef.current = null;
+      frameRenderTokenRef.current += 1;
       lastFrameCallbackAtRef.current = 0;
       setRenderedFrame(null);
       onFrameUpdate?.(null);
@@ -527,10 +606,12 @@ export function ProjectedBrowserSurfacePanel({
       if (disposed) return;
 
       if (
+        reuseCurrentSession &&
         existing.ok &&
         existing.result.browser_surface.active &&
         ["starting", "ready"].includes(String(existing.result.browser_surface.state || "").trim())
       ) {
+        activeLifecycleKeyRef.current = lifecycleKey;
         setSessionState(normalizeState(existing.result.browser_surface));
         attachSocket();
         return;
@@ -572,6 +653,7 @@ export function ProjectedBrowserSurfacePanel({
         return;
       }
 
+      activeLifecycleKeyRef.current = lifecycleKey;
       setSessionState(normalizeState(started.result.browser_surface));
       attachSocket();
     };
@@ -582,31 +664,43 @@ export function ProjectedBrowserSurfacePanel({
       disposed = true;
       cleanupTransport();
     };
-  }, [onFrameUpdate, runNonce, texts.closed, texts.reconnecting, vncFailed, webSocketUrl]);
+  }, [
+    onFrameUpdate,
+    runNonce,
+    texts.closed,
+    texts.reconnecting,
+    texts.refreshFailed,
+    reuseActiveSession,
+    sessionIdentity,
+    vncFailed,
+    viewerMode,
+    webSocketUrl,
+  ]);
 
-  const vncAvailable =
+  const browserViewAvailable =
     String(sessionState.viewer?.kind || "")
       .trim()
-      .toLowerCase() === "vnc" && !vncFailed;
+      .toLowerCase() === "vnc" && !!sessionState.viewer?.vnc?.available;
+  const vncAvailable = viewerMode === "browser" && browserViewAvailable && !vncFailed;
   const displayIsolated =
     !!sessionState.metadata?.display_owned &&
     String(sessionState.metadata?.display_owner || "").trim() === "cccc_xvfb";
-  const viewerKind = vncAvailable ? texts.viewerVnc : texts.viewerFallback;
-  const viewerKindLabel = displayIsolated
-    ? `${viewerKind} · ${texts.viewerIsolationXvfb}`
-    : viewerKind;
   const vncFallbackReason = String(sessionState.viewer?.vnc?.error || "").trim();
-  const vncFallbackReasonLabel = vncAvailable
+  const vncFallbackReasonLabel = browserViewAvailable
     ? ""
     : formatVncFallbackReason(vncFallbackReason, texts);
-  const viewerTransportTooltip = vncAvailable
-    ? texts.viewerTooltipVnc
-    : vncFallbackReason
-      ? `${texts.viewerTooltipScreencast} ${texts.viewerFallbackReason}: ${vncFallbackReason}`
-      : texts.viewerTooltipScreencast;
-  const viewerTooltip = displayIsolated
-    ? `${viewerTransportTooltip} ${texts.viewerTooltipIsolationXvfb}`
-    : viewerTransportTooltip;
+  const isolationTooltip = displayIsolated ? ` ${texts.viewerTooltipIsolationXvfb}` : "";
+  const pageModeTooltip = `${texts.viewerPageTooltip}${isolationTooltip}`;
+  const browserModeTooltip = browserViewAvailable
+    ? `${texts.viewerBrowserTooltip}${isolationTooltip}`
+    : `${texts.viewerBrowserUnavailable}${
+        vncFallbackReasonLabel ? ` ${texts.viewerFallbackReason}: ${vncFallbackReasonLabel}.` : ""
+      }${isolationTooltip}`;
+  const effectiveViewerMode = projectedBrowserEffectiveViewerMode(
+    viewerMode,
+    browserViewAvailable,
+    vncFailed,
+  );
 
   useEffect(() => {
     if (!vncAvailable || sessionState.state !== "ready") {
@@ -667,14 +761,7 @@ export function ProjectedBrowserSurfacePanel({
     if (!container || typeof ResizeObserver === "undefined") return;
 
     const sendResize = () => {
-      if (
-        String(sessionState.viewer?.kind || "")
-          .trim()
-          .toLowerCase() === "vnc" &&
-        !vncFailed
-      ) {
-        return;
-      }
+      if (vncAvailable) return;
       const width = Math.max(640, Math.round(container.clientWidth || 0));
       const height = Math.max(480, Math.round(container.clientHeight || 0));
       if (!width || !height) return;
@@ -703,16 +790,25 @@ export function ProjectedBrowserSurfacePanel({
         resizeTimerRef.current = null;
       }
     };
-  }, [isExpanded, sessionState.viewer?.kind, vncFailed]);
+  }, [isExpanded, vncAvailable]);
 
   const handleBack = () => {
     setPanelError("");
     sendCommand({ t: "back" });
   };
 
+  const handleViewerModeChange = (nextMode: ProjectedBrowserViewerMode) => {
+    if (nextMode === "browser") {
+      setVncFailed(false);
+    }
+    setPanelError("");
+    setViewerMode(nextMode);
+  };
+
   const handleReconnect = () => {
     frameRef.current = null;
     renderedFrameRef.current = null;
+    frameRenderTokenRef.current += 1;
     if (rfbRef.current) {
       rfbRef.current.disconnect();
       rfbRef.current = null;
@@ -730,10 +826,18 @@ export function ProjectedBrowserSurfacePanel({
   useEffect(() => {
     if (refreshNonce === lastRefreshNonceRef.current) return;
     lastRefreshNonceRef.current = refreshNonce;
-    if (sessionState.state === "failed" || sessionState.state === "closed") {
+    const commandId = `refresh-${refreshNonce}`;
+    pendingRefreshIdRef.current = commandId;
+    setRefreshFeedback("pending");
+    if (
+      sessionState.state === "failed" ||
+      sessionState.state === "closed" ||
+      sessionState.state === "disconnected"
+    ) {
       const timer = window.setTimeout(() => {
         frameRef.current = null;
         renderedFrameRef.current = null;
+        frameRenderTokenRef.current += 1;
         if (rfbRef.current) {
           rfbRef.current.disconnect();
           rfbRef.current = null;
@@ -753,7 +857,11 @@ export function ProjectedBrowserSurfacePanel({
     }
     const timer = window.setTimeout(() => {
       setPanelError("");
-      sendCommand({ t: "refresh" });
+      if (sendCommand({ t: "refresh", id: commandId })) {
+        setRefreshFeedback("refreshing");
+      } else {
+        setRefreshFeedback("pending");
+      }
     }, 0);
     return () => window.clearTimeout(timer);
   }, [refreshNonce, sessionState.state, texts.starting]);
@@ -763,23 +871,27 @@ export function ProjectedBrowserSurfacePanel({
     const frame = frameRef.current || renderedFrame;
     if (!frame || !imageRef.current) return;
     const rect = imageRef.current.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0 || frame.width <= 0 || frame.height <= 0) return;
-    const relativeX = (event.clientX - rect.left) / rect.width;
-    const relativeY = (event.clientY - rect.top) / rect.height;
-    if (relativeX < 0 || relativeX > 1 || relativeY < 0 || relativeY > 1) return;
-    sendCommand({
-      t: "click",
-      x: Math.round(relativeX * frame.width),
-      y: Math.round(relativeY * frame.height),
-      button: buttonFromMouseEvent(event.button),
-    });
+    const point = mapContainedImagePoint({ x: event.clientX, y: event.clientY }, rect, frame);
+    if (!point) return;
+    sendCommand({ t: "click", x: point.x, y: point.y, button: buttonFromMouseEvent(event.button) });
     containerRef.current?.focus();
     event.preventDefault();
   };
 
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
     if (vncAvailable) return;
-    sendCommand({ t: "scroll", dx: Math.round(event.deltaX), dy: Math.round(event.deltaY) });
+    const frame = frameRef.current || renderedFrame;
+    if (!frame || !imageRef.current) return;
+    const rect = imageRef.current.getBoundingClientRect();
+    const point = mapContainedImagePoint({ x: event.clientX, y: event.clientY }, rect, frame);
+    if (!point) return;
+    sendCommand({
+      t: "scroll",
+      x: point.x,
+      y: point.y,
+      dx: Math.round(event.deltaX),
+      dy: Math.round(event.deltaY),
+    });
     event.preventDefault();
   };
 
@@ -797,8 +909,21 @@ export function ProjectedBrowserSurfacePanel({
     event.preventDefault();
   };
 
-  const showReconnect = sessionState.state === "failed" || sessionState.state === "closed";
+  const showReconnect =
+    sessionState.state === "failed" ||
+    sessionState.state === "closed" ||
+    sessionState.state === "disconnected";
   const fullScreenLabel = isExpanded ? texts.exitFullScreen : texts.fullScreen;
+  const refreshFeedbackLabel =
+    refreshFeedback === "pending"
+      ? texts.refreshPending
+      : refreshFeedback === "refreshing"
+        ? texts.refreshing
+        : refreshFeedback === "refreshed"
+          ? texts.refreshed
+          : refreshFeedback === "failed"
+            ? texts.refreshFailed
+            : "";
   const panelClassName = classNames(
     "relative flex flex-col overflow-hidden outline-none",
     chromeMode === "embedded"
@@ -864,22 +989,62 @@ export function ProjectedBrowserSurfacePanel({
                 ? texts.closed
                 : texts.starting}
         </span>
-        <span
+        <div
+          role="group"
+          aria-label={texts.viewerLabel}
           className={classNames(
-            "inline-flex max-w-[220px] items-center gap-1 rounded-full px-2.5 py-1 font-medium",
-            isDark ? "bg-white/[0.06] text-slate-300" : "bg-gray-100 text-gray-700",
+            "inline-flex shrink-0 items-center rounded-full p-0.5",
+            isDark ? "bg-white/[0.06]" : "bg-black/[0.045]",
           )}
-          title={viewerTooltip}
         >
-          <span className="text-[0.68rem] uppercase opacity-70">{texts.viewerLabel}</span>
-          <span className="truncate">{viewerKindLabel}</span>
-          {vncFallbackReasonLabel ? (
-            <span className="hidden max-w-[180px] truncate opacity-70 sm:inline">
-              · {vncFallbackReasonLabel}
-            </span>
-          ) : null}
-        </span>
+          {(["page", "browser"] as const).map((mode) => {
+            const selected = effectiveViewerMode === mode;
+            const browserMode = mode === "browser";
+            return (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={selected}
+                disabled={browserMode && !browserViewAvailable}
+                onClick={() => handleViewerModeChange(mode)}
+                title={browserMode ? browserModeTooltip : pageModeTooltip}
+                className={classNames(
+                  "rounded-full px-2.5 py-1 font-medium transition-colors",
+                  selected
+                    ? isDark
+                      ? "bg-white/[0.11] text-slate-100 shadow-sm"
+                      : "bg-white text-gray-800 shadow-sm ring-1 ring-black/[0.05]"
+                    : isDark
+                      ? "text-slate-400 hover:bg-white/[0.05] hover:text-slate-200"
+                      : "text-gray-500 hover:bg-white/70 hover:text-gray-700",
+                  browserMode && !browserViewAvailable
+                    ? "cursor-not-allowed opacity-45 hover:bg-transparent"
+                    : "",
+                )}
+              >
+                {browserMode ? texts.viewerBrowser : texts.viewerPage}
+              </button>
+            );
+          })}
+        </div>
         <span className="min-w-0 flex-1 truncate">{sessionState.url || fallbackUrl || ""}</span>
+        {refreshFeedbackLabel ? (
+          <span
+            className={classNames(
+              "rounded-full px-2.5 py-1 font-medium",
+              refreshFeedback === "failed"
+                ? isDark
+                  ? "bg-rose-500/15 text-rose-200"
+                  : "bg-rose-50 text-rose-700"
+                : isDark
+                  ? "bg-cyan-500/15 text-cyan-200"
+                  : "bg-cyan-50 text-cyan-700",
+            )}
+            role="status"
+          >
+            {refreshFeedbackLabel}
+          </span>
+        ) : null}
         {chromeMode === "standalone" ? (
           <button
             type="button"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 from .common import *  # noqa: F401,F403
 from .group_cmds import *  # noqa: F401,F403
@@ -12,6 +12,7 @@ from .messaging_cmds import *  # noqa: F401,F403
 from .space_cmds import *  # noqa: F401,F403
 from .im_cmds import *  # noqa: F401,F403
 from .system_cmds import *  # noqa: F401,F403
+from .runtime_hook_cmd import cmd_runtime_hook
 
 
 def _apply_invocation_web_overrides(args: argparse.Namespace) -> tuple[dict[str, Optional[str]], dict[str, str]]:
@@ -58,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override Web host for this invocation (default-entry friendly)",
     )
     sub = p.add_subparsers(dest="cmd", required=False)
+
+    p_hook = sub.add_parser("hook", help=argparse.SUPPRESS)
+    p_hook.add_argument(
+        "action", choices=("codex-state", "claude-state"), help=argparse.SUPPRESS
+    )
+    p_hook.set_defaults(func=cmd_runtime_hook)
 
     p_attach = sub.add_parser("attach", help="Attach current path to a working group (auto-create if needed)")
     p_attach.add_argument("path", nargs="?", default=".", help="Path inside a repo/scope (default: .)")
@@ -144,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_actor_add.add_argument("--title", default="", help="Display title (optional)")
     p_actor_add.add_argument(
         "--runtime",
-        choices=["claude", "codex", "copilot", "cursor", "devin", "kiro", "kilo", "antigravity", "droid", "amp", "auggie", "grok", "hermes", "kimi", "opencode", "custom"],
+        choices=["claude", "cline", "codex", "copilot", "cursor", "devin", "kiro", "kilo", "antigravity", "droid", "amp", "auggie", "grok", "hermes", "kimi", "opencode", "custom"],
         default="codex",
         help="Agent runtime (auto-sets command if not provided)",
     )
@@ -183,7 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_actor_update = actor_sub.add_parser("update", help="Update an actor (title/command/env/scope/enabled/runtime)")
     p_actor_update.add_argument("actor_id", help="Actor id")
     p_actor_update.add_argument("--title", default=None, help="New title")
-    p_actor_update.add_argument("--runtime", choices=["claude", "codex", "copilot", "cursor", "devin", "kiro", "kilo", "antigravity", "droid", "amp", "auggie", "grok", "hermes", "kimi", "opencode", "custom"], default=None, help="New runtime")
+    p_actor_update.add_argument("--runtime", choices=["claude", "cline", "codex", "copilot", "cursor", "devin", "kiro", "kilo", "antigravity", "droid", "amp", "auggie", "grok", "hermes", "kimi", "opencode", "custom"], default=None, help="New runtime")
     p_actor_update.add_argument("--command", default=None, help="Replace command (shell-like string); use empty to clear")
     p_actor_update.add_argument("--env", action="append", default=[], help="Replace env with these KEY=VAL entries (repeatable)")
     p_actor_update.add_argument("--scope", default="", help="Set default scope path (must be attached)")
@@ -301,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_lc.set_defaults(func=cmd_ledger_compact)
 
     p_daemon = sub.add_parser("daemon", help="Manage ccccd daemon")
-    p_daemon.add_argument("action", choices=["start", "stop", "status"], help="Action")
+    p_daemon.add_argument("action", choices=["start", "stop", "status", "run"], help="Action")
     p_daemon.set_defaults(func=cmd_daemon)
 
     # IM Bridge commands
@@ -386,14 +393,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup = sub.add_parser("setup", help="Setup MCP for agent runtimes (configure MCP, print guidance)")
     p_setup.add_argument(
         "--runtime",
-        choices=["claude", "codex", "copilot", "cursor", "devin", "kiro", "kilo", "antigravity", "droid", "amp", "auggie", "grok", "hermes", "kimi", "opencode", "custom"],
+        choices=["claude", "cline", "codex", "copilot", "cursor", "devin", "kiro", "kilo", "antigravity", "droid", "amp", "auggie", "grok", "hermes", "kimi", "opencode", "custom"],
         default="",
         help="Target runtime (default: all supported runtimes)",
     )
     p_setup.add_argument("--path", default=".", help="Project path (default: current directory)")
     p_setup.set_defaults(func=cmd_setup)
 
-    p_update = sub.add_parser("update", help="Update CCCC in the current Python environment")
+    p_update = sub.add_parser("update", help="Update the complete installed CCCC product via pip")
     p_update.add_argument(
         "--channel",
         choices=["stable", "rc"],
@@ -572,7 +579,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     return p
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(
+    argv: Optional[list[str]] = None,
+    *,
+    before_product_update: Optional[Callable[[], None]] = None,
+) -> int:
     if argv is None:
         argv = sys.argv[1:]
     parser = build_parser()
@@ -586,6 +597,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     web_port_override=getattr(args, "web_port", None),
                 )
             )
+        if getattr(args, "func", None) is cmd_update:
+            setattr(args, "_before_product_update", before_product_update)
         return int(args.func(args))
     finally:
         _restore_invocation_web_overrides(previous_env, applied_env)

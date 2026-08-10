@@ -218,6 +218,9 @@ function normalizeAssistantServiceModel(value: unknown): AssistantServiceModel |
     status: asOptionalString(record.status) || undefined,
     available: typeof record.available === "boolean" ? record.available : undefined,
     installed: typeof record.installed === "boolean" ? record.installed : undefined,
+    managed: typeof record.managed === "boolean" ? record.managed : undefined,
+    removable: typeof record.removable === "boolean" ? record.removable : undefined,
+    implementation: asOptionalString(record.implementation) || undefined,
     install_dir: asOptionalString(record.install_dir) || undefined,
     installed_at: asOptionalString(record.installed_at) || undefined,
     updated_at: asOptionalString(record.updated_at) || undefined,
@@ -291,6 +294,9 @@ function normalizeAssistantServiceRuntime(value: unknown): AssistantServiceRunti
     status: asOptionalString(record.status) || undefined,
     available: typeof record.available === "boolean" ? record.available : undefined,
     installed: typeof record.installed === "boolean" ? record.installed : undefined,
+    managed: typeof record.managed === "boolean" ? record.managed : undefined,
+    removable: typeof record.removable === "boolean" ? record.removable : undefined,
+    implementation: asOptionalString(record.implementation) || undefined,
     install_dir: asOptionalString(record.install_dir) || undefined,
     python: asOptionalString(record.python) || undefined,
     packages: Array.isArray(record.packages)
@@ -583,6 +589,7 @@ function normalizeAssistantVoiceDocumentMutationResult(
     actor_notify_delivery_error: asOptionalString(record.actor_notify_delivery_error) || undefined,
     event: record.event,
     request_id: asOptionalString(record.request_id) || undefined,
+    input_append_id: asOptionalString(record.input_append_id) || undefined,
   };
 }
 
@@ -605,6 +612,7 @@ function normalizeAssistantVoiceInputResult(
     actor_notify_delivery_error: asOptionalString(record.actor_notify_delivery_error) || undefined,
     event: record.event,
     request_id: asOptionalString(record.request_id) || undefined,
+    input_append_id: asOptionalString(record.input_append_id) || undefined,
   };
 }
 
@@ -730,20 +738,25 @@ export async function updateAssistantStatus(
 
 export async function transcribeVoiceAssistantAudio(
   groupId: string,
-  payload: { audioBase64: string; mimeType: string; language?: string; by?: string },
+  payload: { audio: Blob | ArrayBuffer; mimeType?: string; language?: string; by?: string },
 ): Promise<ApiResponse<AssistantVoiceTranscriptionResult>> {
   const gid = String(groupId || "").trim();
   clearAssistantStateRequest(gid);
+  const params = new URLSearchParams();
+  const language = String(payload.language || "").trim();
+  if (language) params.set("language", language);
+  params.set("by", String(payload.by || "user").trim() || "user");
   const resp = await apiJson<unknown>(
-    `/api/v1/groups/${encodeURIComponent(gid)}/assistants/voice_secretary/transcriptions`,
+    `/api/v1/groups/${encodeURIComponent(gid)}/assistants/voice_secretary/transcriptions?${params.toString()}`,
     {
       method: "POST",
-      body: JSON.stringify({
-        audio_base64: String(payload.audioBase64 || ""),
-        mime_type: String(payload.mimeType || "application/octet-stream"),
-        language: String(payload.language || ""),
-        by: String(payload.by || "user").trim() || "user",
-      }),
+      headers: {
+        "content-type":
+          String(payload.mimeType || "").trim() ||
+          (payload.audio instanceof Blob && payload.audio.type) ||
+          "application/octet-stream",
+      },
+      body: payload.audio,
     },
   );
   clearAssistantStateRequest(gid);
@@ -760,6 +773,7 @@ export async function updateVoiceAssistantRecordingLease(
     ttlSeconds?: number;
     captureMode?: string;
     recognitionBackend?: string;
+    dispatchTarget?: string;
     by?: string;
   },
 ): Promise<ApiResponse<AssistantVoiceRecordingLeaseResult>> {
@@ -777,6 +791,7 @@ export async function updateVoiceAssistantRecordingLease(
           : 30,
         capture_mode: String(payload.captureMode || "").trim(),
         recognition_backend: String(payload.recognitionBackend || "").trim(),
+        dispatch_target: String(payload.dispatchTarget || "").trim(),
         by: String(payload.by || "user").trim() || "user",
       }),
     },
@@ -1094,6 +1109,8 @@ export async function sendVoiceAssistantDocumentInstruction(
     instruction: string;
     sourceText?: string;
     documentPath?: string;
+    requestId?: string;
+    inputAppendId?: string;
     trigger?: Record<string, unknown>;
     by?: string;
   },
@@ -1109,6 +1126,8 @@ export async function sendVoiceAssistantDocumentInstruction(
         document_path: String(payload.documentPath || docPath).trim(),
         instruction: String(payload.instruction || ""),
         source_text: String(payload.sourceText || ""),
+        request_id: String(payload.requestId || ""),
+        input_append_id: String(payload.inputAppendId || ""),
         trigger: payload.trigger || {},
         by: String(payload.by || "user").trim() || "user",
       }),
@@ -1130,6 +1149,7 @@ export async function appendVoiceAssistantInput(
     voiceTranscript?: string;
     composerText?: string;
     requestId?: string;
+    inputAppendId?: string;
     operation?: string;
     composerContext?: Record<string, unknown>;
     composerSnapshotHash?: string;
@@ -1153,6 +1173,7 @@ export async function appendVoiceAssistantInput(
         voice_transcript: String(payload.voiceTranscript || ""),
         composer_text: String(payload.composerText || ""),
         request_id: String(payload.requestId || ""),
+        input_append_id: String(payload.inputAppendId || ""),
         operation: String(payload.operation || ""),
         composer_context: payload.composerContext || {},
         composer_snapshot_hash: String(payload.composerSnapshotHash || ""),
@@ -1562,14 +1583,6 @@ export function getPresentationBrowserSurfaceWebSocketUrl(groupId: string, slotI
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const base = `${protocol}//${window.location.host}/api/v1/groups/${encodeURIComponent(groupId)}/presentation/browser_surface/ws?slot=${encodeURIComponent(slotId)}`;
   return withAuthToken(base);
-}
-
-export async function createGroup(title: string, topic: string = "") {
-  clearGroupsReadRequest();
-  return apiJson<{ group_id: string }>("/api/v1/groups", {
-    method: "POST",
-    body: JSON.stringify({ title, topic, by: "user" }),
-  });
 }
 
 export type GroupCopyPreviewActor = {

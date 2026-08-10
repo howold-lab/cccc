@@ -27,11 +27,11 @@ In short: CCCC does not replace your agents — it is the coordination layer tha
 ### How do I install CCCC?
 
 ```bash
-# From PyPI
-pip install -U cccc-pair
+# Stable product distribution from PyPI (recommended)
+python -m pip install -U cccc-pair
 
 # From TestPyPI (explicit RC testing)
-pip install -U --pre \
+python -m pip install -U --pre \
   --index-url https://test.pypi.org/simple \
   --extra-index-url https://pypi.org/simple \
   cccc-pair
@@ -41,6 +41,33 @@ git clone https://github.com/ChesterRa/cccc
 cd cccc
 pip install -e .
 ```
+
+Supported PyPI platform wheels include stable Python plus a private,
+version-matched experimental Rust implementation for opt-in performance
+evaluation. An experimental Rust-only standalone preview is also available for
+deployment testing:
+
+```bash
+# macOS / Linux
+curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
+
+# Windows CMD or PowerShell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
+```
+
+The preview has no Python fallback or implementation switching and is not the
+recommended replacement for the pip product.
+
+### Why does `cccc` still start an older installation after an upgrade?
+
+CCCC does not delete commands owned by another Python environment or installer.
+Run `cccc doctor` and inspect the `Installation` section. It shows the current
+launcher, the first command selected by PATH, and every duplicate. The standalone
+installer puts its default directory first for new terminals; an existing terminal
+must be reopened (or its PATH refreshed). Custom install directories and
+`CCCC_NO_MODIFY_PATH=1` require you to move that directory to the front manually.
+When PATH still selects the old command, run the newly installed executable by
+the absolute path printed by the installer to get the current diagnostic report.
 
 ### How do I upgrade from an older version (0.3.x)?
 
@@ -61,17 +88,49 @@ Then install the new version. Note that 0.4.x has a completely different command
 
 ### What are the system requirements?
 
-- Python 3.9+
-- macOS, Linux, or Windows
+- Python 3.11+ on macOS, Linux, or Windows for the recommended PyPI distribution
 - At least one supported agent runtime CLI
+
+The experimental standalone Rust preview does not require Python or a Rust
+toolchain, but supports fewer platforms and contains only the Rust implementation.
+
+### How do I choose the Python or Rust implementation?
+
+```bash
+cccc status
+cccc rust              # persist experimental Rust and launch CCCC
+cccc python            # persist stable Python and launch CCCC
+cccc rust doctor       # persist experimental Rust, then run one command
+```
+
+These selectors belong to the recommended pip distribution. Python is the stable
+default; `cccc rust` explicitly opts into the experimental Rust implementation,
+whose feature and integration parity is still in progress. Use `cccc python` for
+reliability-critical workflows or to switch back. Supported PyPI platform wheels
+contain Rust privately; other platforms receive the universal Python wheel and
+report Rust as unavailable. The selector validates the payload and stops the
+active Web/daemon pair. It never installs a second command or silently falls
+back. The standalone preview contains Rust only and therefore does not expose
+implementation switching.
 
 ### How do I check if CCCC is working?
 
 ```bash
+cccc status
 cccc doctor
 ```
 
-This checks Python version, available runtimes, and daemon status.
+These show implementation availability, Python version, agent runtimes, and
+daemon status.
+
+### Does a leftover `cccc-web.lock` mean CCCC is still running?
+
+No. The operating-system file lock is authoritative; the file may retain the
+last owner's PID after a crash. `cccc` automatically reclaims an unlocked file,
+replaces the PID, and starts its embedded daemon when the Web process starts.
+Manual lock deletion or a separate `cccc daemon start` is not required. If CCCC
+reports that another instance is running, that process still holds the real file
+lock and should be stopped normally.
 
 ### Why does an embedded browser open a physical Chrome window on Linux?
 
@@ -84,6 +143,7 @@ fails browser startup when Xvfb is missing instead of silently falling back to t
 ### Which AI agents are supported?
 
 - Claude Code (`claude`)
+- Cline CLI (`cline`)
 - Codex CLI (`codex`)
 - GitHub Copilot CLI (`copilot`)
 - Cursor CLI (`cursor-agent`)

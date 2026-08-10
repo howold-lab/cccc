@@ -9,9 +9,11 @@ from typing import Any, Dict, List, Optional
 from ...contracts.v1 import DaemonError, DaemonResponse
 from ...kernel.actors import find_actor
 from ...kernel.group import load_group
-from ...kernel.inbox import find_event, get_cursor, has_chat_ack, is_message_for_actor, set_cursor, unread_messages
+from ...kernel.inbox import cursor_covers_event, find_event, get_cursor, has_chat_ack, is_message_for_actor, set_cursor, unread_messages
+from ...kernel.ledger_index import lookup_event_positions
 from ...kernel.ledger import append_event
-from ...util.time import parse_utc_iso, utc_now_iso
+from ...kernel.system_prompt import render_system_prompt
+from ...util.time import utc_now_iso
 from ..messaging.actor_turn_rendering import render_actor_event_batch_for_delivery
 from ..runner_state_ops import update_headless_state, web_model_actor_running
 
@@ -19,6 +21,8 @@ from ..runner_state_ops import update_headless_state, web_model_actor_running
 _MAX_TURN_EVENTS = 20
 _MAX_COALESCED_TEXT_CHARS = 24000
 _COMPLETE_STATUSES = {"done", "partial", "failed", "cancelled"}
+_DELIVERY_PREFERENCES_KEY = "web_model_delivery_preferences"
+_DELIVERY_MODES = {"standard", "image_compat"}
 
 
 def _error(code: str, message: str, *, details: Optional[Dict[str, Any]] = None) -> DaemonResponse:
@@ -83,6 +87,69 @@ def _validate_group_actor(group_id: str, actor_id: str) -> tuple[Any, Dict[str, 
     if not isinstance(actor, dict):
         return None, {}, _error("actor_not_found", f"actor not found: {actor_id}")
     return group, dict(actor), None
+
+
+def web_model_delivery_preference(group: Any, *, actor_id: str) -> Dict[str, Any]:
+    preferences = group.doc.get(_DELIVERY_PREFERENCES_KEY) if isinstance(group.doc, dict) else None
+    raw = preferences.get(actor_id) if isinstance(preferences, dict) else None
+    stored = dict(raw) if isinstance(raw, dict) else {}
+    mode = _clean_text(stored.get("mode")).lower()
+    if mode not in _DELIVERY_MODES:
+        mode = "standard"
+    return {
+        "mode": mode,
+        "updated_at": _clean_text(stored.get("updated_at")),
+        "updated_by": _clean_text(stored.get("updated_by")),
+    }
+
+
+def handle_web_model_delivery_preferences_get(args: Dict[str, Any]) -> DaemonResponse:
+    group_id = _clean_text(args.get("group_id"))
+    actor_id = _clean_text(args.get("actor_id"))
+    group, actor, err = _validate_group_actor(group_id, actor_id)
+    if err is not None:
+        return err
+    if _clean_text(actor.get("runtime")).lower() != "web_model":
+        return _error("invalid_actor_runtime", "web-model delivery preferences require runtime=web_model")
+    return DaemonResponse(
+        ok=True,
+        result={
+            "group_id": group_id,
+            "actor_id": actor_id,
+            "preference": web_model_delivery_preference(group, actor_id=actor_id),
+        },
+    )
+
+
+def handle_web_model_delivery_preferences_update(args: Dict[str, Any]) -> DaemonResponse:
+    group_id = _clean_text(args.get("group_id"))
+    actor_id = _clean_text(args.get("actor_id"))
+    group, actor, err = _validate_group_actor(group_id, actor_id)
+    if err is not None:
+        return err
+    if _clean_text(actor.get("runtime")).lower() != "web_model":
+        return _error("invalid_actor_runtime", "web-model delivery preferences require runtime=web_model")
+    by = _clean_text(args.get("by"))
+    if by != "user":
+        return _error("permission_denied", "web-model delivery preferences are user-controlled")
+    mode = _clean_text(args.get("mode")).lower()
+    if mode not in _DELIVERY_MODES:
+        return _error(
+            "invalid_web_model_delivery_mode",
+            "mode must be standard or image_compat",
+            details={"mode": mode},
+        )
+    preferences = group.doc.get(_DELIVERY_PREFERENCES_KEY)
+    if not isinstance(preferences, dict):
+        preferences = {}
+        group.doc[_DELIVERY_PREFERENCES_KEY] = preferences
+    preference = {"mode": mode, "updated_at": utc_now_iso(), "updated_by": by}
+    preferences[actor_id] = preference
+    group.save()
+    return DaemonResponse(
+        ok=True,
+        result={"group_id": group_id, "actor_id": actor_id, "preference": preference},
+    )
 
 
 def _web_model_actor_running(group_id: str, actor_id: str, actor: Dict[str, Any]) -> bool:
@@ -204,11 +271,13 @@ def handle_web_model_runtime_wait_next_turn(args: Dict[str, Any]) -> DaemonRespo
         "latest_ts": str(latest.get("ts") or ""),
         "messages": compact_messages,
         "coalesced_text": _coalesced_text(compact_messages, actor_id=actor_id),
+        "system_prompt": render_system_prompt(group=group, actor=actor),
         "delivery": {
             "mode": "cursor_on_complete",
             "cursor_committed": False,
             "max_events": limit,
             "kind_filter": kind_filter,
+            "web_model_mode": web_model_delivery_preference(group, actor_id=actor_id)["mode"],
         },
         "instructions": (
             "Process this coalesced CCCC turn. Use CCCC MCP tools for visible replies, handoffs, repo edits, "
@@ -224,6 +293,65 @@ def handle_web_model_runtime_wait_next_turn(args: Dict[str, Any]) -> DaemonRespo
         latest_event_id=str(turn.get("latest_event_id") or ""),
     )
     return DaemonResponse(ok=True, result={"status": "work_available", "turn": turn, "cursor": {"event_id": cursor_event_id, "ts": cursor_ts}})
+
+
+def handle_web_model_runtime_recover_turn(args: Dict[str, Any]) -> DaemonResponse:
+    group_id = _clean_text(args.get("group_id"))
+    actor_id = _clean_text(args.get("actor_id") or args.get("by"))
+    group, actor, err = _validate_group_actor(group_id, actor_id)
+    if err is not None:
+        return err
+    if _clean_text(actor.get("runtime")).lower() != "web_model":
+        return _error("invalid_actor_runtime", "turn recovery is only available for runtime=web_model actors")
+    raw_event_ids = args.get("event_ids")
+    if not isinstance(raw_event_ids, list) or not raw_event_ids or any(not isinstance(item, str) for item in raw_event_ids):
+        return _error("invalid_event_ids", "event_ids must be a non-empty list of strings")
+    event_ids = [_clean_text(item) for item in raw_event_ids]
+    if any(not item for item in event_ids) or len(set(event_ids)) != len(event_ids):
+        return _error("invalid_event_ids", "event_ids must be non-empty and unique")
+    events, event_error = _valid_turn_events(group, actor_id=actor_id, event_ids=event_ids)
+    if event_error is not None:
+        return event_error
+    try:
+        positions = lookup_event_positions(group.ledger_path, event_ids)
+    except Exception as exc:
+        return _error("ledger_read_failed", f"failed to locate turn events: {exc}")
+    if any(position is None for position in positions):
+        missing = [event_id for event_id, position in zip(event_ids, positions) if position is None]
+        return _error("event_not_found", f"event not found: {missing[0]}")
+    ordered = [
+        event
+        for _, event in sorted(
+            zip((position for position in positions if position is not None), events),
+            key=lambda item: item[0],
+        )
+    ]
+    latest = ordered[-1]
+    if not cursor_covers_event(group, actor_id=actor_id, event=latest):
+        return _error(
+            "turn_not_committed",
+            "turn recovery only accepts events already covered by the actor cursor",
+            details={"latest_event_id": _clean_text(latest.get("id"))},
+        )
+    compact_messages = [_compact_event(event) for event in ordered]
+    turn = {
+        "turn_id": _turn_id(group_id=group_id, actor_id=actor_id, messages=compact_messages),
+        "group_id": group_id,
+        "actor_id": actor_id,
+        "created_at": utc_now_iso(),
+        "event_ids": [_clean_text(event.get("id")) for event in compact_messages],
+        "latest_event_id": _clean_text(latest.get("id")),
+        "latest_ts": _clean_text(latest.get("ts")),
+        "messages": compact_messages,
+        "coalesced_text": _coalesced_text(compact_messages, actor_id=actor_id),
+        "system_prompt": render_system_prompt(group=group, actor=actor),
+        "delivery": {
+            "mode": "recovery_no_cursor_mutation",
+            "cursor_committed": True,
+            "web_model_mode": web_model_delivery_preference(group, actor_id=actor_id)["mode"],
+        },
+    }
+    return DaemonResponse(ok=True, result={"status": "recovered", "turn": turn})
 
 
 def _valid_turn_events(group: Any, *, actor_id: str, event_ids: List[str]) -> tuple[List[Dict[str, Any]], Optional[DaemonResponse]]:
@@ -245,30 +373,22 @@ def _valid_turn_events(group: Any, *, actor_id: str, event_ids: List[str]) -> tu
     return events, None
 
 
-def _latest_event_by_ts(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    latest: Optional[Dict[str, Any]] = None
-    latest_dt: Any = None
-    for event in events:
-        dt = parse_utc_iso(str(event.get("ts") or ""))
-        if latest is None:
-            latest = event
-            latest_dt = dt
-            continue
-        if dt is not None and latest_dt is not None:
-            if dt >= latest_dt:
-                latest = event
-                latest_dt = dt
-        else:
-            latest = event
-            latest_dt = dt
-    return latest
-
-
-def _cursor_covers_event(group: Any, *, actor_id: str, event: Dict[str, Any]) -> bool:
-    _, cursor_ts = get_cursor(group, actor_id)
-    cursor_dt = parse_utc_iso(cursor_ts) if cursor_ts else None
-    event_dt = parse_utc_iso(str(event.get("ts") or ""))
-    return bool(cursor_dt is not None and event_dt is not None and event_dt <= cursor_dt)
+def _latest_event_by_ledger_order(group: Any, events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    event_ids = [str(event.get("id") or "").strip() for event in events]
+    if not event_ids or any(not event_id for event_id in event_ids):
+        return None
+    try:
+        positions = lookup_event_positions(group.ledger_path, event_ids)
+    except Exception:
+        return None
+    ranked = [
+        (position, event)
+        for position, event in zip(positions, events)
+        if position is not None
+    ]
+    if len(ranked) != len(events):
+        return None
+    return max(ranked, key=lambda item: item[0])[1]
 
 
 def _validate_unread_prefix_complete(group: Any, *, actor_id: str, event_ids: List[str], latest_event_id: str) -> Optional[DaemonResponse]:
@@ -349,13 +469,17 @@ def commit_web_model_delivered_turn(
     cursor = {"event_id": get_cursor(group, actor_id)[0], "ts": get_cursor(group, actor_id)[1]}
     read_event: Optional[Dict[str, Any]] = None
     ack_events: List[Dict[str, Any]] = []
-    latest = _latest_event_by_ts(events)
+    latest = _latest_event_by_ledger_order(group, events)
     if latest is None:
-        return {"ok": False, "error": "missing_latest_event", "message": "turn has no valid latest event"}
+        return {
+            "ok": False,
+            "error": "ledger_position_unavailable",
+            "message": "turn events could not be resolved in ledger order",
+        }
 
     latest_event_id = str(latest.get("id") or "").strip()
     latest_ts = str(latest.get("ts") or "").strip()
-    if _cursor_covers_event(group, actor_id=actor_id, event=latest):
+    if cursor_covers_event(group, actor_id=actor_id, event=latest):
         return {
             "ok": True,
             "cursor_committed": True,
@@ -438,33 +562,37 @@ def handle_web_model_runtime_complete_turn(args: Dict[str, Any]) -> DaemonRespon
     read_event: Optional[Dict[str, Any]] = None
     ack_events: List[Dict[str, Any]] = []
     cursor_committed = False
+    committed_latest_event_id = ""
     if status in {"done", "partial"}:
-        latest = _latest_event_by_ts(events)
-        if latest is not None:
-            latest_event_id = str(latest.get("id") or "").strip()
-            latest_ts = str(latest.get("ts") or "").strip()
-            if _cursor_covers_event(group, actor_id=actor_id, event=latest):
-                cursor_committed = True
-            else:
-                prefix_err = _validate_unread_prefix_complete(
-                    group,
-                    actor_id=actor_id,
-                    event_ids=[str(event.get("id") or "") for event in events],
-                    latest_event_id=latest_event_id,
-                )
-                if prefix_err is not None:
-                    return prefix_err
-                cursor = set_cursor(group, actor_id, event_id=latest_event_id, ts=latest_ts)
-                read_event = append_event(
-                    group.ledger_path,
-                    kind="chat.read",
-                    group_id=group.group_id,
-                    scope_key="",
-                    by=by,
-                    data={"actor_id": actor_id, "event_id": latest_event_id},
-                )
-                ack_events = _append_attention_acks(group, actor_id=actor_id, by=by, events=events)
-            cursor_committed = True
+        latest = _latest_event_by_ledger_order(group, events)
+        if latest is None:
+            return _error(
+                "ledger_position_unavailable",
+                "turn events could not be resolved in ledger order",
+            )
+        latest_event_id = str(latest.get("id") or "").strip()
+        committed_latest_event_id = latest_event_id
+        latest_ts = str(latest.get("ts") or "").strip()
+        if not cursor_covers_event(group, actor_id=actor_id, event=latest):
+            prefix_err = _validate_unread_prefix_complete(
+                group,
+                actor_id=actor_id,
+                event_ids=[str(event.get("id") or "") for event in events],
+                latest_event_id=latest_event_id,
+            )
+            if prefix_err is not None:
+                return prefix_err
+            cursor = set_cursor(group, actor_id, event_id=latest_event_id, ts=latest_ts)
+            read_event = append_event(
+                group.ledger_path,
+                kind="chat.read",
+                group_id=group.group_id,
+                scope_key="",
+                by=by,
+                data={"actor_id": actor_id, "event_id": latest_event_id},
+            )
+            ack_events = _append_attention_acks(group, actor_id=actor_id, by=by, events=events)
+        cursor_committed = True
 
     followup_delivery_scheduled = False
     if cursor_committed and status in {"done", "partial"}:
@@ -479,7 +607,7 @@ def handle_web_model_runtime_complete_turn(args: Dict[str, Any]) -> DaemonRespon
                 followup_delivery_scheduled = schedule_web_model_browser_delivery(
                     group_id=group_id,
                     actor_id=actor_id,
-                    trigger_event_id=str(events[-1].get("id") or "") if events else "",
+                    trigger_event_id=committed_latest_event_id,
                 )
         except Exception:
             followup_delivery_scheduled = False
@@ -515,8 +643,14 @@ def handle_web_model_runtime_complete_turn(args: Dict[str, Any]) -> DaemonRespon
 
 
 def try_handle_web_model_runtime_op(op: str, args: Dict[str, Any]) -> Optional[DaemonResponse]:
+    if op == "web_model_delivery_preferences_get":
+        return handle_web_model_delivery_preferences_get(args)
+    if op == "web_model_delivery_preferences_update":
+        return handle_web_model_delivery_preferences_update(args)
     if op == "web_model_runtime_wait_next_turn":
         return handle_web_model_runtime_wait_next_turn(args)
+    if op == "web_model_runtime_recover_turn":
+        return handle_web_model_runtime_recover_turn(args)
     if op == "web_model_runtime_complete_turn":
         return handle_web_model_runtime_complete_turn(args)
     return None

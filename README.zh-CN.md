@@ -10,11 +10,11 @@
 ### 像群聊一样指挥你的编码智能体
 
 **已读回执、送达追踪、远端协作组桥接、手机远程运维 ——
-Claude Code、Codex、ChatGPT Web 等 16 种运行时，在同一个持久协作组里。**
+Claude Code、Codex、ChatGPT Web 等 17 种运行时，在同一个持久协作组里。**
 
 让多个 coding agent 跨运行时、跨机器、跨可信协作组作为一支**持久化、可协调的团队**运行 — 而不是一堆各自为政的终端窗口。
 
-一条 `pip install`。零基础设施，生产级能力。
+一条安装命令，无需 Rust 工具链或额外基础设施。
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=blue)](https://pypi.org/project/cccc-pair/)
 [![Python](https://img.shields.io/pypi/pyversions/cccc-pair)](https://pypi.org/project/cccc-pair/)
@@ -31,7 +31,9 @@ Claude Code、Codex、ChatGPT Web 等 16 种运行时，在同一个持久协作
 
 <div align="center">
 
-<img src="screenshots/overview.webp" alt="CCCC Web UI 概览" width="100%">
+<a href="screenshots/overview.webp?raw=1" title="查看桌面端大图"><img src="screenshots/overview.webp" alt="CCCC Web UI 桌面端概览" width="76%" align="top"></a>
+&nbsp;
+<a href="screenshots/iphone.webp?raw=1" title="查看移动端大图"><img src="screenshots/iphone.webp" alt="CCCC Web UI 移动端概览" width="20%" align="top"></a>
 
 </div>
 
@@ -46,18 +48,18 @@ CCCC 让你的 agent 作为一套持久、可协调的系统运行：
 - **控制面统一** — Web UI、CLI、MCP、IM 桥接全部围绕同一 daemon 运作，不会出现多套状态。
 - **多运行时是默认能力** — Claude Code、Codex CLI、ChatGPT Web、Grok Build 以及其它一线 runtime 可以在同一协作组内协同工作。
 - **Group Bridge 连接远端协作组** — 可信 CCCC group 可以显式互发消息，并在授权后读取或操作彼此的本地资源。
-- **本地优先但可远程值守** — 单条 `pip install` 即可启动，运行时状态放在 `CCCC_HOME`，需要时再通过 Web / IM 远程运维。
+- **本地优先但可远程值守** — 单条安装命令即可启动，运行时状态放在 `CCCC_HOME`，需要时再通过 Web / IM 远程运维。
 
 ## CCCC 能做什么
 
-CCCC 只需一条 `pip install`，零外部依赖 — 不需要数据库、不需要消息队列、不强制 Docker。但它补上了脆弱多智能体方案最缺的那几块能力：
+CCCC 只需一条安装命令，不需要数据库、不需要消息队列、不强制 Docker。它补上了脆弱多智能体方案最缺的那几块能力：
 
 | 能力 | 实现方式 |
 |---|---|
 | **唯一事实源** | append-only ledger（`ledger.jsonl`）记录所有消息和事件 — 可回放、可审计、永不丢失 |
 | **可靠的消息语义** | 已读游标、attention ACK、reply-required 义务追踪 — 谁看到了什么一清二楚 |
 | **统一控制面** | Web UI、CLI、MCP 工具、IM 桥接全部对接同一 daemon — 不存在状态分裂 |
-| **多运行时编排** | Claude Code、Codex CLI、GitHub Copilot CLI、Cursor CLI、Devin CLI、Kiro CLI、Kilo Code CLI、Antigravity CLI、Grok Build、OpenCode、ChatGPT Web 等 16 种一线运行时可混用，此外还支持 `custom` 运行时兜底 |
+| **多运行时编排** | Claude Code、Cline CLI、Codex CLI、GitHub Copilot CLI、Cursor CLI、Devin CLI、Kiro CLI、Kilo Code CLI、Antigravity CLI、Grok Build、OpenCode、ChatGPT Web 等 17 种一线运行时可混用，此外还支持 `custom` 运行时兜底 |
 | **Group Bridge** | 连接跨机器或跨团队的可信远端协作组，从显式消息开始，并可按需授予 read/full 本地访问权限 |
 | **角色化协调** | Foreman + Peer 角色模型，权限边界清晰，收件人路由精确（`@all`、`@peers`、`@foreman`） |
 | **本地优先的运行时状态** | 运行时数据保存在 `CCCC_HOME` 而不是代码仓库里，同时仍可通过 Web Access 与 IM 做远程运维 |
@@ -67,17 +69,22 @@ CCCC 只需一条 `pip install`，零外部依赖 — 不需要数据库、不�
 ### 安装
 
 ```bash
-# 稳定通道（PyPI）
-pip install -U cccc-pair
+# 稳定的完整产品发行版（推荐；要求 Python 3.11+）
+python -m pip install -U cccc-pair
 
 # RC 通道（TestPyPI）
-pip install -U --pre \
+python -m pip install -U --pre \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
   cccc-pair
 ```
 
-> **环境要求**: Python 3.9+，macOS / Linux / Windows
+> PyPI 包是当前稳定且推荐的 CCCC 发行方式，Python 是其中稳定的默认实现。在
+> Linux x86-64、Intel/Apple Silicon macOS 和 Windows x86-64 上，对应平台 wheel
+> 还会包含一个私有且版本严格匹配的**实验性 Rust 实现**，可通过 `cccc rust`
+> 显式选择并评估性能。其功能与集成细节仍在持续对齐；可靠性敏感的工作请使用
+> `cccc python`。如果要专门测试无 Python 的 Rust-only 部署，可选用下文的
+> [实验性独立 Rust 预览版](#实验性独立-rust-预览版)。
 
 ### 升级
 
@@ -85,7 +92,9 @@ pip install -U --pre \
 cccc update
 ```
 
-如需先查看检测到的安装类型和将要执行的命令，可使用 `cccc update --check`。
+如需先查看检测到的安装类型和升级来源，可使用 `cccc update --check`。推荐的 pip
+安装会从检测到的 PyPI 通道更新完整的 `cccc-pair` 产品；实验性独立安装则通过
+GitHub Pages 安装器更新。两种路径都会先停止当前 Web/daemon 进程对，再替换文件。
 
 ### 启动
 
@@ -94,6 +103,23 @@ cccc
 ```
 
 打开 **http://127.0.0.1:8848** — 默认会一起拉起 daemon 和本地 Web UI。
+
+在推荐的 pip 发行版中，Python 是稳定的初始默认实现；Rust 是用于性能评估的
+实验性显式选项。可以持久切换，也可以在切换后立即执行命令：
+
+```bash
+cccc status            # 查看已选、正在运行和可用的实现
+cccc rust              # 选择实验性 Rust，然后启动 CCCC
+cccc python            # 选择稳定 Python，然后启动 CCCC
+cccc rust doctor        # 选择实验性 Rust，然后执行 doctor
+```
+
+切换属于显式生命周期操作：CCCC 会先校验目标载荷，再停止当前 Web/daemon，
+且绝不会悄悄回退到另一实现。各 agent runtime 的 MCP 配置始终指向公开的
+`cccc` 启动器，因此之后切换实现时无需逐个重配。
+任何时候都可以运行 `cccc python` 回到稳定实现。
+
+实验性独立发行版只包含 Rust，因此其中不会提供 `cccc python` 或实现切换。
 
 ### 建立多智能体协作组
 
@@ -193,11 +219,12 @@ graph TB
 
 ## 支持的运行时
 
-CCCC 跨 16 种一线运行时编排 agent，除此之外还支持 `custom` 运行时兜底。同一协作组内，每个 actor 可使用不同的运行时。
+CCCC 跨 17 种一线运行时编排 agent，除此之外还支持 `custom` 运行时兜底。同一协作组内，每个 actor 可使用不同的运行时。
 
 | 运行时 | 接入方式 | 入口 / 表面 |
 |---------|----------|-------------|
 | Claude Code | 自动 MCP 配置 | `claude` |
+| Cline CLI | 自动 MCP 配置 | `cline` |
 | Codex CLI | 自动 MCP 配置 | `codex` |
 | GitHub Copilot CLI | 自动 MCP 配置 | `copilot` |
 | Cursor CLI | 提示词辅助 MCP 配置 | `cursor-agent` |
@@ -219,12 +246,15 @@ CCCC 跨 16 种一线运行时编排 agent，除此之外还支持 `custom` 运�
 
 ```bash
 cccc setup --runtime claude       # 自动配置该运行时的 MCP
+cccc setup --runtime cline        # 为 Cline PTY TUI 自动配置 MCP
 cccc setup --runtime cursor       # 显示提示词辅助 MCP 配置协议
 cccc setup --runtime kilo         # 显示提示词辅助 MCP 配置协议
 cccc setup --runtime antigravity  # 显示提示词辅助 MCP 配置协议
 cccc runtime list --all           # 列出所有可用运行时
 cccc doctor                       # 检查环境和运行时可用性
 ```
+
+Rust daemon 在创建自动管理的 PTY actor 会话前，会检查对应 runtime 的 `cccc` MCP 是否仍指向当前公共入口；缺失或可安全替换的旧配置会自动修复并再次验证。Codex 保留 actor 级启动配置，因此从 Python 切换到 Rust、旧入口被删除或符号链接失效时，新会话不会继续锁定无效工具列表。项目级等非用户作用域冲突不会被静默覆盖，而会返回可操作的错误。
 
 Actor 可以以 **PTY**（嵌入式终端）或 **headless**（无终端的结构化 I/O）模式运行。Claude Code 和 Codex CLI 支持两种模式；headless 模式下 daemon 对投递和流式传输具有更精细的控制。
 
@@ -304,10 +334,6 @@ CCCC 实现的是 IM 级消息语义，而不是"往终端里粘贴一段文字"
 - **文本缩放** — 90% / 100% / 125% 三级字体大小，按浏览器持久化
 - **亮色 / 暗色 / 跟随系统 主题**
 
-| 聊天 | 终端 |
-|:----:|:----:|
-| ![Chat](screenshots/chat.png) | ![Terminal](screenshots/terminal.png) |
-
 ### 远程访问
 
 从外部访问 Web UI：
@@ -340,7 +366,7 @@ cccc im start
 | 企业微信 / WeCom | ✅ 已支持 |
 | 微信 / Weixin | ✅ 已支持 |
 
-> 钉钉和企业微信支持流式回复（分别为 AI Card 和 aibot 流式）；其余平台投递最终消息。
+> Telegram、Slack、Discord、飞书、钉钉和企业微信均支持渐进式回复；超长结果会回退为无损分段的最终消息。微信采用无损最终消息投递，目前仅支持机器人私聊。
 
 在任一已支持平台上，使用纯文本或 `/send @foreman <消息>` 做常规协调，只有真正广播时才使用 `/send @all <消息>`；也可以用 `/status` 查看组状态，并用 `/pause` / `/resume` 控制运维 — 全部在手机上完成。
 
@@ -458,20 +484,49 @@ CCCC 不替代你的 agent —— 它是让它们成为一个团队的那一层�
 
 ## 安装选项
 
-### pip（稳定版，推荐）
+### pip（稳定、推荐）
 
 ```bash
-pip install -U cccc-pair
+python -m pip install -U cccc-pair
 ```
+
+这是完整且受支持的产品发行版，其中 Python 是稳定且推荐的实现。在 Linux
+x86-64、Intel/Apple Silicon macOS 和 Windows x86-64 上，pip 会选择还包含一个
+私有、版本严格匹配的实验性 Rust 可执行文件的平台 wheel，用于显式的性能评估。
+其他平台使用通用 Python wheel；`cccc status` 会明确显示 Rust 不可用，而不会
+假装切换成功。
+
+### 实验性独立 Rust 预览版
+
+```bash
+# macOS / Linux
+curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
+
+# Windows CMD 或 PowerShell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
+```
+
+这个可选通道只适合在无 Python 的 Rust-only 部署中评估实验性 Rust 实现。它会
+从 GitHub Releases 下载并校验二进制，也可通过同一安装器执行 `cccc update`，
+但不具备 Python 回退或实现切换能力，不作为稳定 pip/Python 路径的推荐替代品。
+安装器不会覆盖不属于它的
+现有 `cccc` 命令；请先有意卸载原命令，或改用其它 `CCCC_INSTALL_DIR`。
+其它目录中的同名命令会原样保留。使用默认安装目录时，安装器会把新命令放到用户
+PATH 最前面，并列出仍然存在的重复命令。打开新终端后运行 `cccc doctor`，其
+`Installation` 部分会显示本次入口、PATH 实际命中的命令以及全部冲突路径。
+
+当前托管的原生安装器固定安装 `v0.4.34-rc2` 候选版本。
 
 ### pip（RC 版，TestPyPI）
 
 ```bash
-pip install -U --pre \
+python -m pip install -U --pre \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
   cccc-pair
 ```
+
+Cargo 安装仅保留给工作区开发使用，不作为受支持的终端用户发行方式。
 
 ### 从源码安装
 
@@ -484,7 +539,7 @@ pip install -e .
 ### uv（快速，Windows 推荐）
 
 ```bash
-uv venv -p 3.11 .venv
+uv venv -p 3.14 .venv
 uv pip install -e .
 uv run cccc --help
 ```

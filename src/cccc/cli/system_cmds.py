@@ -6,6 +6,7 @@ import json
 from importlib.metadata import PackageNotFoundError, distribution
 
 from .common import *  # noqa: F401,F403
+from .installation_diagnostics import inspect_cccc_installation
 
 __all__ = [
     "cmd_version",
@@ -174,7 +175,7 @@ def cmd_update(args: argparse.Namespace) -> int:
                 "ok": False,
                 "error": {
                     "code": "distribution_not_found",
-                    "message": "CCCC is not installed in the current Python environment",
+                    "message": "CCCC is not installed in the launcher's Python environment",
                 },
             }
         )
@@ -199,6 +200,34 @@ def cmd_update(args: argparse.Namespace) -> int:
                     **inspection,
                     "recommendation": _recommendation_for_install_kind(install_kind),
                 },
+            }
+        )
+        return 1
+
+    prepare = getattr(args, "_before_product_update", None)
+    if not callable(prepare):
+        _print_json(
+            {
+                "ok": False,
+                "error": {
+                    "code": "launcher_required",
+                    "message": "product updates must run through the installed cccc launcher",
+                },
+                "result": inspection,
+            }
+        )
+        return 1
+    try:
+        # Windows cannot replace a running packaged Rust executable. Stop the
+        # active product only after argument/install validation and immediately
+        # before pip replaces the wheel.
+        prepare()
+    except Exception as e:
+        _print_json(
+            {
+                "ok": False,
+                "error": {"code": "update_prepare_failed", "message": str(e)},
+                "result": inspection,
             }
         )
         return 1
@@ -252,6 +281,12 @@ def cmd_version(_: argparse.Namespace) -> int:
 
 def cmd_status(_: argparse.Namespace) -> int:
     """Show overall CCCC status: daemon, groups, actors."""
+    from ..implementation import (
+        ImplementationError,
+        daemon_implementation,
+        load_selected_implementation,
+        probe_rust_implementation,
+    )
     from ..kernel.runtime import detect_all_runtimes
     
     home = ensure_home()
@@ -259,6 +294,15 @@ def cmd_status(_: argparse.Namespace) -> int:
     # Check daemon
     daemon_resp = call_daemon({"op": "ping"})
     daemon_ok = daemon_resp.get("ok", False)
+    running_implementation = daemon_implementation(daemon_resp)
+
+    try:
+        selected_implementation = load_selected_implementation(home)
+        selection_error = ""
+    except ImplementationError as error:
+        selected_implementation = "invalid"
+        selection_error = str(error)
+    rust = probe_rust_implementation()
     
     # Get groups
     groups_resp = call_daemon({"op": "groups"}) if daemon_ok else {"ok": False}
@@ -276,7 +320,16 @@ def cmd_status(_: argparse.Namespace) -> int:
     print(f"===========")
     print(f"Version:     {__version__}")
     print(f"Home:        {home}")
-    print(f"Daemon:      {'running' if daemon_ok else 'stopped'}")
+    print(f"Selected:    {selected_implementation}")
+    if selection_error:
+        print(f"Selection:   {selection_error}")
+    daemon_state = f"running ({running_implementation})" if daemon_ok else "stopped"
+    print(f"Daemon:      {daemon_state}")
+    print(f"Python:      available ({__version__})")
+    if rust.get("available"):
+        print(f"Rust:        available ({rust.get('version')})")
+    else:
+        print(f"Rust:        unavailable ({rust.get('error')})")
     print(f"Runtimes:    {', '.join(available_runtimes) if available_runtimes else '(none detected)'}")
     print()
     
@@ -324,6 +377,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # CCCC_HOME
     home = ensure_home()
     print(f"CCCC_HOME: {home}")
+
+    installation = inspect_cccc_installation()
+    print()
+    print("Installation:")
+    print(f"  Current executable: {installation.get('current_executable') or '(unknown)'}")
+    print(f"  PATH resolves to: {installation.get('resolved_command') or '(not found)'}")
+    path_status = str(installation.get("path_status") or "unknown")
+    print(f"  PATH status: {path_status.upper()}")
+    conflicting_commands = installation.get("conflicting_commands")
+    if isinstance(conflicting_commands, list) and conflicting_commands:
+        print("  Other CCCC commands left unchanged:")
+        for command in conflicting_commands:
+            print(f"    - {command}")
+    if path_status == "conflict":
+        print("  Fix: move the current executable's directory to the front of PATH, then open a new terminal.")
     
     # Daemon status
     resp = call_daemon({"op": "ping"})
@@ -386,7 +454,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if available_count == 0:
         print("No agent runtimes detected.")
         print(
-            "First-class supported runtimes: claude, codex, copilot, cursor, devin, kiro, kilo, "
+            "First-class supported runtimes: claude, cline, codex, copilot, cursor, devin, kiro, kilo, "
             "antigravity, droid, amp, auggie, grok, hermes, kimi, opencode"
         )
         print("Manual fallback: custom (bring your own command and MCP wiring)")
@@ -433,12 +501,13 @@ def cmd_setup(args: argparse.Namespace) -> int:
     project_path = Path(args.path or ".").resolve()
 
     # Supported runtimes
-    # - claude/codex/copilot/devin/kiro/droid/amp/auggie/grok/hermes/kimi: MCP setup can be automated via their CLIs
+    # - claude/cline/codex/copilot/devin/kiro/droid/amp/auggie/grok/hermes/kimi: MCP setup can be automated via their CLIs
     # - opencode: MCP setup is injected into the actor process through OPENCODE_CONFIG_CONTENT
     # - antigravity/cursor/kilo: MCP setup is prompt-assisted inside the runtime agent; CCCC does not edit their config
     # - custom: user-provided runtime; MCP setup is manual (generic guidance only)
     SUPPORTED_RUNTIMES = [
         "claude",
+        "cline",
         "codex",
         "copilot",
         "cursor",
@@ -542,6 +611,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 def cmd_daemon(args: argparse.Namespace) -> int:
+    if args.action in {"run", "stop"}:
+        from ..daemon_main import main as daemon_main
+
+        # Keep Python daemon lifecycle ownership in one place. In particular,
+        # daemon_main's stop path also terminates the supervised Web/launcher
+        # process so that its daemon monitor cannot immediately restart the
+        # child after reporting a successful shutdown.
+        return int(daemon_main([args.action]))
+
     if args.action == "status":
         resp = call_daemon({"op": "ping"})
         if resp.get("ok"):
@@ -557,13 +635,5 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             return 0
         print("ccccd: failed to start")
         return 1
-
-    if args.action == "stop":
-        resp = call_daemon({"op": "shutdown"})
-        if resp.get("ok"):
-            print("ccccd: shutdown requested")
-            return 0
-        print("ccccd: not running")
-        return 0
 
     return 2

@@ -14,7 +14,7 @@ for Claude Code, Codex, ChatGPT Web, and 13 more runtimes in one durable group.*
 
 Run multiple coding agents as a **persistent, coordinated team** across runtimes, machines, and trusted working groups — not a pile of disconnected terminal sessions.
 
-One `pip install`. Zero infrastructure, production-grade power.
+One install command. No Rust toolchain or infrastructure required.
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=blue)](https://pypi.org/project/cccc-pair/)
 [![Python](https://img.shields.io/pypi/pyversions/cccc-pair)](https://pypi.org/project/cccc-pair/)
@@ -31,7 +31,9 @@ One `pip install`. Zero infrastructure, production-grade power.
 
 <div align="center">
 
-<img src="screenshots/overview.webp" alt="CCCC Web UI overview" width="100%">
+<a href="screenshots/overview.webp?raw=1" title="View desktop screenshot at full size"><img src="screenshots/overview.webp" alt="CCCC Web UI desktop overview" width="76%" align="top"></a>
+&nbsp;
+<a href="screenshots/iphone.webp?raw=1" title="View mobile screenshot at full size"><img src="screenshots/iphone.webp" alt="CCCC Web UI mobile overview" width="20%" align="top"></a>
 
 </div>
 
@@ -46,11 +48,11 @@ CCCC runs your agents as one durable, coordinated system:
 - **One control plane** — Web UI, CLI, MCP, and IM bridges all operate on the same daemon-owned state.
 - **Multi-runtime by default** — Claude Code, Codex CLI, ChatGPT Web, Grok Build, and the rest of the first-class runtimes can collaborate in one group.
 - **Group Bridge for remote teams** — trusted CCCC groups can exchange explicit messages and, when granted, inspect or work with each other's local resources.
-- **Local-first operations** — one `pip install`, runtime state in `CCCC_HOME`, and remote supervision only when you choose to expose it.
+- **Local-first operations** — one install command, runtime state in `CCCC_HOME`, and remote supervision only when you choose to expose it.
 
 ## What CCCC Does
 
-CCCC is a single `pip install` with zero external dependencies — no database, no message broker, no Docker required. Yet it gives you the pieces fragile multi-agent setups usually lack:
+CCCC installs with one command and needs no database, message broker, or Docker. Yet it gives you the pieces fragile multi-agent setups usually lack:
 
 | Capability | How |
 |---|---|
@@ -68,17 +70,24 @@ CCCC is a single `pip install` with zero external dependencies — no database, 
 ### Install
 
 ```bash
-# Stable channel (PyPI)
-pip install -U cccc-pair
+# Stable product distribution (recommended; Python 3.11+)
+python -m pip install -U cccc-pair
 
 # RC channel (TestPyPI)
-pip install -U --pre \
+python -m pip install -U --pre \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
   cccc-pair
 ```
 
-> **Requirements**: Python 3.9+, macOS / Linux / Windows
+> The PyPI package is the stable, recommended CCCC distribution, with Python as
+> its stable default implementation. On Linux x86-64, Intel/Apple Silicon macOS,
+> and Windows x86-64, its platform wheel also includes a private, version-matched
+> **experimental Rust implementation** for opt-in performance evaluation with
+> `cccc rust`. Feature and integration parity is still in progress; use
+> `cccc python` for reliability-critical workflows. An optional
+> [experimental standalone Rust preview](#experimental-standalone-rust-preview)
+> is available for Rust-only deployment testing.
 
 ### Upgrade
 
@@ -86,7 +95,10 @@ pip install -U --pre \
 cccc update
 ```
 
-Use `cccc update --check` to inspect the detected install type and the command that would run.
+Use `cccc update --check` to inspect the detected installation and update source.
+The recommended pip install updates the complete `cccc-pair` product from its
+detected PyPI channel. Experimental standalone installs update through the GitHub
+Pages installer. Both paths stop the active Web/daemon pair before replacing files.
 
 ### Launch
 
@@ -96,12 +108,33 @@ cccc
 
 Open **http://127.0.0.1:8848** — by default, CCCC brings up the daemon and the local Web UI together.
 
+In the recommended pip distribution, Python is the stable initial default until
+an implementation choice is saved. Rust is an experimental, explicit opt-in for
+performance evaluation. A bare `cccc` follows the persisted choice. Switch
+persistently, or switch and run a command in one step:
+
+```bash
+cccc status            # selected, running, and available implementations
+cccc rust              # select experimental Rust, then launch CCCC
+cccc python            # select stable Python, then launch CCCC
+cccc rust doctor        # select experimental Rust, then run doctor
+```
+
+Switching is an explicit lifecycle operation: CCCC validates the target payload,
+stops the active Web/daemon pair, and never silently falls back to the other
+implementation. Agent runtime MCP configurations keep pointing at the stable
+public `cccc` launcher, so they follow later switches automatically.
+Use `cccc python` to return to the stable implementation at any time.
+
+The experimental standalone distribution contains Rust only, so `cccc python`
+and implementation switching are intentionally unavailable there.
+
 ### Create a multi-agent group
 
 ```bash
 cd /path/to/your/repo
 cccc attach .                              # bind this directory as a scope
-cccc setup --runtime claude                # configure MCP for your runtime
+cccc setup                                 # configure all available runtimes (or select one with --runtime)
 cccc actor add foreman --runtime claude    # first actor becomes foreman
 cccc actor add implementer --runtime codex # add a peer
 cccc group start                           # start all actors
@@ -194,11 +227,12 @@ graph TB
 
 ## Supported Runtimes
 
-CCCC orchestrates agents across 16 first-class runtimes, with `custom` available for everything else. Each actor in a group can use a different runtime.
+CCCC orchestrates agents across 17 first-class runtimes, with `custom` available for everything else. Each actor in a group can use a different runtime.
 
 | Runtime | Integration | Entrypoint / Surface |
 |---------|-------------|----------------------|
 | Claude Code | Auto MCP setup | `claude` |
+| Cline CLI | Auto MCP setup | `cline` |
 | Codex CLI | Auto MCP setup | `codex` |
 | GitHub Copilot CLI | Auto MCP setup | `copilot` |
 | Cursor CLI | Prompt-assisted MCP setup | `cursor-agent` |
@@ -220,6 +254,7 @@ These are stable runtime entrypoints or surfaces. CCCC applies runtime-specific 
 
 ```bash
 cccc setup --runtime claude       # auto-configures MCP for this runtime
+cccc setup --runtime cline        # configures Cline CLI MCP for its PTY TUI
 cccc setup --runtime cursor       # shows the prompt-assisted MCP setup contract
 cccc setup --runtime kilo         # shows the prompt-assisted MCP setup contract
 cccc setup --runtime antigravity  # shows the prompt-assisted MCP setup contract
@@ -235,7 +270,7 @@ For setup commands, runner-mode guidance, and troubleshooting for every supporte
 
 ChatGPT Web can join a CCCC group as a real actor, not just an external chat window: CCCC delivers group messages into one bound ChatGPT conversation via browser delivery, and GPT-5.x calls back through an actor-bound remote MCP connector — receiving routed messages, replying visibly, editing repository files, and running scoped shell/git commands much like a native local coding agent. This also turns spare ChatGPT Web capacity into additional local-development agent capacity.
 
-Setup requires exposing CCCC through a public HTTPS URL for the MCP connector (Cloudflare Tunnel, ngrok, Tailscale Funnel, or a reverse proxy). Note that GPT-5.x Pro sessions currently cannot be used this way — they do not expose third-party MCP connectors. Full setup and troubleshooting: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime).
+Setup requires exposing CCCC through a public HTTPS URL for the MCP connector (Cloudflare Tunnel, ngrok, Tailscale Funnel, or a reverse proxy). CCCC defaults to stable text-only delivery and also offers an experimental **GPT Pro** mode that attaches a tiny blank PNG when delivering each batch. This compatibility workaround does not switch ChatGPT models or guarantee connector availability, and may stop working when ChatGPT changes. Full setup and troubleshooting: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime).
 
 ## Group Bridge: connect remote groups
 
@@ -305,10 +340,6 @@ The built-in Web UI at `http://127.0.0.1:8848` provides:
 - **Text scale** — 90% / 100% / 125% font size with per-browser persistence
 - **Light / Dark / System themes**
 
-| Chat | Terminal |
-|:----:|:-------:|
-| ![Chat](screenshots/chat.png) | ![Terminal](screenshots/terminal.png) |
-
 ### Remote access
 
 For accessing the Web UI from outside localhost:
@@ -318,6 +349,7 @@ For accessing the Web UI from outside localhost:
 - **Tailscale** — bind to your tailnet IP: `CCCC_WEB_HOST=$TAILSCALE_IP cccc`
 - Before any non-local exposure, create an **Admin Access Token** in **Settings > Web Access** and keep the service behind a network boundary until that token exists.
 - In **Settings > Web Access**, `127.0.0.1` means local-only, while `0.0.0.0` means localhost plus your LAN IP on a normal local host. If CCCC is running inside WSL2's default NAT networking, `0.0.0.0` only exposes Web inside WSL; for LAN devices, use WSL mirrored networking or a Windows portproxy/firewall rule.
+- Rust launch uses `--host` / `--port` overrides first, then the saved Web Access binding (including legacy Python `settings.yaml`), then `CCCC_WEB_HOST` / `CCCC_WEB_PORT`.
 - `Save` stores the target binding. If Web was started by `cccc` or `cccc web`, use `Apply now` in **Settings > Web Access** to perform the short supervised restart. If Web is managed by Docker, systemd, or another external supervisor, restart that service instead.
 - `Start` / `Stop` are only for Tailscale remote access and do not rebind the already-running Web socket.
 - Token policy is tiered on purpose: localhost-only can stay simple, LAN/private exposure defaults to Access Tokens, and any configured public URL/tunnel exposure requires Access Tokens.
@@ -341,7 +373,7 @@ cccc im start
 | WeCom / 企业微信 | ✅ Supported |
 | Weixin / 微信 | ✅ Supported |
 
-> DingTalk and WeCom support streaming replies (AI Card and aibot streaming respectively); other platforms deliver final messages.
+> Telegram, Slack, Discord, Feishu, DingTalk, and WeCom support progressive replies; overlong results fall back to lossless final-message chunks. Weixin delivers lossless final messages and currently supports direct bot chats only.
 
 From any supported platform, use plain text or `/send @foreman <message>` for normal coordination, reserve `/send @all <message>` for true broadcasts, use `/status` to check group health, and use `/pause` / `/resume` to control operations — all from your phone.
 
@@ -462,17 +494,52 @@ For detailed security guidance, see [SECURITY.md](SECURITY.md).
 ### pip (stable, recommended)
 
 ```bash
-pip install -U cccc-pair
+python -m pip install -U cccc-pair
 ```
+
+This is the complete supported product distribution, with Python as its stable
+and recommended implementation. On Linux x86-64, Intel/Apple Silicon macOS, and
+Windows x86-64, pip selects a platform wheel that also contains a private,
+version-matched experimental Rust executable for opt-in performance evaluation.
+Other platforms receive the universal Python wheel; `cccc status` reports Rust
+as unavailable instead of pretending to switch.
+
+### Experimental standalone Rust preview
+
+```bash
+# macOS / Linux
+curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
+
+# Windows CMD or PowerShell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
+```
+
+Use this optional channel only when evaluating the experimental Rust
+implementation in a Rust-only deployment without Python. It downloads a
+checksum-verified binary from GitHub Releases and updates through the same
+installer, but it has no Python fallback or implementation switching and is not
+the recommended replacement for the stable pip/Python path. The
+installer refuses to overwrite an existing `cccc` command that it does not own;
+uninstall that command deliberately or choose another `CCCC_INSTALL_DIR` first.
+Commands in other directories are left untouched. For the default install
+directory, the installer places the new command first in the user PATH and lists
+any remaining duplicates. Open a new terminal and run `cccc doctor`; its
+`Installation` section reports the invoked executable, the command selected by
+PATH, and every conflicting command.
+
+The hosted native installer currently pins the `v0.4.34-rc2` release candidate.
 
 ### pip (RC from TestPyPI)
 
 ```bash
-pip install -U --pre \
+python -m pip install -U --pre \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
   cccc-pair
 ```
+
+Cargo installation is retained for workspace development, not as a supported
+end-user distribution.
 
 ### From source
 
@@ -485,7 +552,7 @@ pip install -e .
 ### uv (fast, recommended on Windows)
 
 ```bash
-uv venv -p 3.11 .venv
+uv venv -p 3.14 .venv
 uv pip install -e .
 uv run cccc --help
 ```

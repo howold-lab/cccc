@@ -21,9 +21,16 @@ Check your environment and diagnose issues.
 cccc doctor             # Full environment check
 ```
 
-On Linux, the report includes projected-browser readiness: system Chrome/Edge, required `Xvfb`
+Browser readiness uses the same executable discovery as the Web runtime, including the standard
+Chrome, Edge, and Chromium installation directories on macOS and Windows. On Linux, the report
+includes projected-browser readiness: system Chrome/Edge, required `Xvfb`
 isolation, and the optional `x11vnc` VNC viewer. A missing `x11vnc` does not prevent browser
 isolation; CCCC falls back to its CDP screencast viewer.
+
+The installation section reports the executable handling the current invocation,
+the first `cccc` selected by PATH, and all other `cccc` commands. A `CONFLICT`
+status means an older installation is ahead of the current launcher; move the
+current launcher's directory to the front of PATH and open a new terminal.
 
 ### `cccc runtime list`
 
@@ -120,13 +127,17 @@ Manage actors.
 
 ```bash
 cccc actor list                    # List actors
+cccc actor add <actor_id> --scope /path/to/project
 cccc actor start <actor_id>        # Start actor
 cccc actor stop <actor_id>         # Stop actor
 cccc actor restart <actor_id>      # Restart actor
 cccc actor remove <actor_id>       # Remove actor
-cccc actor update <actor_id> ...   # Update actor settings
+cccc actor update <actor_id> --scope /path/to/project
 cccc actor secrets <actor_id> ...  # Manage runtime-only secrets
 ```
+
+Actor scope arguments are project paths at the CLI boundary. Rust resolves them to the attached
+scope key before persistence, keeping the stored group document compatible with the Python backend.
 
 ## Message Commands
 
@@ -139,6 +150,7 @@ cccc send "Hello"                  # No --to: default recipient policy applies (
 cccc send "Hello" --to @foreman    # Send to foreman
 cccc send "Hello" --to peer-1      # Send to specific actor
 cccc send "Announcement" --to @all # Explicit broadcast
+cccc send "Review this scope" --path src/api
 ```
 
 ### `cccc tracked-send`
@@ -152,12 +164,15 @@ cccc tracked-send "Please implement this and reply with validation evidence." \
   --outcome "Feature is implemented and validation evidence is reported"
 ```
 
+The Rust CLI also forwards `--checklist`, `--assignee`, `--waiting-on`, `--handoff-to`,
+`--notes`, `--priority`, `--no-reply-required`, and `--idempotency-key` to the daemon.
+
 ### `cccc reply`
 
 Reply to a message.
 
 ```bash
-cccc reply <event_id> "Reply text"
+cccc reply <event_id> "Reply text" --to peer-1 --priority attention --reply-required
 ```
 
 ### `cccc inbox`
@@ -167,6 +182,7 @@ View inbox.
 ```bash
 cccc inbox --actor-id <id>         # View actor unread messages
 cccc inbox --actor-id <id> --mark-read
+cccc inbox --actor-id <id> --kind-filter notify
 ```
 
 ### `cccc tail`
@@ -237,10 +253,61 @@ Notes:
 - `language` / `lang` are not valid query options (put language requirement in query text).
 - Provider credentials are write-only; CLI/Web only return masked metadata.
 - `cccc space health` validates credential format and adapter compatibility.
+- The Python implementation vendors `notebooklm-py` v0.8.0. The experimental
+  Rust implementation uses a native protocol client and currently supports
+  direct `resource_ingest` only for `pasted_text`; use `cccc space sync` for
+  local `.md`/`.txt` files, or select Python for direct file/URL/YouTube/Drive
+  ingestion.
+- Artifact generation is asynchronous and does not save locally by default.
+  Request wait/save explicitly when a local artifact is required. Native Rust
+  download currently supports media, report/study-guide, infographic, and
+  slide-deck outputs; interactive quiz/flashcard/mind-map and data-table
+  downloads remain Python-only.
 - When a group is bound, curated `context_sync` exports are also auto-enqueued from `context_sync` updates.
 - `cccc space sync` performs two-way reconcile for Group Space:
   - local `repo/space/` files -> provider sources,
   - provider source/artifact projection -> local `repo/space/` (`.sync/remote-sources` and `artifacts/`).
+
+## Implementation Selection
+
+### `cccc python [command ...]` / `cccc rust [command ...]`
+
+Select the product implementation persistently, then optionally execute a
+command with that implementation. Python is the stable and recommended default;
+Rust is an experimental opt-in for performance evaluation while feature and
+integration parity remains in progress.
+
+```bash
+cccc status             # Show selected, running, and available implementations
+cccc rust               # Select experimental Rust and launch daemon + Web
+cccc rust doctor        # Select experimental Rust and run doctor
+cccc python             # Select stable Python and launch daemon + Web
+cccc python daemon start
+```
+
+The selector must be the first argument. It is intentionally not a one-shot
+override: agent runtimes and later terminal invocations all follow the same
+selection in `CCCC_HOME`. Switching validates the target first and then stops
+the active Web/daemon pair. If Rust is absent or has a different product version,
+the command fails without changing the selection or falling back to Python.
+If the selection file is corrupt, ordinary commands fail visibly; an explicit
+`cccc python` selector replaces it and restores the safe default.
+
+Python is the stable initial default only while no implementation choice has
+been stored. After `cccc rust` or `cccc python`, a bare `cccc` follows that
+persisted choice; the Web startup banner prints the implementation that actually
+started. Use `cccc python` to return to the stable implementation at any time.
+
+`status`, `version`, and `update` are stable launcher commands. `status` shows
+the selected implementation, the implementation reported by a live daemon, and
+whether the bundled Rust payload is usable. `version` is the shared product
+version. `update` follows the installer that owns the public executable: the
+website installer for an experimental standalone Rust preview, or pip for the
+recommended complete `cccc-pair` distribution.
+
+The legacy `ccccd start|stop|status|run` command remains as a compatibility
+alias, but now passes through the same implementation launcher. New automation
+should prefer `cccc daemon ...`.
 
 ## Setup Commands
 
@@ -249,6 +316,7 @@ Notes:
 Configure MCP for an agent runtime.
 
 ```bash
+cccc setup                         # Configure every supported runtime; unavailable CLIs are reported
 cccc setup --runtime claude        # Auto-configure for Claude Code
 cccc setup --runtime codex         # Auto-configure for Codex
 cccc setup --runtime copilot       # Auto-configure for GitHub Copilot CLI
@@ -260,20 +328,33 @@ cccc setup --runtime kilo          # Show prompt-assisted setup contract for Kil
 cccc setup --runtime antigravity   # Show prompt-assisted setup contract for Antigravity CLI
 ```
 
+Without `--runtime`, setup performs one batch pass: installed CLI runtimes are configured,
+prompt-assisted/manual runtimes return their configuration contract, and missing runtimes are
+reported without aborting the remaining setup work.
+
 ### `cccc update`
 
-Upgrade CCCC in the current Python environment.
+Upgrade CCCC through the detected installation channel.
 
 ```bash
 cccc update                        # Upgrade using the detected channel
+cccc update --check                # Show install detection + planned command
+
+# pip distribution only
 cccc update --channel stable       # Force the stable PyPI channel
 cccc update --channel rc           # Force the TestPyPI RC channel
-cccc update --check                # Show install detection + planned command
 ```
 
 Notes:
 - The default channel follows the detected install metadata when possible, then falls back to `stable`.
+- Experimental standalone Rust installations reuse the GitHub Pages installer,
+  preserve their current install directory, and contain no Python fallback or
+  implementation switching.
 - Editable and local-path installs are reported but not updated automatically.
+- The recommended platform wheel updates the public launcher, stable Python
+  implementation, and experimental private Rust payload together.
+- After a successful update, CCCC stops the older Web/daemon pair; the next
+  command starts the selected implementation from the new product version.
 
 ## Web Commands
 
@@ -284,7 +365,14 @@ Start only the Web UI (daemon must be running).
 ```bash
 cccc web                           # Start Web UI
 cccc web --port 9000               # Custom port
+cccc web --exhibit                 # Read-only exhibit mode
+cccc web --mode exhibit            # Equivalent explicit mode
 ```
+
+Only one Web process may run for a given `CCCC_HOME`. If another CCCC process
+for that home is active, an interactive launch displays its PID and asks whether
+to stop it before continuing. Non-interactive launches fail instead of stopping
+an existing process implicitly.
 
 ## MCP Commands
 
@@ -301,7 +389,9 @@ cccc mcp                           # Start MCP server (stdio mode)
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CCCC_HOME` | `~/.cccc` | Runtime home directory |
-| `CCCC_WEB_HOST` | `127.0.0.1` | Web UI bind address |
-| `CCCC_WEB_PORT` | `8848` | Web UI port |
+| `CCCC_WEB_HOST` | saved setting, then `127.0.0.1` | Web UI bind address; `--host` overrides both |
+| `CCCC_WEB_PORT` | saved setting, then `8848` | Web UI port; `--port` overrides both |
+| `CCCC_WEB_MODE` | `normal` | Set to `exhibit` for a read-only Web UI |
+| `CCCC_WEB_READONLY` | unset | Truthy value also enables read-only exhibit mode |
 | `CCCC_WEB_READY_TIMEOUT_SECONDS` | `10` | Supervised Web child readiness timeout before CCCC treats startup as failed |
 | `CCCC_LOG_LEVEL` | `INFO` | Log level |

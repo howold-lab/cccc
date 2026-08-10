@@ -114,6 +114,13 @@ export type GroupBridgeRouteMessageRef = MessageRef & {
   token?: string;
 };
 
+export type LocalGroupRouteMessageRef = MessageRef & {
+  kind: "local_group_route";
+  group_id: string;
+  group_title?: string;
+  token?: string;
+};
+
 export type StreamingActivity = {
   id: string;
   kind: "queued" | "thinking" | "plan" | "search" | "command" | "patch" | "tool" | "reply" | string;
@@ -218,6 +225,24 @@ export type HeadlessStreamEvent = {
   actor_id?: string;
   type?: string;
   data?: Record<string, unknown>;
+};
+
+export type RuntimeActivityEvent = {
+  v: number;
+  id: string;
+  ts: string;
+  group_id: string;
+  actor_id: string;
+  runtime: string;
+  activity_id: string;
+  kind: "session" | "turn" | "tool" | "subagent" | string;
+  status: "started" | "waiting" | "completed" | "failed" | "stuck" | string;
+  event_type: string;
+  session_id: string;
+  turn_id?: string | null;
+  operation_id?: string | null;
+  tool_name?: string | null;
+  duration_ms?: number | null;
 };
 
 export type LedgerEventStatusPayload = {
@@ -745,6 +770,9 @@ export type AssistantServiceModel = {
   status?: "not_installed" | "downloading" | "installing" | "ready" | "failed" | "unknown" | string;
   available?: boolean;
   installed?: boolean;
+  managed?: boolean;
+  removable?: boolean;
+  implementation?: string;
   install_dir?: string;
   installed_at?: string;
   updated_at?: string;
@@ -781,6 +809,9 @@ export type AssistantServiceRuntime = {
   status?: "not_installed" | "installing" | "ready" | "failed" | string;
   available?: boolean;
   installed?: boolean;
+  managed?: boolean;
+  removable?: boolean;
+  implementation?: string;
   install_dir?: string;
   python?: string;
   packages?: string[];
@@ -945,6 +976,7 @@ export type AssistantVoiceDocumentMutationResult = {
   actor_notify_delivery_error?: string;
   event?: unknown;
   request_id?: string;
+  input_append_id?: string;
 };
 
 export type AssistantVoicePromptDraft = {
@@ -995,6 +1027,7 @@ export type AssistantVoiceInputResult = {
   actor_notify_delivery_error?: string;
   event?: unknown;
   request_id?: string;
+  input_append_id?: string;
 };
 
 export type AssistantVoicePromptDraftMutationResult = {
@@ -1040,6 +1073,11 @@ export type RemoteAccessState = {
     access_token_requirement_satisfied?: boolean;
     access_token_source?: "store" | "none" | string;
     access_token_count?: number;
+    admin_access_token_present?: boolean;
+    admin_access_token_count?: number;
+    remote_listener_auth_required?: boolean;
+    remote_listener_auth_requirement_satisfied?: boolean;
+    allow_unauthenticated_listener_override?: boolean;
     allow_insecure_remote_override?: boolean;
     effective_require_access_token?: boolean;
     exposure_class?: "local" | "private" | "public" | string;
@@ -1075,6 +1113,8 @@ export type RemoteAccessState = {
     web_public_url?: string | null;
     access_token_configured?: boolean;
     access_token_count?: number;
+    admin_access_token_configured?: boolean;
+    admin_access_token_count?: number;
     access_token_source?: "store" | "none" | string;
   } | null;
   next_steps?: string[] | null;
@@ -1374,7 +1414,9 @@ export type IMStatus = {
   enabled: boolean;
   platform?: string;
   running: boolean;
-  pid?: number;
+  adapter_available?: boolean;
+  last_error?: string | null;
+  pid?: number | null;
   subscribers: number;
 };
 
@@ -1385,6 +1427,8 @@ export type WeixinLoginStatus = {
   qrcode_url?: string;
   qr_ascii?: string;
   error?: string;
+  auto_subscribed?: boolean;
+  verification_required?: boolean;
   running: boolean;
   pid?: number | null;
   updated_at?: string;
@@ -1408,6 +1452,7 @@ export type PresentationWorkspaceListing = {
 // Runtime configuration
 export const SUPPORTED_RUNTIMES = [
   "claude",
+  "cline",
   "codex",
   "copilot",
   "cursor",
@@ -1432,6 +1477,7 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   amp: { label: "Amp", desc: "" },
   auggie: { label: "Auggie (Augment)", desc: "" },
   claude: { label: "Claude Code", desc: "" },
+  cline: { label: "Cline CLI", desc: "Uses Cline CLI MCP setup with the PTY TUI" },
   codex: { label: "Codex CLI", desc: "" },
   copilot: { label: "GitHub Copilot CLI", desc: "Uses Copilot CLI MCP setup with the PTY runner" },
   cursor: {
@@ -1507,6 +1553,16 @@ export const RUNTIME_COLORS: Record<
     textLight: "text-orange-700",
     borderLight: "border-orange-300",
     dotLight: "bg-orange-500",
+  },
+  cline: {
+    bg: "bg-gray-900/40",
+    text: "text-gray-200",
+    border: "border-gray-500/60",
+    dot: "bg-gray-300",
+    bgLight: "bg-gray-100",
+    textLight: "text-gray-800",
+    borderLight: "border-gray-300",
+    dotLight: "bg-gray-600",
   },
   codex: {
     bg: "bg-emerald-900/30",

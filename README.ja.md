@@ -10,11 +10,11 @@
 ### コーディングエージェントをグループチャットのように指揮する
 
 **既読・送達トラッキング・リモートグループブリッジ・スマホ運用 —
-Claude Code、Codex、ChatGPT Web など 16 のランタイムをひとつの永続グループで。**
+Claude Code、Codex、ChatGPT Web など 17 のランタイムをひとつの永続グループで。**
 
 複数のコーディングエージェントを、ランタイム・マシン・信頼済み working group をまたぐ**永続的で協調されたチーム**として運用 — バラバラのターミナルセッションではなく。
 
-`pip install` ひとつ。ゼロインフラ、プロダクション級のパワー。
+インストールコマンドひとつ。Rust ツールチェーンも追加インフラも不要です。
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=blue)](https://pypi.org/project/cccc-pair/)
 [![Python](https://img.shields.io/pypi/pyversions/cccc-pair)](https://pypi.org/project/cccc-pair/)
@@ -31,7 +31,9 @@ Claude Code、Codex、ChatGPT Web など 16 のランタイムをひとつの永
 
 <div align="center">
 
-<img src="screenshots/overview.webp" alt="CCCC Web UI の概要" width="100%">
+<a href="screenshots/overview.webp?raw=1" title="デスクトップ画像を原寸で表示"><img src="screenshots/overview.webp" alt="CCCC Web UI デスクトップ概要" width="76%" align="top"></a>
+&nbsp;
+<a href="screenshots/iphone.webp?raw=1" title="モバイル画像を原寸で表示"><img src="screenshots/iphone.webp" alt="CCCC Web UI モバイル概要" width="20%" align="top"></a>
 
 </div>
 
@@ -46,18 +48,18 @@ CCCC はエージェント群を、永続的で協調された 1 つのシステ
 - **1 つのコントロールプレーン** — Web UI、CLI、MCP、IM ブリッジがすべて同じ daemon 状態を共有します。
 - **マルチランタイム前提** — Claude Code、Codex CLI、ChatGPT Web、Grok Build などの主要ランタイムを 1 つのグループで混在運用できます。
 - **Group Bridge によるリモート連携** — 信頼済み CCCC group 同士が明示的なメッセージを交換し、許可された場合は相手のローカルリソースを調査・操作できます。
-- **ローカルファースト運用** — `pip install` ひとつで始められ、ランタイム状態は `CCCC_HOME` に置いたまま、必要時だけリモート監視へ広げられます。
+- **ローカルファースト運用** — インストールコマンドひとつで始められ、ランタイム状態は `CCCC_HOME` に置いたまま、必要時だけリモート監視へ広げられます。
 
 ## CCCC の役割
 
-CCCC は `pip install` 一つで導入完了、外部依存ゼロ — データベース不要、メッセージブローカー不要、Docker 必須ではありません。それでいて、壊れやすいマルチエージェント構成に足りない運用基盤を提供します：
+CCCC はコマンド一つで導入でき、データベース、メッセージブローカー、Docker は不要です。それでいて、壊れやすいマルチエージェント構成に足りない運用基盤を提供します：
 
 | 機能 | 実現方法 |
 |---|---|
 | **唯一の事実源** | append-only ledger（`ledger.jsonl`）が全メッセージ・イベントを記録 — 再生可能、監査可能、喪失なし |
 | **信頼性のあるメッセージング** | 既読カーソル、attention ACK、reply-required 義務追跡 — 誰が何を確認したか明確 |
 | **統一コントロールプレーン** | Web UI、CLI、MCP ツール、IM ブリッジがすべて 1 つの daemon に接続 — 状態の分断なし |
-| **マルチランタイム編成** | Claude Code、Codex CLI、GitHub Copilot CLI、Cursor CLI、Devin CLI、Kiro CLI、Kilo Code CLI、Antigravity CLI、Grok Build、OpenCode、ChatGPT Web など 16 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
+| **マルチランタイム編成** | Claude Code、Cline CLI、Codex CLI、GitHub Copilot CLI、Cursor CLI、Devin CLI、Kiro CLI、Kilo Code CLI、Antigravity CLI、Grok Build、OpenCode、ChatGPT Web など 17 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
 | **Group Bridge** | マシンやチームをまたぐ信頼済みリモートグループを接続し、明示的メッセージから始めて read/full のローカルアクセスを必要時だけ付与 |
 | **ロールベース協調** | Foreman + Peer ロールモデル、権限境界と宛先ルーティング（`@all`、`@peers`、`@foreman`） |
 | **ローカルファーストなランタイム状態** | ランタイムデータはリポジトリではなく `CCCC_HOME` に保持しつつ、Web Access と IM ブリッジで遠隔運用も可能 |
@@ -67,17 +69,23 @@ CCCC は `pip install` 一つで導入完了、外部依存ゼロ — データ�
 ### インストール
 
 ```bash
-# 安定チャネル（PyPI）
-pip install -U cccc-pair
+# 安定した製品ディストリビューション（推奨、Python 3.11+）
+python -m pip install -U cccc-pair
 
 # RC チャネル（TestPyPI）
-pip install -U --pre \
+python -m pip install -U --pre \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
   cccc-pair
 ```
 
-> **要件**: Python 3.9+、macOS / Linux / Windows
+> PyPI パッケージが、現在の安定した推奨 CCCC ディストリビューションであり、
+> Python が安定版のデフォルト実装です。Linux x86-64、Intel/Apple Silicon macOS、
+> Windows x86-64 の platform wheel には、`cccc rust` で明示的に選択して性能を
+> 評価するための、Python と同じバージョンの private な**実験的 Rust 実装**も
+> 含まれます。機能とインテグレーションの parity は現在も整備中です。信頼性を
+> 重視するワークフローでは `cccc python` を使用してください。Python なしの
+> Rust-only 配備を試す場合に限り、下記の実験的スタンドアロン版を利用できます。
 
 ### アップグレード
 
@@ -85,7 +93,10 @@ pip install -U --pre \
 cccc update
 ```
 
-インストール種別と実行予定のコマンドを事前確認するには `cccc update --check` を使用してください。
+インストール種別と更新元を事前確認するには `cccc update --check` を使用してください。
+推奨の pip 版は、検出した PyPI チャネルから `cccc-pair` 製品全体を更新します。
+実験的スタンドアロン版は GitHub Pages インストーラーから更新します。どちらも
+ファイルを置き換える前に稼働中の Web/daemon ペアを停止します。
 
 ### 起動
 
@@ -94,6 +105,25 @@ cccc
 ```
 
 **http://127.0.0.1:8848** を開く — デフォルトで daemon とローカル Web UI が一緒に起動します。
+
+推奨の pip ディストリビューションでは、Python が安定版の初期デフォルト実装です。
+Rust は性能評価向けの実験的な明示選択です。永続的に切り替えるか、切り替えと
+コマンド実行を 1 ステップで行えます。
+
+```bash
+cccc status            # 選択中・実行中・利用可能な実装を表示
+cccc rust              # 実験的 Rust を選択して CCCC を起動
+cccc python             # 安定版 Python を選択して CCCC を起動
+cccc rust doctor        # 実験的 Rust を選択して doctor を実行
+```
+
+切り替えは明示的なライフサイクル操作です。CCCC は対象 payload を検証してから現在の
+Web/daemon を停止し、別実装へ暗黙にフォールバックしません。Agent runtime の MCP 設定は
+安定した公開 `cccc` launcher を参照するため、後の切り替えでも再設定は不要です。
+いつでも `cccc python` で安定版の実装へ戻せます。
+
+実験的スタンドアロン版には Rust だけが含まれるため、`cccc python` と実装切り替えは
+利用できません。
 
 ### マルチエージェントグループの作成
 
@@ -193,11 +223,12 @@ graph TB
 
 ## サポートランタイム
 
-CCCC は 16 種の主要ランタイムでエージェントを編成し、残りは `custom` で扱えます。同一グループ内で各 actor が異なるランタイムを使用可能です。
+CCCC は 17 種の主要ランタイムでエージェントを編成し、残りは `custom` で扱えます。同一グループ内で各 actor が異なるランタイムを使用可能です。
 
 | ランタイム | 連携方式 | 入口 / サーフェス |
 |-----------|----------|-------------------|
 | Claude Code | MCP 自動設定 | `claude` |
+| Cline CLI | MCP 自動設定 | `cline` |
 | Codex CLI | MCP 自動設定 | `codex` |
 | GitHub Copilot CLI | MCP 自動設定 | `copilot` |
 | Cursor CLI | プロンプト支援 MCP 設定 | `cursor-agent` |
@@ -219,6 +250,7 @@ CCCC は 16 種の主要ランタイムでエージェントを編成し、残�
 
 ```bash
 cccc setup --runtime claude       # ランタイムの MCP を自動設定
+cccc setup --runtime cline        # Cline PTY TUI の MCP を自動設定
 cccc setup --runtime cursor       # プロンプト支援 MCP 設定コントラクトを表示
 cccc setup --runtime kilo         # プロンプト支援 MCP 設定コントラクトを表示
 cccc setup --runtime antigravity  # プロンプト支援 MCP 設定コントラクトを表示
@@ -304,10 +336,6 @@ CCCC は IM グレードのメッセージングセマンティクスを実装 �
 - **テキストスケール** — 90% / 100% / 125% フォントサイズ、ブラウザごとに永続化
 - **ライト / ダーク / システムテーマ**
 
-| チャット | ターミナル |
-|:--------:|:----------:|
-| ![Chat](screenshots/chat.png) | ![Terminal](screenshots/terminal.png) |
-
 ### リモートアクセス
 
 localhost 外から Web UI にアクセスする場合：
@@ -340,7 +368,7 @@ cccc im start
 | WeCom / 企業微信 | ✅ 対応済み |
 | Weixin / 微信 | ✅ 対応済み |
 
-> DingTalk と WeCom はストリーミング返信に対応（それぞれ AI Card と aibot ストリーミング）。他のプラットフォームは最終メッセージを配信。
+> Telegram、Slack、Discord、Feishu、DingTalk、WeCom は段階的な返信に対応し、長すぎる結果は欠落のない分割済み最終メッセージへフォールバックします。Weixin は欠落のない最終メッセージを配信し、現在はボットとのダイレクトチャットのみ対応しています。
 
 任意の対応プラットフォームから、通常の調整にはプレーンテキストまたは `/send @foreman <メッセージ>` を使い、真のブロードキャストだけ `/send @all <メッセージ>` を使います。`/status` でグループ状態を確認し、`/pause` / `/resume` で運用を制御できます — すべてスマートフォンから。
 
@@ -458,20 +486,53 @@ CCCC はエージェントを置き換えるものではなく、それらをチ
 
 ## インストールオプション
 
-### pip（安定版、推奨）
+### pip（安定版・推奨）
 
 ```bash
-pip install -U cccc-pair
+python -m pip install -U cccc-pair
 ```
+
+これは完全にサポートされる製品ディストリビューションで、Python が安定版の
+推奨実装です。Linux x86-64、Intel/Apple Silicon macOS、Windows x86-64 では、
+性能評価向けに Python と同じバージョンの private な実験的 Rust 実行ファイルも
+含む platform wheel が選択されます。それ以外では universal Python wheel を使い、
+`cccc status` が Rust を利用不可と明示します。
+
+### 実験的スタンドアロン Rust プレビュー
+
+```bash
+# macOS / Linux
+curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
+
+# Windows CMD または PowerShell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
+```
+
+このオプションは、Python なしの Rust-only 配備で実験的 Rust 実装を評価する場合に
+限って利用してください。GitHub Releases からチェックサム検証済みバイナリを取得し、
+同じインストーラーで `cccc update` できますが、Python fallback と実装切り替えは
+ありません。安定版の pip/Python 経路の推奨代替ではありません。インストーラーは
+自身が所有しない既存の `cccc`
+コマンドを上書きしないため、意図的にアンインストールするか、別の
+`CCCC_INSTALL_DIR` を指定してください。
+別ディレクトリにある同名コマンドは変更しません。デフォルトのインストール先では、
+新しいコマンドをユーザー PATH の先頭に置き、残っている重複コマンドを表示します。
+新しいターミナルで `cccc doctor` を実行すると、`Installation` セクションに
+実行中の入口、PATH が選ぶコマンド、競合するすべてのパスが表示されます。
+
+現在のネイティブインストーラーは `v0.4.34-rc2` リリース候補を固定してインストールします。
 
 ### pip（RC 版、TestPyPI）
 
 ```bash
-pip install -U --pre \
+python -m pip install -U --pre \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
   cccc-pair
 ```
+
+Cargo インストールは workspace 開発用にのみ残し、サポート対象のエンドユーザー
+配布にはしません。
 
 ### ソースから
 
@@ -484,7 +545,7 @@ pip install -e .
 ### uv（高速、Windows 推奨）
 
 ```bash
-uv venv -p 3.11 .venv
+uv venv -p 3.14 .venv
 uv pip install -e .
 uv run cccc --help
 ```

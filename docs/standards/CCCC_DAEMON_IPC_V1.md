@@ -1,6 +1,6 @@
 # CCCC Daemon API/IPC Contract v1
 
-Status: Draft (for CCCC v0.4.x ecosystem)
+Status: Draft (for CCCC v0.5.x ecosystem)
 
 This document defines the **daemon-facing client contract** for CCCC: how a client (CLI/Web/MCP bridge/SDK) discovers the daemon endpoint, frames requests, and calls daemon operations.
 
@@ -106,15 +106,11 @@ For all non-streaming operations, requests and responses are framed as:
 - **One JSON object per line**, delimited by a single `\n` (newline).
 - Encoding MUST be UTF‑8.
 
-Baseline behavior (implemented by CCCC v0.4.x):
-- Each connection processes exactly **one** request line and produces exactly **one** response line.
-- The daemon then closes the connection.
-
-Clients MUST assume the daemon may close the connection after any successful response and MUST NOT rely on persistent connections.
-
-Forward-compatible extension (not required for v1):
-- A daemon MAY accept multiple request lines over a single connection (strictly serial, no pipelining).
+Baseline behavior (implemented by CCCC v0.5.x):
+- A connection accepts multiple request lines and produces one response line for each request.
+- Requests on one connection are processed strictly serially.
 - Clients MUST NOT pipeline requests (there is no request id / multiplexing in v1).
+- Clients SHOULD reuse successful connections, but MUST tolerate the daemon closing a connection after any response and reconnect through endpoint discovery.
 
 ### 4.3 Size Limits
 
@@ -122,7 +118,10 @@ Implementations MUST respect practical line limits to avoid truncation:
 - **Request line limit (daemon receive):** the daemon MAY stop reading after ~2,000,000 bytes without a newline; clients MUST keep request lines comfortably below this bound.
 - **Response line limit (typical clients):** the reference client reader MAY cap a response line at ~4,000,000 bytes; daemons SHOULD keep single-response payloads below this bound.
 
-Clients SHOULD treat truncated/invalid JSON as a transport failure.
+Clients SHOULD treat truncated/invalid JSON as a transport failure. Once any request bytes
+have been written, clients MUST NOT automatically replay the request after a send, read, or
+decode failure unless the operation carries a daemon-enforced idempotency key. Retrying a
+failure that occurred while establishing the connection is safe because no request was sent.
 
 ### 4.4 Streaming Upgrade: `term_attach`
 
@@ -334,12 +333,25 @@ Args: none
 
 Result:
 ```ts
-{ version: string; pid: number; ts: string; ipc_v?: 1; capabilities?: Record<string, unknown> }
+{
+  version: string;
+  implementation: "python" | "rust";
+  pid: number;
+  ts: string;
+  ipc_v: 1;
+  capabilities: Record<string, unknown>;
+  compatibility?: string;
+}
 ```
 
 Notes:
-- `ipc_v` is RECOMMENDED for SDK compatibility checks.
-- `capabilities` is RECOMMENDED as a best-effort feature map (e.g., `{ "events_stream": true }`).
+- SDK-compatible daemons MUST return `ipc_v: 1`; omitting it is interpreted as IPC version `0`.
+- SDK-compatible daemons MUST identify their active implementation as `python` or `rust`.
+- `compatibility`, when present, is an implementation-specific compatibility identity; clients MUST NOT infer compatibility from the implementation name alone.
+- SDK-compatible daemons MUST return a `capabilities` feature map. Python and Rust daemons advertise supported `events_stream` and `remote_access` features here.
+- Clients SHOULD probe operation support independently; a recognized operation may reject empty probe arguments, but MUST NOT return `unknown_op`.
+- Clients MUST use protocol, compatibility, and capability fields instead of exact product-version equality.
+- Ordinary business commands MUST NOT stop, signal, or replace a reachable daemon. Implementation replacement is restricted to explicit daemon lifecycle commands.
 
 #### `shutdown`
 
@@ -1198,12 +1210,31 @@ Result:
 }
 ```
 
+#### `capability_install` / `capability_install_target`
+
+Install and enable either an existing capability id or one or more `SKILL.md` records from a local
+path, a direct HTTP(S) URL, or a GitHub repository. GitHub repositories import a root `SKILL.md`
+and files matching `skills/*/SKILL.md` (up to 64 records). Imported records retain their source,
+qualification, capsule, and installation metadata.
+
+Args:
+```ts
+{
+  group_id: string
+  target: string
+  actor_id?: string
+  by?: string
+  scope?: "actor" | "group" | "session"
+  ttl_seconds?: number
+}
+```
+
 #### `capability_uninstall`
 
-Revoke capability bindings for the target group, remove current-group actor autoload references, and remove runtime cache
-when no other group/actor bindings remain. For `source_id=agent_self_proposed` skill records, uninstall also removes the
-generated local catalog record plus all actor/profile autoload references for that capability id. External registry catalog
-records are not deleted.
+Revoke capability bindings for the target group, mark the capability removed from that group's catalog view,
+remove current-group actor autoload references, and remove runtime cache when no other group/actor bindings
+remain. The catalog record, block policy, other groups, and profile defaults are preserved. Use
+`capability_source_delete` for an explicit global deletion of records owned by a removable import source.
 
 Args:
 ```ts
@@ -1227,14 +1258,48 @@ Result:
   removed_record: boolean
   removed_bindings: number
   removed_blocked?: number
+  removed_group_marker: boolean
   removed_installation: boolean
   removed_runtime_bindings?: number
+  removed_recent_success?: boolean
   removed_actor_autoload: number
   removed_profile_autoload: number
   cleanup_skipped_reason?: "cleanup_skipped_capability_still_bound"
   refresh_required: boolean
   refresh_mode?: "relist_or_reconnect"
   wait?: "relist_or_reconnect"
+}
+```
+
+#### `capability_source_delete`
+
+Explicitly delete every catalog record owned by a removable import source and clean its bindings,
+runtime state, actor autoload references, and profile defaults across all groups. Built-in and curated
+sources are protected. Only the user or a group foreman may perform this global operation.
+
+Args:
+```ts
+{
+  group_id: string
+  source_id: "manual_import" | "agent_self_proposed" | "github_import" | "url_import" | "local_import"
+  reason?: string
+  by?: string
+  actor_id?: string
+}
+```
+
+Result:
+```ts
+{
+  group_id: string
+  actor_id: string
+  source_id: string
+  removed_records: number
+  removed_capability_ids: string[]
+  removed_runtime_bindings: number
+  removed_installations: number
+  removed_actor_autoload: number
+  removed_profile_autoload: number
 }
 ```
 
@@ -1273,6 +1338,59 @@ Result:
 ```ts
 { group: Record<string, unknown> } // group.yaml content, redacted
 ```
+
+#### `group_preamble_get`
+
+Read the effective group startup preamble. A non-empty group override replaces
+the built-in preamble body on the next preamble delivery; the fixed CCCC
+identity and protocol frame remains in place.
+
+Args:
+```ts
+{ group_id: string }
+```
+
+Result:
+```ts
+{
+  group_id: string
+  source: "builtin" | "home"
+  filename: "CCCC_PREAMBLE.md"
+  overridden: boolean
+  content: string
+}
+```
+
+#### `group_preamble_set`
+
+Create or replace the non-empty group preamble override. The UTF-8 encoded
+content must not exceed 512 KiB. Existing sessions that have already received
+their preamble are not reinjected; start a fresh session when the new guidance
+must apply immediately. `group_reset` creates a new group id and does not carry
+this override forward, so provisioners must set the desired preamble on the
+replacement group before starting its actors. This operation manages prompt
+content only; consumers requiring a distinct standby turn must observe the
+actor return to `waiting` or `idle` before sending the authoritative mission.
+
+Args:
+```ts
+{ group_id: string; content: string; by?: string }
+```
+
+Result: the `group_preamble_get` result plus `changed: boolean`. When `changed`
+is false, the stored override is not rewritten.
+
+#### `group_preamble_reset`
+
+Delete the group override and restore the built-in preamble body. The explicit
+confirmation avoids accidental removal.
+
+Args:
+```ts
+{ group_id: string; confirm: "preamble"; by?: string }
+```
+
+Result: the `group_preamble_get` result plus `changed: boolean`.
 
 #### `group_create`
 
@@ -1375,8 +1493,9 @@ Result:
 #### `assistant_state`
 
 Read the group-scoped state for first-party built-in assistants. Voice
-Secretary service-local ASR runs in a daemon-managed first-party service
-process; heavy ASR runtimes remain behind an explicit local command adapter.
+Secretary service-local ASR runs in-process through the Rust `sherpa-onnx`
+binding. The native runtime is linked into the CCCC binary; model weights remain
+explicit, checksummed downloads under `CCCC_HOME/cache/voice-models`.
 
 Args:
 ```ts
@@ -1410,8 +1529,10 @@ Result:
 Voice service runtime records may include `primary_package`, `package_versions`,
 `installed_version`, `latest_version`, `latest_checked_at`,
 `latest_check_error`, and `update_available` so local ASR settings can show the
-installed sherpa-onnx version and whether a newer official PyPI release is
-available. Voice model records may include `installed_manifest_sha256`,
+linked sherpa-onnx version. Rust reports the stable runtime ID
+`sherpa_onnx_streaming` for Web/API compatibility and `implementation="rust"`;
+runtime install/remove calls are idempotent compatibility operations because the
+linked runtime cannot be removed independently. Voice model records may include `installed_manifest_sha256`,
 `update_available`, `last_update_error`, and artifact source fields (`url`,
 `sha256`, `archive`) so model updates remain explicit and inspectable.
 
@@ -1457,8 +1578,8 @@ Args:
 
 `browser_asr` means browser-managed speech recognition and does not guarantee
 browser-device-local model execution. `assistant_service_local_asr` means ASR
-runs on the daemon host through the first-party Voice Secretary service and uses
-an installed local ASR model. The returned assistant health may include `health.service` with
+runs on the daemon host through native Rust and uses an installed local ASR
+model. The returned assistant health may include `health.service` with
 `status`, `alive`, `asr_command_configured`, `asr_mock_configured`,
 `selected_model_id`, `managed_model`, and `last_error` so Web can show whether
 service-local ASR is actually usable. `service_model_id` is optional and
@@ -1533,32 +1654,34 @@ Result:
 }
 ```
 
-#### `assistant_voice_transcribe`
+#### HTTP Voice Secretary transcription
 
 Transcribe a push-to-talk audio payload through the daemon-managed first-party
-Voice Secretary service. This endpoint only returns transcript text and service
+Voice Secretary runtime. Python is the default distribution and Rust implements
+the same HTTP contract. This endpoint only returns transcript text and service
 health; it does not create a chat message, proposal, or working document by
 itself. Call `assistant_voice_transcript_append` after transcription so the
 daemon can append stable transcript source material and update the current
 working document.
 
-Args:
+Request:
 ```ts
-{
-  group_id: string
-  by?: string
-  audio_base64: string
-  mime_type?: string
-  language?: string
-}
+POST /api/v1/groups/{group_id}/assistants/voice_secretary/transcriptions
+  ?language={language}&by={actor_id}
+Content-Type: audio/pcm | audio/wav | application/octet-stream
+
+<streamed binary audio body>
 ```
 
 Preconditions:
 - `voice_secretary` is enabled for the group.
 - `recognition_backend` is `assistant_service_local_asr`.
-- The selected `service_model_id` is installed and exposes a managed command via
-  the manifest. The effective command receives the audio path as the final
-  argument unless it includes `{audio_path}` / `{input_path}` / `{input}`.
+- The selected offline `service_model_id` is installed and its manifest exposes
+  a supported sherpa-onnx model configuration. HTTP transcription accepts mono
+  PCM16 or WAV up to 100 MiB. The HTTP body and WebSocket PCM16 frames are
+  streamed to auto-deleted temporary files; browser service capture sends binary
+  PCM16 WebSocket frames. Python also accepts the former JSON/Base64 HTTP body
+  for compatibility, but clients should send the binary form above.
 
 Result:
 ```ts
@@ -1583,6 +1706,13 @@ daemon lease is the final cross-tab / cross-browser / cross-device guard that
 prevents two Voice Secretary recording streams from running at the same time.
 The lease is TTL-based so a crashed tab or disconnected browser eventually
 expires without manual cleanup.
+
+The service-local ASR WebSocket requires the active `owner_id` and `lease_id` as
+query parameters and revalidates them while audio is streaming. Opening the
+transcription WebSocket directly cannot bypass the daemon lease.
+Lease mutations match `group_id`, `owner_id`, and `lease_id`; public status and
+conflict payloads redact `lease_id`. The stable browser owner identifies the
+lease holder, while every recording uses a fresh `session_id`.
 
 Args:
 ```ts
@@ -1648,10 +1778,30 @@ created while the actor was stopped, the daemon re-dispatches that same notify:
 headless runtimes receive it as a control turn, and PTY runtimes receive it
 through the pending delivery queue so lazy preamble delivery is triggered.
 
+Rust commits an input under the group lock in this order: validate or create the
+Markdown target, append the stable segment log, append the semantic input log,
+then advance group session/cursor state. Retrying the same `session_id` and
+`segment_id` is idempotent. Document paths must be repository-relative `.md`
+paths and must not traverse symbolic links.
+
+Idempotency is checked against the complete semantic input log, not the bounded
+session display window. If the input log was committed but its ledger input or
+notify event was interrupted, retrying the same segment reuses the canonical
+input record and completes only the missing delivery work.
+
 The public document identity for Voice Secretary APIs is `document_path`, a
 repository-relative markdown path. `document_id` may exist in daemon sidecar
 state as an implementation detail, but runtime actors and Web clients should
 route by `document_path`.
+
+`assistant_index`, `assistant_voice_document_list`, and
+`assistant_voice_document_select` reconcile repository Markdown edits into the
+daemon document index before returning. Reconciliation updates content, hash,
+character count, and revision only when file content changed. Missing files do
+not clear indexed content, and path/symbolic-link validation is applied before
+reading. The emitted `assistant.voice.document` reconciliation event is an
+auxiliary signal; index persistence and ledger append are not one atomic
+transaction.
 
 Args:
 ```ts
@@ -1819,6 +1969,72 @@ Result:
   actor_notify_delivered?: boolean
   actor_notify_delivery_error?: string
   event?: CCCSEventV1
+}
+```
+
+#### `assistant_voice_input_append` (`kind="prompt_refine"`)
+
+Create or update a composer refinement request. The daemon persists the request
+before emitting one targeted `voice_secretary_input` notification. Its canonical
+`input_envelope` carries `request_id`, `operation`, `composer_snapshot_hash`, and
+matching composer metadata. This operation creates work for Voice Secretary; it
+does not create a prompt draft.
+
+Args:
+```ts
+{
+  group_id: string
+  by?: string
+  kind: "prompt_refine"
+  request_id?: string
+  voice_transcript?: string
+  composer_text?: string
+  operation?: "append_to_composer_end" | "replace_with_refined_prompt" | string
+  composer_context?: Record<string, unknown>
+  composer_snapshot_hash?: string
+}
+```
+
+At least one of `voice_transcript` or `composer_text` must be non-empty.
+
+#### `assistant_voice_prompt_draft_submit`
+
+Submit the Voice Secretary result for an existing prompt refinement request.
+Only `voice-secretary` / `assistant:voice_secretary` may call this operation.
+The daemon inherits a missing operation and composer snapshot hash from the
+request, stores the result as `pending`, and emits
+`assistant.voice.prompt_draft`. `no_op=true` stores `no_change` with empty draft
+text. Submission MUST NOT append another semantic input or emit another
+`voice_secretary_input` notification.
+
+Args:
+```ts
+{
+  group_id: string
+  by?: "voice-secretary" | "assistant:voice_secretary"
+  request_id: string
+  draft_text?: string
+  no_op?: boolean
+  summary?: string
+  operation?: string
+  composer_snapshot_hash?: string
+}
+```
+
+`draft_text` is required unless `no_op=true`.
+
+#### `assistant_voice_prompt_draft_ack`
+
+Mark a submitted draft as `applied`, `dismissed`, or `stale`. Acknowledgement
+removes it from the active `prompt_draft` projection while retaining bounded
+request history.
+
+Args:
+```ts
+{
+  group_id: string
+  request_id: string
+  status: "applied" | "dismissed" | "stale"
 }
 ```
 
@@ -2487,6 +2703,37 @@ Result:
 { event: CCCSEventV1 } // kind="chat.message"
 ```
 
+#### `send_files`
+
+Store one or more files from the group's active scope in the group blob store,
+then append one `chat.message` carrying those files as attachments. This is the
+daemon-owned upload boundary for SDK clients; callers MUST NOT write directly
+to `state/blobs/` or manufacture attachment records.
+
+Args:
+```ts
+{
+  group_id: string
+  paths: string[]               // absolute, or relative to the active scope root
+  text?: string                 // defaults to a compact file notice
+  by?: string
+  to?: string[]
+  priority?: "normal" | "attention"
+  reply_required?: boolean
+  insight?: string
+  client_id?: string
+}
+```
+
+Every resolved path MUST be a regular file beneath the group's active scope.
+All paths are validated and read before any message is appended. The resulting
+event uses the normal `send` recipient, permission, wake, and delivery rules.
+
+Result:
+```ts
+{ event: CCCSEventV1 } // kind="chat.message", data.attachments contains stored blobs
+```
+
 #### `reply`
 
 Append a `chat.message` with `reply_to` and `quote_text`.
@@ -2606,6 +2853,10 @@ Result:
 #### `inbox_list`
 
 Return unread `chat.message` and/or `system.notify` events for an actor based on its read cursor.
+When a cursor contains a resolvable `event_id`, cursor advancement, unread membership,
+read status, and obligation status MUST use ledger append order. The cursor `ts` is
+informational and a compatibility fallback only; equal or regressed timestamps MUST
+NOT change event coverage.
 
 Args:
 ```ts
@@ -3070,10 +3321,16 @@ Args:
   title?: string
   message?: string
   target_actor_id?: string | null
+  im_visibility?: "internal" | "public" // default: "internal"
   requires_ack?: boolean
   context?: Record<string, unknown>
 }
 ```
+
+`system.notify` is internal by default. An IM bridge may forward it only when
+`im_visibility="public"`; actor-targeted notifications are never eligible for
+external IM delivery. Producers must opt in explicitly instead of relying on
+`to`, `actor_id`, or `target_actor_id` inference.
 
 Result:
 ```ts
@@ -3101,10 +3358,69 @@ Args:
 { group_id: string; actor_id: string; by?: string; max_chars?: number; strip_ansi?: boolean; compact?: boolean }
 ```
 
+`max_chars` limits the final returned Unicode text. Implementations MUST render the complete
+retained PTY backlog before applying this limit; truncating the raw ANSI/VT byte stream first can
+start replay inside an escape sequence or incremental screen update and produce corrupt snapshots.
+
 Result:
 ```ts
-{ group_id: string; actor_id: string; warning: string; hint: string; text: string }
+{ group_id: string; actor_id: string; warning: string; hint: string; text: string; end_cursor: number }
 ```
+
+`end_cursor` is the exclusive raw PTY byte cursor captured with the backlog used to produce
+`text`. A terminal client MAY display the rendered snapshot and then attach its live stream with
+`since=end_cursor`; the stream must replay output produced after the snapshot so the transition is
+gap-free.
+
+#### `terminal_snapshot`
+
+Return a bounded rendered screen snapshot and the exact raw cursor boundary used to render it.
+This operation is intended for diagnostics; interactive clients use `terminal_replay` so they can
+rebuild scrollback from the original ANSI stream.
+
+Args:
+```ts
+{ group_id: string; actor_id: string; by?: string; limit_bytes?: number }
+```
+
+Result:
+```ts
+{ data: string; start_cursor: number; end_cursor: number }
+```
+
+The implementation MUST apply the same group transcript visibility policy as `terminal_tail` and
+`terminal_history`.
+
+#### `terminal_replay`
+
+Return one bounded page of raw ANSI output from the active PTY session's in-memory ring. This
+operation MUST NOT read the durable archive or a completed session. The first request atomically
+captures a UTF-8-complete `replay_end_cursor`. Callers pass that value back as `end_cursor` on every
+following page, so output produced during replay cannot extend the initial replay loop.
+
+Args:
+```ts
+{ group_id: string; actor_id: string; by?: string; after?: number; end_cursor?: number; limit_bytes?: number }
+```
+
+Result:
+```ts
+{
+  replay_end_cursor: number
+  history: {
+    data: string
+    start_cursor: number
+    end_cursor: number
+    has_more: boolean
+    cursor_expired: boolean
+  }
+}
+```
+
+The default page limit is 512 KiB. `history.has_more` is relative to the fixed
+`replay_end_cursor`, not the moving live tail. The implementation MUST apply the same group
+transcript visibility policy as `terminal_tail` and must leave an incomplete UTF-8 suffix for a
+later live page.
 
 #### `terminal_history`
 
@@ -3127,6 +3443,32 @@ Result:
   cursor_expired: boolean
 }
 ```
+
+#### `terminal_since`
+
+Args:
+```ts
+{ group_id: string; actor_id: string; by?: string; after: number; limit_bytes?: number }
+```
+
+Result:
+```ts
+{
+  history: {
+    data: string
+    start_cursor: number
+    end_cursor: number
+    has_more: boolean
+    cursor_expired: boolean
+  }
+}
+```
+
+The cursors count raw PTY bytes. Because `data` is transported as UTF-8 JSON text, an
+implementation MUST NOT advance `end_cursor` through an incomplete UTF-8 code point. It MAY return
+up to three bytes beyond `limit_bytes` to finish a code point. If the retained stream currently ends
+inside a code point, it returns the complete prefix and leaves the incomplete suffix for a later
+call.
 
 #### `terminal_clear`
 
@@ -3442,6 +3784,11 @@ Result:
       access_token_present?: boolean
       access_token_source?: "store" | "none" | string
       access_token_count?: number
+      admin_access_token_present?: boolean
+      admin_access_token_count?: number
+      remote_listener_auth_required?: boolean
+      remote_listener_auth_requirement_satisfied?: boolean
+      allow_unauthenticated_listener_override?: boolean
       web_host?: string
       web_host_source?: "settings" | "env" | "default" | string
       web_port?: number
@@ -3461,6 +3808,8 @@ Result:
       web_public_url?: string | null
       access_token_configured?: boolean
       access_token_count?: number
+      admin_access_token_configured?: boolean
+      admin_access_token_count?: number
       access_token_source?: "store" | "none" | string
       [k: string]: unknown
     }
@@ -3491,6 +3840,8 @@ Result:
 { remote_access: Record<string, unknown> }
 ```
 
+A non-local Web binding or a configured public URL requires at least one administrator Access Token before it can be started or applied. Group-scoped tokens do not satisfy this recovery/control-plane requirement. Localhost-only configuration remains available without a token. Implementations MAY expose `CCCC_WEB_ALLOW_UNAUTHENTICATED=1` as an explicit unsafe listener override for deployments that already enforce a trusted network boundary.
+
 #### `remote_access_start`
 
 Start remote access according to configured provider/mode.
@@ -3505,6 +3856,9 @@ Result:
 { remote_access: Record<string, unknown> }
 ```
 
+Errors:
+- `remote_access_admin_token_required` – remote exposure has no administrator Access Token and the explicit unsafe listener override is not enabled.
+
 #### `remote_access_stop`
 
 Stop remote access service.
@@ -3518,6 +3872,45 @@ Result:
 ```ts
 { remote_access: Record<string, unknown> }
 ```
+
+### 8.17.1 Group Bridge delivery compatibility
+
+The daemon accepts the Python-compatible Group Bridge operations:
+
+- `remote_send`: send a payload through an active registration or trust. It
+  requires `group_id`, `registration_id`, `idempotency_key`, and an explicit
+  `payload.to` recipient list.
+- `remote_delivery_status`: return the stored receipt identified by
+  `registration_id` and `idempotency_key`.
+- `group_bridge_receive_remote_send`: authenticate an already-resolved inbound
+  session using `target_group_id`, `src_group_id`, `remote_peer_id`, and append
+  its payload idempotently to the target group.
+
+Implementations MUST persist delivery receipts and MUST NOT create duplicate
+events when the same registration and idempotency key are retried.
+
+The Rust WebSocket owner and MCP bridge share live reverse-session state through
+these daemon-internal operations:
+
+- `group_bridge_session_open`: register a live route identified by `group_id`,
+  `remote_group_id`, and `remote_peer_id`; returns a new opaque `generation`.
+- `group_bridge_session_close`: remove the route only when its `generation`
+  still matches. A stale socket MUST NOT close a replacement session.
+- `group_bridge_session_ready`: report whether that exact route currently has a
+  live session lease.
+- `group_bridge_session_poll`: let the owning WebSocket take the next queued
+  server-to-peer request for its generation.
+- `group_bridge_session_complete`: resolve a request using `response_to` and a
+  peer-provided `result`.
+- `group_bridge_session_deliver`: enqueue a `remote_send` request and await its
+  response for at most `timeout_ms`.
+
+These operations are runtime-only and MUST NOT treat persisted trust status as
+proof of reachability. Opening a replacement generation, closing the active
+generation, and completing a response MUST wake pending callers immediately.
+Delivery failures use `peer_session_unavailable` when no live lease exists or
+disconnects, `peer_session_timeout` when the peer does not answer in time, and
+`peer_session_failed` when a session is replaced or returns an invalid result.
 
 ### 8.18 Group Space (Provider-Backed Shared Memory, dual-lane NotebookLM)
 
@@ -3691,6 +4084,12 @@ Result:
 }
 ```
 
+Capability matrices are implementation-specific runtime truth. Callers MUST NOT
+assume an ingest source type or asynchronous behavior that is absent from the
+returned matrix. An implementation MUST fail an unavailable operation with
+`capability_unavailable`; it MUST NOT silently coerce a file, URL, YouTube, or
+Drive source into pasted text.
+
 #### `group_space_bind`
 
 Bind/unbind a group lane to a provider remote notebook.
@@ -3863,6 +4262,10 @@ Result (`action=refresh` | `rename` | `delete`):
 }
 ```
 
+`action=refresh` MUST invoke the provider refresh mutation. Re-listing the
+source without refreshing it is not a successful refresh result. A successful
+NotebookLM refresh reports `refresh_result.refreshed=true`.
+
 #### `group_space_artifact`
 
 List/generate/download provider artifacts (NotebookLM studio outputs) on `lane="work"`.
@@ -3879,10 +4282,10 @@ Args:
   action?: "list" | "generate" | "download"
   kind?: "audio" | "video" | "report" | "study_guide" | "quiz" | "flashcards" | "infographic" | "slide_deck" | "data_table" | "mind_map"
   options?: Record<string, unknown> // for action=generate
-  wait?: boolean // action=generate only
-  save_to_space?: boolean // generate/download auto-save behavior
+  wait?: boolean // action=generate only; default false
+  save_to_space?: boolean // generate/download local-save behavior; default false
   output_path?: string // optional local path override
-  output_format?: "json" | "markdown" | "html" // quiz/flashcards
+  output_format?: "json" | "markdown" | "html" | "pdf" | "pptx" | "csv"
   artifact_id?: string // optional explicit download target
   timeout_seconds?: number // generate+wait only
   initial_interval?: number // generate+wait only
@@ -3892,6 +4295,31 @@ Args:
 ```
 
 Result (`action=list|generate|download`) mirrors the lane-targeted binding and includes `lane: "work"`.
+
+Generation defaults to `wait=false` and `save_to_space=false`, so a normal
+request does not hold a group mutation lane while polling a remote provider and
+does not perform an implicit local write. When `wait=false`, an implementation
+without a background artifact worker MAY
+return after remote generation starts with `saved_to_space=false`; the caller
+can later list or download the artifact. It MUST NOT claim that a local file was
+saved. `wait=true` plus `save_to_space=true` performs the wait and local save
+before returning or reports a provider timeout/failure.
+
+When `save_to_space=true`, the implementation MUST validate the local
+destination and kind/format download capability before creating the remote
+artifact. Unsupported kind/format combinations fail with
+`capability_unavailable` without provider-side generation. Authenticated media
+downloads MUST require HTTPS and validate an explicit provider host allowlist
+for both the initial URL and every redirect hop.
+
+Common provider error semantics:
+- `space_provider_not_configured`: required provider credentials or binding configuration is absent; non-transient.
+- `space_provider_auth_invalid`: credentials are malformed, expired, or rejected; non-transient until re-authentication.
+- `space_provider_not_found`: requested remote resource is absent; non-transient and does not degrade the whole provider.
+- `space_provider_compat_mismatch`: provider response schema cannot be decoded; non-transient and degrades the provider until compatibility is restored.
+- `space_provider_timeout`: request or provider-side wait timed out; transient and does not by itself degrade the provider.
+- `space_provider_rate_limited`: provider refused work because of quota/rate limits; transient and does not by itself degrade the provider.
+- `space_provider_upstream_error`: another provider transport/RPC failure occurred; retryability depends on the operation and provider response.
 
 #### `group_space_jobs`
 
@@ -4144,6 +4572,82 @@ Streaming mode:
 
 ### 8.19 ChatGPT Web Model Browser Surface (Optional)
 
+#### `web_model_delivery_preferences_get`
+
+Read the durable browser-delivery preference for one Web Model actor.
+
+Args:
+```ts
+{ group_id: string; actor_id: string }
+```
+
+Result:
+```ts
+{
+  group_id: string
+  actor_id: string
+  preference: {
+    mode: "standard" | "image_compat"
+    updated_at: string
+    updated_by: string
+  }
+}
+```
+
+Missing or invalid stored state MUST resolve to `standard` without mutating the group. The preference is scoped to `(group_id, actor_id)` and MUST survive browser-target changes, daemon restarts, and Python/Rust implementation switches.
+
+#### `web_model_delivery_preferences_update`
+
+Update the durable browser-delivery preference for one Web Model actor.
+
+Args:
+```ts
+{
+  group_id: string
+  actor_id: string
+  mode: "standard" | "image_compat"
+  by: "user"
+}
+```
+
+Result has the same shape as `web_model_delivery_preferences_get`. The operation is user-only and MUST reject other modes. A runtime turn snapshots the effective mode in `turn.delivery.web_model_mode`; a preference change therefore applies to the next accepted delivery, not a delivery already in flight.
+
+`image_compat` is an experimental ChatGPT transport workaround. The browser adapter MUST attach exactly one CCCC-owned blank PNG before invoking Send, MUST NOT use the OS clipboard, and MUST leave the cursor uncommitted if attachment fails before a submit action. The mode does not select or change the ChatGPT model.
+
+#### `web_model_runtime_recover_turn`
+
+Rebuild a previously committed Web Model turn without changing runtime state or the actor cursor. This is used only to inspect and safely migrate legacy browser-delivery state.
+
+Args:
+```ts
+{ group_id: string; actor_id: string; event_ids: string[] }
+```
+
+Result:
+```ts
+{
+  status: "recovered"
+  turn: {
+    turn_id: string
+    group_id: string
+    actor_id: string
+    event_ids: string[] // canonical ledger order
+    latest_event_id: string
+    latest_ts: string
+    messages: Event[]
+    coalesced_text: string
+    system_prompt: string
+    delivery: {
+      mode: "recovery_no_cursor_mutation"
+      cursor_committed: true
+      web_model_mode: "standard" | "image_compat"
+    }
+  }
+}
+```
+
+Every event MUST exist, be addressed to the actor, have a supported turn kind, and already be covered by that actor's cursor. The operation MUST NOT roll the cursor back, change active runtime state, or create a completion receipt.
+
 #### `web_model_browser_attach`
 
 Attach to the currently active daemon-owned ChatGPT Web Model browser surface over a dedicated bidirectional NDJSON stream.
@@ -4363,7 +4867,7 @@ Request line:
 
 Response line:
 ```json
-{"v":1,"ok":true,"result":{"version":"0.4.x","pid":12345,"ts":"2026-01-13T12:34:56Z","ipc_v":1,"capabilities":{"events_stream":true,"remote_access":true}},"error":null}
+{"v":1,"ok":true,"result":{"version":"0.4.x","implementation":"python","pid":12345,"ts":"2026-01-13T12:34:56Z","ipc_v":1,"capabilities":{"events_stream":true,"remote_access":true}},"error":null}
 ```
 
 ### 9.2 Error

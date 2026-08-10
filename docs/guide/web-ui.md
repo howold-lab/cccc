@@ -24,6 +24,25 @@ The Web UI has these main areas:
 - **Main Area**: Chat messages or terminal view
 - **Input**: Message composer with @mention support
 
+### Embedded browser views
+
+ChatGPT Web Model, NotebookLM sign-in, and Presentation use the same embedded-browser viewer. The
+website always runs in the daemon-owned browser session; changing the viewer does not replace that
+browser, navigate it, or change its profile.
+
+- **Page** shows the website content directly and uses the available panel space efficiently. It is
+  the default for normal Web Model operation and Presentation.
+- **Browser** shows the complete browser window when a safe VNC projection is available. It is the
+  default for sign-in and setup surfaces where browser UI or native prompts may matter.
+
+Switching views reconnects only the viewer transport and keeps the current browser session and URL.
+On platforms or installations without the VNC capability, **Browser** is unavailable and **Page**
+remains active. Neither view emulates the website: it still sees the same daemon-owned browser
+process. Web Model and NotebookLM use a real system Chrome/Edge session for sites such as ChatGPT
+and Google; Presentation may use its own Chromium runtime. Browser-native UI that is outside the web
+page is only visible through **Browser** (or through the physical browser window on platforms that
+expose it).
+
 ## Managing Groups
 
 ### Creating a Group
@@ -188,6 +207,7 @@ CCCC_WEB_HOST=0.0.0.0 cccc
 ```
 
 This keeps localhost access working while also letting other devices on the same network open `http://YOUR_LAN_IP:8848/ui/`.
+The Rust launcher also honors the binding saved in **Settings > Web Access**, including the legacy Python `settings.yaml` during migration. Explicit `--host` / `--port` flags still take precedence.
 
 If CCCC is running inside WSL2's default NAT networking, this is the exception: `0.0.0.0` only opens the port inside the Linux VM. For true LAN access from other devices, enable WSL mirrored networking or add a Windows `netsh interface portproxy` rule plus matching firewall allow.
 
@@ -207,6 +227,8 @@ CCCC_WEB_HOST=$(tailscale ip -4) cccc
 
 Before exposing the Web UI beyond localhost, first create an **Admin Access Token** in **Settings > Web Access**.
 
+The Web Access panel keeps LAN/public `Save`, `Apply now`, and remote-endpoint copying disabled until an Admin Access Token exists. Python and Rust also enforce the same rule at remote start, apply, and listener boundaries, so direct API calls and stale saved settings cannot bypass the panel. Group-scoped tokens do not satisfy this administrator recovery requirement. Switching back to localhost-only remains available so an incomplete remote setup can be recovered safely.
+
 In **Settings > Web Access**, `127.0.0.1` means local-only and `0.0.0.0` means localhost plus your LAN IP on a normal local host. On WSL2 NAT, it still stays inside the VM until Windows networking forwards it outward.
 
 `Save` stores the target binding. If Web was started by `cccc` or `cccc web`, use `Apply now` in **Settings > Web Access** to perform the short supervised restart. If Web is managed by Docker, systemd, or another external supervisor, restart that service instead.
@@ -215,14 +237,21 @@ For the default local app flow, prefer restarting from the owning `cccc` session
 
 `Start` / `Stop` are only for Tailscale remote access and do not rebind the already-running Web socket.
 
-CCCC keeps the token policy tiered:
+CCCC keeps the token policy simple:
 
-- localhost-only: remote token gate is not the main concern
-- LAN/private network: Access Tokens are the default and recommended posture
-- public URL / tunnel / reverse proxy: Access Tokens are mandatory
+- localhost-only: no remote-exposure token prerequisite
+- LAN/private network and public URL/tunnel/reverse proxy: an Admin Access Token is mandatory before exposure
+
+`CCCC_WEB_ALLOW_UNAUTHENTICATED=1` is an explicit unsafe listener override for deployments that already enforce a trusted network boundary outside CCCC. It is intentionally not offered as a Web UI toggle.
 
 Then authenticate once to bootstrap the session cookie:
 
 - Open `http://YOUR_HOST:8848/?token=<access-token>` (or `.../ui/?token=...`) using an Access Token created in Web Access.
 
 After that, you can use the Web UI normally without `?token=...`.
+
+The query token is only a session-bootstrap transport; it does not widen the
+token's permissions. A token scoped to selected Groups receives global stream
+metadata only for those Groups, and the global stream never carries message
+content. Full event content remains on the per-Group stream and is subject to
+the same scope check. Administrative capability changes require an Admin token.

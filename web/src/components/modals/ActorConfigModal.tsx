@@ -139,6 +139,10 @@ const SECRETS_PLACEHOLDER: Record<string, { set: string; unset: string }> = {
     set: 'ANTHROPIC_AUTH_TOKEN="..."\nANTHROPIC_BASE_URL="..."',
     unset: "ANTHROPIC_AUTH_TOKEN\nANTHROPIC_BASE_URL",
   },
+  cline: {
+    set: "# Configure Cline providers with `cline auth` or Cline configuration.",
+    unset: "",
+  },
   codex: {
     set: "# Configure OpenAI-compatible Codex providers with Codex config or command -c overrides.",
     unset: "",
@@ -392,7 +396,7 @@ function CreateActorConfigModal({
             </div>
           ) : null}
 
-          <div className="flex flex-col-reverse sm:flex-row gap-3 sm:justify-end">
+          <div className="flex flex-col-reverse gap-3 pb-2 sm:flex-row sm:justify-end">
             <Button
               type="button"
               variant="secondary"

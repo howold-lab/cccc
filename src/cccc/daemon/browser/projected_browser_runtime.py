@@ -45,6 +45,9 @@ _SCREENCAST_EVERY_NTH_FRAME = 1
 _SOCKET_READ_TIMEOUT_SECONDS = 0.2
 _START_WAIT_TIMEOUT_SECONDS = 20.0
 _VNC_START_TIMEOUT_SECONDS = 3.0
+_XVFB_FIRST_DISPLAY = 99
+_XVFB_LAST_DISPLAY = 199
+_XVFB_START_TIMEOUT_SECONDS = 5.0
 
 
 def ensure_dir(path: Path, mode: int = 0o700) -> None:
@@ -142,6 +145,46 @@ class _VirtualDisplay:
         _terminate_process(self.proc)
 
 
+def _xvfb_display_in_use(number: int, *, temp_root: Path = Path("/tmp")) -> bool:
+    return (temp_root / f".X{int(number)}-lock").exists() or (
+        temp_root / ".X11-unix" / f"X{int(number)}"
+    ).exists()
+
+
+def _xvfb_args(*, number: int, width: int, height: int) -> list[str]:
+    return [
+        f":{int(number)}",
+        "-displayfd",
+        "1",
+        "-screen",
+        "0",
+        f"{max(1024, int(width))}x{max(768, int(height))}x24",
+        "-nolisten",
+        "tcp",
+    ]
+
+
+def _xvfb_display_conflict(output: str) -> bool:
+    detail = str(output or "").lower()
+    return any(
+        marker in detail
+        for marker in (
+            "server already active",
+            "server already running",
+            "failed to bind listener",
+            "cannot establish any listening sockets",
+        )
+    )
+
+
+def _xvfb_start_error(reason: str, output: str = "") -> str:
+    compact_output = " ".join(str(output or "").replace("\r", "\n").split())
+    prefix = str(reason or "Xvfb startup failed").strip() or "Xvfb startup failed"
+    if compact_output:
+        return f"{prefix}; {compact_output[:800]}"
+    return prefix
+
+
 def _start_virtual_display(*, width: int, height: int) -> _VirtualDisplay | None:
     if os.name == "nt" or sys.platform == "darwin":
         return None
@@ -151,58 +194,77 @@ def _start_virtual_display(*, width: int, height: int) -> _VirtualDisplay | None
             "Linux projected browser requires Xvfb to stay off the host desktop; "
             "install it (Debian/Ubuntu: sudo apt install xvfb) and restart the browser session"
         )
-    proc = subprocess.Popen(
-        [
-            binary,
-            "-displayfd",
-            "1",
-            "-screen",
-            "0",
-            f"{max(1024, int(width))}x{max(768, int(height))}x24",
-            "-nolisten",
-            "unix",
-            "-nolisten",
-            "tcp",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    selector = selectors.DefaultSelector()
-    display = ""
-    try:
-        if proc.stdout is None:
-            raise RuntimeError("Xvfb did not expose a display fd")
-        selector.register(proc.stdout, selectors.EVENT_READ)
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                raise RuntimeError("Xvfb exited before a display became ready")
-            events = selector.select(timeout=max(0.1, deadline - time.time()))
-            if not events:
-                continue
-            line = str(proc.stdout.readline() or "").strip()
-            if not line:
-                continue
-            if line.startswith(":"):
-                display = line
+    for number in range(_XVFB_FIRST_DISPLAY, _XVFB_LAST_DISPLAY + 1):
+        if _xvfb_display_in_use(number):
+            continue
+
+        proc = None
+        stderr_log = None
+        selector = selectors.DefaultSelector()
+        display = ""
+        failure_reason = f"Xvfb display :{number} did not report a usable display"
+        try:
+            stderr_log = tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace")
+            proc = subprocess.Popen(
+                [binary, *_xvfb_args(number=number, width=width, height=height)],
+                stdout=subprocess.PIPE,
+                stderr=stderr_log,
+                text=True,
+            )
+            if proc.stdout is None:
+                failure_reason = f"Xvfb display :{number} did not expose a display fd"
             else:
-                display = f":{line}"
-            break
-    finally:
-        try:
-            selector.close()
-        except Exception:
-            pass
-        try:
-            if proc.stdout is not None:
-                proc.stdout.close()
-        except Exception:
-            pass
-    if not display:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                deadline = time.time() + _XVFB_START_TIMEOUT_SECONDS
+                while time.time() < deadline:
+                    if proc.poll() is not None:
+                        failure_reason = f"Xvfb display :{number} exited before becoming ready"
+                        break
+                    events = selector.select(timeout=max(0.1, deadline - time.time()))
+                    if not events:
+                        continue
+                    reported = str(proc.stdout.readline() or "").strip().lstrip(":")
+                    if reported == str(number) and proc.poll() is None:
+                        display = f":{number}"
+                    elif reported:
+                        failure_reason = (
+                            f"Xvfb display :{number} reported unexpected display :{reported}"
+                        )
+                    break
+                else:
+                    failure_reason = f"Xvfb display :{number} startup timed out"
+        except Exception as exc:
+            _terminate_process(proc)
+            if stderr_log is not None:
+                stderr_log.close()
+            raise RuntimeError(f"failed to start Xvfb display :{number}: {exc}") from exc
+        finally:
+            try:
+                selector.close()
+            except Exception:
+                pass
+            try:
+                if proc is not None and proc.stdout is not None:
+                    proc.stdout.close()
+            except Exception:
+                pass
+
+        if display:
+            if stderr_log is not None:
+                stderr_log.close()
+            return _VirtualDisplay(proc=proc, display=display)
+
         _terminate_process(proc)
-        raise RuntimeError("Xvfb did not report a usable display")
-    return _VirtualDisplay(proc=proc, display=display)
+        output = _read_temp_text(stderr_log)
+        if stderr_log is not None:
+            stderr_log.close()
+        if _xvfb_display_in_use(number) or _xvfb_display_conflict(output):
+            continue
+        raise RuntimeError(_xvfb_start_error(failure_reason, output))
+
+    raise RuntimeError(
+        f"no free Xvfb display is available in :{_XVFB_FIRST_DISPLAY}-:{_XVFB_LAST_DISPLAY}"
+    )
 
 
 def _system_browser_binaries(channel: str) -> list[str]:
@@ -268,15 +330,26 @@ def _wait_cdp_endpoint(port: int, *, timeout_seconds: float) -> bool:
     return False
 
 
-def _browser_app_launch_args(url: str, *, width: int, height: int) -> list[str]:
+def _browser_app_launch_args(
+    url: str,
+    *,
+    width: int,
+    height: int,
+    headless: bool = False,
+) -> list[str]:
     args = [
         f"--window-size={max(1024, int(width))},{max(768, int(height))}",
-        "--window-position=0,0",
         "--force-device-scale-factor=1",
     ]
+    if bool(headless):
+        args.insert(0, "--headless=new")
+    else:
+        args.insert(1, "--window-position=0,0")
     target = str(url or "").strip()
-    if target:
+    if target and not bool(headless):
         args.append(f"--app={target}")
+    elif target:
+        args.append(target)
     else:
         args.append("about:blank")
     return args
@@ -761,7 +834,9 @@ class PlaywrightProjectedRuntime:
     def click(self, *, x: float, y: float, button: str = "left") -> None:
         self.page.mouse.click(float(x), float(y), button=str(button or "left"))
 
-    def scroll(self, *, dx: float, dy: float) -> None:
+    def scroll(self, *, dx: float, dy: float, x: float | None = None, y: float | None = None) -> None:
+        if x is not None and y is not None:
+            self.page.mouse.move(float(x), float(y))
         self.page.mouse.wheel(float(dx), float(dy))
 
     def key_press(self, *, key: str) -> None:
@@ -858,6 +933,7 @@ def launch_projected_browser_runtime(
                     "cdp_port": existing_port,
                     "profile_dir": str(metadata.get("profile_dir") or profile_dir),
                     "adopted": True,
+                    "headless": bool(headless),
                     "display_owned": display_owned,
                     "display_owner": "cccc_xvfb" if display_owned else "",
                 }
@@ -925,13 +1001,16 @@ def launch_projected_browser_runtime(
             display_owned = True
     browser_display = str(browser_env.get("DISPLAY") or "").strip()
     display_owner = "cccc_xvfb" if display_owned else ""
-    browser_app_args = _browser_app_launch_args(str(url or ""), width=width, height=height)
+    browser_app_args = _browser_app_launch_args(
+        str(url or ""),
+        width=width,
+        height=height,
+        headless=headless,
+    )
     if display_owned:
         browser_app_args.insert(0, "--ozone-platform=x11")
 
     def _launch_system_browser_once(channel: str) -> PlaywrightProjectedRuntime | None:
-        if bool(headless):
-            return None
         binaries = _system_browser_binaries(channel)
         if not binaries:
             return None
@@ -971,6 +1050,7 @@ def launch_projected_browser_runtime(
                             "display": browser_display,
                             "display_owned": bool(display_owned),
                             "display_owner": display_owner,
+                            "headless": bool(headless),
                             "started_at": utc_now_iso(),
                         }
                     )
@@ -1008,6 +1088,7 @@ def launch_projected_browser_runtime(
                         "display": browser_display,
                         "display_owned": bool(display_owned),
                         "display_owner": display_owner,
+                        "headless": bool(headless),
                     },
                     cleanup_callbacks=[lambda proc=proc: _terminate_process(proc), *cleanup_callbacks],
                 )
@@ -1071,6 +1152,7 @@ def launch_projected_browser_runtime(
                 "display": browser_display,
                 "display_owned": bool(display_owned),
                 "display_owner": display_owner,
+                "headless": bool(headless),
             },
             cleanup_callbacks=cleanup_callbacks,
         )
@@ -1424,9 +1506,13 @@ class ProjectedBrowserSession:
                 button=str(payload.get("button") or "left"),
             )
         elif kind == "scroll":
+            raw_x = payload.get("x")
+            raw_y = payload.get("y")
             runtime.scroll(
                 dx=float(payload.get("dx") or 0.0),
                 dy=float(payload.get("dy") or 0.0),
+                x=float(raw_x) if isinstance(raw_x, (int, float)) else None,
+                y=float(raw_y) if isinstance(raw_y, (int, float)) else None,
             )
         elif kind == "key":
             runtime.key_press(key=str(payload.get("key") or ""))
@@ -1449,10 +1535,12 @@ class ProjectedBrowserSession:
         elif kind == "chatgpt_submit_prompt":
             from ...ports.web_model_browser_sidecar import (
                 CHATGPT_URL,
+                CHATGPT_BOUND_TARGET_ERROR_MARKER,
                 _conversation_url_from_tab,
                 _mark_page_pending_delivery,
                 _normalize_chatgpt_url,
                 _submit_prompt,
+                _wait_for_bound_conversation_url,
                 _wait_for_conversation_url,
             )
 
@@ -1462,6 +1550,14 @@ class ProjectedBrowserSession:
             target_url = _normalize_chatgpt_url(payload.get("target_url"))
             auto_bind_new_chat = bool(payload.get("auto_bind_new_chat"))
             delivery_id = str(payload.get("delivery_id") or "").strip()
+            expected_conversation_url = ""
+            if not auto_bind_new_chat:
+                expected_conversation_url = _conversation_url_from_tab(target_url)
+                if not expected_conversation_url:
+                    raise RuntimeError(
+                        f"{CHATGPT_BOUND_TARGET_ERROR_MARKER} saved ChatGPT conversation URL is provisional or invalid"
+                    )
+                target_url = expected_conversation_url
             page = runtime.page
             current_url = _normalize_chatgpt_url(str(getattr(page, "url", "") or ""))
             if target_url and current_url != target_url:
@@ -1471,6 +1567,15 @@ class ProjectedBrowserSession:
             current_chatgpt_url = _normalize_chatgpt_url(str(getattr(page, "url", "") or ""))
             if not current_chatgpt_url:
                 raise RuntimeError(f"ChatGPT sign-in required before delivery; current page is {str(getattr(page, 'url', '') or '')[:200]}")
+            if expected_conversation_url and not _wait_for_bound_conversation_url(
+                page, expected_conversation_url, timeout_seconds=5.0
+            ):
+                observed = _normalize_chatgpt_url(
+                    str(getattr(page, "url", "") or "")
+                )
+                raise RuntimeError(
+                    f"{CHATGPT_BOUND_TARGET_ERROR_MARKER} expected={expected_conversation_url} observed={observed or 'non-ChatGPT page'}"
+                )
             if auto_bind_new_chat:
                 _mark_page_pending_delivery(page, delivery_id)
             command_timeout_seconds = float(payload.get("command_timeout_seconds") or payload.get("input_timeout_seconds") or 30.0)
@@ -1481,14 +1586,17 @@ class ProjectedBrowserSession:
                 prompt,
                 input_timeout_seconds=float(payload.get("input_timeout_seconds") or 30.0),
                 submit_timeout_seconds=submit_timeout_seconds,
+                attachment_path=str(payload.get("attachment_path") or "").strip() or None,
+                delivery_id=delivery_id,
             )
-            conversation_url = _conversation_url_from_tab(str(getattr(page, "url", "") or ""))
-            if auto_bind_new_chat and not conversation_url:
+            if auto_bind_new_chat:
                 bind_timeout = max(0.2, command_deadline - time.time())
                 conversation_url = _wait_for_conversation_url(
                     page,
                     timeout_seconds=min(float(payload.get("new_chat_bind_timeout_seconds") or 20.0), bind_timeout),
                 )
+            else:
+                conversation_url = expected_conversation_url
             tab_url = str(getattr(page, "url", "") or "")
             pending_conversation_url = bool(auto_bind_new_chat and not conversation_url)
             conversation_url = conversation_url or ("" if pending_conversation_url else target_url)
@@ -1661,6 +1769,7 @@ class ProjectedBrowserSession:
         buffer = b""
         last_seq = 0
         sent_state_marker = ""
+        pending_replies: list[tuple[str, "queue.Queue[dict[str, Any]]"]] = []
 
         def _queue_controller_command(incoming: dict[str, Any]) -> bool:
             kind = str(incoming.get("t") or "").strip().lower()
@@ -1671,7 +1780,13 @@ class ProjectedBrowserSession:
                 # briefly block Playwright commands while navigation or frame
                 # projection is in progress; waiting synchronously here turns that
                 # transient congestion into a user-visible error.
-                self._commands.put((kind, incoming, None))
+                command_id = str(incoming.get("id") or "").strip()
+                reply: Optional["queue.Queue[dict[str, Any]]"] = None
+                if command_id:
+                    reply = queue.Queue(maxsize=1)
+                self._commands.put((kind, incoming, reply))
+                if reply is not None:
+                    pending_replies.append((command_id, reply))
             except Exception as exc:
                 if not _send_json_line(
                     sock,
@@ -1682,6 +1797,27 @@ class ProjectedBrowserSession:
                     },
                 ):
                     return False
+            return True
+
+        def _drain_command_replies() -> bool:
+            waiting: list[tuple[str, "queue.Queue[dict[str, Any]]"]] = []
+            for command_id, reply in pending_replies:
+                try:
+                    result = reply.get_nowait()
+                except queue.Empty:
+                    waiting.append((command_id, reply))
+                    continue
+                response: dict[str, Any] = {
+                    "t": "command_result",
+                    "id": command_id,
+                    "ok": bool(result.get("ok")),
+                }
+                message = str(result.get("message") or "").strip()
+                if message:
+                    response["message"] = message
+                if not _send_json_line(sock, response):
+                    return False
+            pending_replies[:] = waiting
             return True
 
         def _drain_controller_commands(max_messages: int = 64) -> bool:
@@ -1703,6 +1839,8 @@ class ProjectedBrowserSession:
         try:
             while not self._stop_event.is_set():
                 if not _drain_controller_commands():
+                    break
+                if not _drain_command_replies():
                     break
 
                 snapshot = self.snapshot()
@@ -1734,6 +1872,8 @@ class ProjectedBrowserSession:
 
                 if not _drain_controller_commands():
                     break
+                if not _drain_command_replies():
+                    break
                 if not self._commands.empty():
                     time.sleep(0.01)
                     continue
@@ -1747,6 +1887,8 @@ class ProjectedBrowserSession:
 
                 frame = self.wait_for_frame(after_seq=last_seq, timeout=0.08)
                 if not _drain_controller_commands():
+                    break
+                if not _drain_command_replies():
                     break
                 if not self._commands.empty():
                     continue

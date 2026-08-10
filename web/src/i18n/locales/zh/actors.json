@@ -158,7 +158,6 @@
   "saveSecretsAndRestartConfirm": "保存更改、应用密钥并重启 \"{{label}}\"？这将中断正在进行的工作。",
   "nothingToSave": "没有可保存的更改。",
   "savedRestartRequired": "已保存。请重启 \"{{label}}\" 以应用运行时/配置/密钥变更。",
-  "scopeAlreadyAttached": "此目录已有工作组，正在打开它。",
   "createdButFailedAttach": "已创建工作组但关联失败：{{message}}",
   "destGroupDifferent": "目标工作组必须与源工作组不同。",
   "relayTextEmpty": "转发消息内容为空。",
@@ -277,5 +276,23 @@
   "headlessControlStalled": "控制任务等待中",
   "headlessControlCompleted": "控制任务处理完成",
   "headlessControlFailed": "控制任务处理失败",
-  "headlessControlUpdated": "控制任务更新"
+  "headlessControlUpdated": "控制任务更新",
+  "runtimeActivity": {
+    "toolFallback": "工具",
+    "sessionStarted": "运行会话已启动",
+    "sessionCompleted": "运行会话已结束，用时 {{seconds}} 秒",
+    "turnStarted": "正在处理新请求",
+    "turnWaiting": "正在等待输入",
+    "turnCompleted": "请求处理完成，用时 {{seconds}} 秒",
+    "turnFailed": "请求处理失败，已运行 {{seconds}} 秒",
+    "turnStuck": "疑似卡住：已等待 {{seconds}} 秒",
+    "toolStarted": "正在调用 {{tool}}",
+    "toolWaiting": "等待 {{tool}} 权限",
+    "toolCompleted": "{{tool}} 已完成，用时 {{seconds}} 秒",
+    "toolFailed": "{{tool}} 执行失败，已运行 {{seconds}} 秒",
+    "toolStuck": "{{tool}} 已 {{seconds}} 秒无返回",
+    "subagentStarted": "子代理已启动",
+    "subagentCompleted": "子代理已完成，用时 {{seconds}} 秒",
+    "subagentFailed": "子代理执行失败，已运行 {{seconds}} 秒"
+  }
 }

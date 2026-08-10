@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=70.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cccc-pair"
-version = "0.4.32"
+version = "0.4.34rc2"
 description = "Global multi-agent delivery kernel with working groups, scopes, and an append-only collaboration ledger"
 readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 authors = [
   { name = "ChesterRa", email = "ra@ike.ba" }
 ]
@@ -19,7 +19,7 @@ dependencies = [
   "dingtalk-stream>=0.24.3",
   "fastapi>=0.110,<1.0",
   "filelock>=3.13,<4",
-  "httpx[socks]>=0.24,<1.0",
+  "httpx[socks]>=0.27,<0.29",
   "lark-oapi>=1.0.0",
   "pydantic>=2.0,<3.0",
   "pywinpty>=2.0,<3.0.4; platform_system == 'Windows'",
@@ -34,9 +34,10 @@ classifiers = [
   "Programming Language :: Python",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Environment :: Console",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
@@ -50,8 +51,8 @@ Repository = "https://github.com/ChesterRa/cccc"
 Issues = "https://github.com/ChesterRa/cccc/issues"
 
 [project.scripts]
-cccc = "cccc.cli:main"
-ccccd = "cccc.daemon_main:main"
+cccc = "cccc.launcher:main"
+ccccd = "cccc.daemon_launcher:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -59,7 +60,8 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
 "cccc.ports.web" = ["dist/**"]
-"cccc.resources" = ["*.md", "*.yaml", "*.json", "*.py"]
+"cccc.providers.notebooklm._vendor" = ["LICENSE", "VENDORED_FROM.md"]
+"cccc.resources" = ["*.md", "*.yaml", "*.json", "*.js", "*.py"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -73,7 +75,7 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py311"
 exclude = [
   "src/cccc/providers/notebooklm/_vendor",
   "src/cccc/vendor",

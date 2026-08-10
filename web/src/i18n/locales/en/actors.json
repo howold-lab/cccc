@@ -158,7 +158,6 @@
   "saveSecretsAndRestartConfirm": "Save changes, apply secrets, and restart \"{{label}}\" now? This will interrupt any running work.",
   "nothingToSave": "No changes to save.",
   "savedRestartRequired": "Saved. Restart \"{{label}}\" to apply runtime/profile/secret changes.",
-  "scopeAlreadyAttached": "This directory already has a working group. Opening it instead.",
   "createdButFailedAttach": "Created group but failed to attach: {{message}}",
   "destGroupDifferent": "Destination group must be different from the source group.",
   "relayTextEmpty": "Relay message text is empty.",
@@ -277,5 +276,23 @@
   "headlessControlStalled": "Control task is waiting",
   "headlessControlCompleted": "Control task completed",
   "headlessControlFailed": "Control task failed",
-  "headlessControlUpdated": "Control task updated"
+  "headlessControlUpdated": "Control task updated",
+  "runtimeActivity": {
+    "toolFallback": "tool",
+    "sessionStarted": "Runtime session started",
+    "sessionCompleted": "Runtime session ended in {{seconds}}s",
+    "turnStarted": "Processing a new request",
+    "turnWaiting": "Waiting for input",
+    "turnCompleted": "Request completed in {{seconds}}s",
+    "turnFailed": "Request failed after {{seconds}}s",
+    "turnStuck": "Possibly stuck for {{seconds}}s",
+    "toolStarted": "Calling {{tool}}",
+    "toolWaiting": "Waiting for {{tool}} permission",
+    "toolCompleted": "{{tool}} completed in {{seconds}}s",
+    "toolFailed": "{{tool}} failed after {{seconds}}s",
+    "toolStuck": "{{tool}} has not returned for {{seconds}}s",
+    "subagentStarted": "Subagent started",
+    "subagentCompleted": "Subagent completed in {{seconds}}s",
+    "subagentFailed": "Subagent failed after {{seconds}}s"
+  }
 }

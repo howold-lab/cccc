@@ -107,6 +107,37 @@ def _web_mode() -> Literal["normal", "exhibit"]:
     return "normal"
 
 
+def _resolve_web_dist_dir() -> Optional[Path]:
+    explicit = str(os.environ.get("CCCC_WEB_DIST") or "").strip()
+    if explicit:
+        try:
+            candidate = Path(explicit).expanduser().resolve()
+            return candidate if candidate.is_dir() else None
+        except Exception:
+            return None
+
+    module_path = Path(__file__).resolve()
+    try:
+        for parent in module_path.parents:
+            candidate = parent / "web" / "dist"
+            if (
+                (parent / "pyproject.toml").is_file()
+                and (parent / "web" / "package.json").is_file()
+                and (candidate / "index.html").is_file()
+            ):
+                return candidate
+    except Exception:
+        pass
+
+    try:
+        packaged = module_path.parent / "dist"
+        if (packaged / "index.html").is_file():
+            return packaged
+    except Exception:
+        pass
+    return None
+
+
 _PUBLIC_API_PATHS = frozenset({
     "/api/v1/health",
     "/api/v1/ready",
@@ -392,34 +423,7 @@ def create_app() -> FastAPI:
         except Exception:
             pass
 
-    dist = str(os.environ.get("CCCC_WEB_DIST") or "").strip()
-    dist_dir: Optional[Path] = None
-    if dist:
-        try:
-            candidate = Path(dist).expanduser().resolve()
-            if candidate.exists():
-                dist_dir = candidate
-        except Exception:
-            dist_dir = None
-    else:
-        # Prefer packaged UI under `cccc/ports/web/dist`.
-        try:
-            packaged = Path(__file__).resolve().parent / "dist"
-            if packaged.exists():
-                dist_dir = packaged
-        except Exception:
-            dist_dir = None
-
-        # Dev fallback: repo-root `web/dist`.
-        if dist_dir is None:
-            try:
-                for parent in Path(__file__).resolve().parents:
-                    candidate = parent / "web" / "dist"
-                    if candidate.exists():
-                        dist_dir = candidate
-                        break
-            except Exception:
-                dist_dir = None
+    dist_dir = _resolve_web_dist_dir()
     if dist_dir is not None:
         @app.get("/ui/capabilities/", include_in_schema=False)
         @app.get("/ui/capabilities", include_in_schema=False)
@@ -506,6 +510,7 @@ def create_app() -> FastAPI:
     from .routes.access_tokens import create_routers as create_access_token_routers
     from .routes.group_bridge import create_routers as create_group_bridge_routers
     from .routes.nomcp import create_routers as create_nomcp_routers
+    from .routes.runtime_activity import create_routers as create_runtime_activity_routers
 
     route_ctx = RouteContext(
         home=home,
@@ -527,6 +532,8 @@ def create_app() -> FastAPI:
     for router in create_messaging_routers(route_ctx):
         app.include_router(router)
     for router in create_actor_routers(route_ctx):
+        app.include_router(router)
+    for router in create_runtime_activity_routers(route_ctx):
         app.include_router(router)
     register_im_routes(app, ctx=route_ctx)
     for router in create_access_token_routers(route_ctx):

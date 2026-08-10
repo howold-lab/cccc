@@ -21,6 +21,7 @@ import {
   isSessionConnectionInfoInput,
   normalizeGroupBridgeAccessLevel,
   normalizeIssuerEndpoint,
+  pairingOutboundLabel,
   parseConnectionInfoInput,
   projectIncomingRequests,
   projectPairingOverview,
@@ -41,6 +42,7 @@ import {
 import { publishGroupBridgePairingChanged } from "../../../utils/groupBridgePairingEvents";
 import { copyTextToClipboard } from "../../../utils/copy";
 import { formatRecipientIdentifier } from "../../../utils/recipientIdentifier";
+import { accessButtonClass, defaultIssuerEndpoint } from "./groupBridgePairingView";
 
 interface Props {
   isDark: boolean;
@@ -51,27 +53,6 @@ interface Props {
   trusts: GroupBridgeTrust[];
   outbounds: GroupBridgePairingOutbound[];
   refreshPairing: () => Promise<void>;
-}
-
-function defaultIssuerEndpoint(): string {
-  return typeof window !== "undefined" ? window.location.origin : "";
-}
-
-function accessButtonClass(level: GroupBridgeAccessLevel, selected: boolean): string {
-  const selectedClass =
-    level === "full"
-      ? "border-rose-500/40 bg-rose-500/15 text-rose-700 dark:text-rose-200"
-      : level === "read"
-        ? "border-sky-500/35 bg-sky-500/15 text-sky-700 dark:text-sky-200"
-        : "border-slate-500/25 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)]";
-  return [
-    "min-h-[32px] rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all duration-150",
-    "focus:outline-none focus:ring-2 focus:ring-slate-500/15",
-    "disabled:cursor-not-allowed disabled:opacity-50",
-    selected
-      ? selectedClass
-      : "border-transparent text-[var(--color-text-muted)] hover:bg-[var(--glass-tab-bg-hover)] hover:text-[var(--color-text-primary)]",
-  ].join(" ");
 }
 
 export function GroupBridgePairingSection({
@@ -124,6 +105,16 @@ export function GroupBridgePairingSection({
     busy,
   });
 
+  const copyConnectionInfo = useCallback(
+    async (value: string) => {
+      const copied = await copyTextToClipboard(value);
+      setCopyNotice(
+        t(copied ? "group_bridge.copyConnectionInfoDone" : "group_bridge.copyConnectionInfoManual"),
+      );
+    },
+    [t],
+  );
+
   const onCreateInvite = useCallback(async () => {
     setInviteError("");
     setCopyNotice("");
@@ -146,7 +137,9 @@ export function GroupBridgePairingSection({
           );
           return;
         }
-        setCreatedInfo(JSON.stringify(infoResp.result.payload, null, 2));
+        const nextCreatedInfo = JSON.stringify(infoResp.result.payload, null, 2);
+        setCreatedInfo(nextCreatedInfo);
+        await copyConnectionInfo(nextCreatedInfo);
         await refreshPairing();
       } else {
         setInviteError(resp.error.message || t("group_bridge.createInviteFailed"));
@@ -156,15 +149,12 @@ export function GroupBridgePairingSection({
     } finally {
       setBusy(false);
     }
-  }, [currentGroupId, currentGroupTitle, issuerEndpoint, refreshPairing, t]);
+  }, [copyConnectionInfo, currentGroupId, currentGroupTitle, issuerEndpoint, refreshPairing, t]);
 
   const onCopyConnectionInfo = useCallback(async () => {
     if (!createdInfo) return;
-    const copied = await copyTextToClipboard(createdInfo);
-    setCopyNotice(
-      t(copied ? "group_bridge.copyConnectionInfoDone" : "group_bridge.copyConnectionInfoManual"),
-    );
-  }, [createdInfo, t]);
+    await copyConnectionInfo(createdInfo);
+  }, [copyConnectionInfo, createdInfo]);
 
   const copyTrustRecipientIdentifier = useCallback(
     async (trust: GroupBridgeTrust, displayName: string, accessLevel: string) => {
@@ -370,6 +360,9 @@ export function GroupBridgePairingSection({
             const currentAccessLevel = normalizeGroupBridgeAccessLevel(trust.access_level);
             const remoteAccessLevel = normalizeGroupBridgeAccessLevel(trust.remote_access_level);
             const remoteAccessKnown = String(trust.remote_access_level || "").trim().length > 0;
+            const sessionHealthKnown =
+              typeof trust.session_connected === "boolean" ||
+              Boolean(String(trust.session_last_error || "").trim());
             const refreshError = remoteRefreshErrors[trust.trust_id] || "";
             const remoteRefreshBusy = remoteRefreshBusyTrustId === trust.trust_id;
             return (
@@ -387,12 +380,30 @@ export function GroupBridgePairingSection({
                         {t("group_bridge.trustedBadge")}
                       </span>
                       <span>{t("group_bridge.status", { status: trust.status })}</span>
+                      {sessionHealthKnown && (
+                        <span
+                          className={
+                            trust.session_connected
+                              ? "rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200"
+                              : "rounded-full bg-amber-100 px-2 py-0.5 font-medium text-amber-800 dark:bg-amber-500/15 dark:text-amber-200"
+                          }
+                        >
+                          {trust.session_connected
+                            ? t("group_bridge.sessionConnected")
+                            : t("group_bridge.sessionReconnecting")}
+                        </span>
+                      )}
                       {remoteGroupId && (
                         <code className="max-w-[18rem] truncate rounded-md bg-[var(--glass-panel-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-text-primary)]">
                           {remoteGroupId}
                         </code>
                       )}
                     </div>
+                    {trust.session_last_error && !trust.session_connected && (
+                      <p className="mt-2 max-w-xl break-words text-xs text-amber-700 dark:text-amber-300">
+                        {trust.session_last_error}
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     {remoteGroupId && (
@@ -765,10 +776,7 @@ export function GroupBridgePairingSection({
               >
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium text-[var(--color-text-primary)]">
-                    {outbound.issuer_peer_id ||
-                      outbound.issuer_group_id ||
-                      outbound.issuer_endpoint ||
-                      outbound.outbound_id}
+                    {pairingOutboundLabel(outbound)}
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--color-text-muted)]">
                     <span className="rounded-full bg-sky-100 px-2 py-0.5 font-medium text-sky-800 dark:bg-sky-500/15 dark:text-sky-200">

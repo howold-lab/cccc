@@ -755,6 +755,58 @@ class TestAssistantOps(unittest.TestCase):
         finally:
             cleanup()
 
+    def test_disabled_voice_secretary_allows_only_direct_composer_recording_lease(self) -> None:
+        _, cleanup = self._with_home()
+        try:
+            group_id = self._create_group()
+
+            rejected, _ = self._call(
+                "assistant_voice_recording_lease",
+                {
+                    "group_id": group_id,
+                    "action": "acquire",
+                    "owner_id": "owner-disabled",
+                    "capture_mode": "prompt",
+                    "recognition_backend": "assistant_service_local_asr",
+                },
+            )
+            self.assertFalse(rejected.ok)
+            self.assertEqual(getattr(rejected.error, "code", ""), "assistant_disabled")
+
+            acquired, _ = self._call(
+                "assistant_voice_recording_lease",
+                {
+                    "group_id": group_id,
+                    "action": "acquire",
+                    "owner_id": "owner-disabled",
+                    "capture_mode": "prompt",
+                    "recognition_backend": "assistant_service_local_asr",
+                    "dispatch_target": "composer",
+                },
+            )
+            self.assertTrue(acquired.ok, getattr(acquired, "error", None))
+            lease_id = str((acquired.result or {}).get("lease_id") or "")
+            lease = (acquired.result or {}).get("lease") or {}
+            self.assertTrue(lease_id)
+            self.assertEqual(lease.get("dispatch_target"), "composer")
+
+            heartbeat, _ = self._call(
+                "assistant_voice_recording_lease",
+                {
+                    "group_id": group_id,
+                    "action": "heartbeat",
+                    "owner_id": "owner-disabled",
+                    "lease_id": lease_id,
+                    "capture_mode": "prompt",
+                    "recognition_backend": "assistant_service_local_asr",
+                    "dispatch_target": "composer",
+                },
+            )
+            self.assertTrue(heartbeat.ok, getattr(heartbeat, "error", None))
+            self.assertTrue(bool((heartbeat.result or {}).get("acquired")))
+        finally:
+            cleanup()
+
     def test_voice_recording_same_owner_reacquire_preserves_lease_id(self) -> None:
         _, cleanup = self._with_home()
         try:
@@ -1402,6 +1454,29 @@ class TestAssistantOps(unittest.TestCase):
                 os.environ.pop("CCCC_VOICE_SECRETARY_ASR_COMMAND", None)
             cleanup()
 
+    def test_voice_service_transcribe_rejects_unmanaged_audio_path(self) -> None:
+        home, cleanup = self._with_home()
+        try:
+            group_id = self._create_group()
+            outside = Path(home) / "outside.audio"
+            outside.write_bytes(b"audio")
+
+            transcribe, _ = self._call(
+                "assistant_voice_transcribe",
+                {
+                    "group_id": group_id,
+                    "by": "user",
+                    "audio_path": str(outside),
+                    "mime_type": "application/octet-stream",
+                },
+            )
+
+            self.assertFalse(transcribe.ok)
+            self.assertEqual(transcribe.error.code, "assistant_voice_transcribe_failed")
+            self.assertIn("managed upload directory", transcribe.error.message)
+        finally:
+            cleanup()
+
     def test_voice_service_transcribe_uses_first_party_service_process(self) -> None:
         _, cleanup = self._with_home()
         old_mock = os.environ.get("CCCC_VOICE_SECRETARY_ASR_MOCK_TEXT")
@@ -1741,7 +1816,7 @@ class TestAssistantOps(unittest.TestCase):
         finally:
             cleanup()
 
-    def test_voice_runtime_python_selects_current_python_39_or_newer(self) -> None:
+    def test_voice_runtime_python_selects_current_python_311_or_newer(self) -> None:
         from cccc.daemon.assistants import voice_runtime_deps
 
         with patch.object(voice_runtime_deps.sys, "version_info", (3, 14, 0)):
@@ -1750,18 +1825,18 @@ class TestAssistantOps(unittest.TestCase):
     def test_voice_runtime_python_falls_back_to_python_314(self) -> None:
         from cccc.daemon.assistants import voice_runtime_deps
 
-        with patch.object(voice_runtime_deps.sys, "version_info", (3, 8, 20)), patch.object(
+        with patch.object(voice_runtime_deps.sys, "version_info", (3, 10, 20)), patch.object(
             voice_runtime_deps.shutil,
             "which",
             side_effect=lambda name: "/opt/homebrew/bin/python3.14" if name == "python3.14" else None,
         ), patch.object(voice_runtime_deps, "_python_version", return_value=(3, 14)):
             self.assertEqual(voice_runtime_deps._select_base_python(), "/opt/homebrew/bin/python3.14")
 
-    def test_voice_runtime_python_rejects_below_39(self) -> None:
+    def test_voice_runtime_python_rejects_below_311(self) -> None:
         from cccc.daemon.assistants import voice_runtime_deps
         from cccc.daemon.assistants.voice_runtime_deps import VoiceRuntimeDepsError
 
-        with patch.object(voice_runtime_deps.sys, "version_info", (3, 8, 20)), patch.object(
+        with patch.object(voice_runtime_deps.sys, "version_info", (3, 10, 20)), patch.object(
             voice_runtime_deps.shutil,
             "which",
             return_value=None,
@@ -1769,7 +1844,7 @@ class TestAssistantOps(unittest.TestCase):
             with self.assertRaises(VoiceRuntimeDepsError) as cm:
                 voice_runtime_deps._select_base_python()
         self.assertEqual(cm.exception.code, "voice_runtime_python_missing")
-        self.assertIn("Python 3.9+", cm.exception.message)
+        self.assertIn("Python 3.11+", cm.exception.message)
 
     def test_voice_document_create_requires_attached_repo_scope(self) -> None:
         _, cleanup = self._with_home()

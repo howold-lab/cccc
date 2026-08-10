@@ -2,6 +2,17 @@
 
 Run CCCC in a Docker container — ideal for servers, teams, and reproducible environments.
 
+The default `docker/Dockerfile` and `docker/docker-compose.yml` use the stable
+Python implementation. To evaluate the experimental Rust implementation instead,
+use the explicit Rust files:
+
+```bash
+docker compose -f docker/docker-compose.rust.yml up --build
+```
+
+The two Compose projects use separate image, container, and volume names. Stop one implementation
+before pointing the other at the same `CCCC_HOME` data.
+
 ## AI-Assisted Deployment
 
 Copy the prompt below and paste it to any AI assistant — it will guide you through the entire deployment interactively.
@@ -13,7 +24,7 @@ You are a deployment assistant for CCCC (Multi-Agent Collaboration Kernel).
 Guide the user step-by-step through Docker deployment. Ask questions interactively, don't dump all steps at once.
 
 ## What you're deploying
-CCCC is a multi-agent collaboration hub. The Docker image includes Python 3.11, Node.js 20,
+CCCC is a multi-agent collaboration hub. The Docker image includes Python 3.14, Node.js 20,
 and pre-installed AI agent CLIs (Claude Code, Codex CLI, Factory CLI).
 
 ## Step 1: Get the source code
@@ -50,7 +61,7 @@ Run these and report results:
 
 ## Troubleshooting knowledge (use when relevant, don't preemptively dump):
 - "cannot be used with root/sudo privileges": The Dockerfile uses a non-root `cccc` user. Ensure using the latest Dockerfile.
-- Volume permission errors after upgrading: `docker run --rm -v cccc-data:/data python:3.11-slim chown -R 1000:1000 /data`
+- Volume permission errors after upgrading: `docker run --rm -v cccc-data:/data python:3.14-slim chown -R 1000:1000 /data`
 - Claude CLI onboarding already pre-configured via: `{"hasCompletedOnboarding":true}` in /home/cccc/.claude.json
 - Custom Claude CLI config: `docker exec cccc sh -c 'cat > /home/cccc/.claude.json << EOF\n{your json}\nEOF'`
 - Check runtime CLIs: `docker exec cccc claude --version` / `codex --version`
@@ -265,7 +276,7 @@ If you previously ran the container as root and then switched to the non-root us
 
 ```bash
 # Fix permissions on the data volume
-docker run --rm -v cccc-data:/data python:3.11-slim \
+docker run --rm -v cccc-data:/data python:3.14-slim \
   chown -R 1000:1000 /data
 ```
 
@@ -298,7 +309,7 @@ The Docker image includes:
 
 | Tool | Purpose |
 |------|---------|
-| Python 3.11 | CCCC daemon runtime |
+| Python 3.14 | CCCC daemon runtime |
 | Node.js 20 | Agent CLI runtime (npm-based tools) |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Anthropic's AI coding agent |
 | [Codex CLI](https://github.com/openai/codex) | OpenAI's AI coding agent |

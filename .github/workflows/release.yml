@@ -1,14 +1,22 @@
-name: Build and Publish
+name: Release CCCC
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  verify-linux:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,155 +24,150 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.14"
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20.19.5'
-          cache: 'npm'
+          node-version: "20.19.5"
+          cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Build Web UI (bundled)
+      - name: Build Web UI
         run: |
           npm ci --prefix web
-          npm -C web run check
           npm -C web run build
+          rm -rf src/cccc/ports/web/dist
+          mkdir -p src/cccc/ports/web/dist
+          cp -R web/dist/. src/cccc/ports/web/dist/
           test -f src/cccc/ports/web/dist/index.html
 
-      - name: Verify tag matches package version
+      - name: Verify shared release identity
         run: |
-          python - <<'PY'
-          import os
-          import re
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            python scripts/check_release_versions.py --tag "$GITHUB_REF_NAME"
+          else
+            python scripts/check_release_versions.py
+          fi
 
-          def _read_pyproject_version(path: str = "pyproject.toml") -> str:
-            in_project = False
-            with open(path, "r", encoding="utf-8") as f:
-              for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                  continue
-                if line.startswith("[") and line.endswith("]"):
-                  in_project = (line == "[project]")
-                  continue
-                if in_project:
-                  m = re.match(r"^version\s*=\s*['\"]([^'\"]+)['\"]\s*(?:#.*)?$", line)
-                  if m:
-                    return m.group(1)
-            return ""
-
-          tag = os.environ.get("GITHUB_REF_NAME", "")
-          if not tag.startswith("v"):
-            raise SystemExit(f"expected tag like v0.4.0 or v0.4.0-rc1, got: {tag!r}")
-
-          tag_body = tag[1:]
-          expected = None
-
-          m = re.fullmatch(r"(\d+\.\d+\.\d+)", tag_body)
-          if m:
-            expected = m.group(1)
-
-          if expected is None:
-            m = re.fullmatch(r"(\d+\.\d+\.\d+)-(alpha|beta|rc)(\d+)", tag_body)
-            if m:
-              base, phase, num = m.group(1), m.group(2), m.group(3)
-              phase_map = {"alpha": "a", "beta": "b", "rc": "rc"}
-              expected = f"{base}{phase_map[phase]}{num}"
-
-          if expected is None:
-            m = re.fullmatch(r"(\d+\.\d+\.\d+)(a|b|rc)(\d+)", tag_body)
-            if m:
-              expected = f"{m.group(1)}{m.group(2)}{m.group(3)}"
-
-          if expected is None:
-            raise SystemExit(f"unsupported tag format: {tag!r}")
-
-          version = _read_pyproject_version()
-          if version != expected:
-            raise SystemExit(f"tag/version mismatch: tag={tag!r} -> expected {expected!r}, pyproject.toml has {version!r}")
-
-          print(f"OK: tag {tag!r} matches pyproject.toml version {version!r}")
-          PY
-
-      - name: Install build deps
+      - name: Build Python compatibility distribution
         run: |
           python -m pip install -U pip build twine
-          python -m pip install -e . pytest pytest-timeout
-
-      - name: Run test suite
-        timeout-minutes: 15
-        run: |
-          python -m pytest -q --timeout=120 --timeout-method=thread --durations=20
-
-      - name: Build
-        run: |
-          python -m compileall -q src/cccc
+          python -W error::SyntaxWarning -m compileall -q src/cccc
           python -m build
           python -m twine check dist/*
 
-      - name: Smoke test wheel
+      - name: Smoke installed portable Python wheel
+        timeout-minutes: 2
+        shell: bash
         run: |
-          python -m pip install --force-reinstall dist/*.whl
-          cccc version
-          python - <<'PY'
-          import importlib.resources as ir
-          import json
-          import subprocess
+          python -m venv .release-smoke
+          .release-smoke/bin/python -m pip install --no-deps --force-reinstall dist/*.whl
+          expected="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          actual="$(CCCC_HOME="$RUNNER_TEMP/cccc-python-release-smoke" .release-smoke/bin/cccc version)"
+          test "$actual" = "$expected"
 
-          web_index = ir.files("cccc.ports.web").joinpath("dist/index.html")
-          help_md = ir.files("cccc.resources").joinpath("cccc-help.md")
-
-          assert web_index.is_file(), f"missing bundled web UI: {web_index}"
-          assert help_md.is_file(), f"missing bundled help playbook: {help_md}"
-
-          proc = subprocess.Popen(
-              ["cccc", "mcp"],
-              stdin=subprocess.PIPE,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE,
-              text=True,
-          )
-          assert proc.stdin is not None
-          assert proc.stdout is not None
-
-          proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
-          proc.stdin.flush()
-          init_resp = json.loads(proc.stdout.readline().strip())
-          assert init_resp.get("id") == 1
-          assert init_resp.get("result", {}).get("serverInfo", {}).get("name") == "cccc-mcp"
-
-          proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}) + "\n")
-          proc.stdin.flush()
-          tools_resp = json.loads(proc.stdout.readline().strip())
-          assert tools_resp.get("id") == 2
-          assert isinstance(tools_resp.get("result", {}).get("tools"), list)
-
-          proc.terminate()
-
-          print("OK: bundled web UI + help playbook + MCP handshake")
-          PY
-
-      - name: Upload verified dist artifact
+      - name: Upload shared Web bundle
         uses: actions/upload-artifact@v4
         with:
-          name: release-dist
+          name: release-web-bundle
+          path: |
+            web/dist
+            src/cccc/ports/web/dist
+          if-no-files-found: error
+
+      - name: Upload Python compatibility distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-universal
           path: dist/*
           if-no-files-found: error
 
-  verify-platform-smoke:
-    needs: verify-linux
-    runs-on: ${{ matrix.os }}
+  native-linux-x64:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: quay.io/pypa/manylinux_2_28_x86_64:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore Web bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-web-bundle
+          path: .
+
+      - name: Install native build dependencies
+        run: dnf install -y cmake openssl-devel perl-core pkgconf-pkg-config
+
+      - name: Select Python 3.14
+        run: echo "/opt/python/cp314-cp314/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Rust implementation against manylinux 2.28
+        run: |
+          touch web/dist/index.html
+          cargo build --release --locked -p cccc --bin cccc
+          strip target/release/cccc
+          python scripts/check_release_versions.py --rust-binary target/release/cccc
+
+      - name: Build and repair Linux native wheel
+        run: |
+          python -m pip install -U pip build "auditwheel==6.7.0"
+          mkdir -p wheelhouse/raw wheelhouse/final
+          CCCC_BUILD_RUST_BINARY="$PWD/target/release/cccc" \
+            CCCC_BUILD_WHEEL_TAG=linux_x86_64 \
+            python -m build --wheel --outdir wheelhouse/raw
+          auditwheel repair \
+            --plat manylinux_2_28_x86_64 \
+            --wheel-dir wheelhouse/final \
+            wheelhouse/raw/*.whl
+          wheel_path="$(find wheelhouse/final -maxdepth 1 -name '*.whl' -print -quit)"
+          python scripts/verify_native_wheel.py "$wheel_path" --platform-tag manylinux_2_28_x86_64
+          auditwheel show "$wheel_path"
+
+      - name: Upload Linux native wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-linux-x64
+          path: wheelhouse/final/*.whl
+          if-no-files-found: error
+
+  native-desktop:
+    needs: build
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: target/x86_64-apple-darwin/release/cccc
+            platform_tag: macosx_11_0_x86_64
+            repair: delocate
+            arch: x86_64
+            artifact: macos-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary: target/aarch64-apple-darwin/release/cccc
+            platform_tag: macosx_11_0_arm64
+            repair: delocate
+            arch: arm64
+            artifact: macos-arm64
           - os: windows-latest
-            label: Windows
-            run_windows_pty: true
-          - os: macos-latest
-            label: macOS
-            run_windows_pty: false
+            target: x86_64-pc-windows-msvc
+            binary: target/x86_64-pc-windows-msvc/release/cccc.exe
+            platform_tag: win_amd64
+            repair: delvewheel
+            arch: AMD64
+            artifact: windows-x64
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
@@ -172,104 +175,155 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Restore Web bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-web-bundle
+          path: .
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.14"
 
-      - name: Install smoke deps
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build Rust implementation
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
-          python -m pip install -U pip pytest pytest-timeout
-          python -m pip install -e .
+          touch web/dist/index.html
+          cargo build --release --locked --target "${{ matrix.target }}" -p cccc --bin cccc
+          python scripts/check_release_versions.py --rust-binary "${{ matrix.binary }}"
 
-      - name: Run Windows PTY smoke tests
-        if: matrix.run_windows_pty
-        timeout-minutes: 10
+      - name: Strip macOS binary
+        if: matrix.repair == 'delocate'
+        run: strip "${{ matrix.binary }}"
+
+      - name: Build raw platform wheel
+        env:
+          CCCC_BUILD_RUST_BINARY: ${{ matrix.binary }}
+          CCCC_BUILD_WHEEL_TAG: ${{ matrix.platform_tag }}
         run: |
-          python -m pytest -q --timeout=90 --timeout-method=thread tests/test_socket_special_ops.py tests/test_windows_pty_backend.py
+          python -m pip install -U pip build
+          mkdir -p wheelhouse/raw wheelhouse/final
+          python -m build --wheel --outdir wheelhouse/raw
 
-      - name: Download verified dist artifact
+      - name: Repair macOS wheel dependencies
+        if: matrix.repair == 'delocate'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          python -m pip install "delocate==0.13.0"
+          delocate-wheel \
+            --require-archs "${{ matrix.arch }}" \
+            --wheel-dir wheelhouse/final \
+            --verbose \
+            wheelhouse/raw/*.whl
+
+      - name: Repair Windows wheel dependencies
+        if: matrix.repair == 'delvewheel'
+        run: |
+          python -m pip install "delvewheel==1.13.0"
+          delvewheel show --analyze-existing-exes wheelhouse/raw/*.whl
+          delvewheel repair --analyze-existing-exes --wheel-dir wheelhouse/final wheelhouse/raw/*.whl
+
+      - name: Verify native wheel structure
+        run: |
+          wheel_path="$(find wheelhouse/final -maxdepth 1 -name '*.whl' -print -quit)"
+          python scripts/verify_native_wheel.py "$wheel_path" --platform-tag "${{ matrix.platform_tag }}"
+
+      - name: Upload native wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-${{ matrix.artifact }}
+          path: wheelhouse/final/*.whl
+          if-no-files-found: error
+
+  collect:
+    needs:
+      - build
+      - native-linux-x64
+      - native-desktop
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Download every release distribution
         uses: actions/download-artifact@v4
         with:
-          name: release-dist
+          pattern: release-dist-*
           path: dist
+          merge-multiple: true
 
-      - name: Install verified wheel
+      - name: Verify complete distribution set
         run: |
-          python -m pip install --force-reinstall dist/*.whl
+          python -m pip install -U twine
+          python -m twine check dist/*
+          python scripts/verify_python_release_set.py dist
 
-      - name: Smoke test installed wheel on ${{ matrix.label }}
-        run: |
-          cccc version
-          python - <<'PY'
-          import json
-          import subprocess
-
-          proc = subprocess.Popen(
-              ["cccc", "mcp"],
-              stdin=subprocess.PIPE,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE,
-              text=True,
-          )
-          assert proc.stdin is not None
-          assert proc.stdout is not None
-
-          proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
-          proc.stdin.flush()
-          init_resp = json.loads(proc.stdout.readline().strip())
-          assert init_resp.get("id") == 1
-          assert init_resp.get("result", {}).get("serverInfo", {}).get("name") == "cccc-mcp"
-
-          proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}) + "\n")
-          proc.stdin.flush()
-          tools_resp = json.loads(proc.stdout.readline().strip())
-          assert tools_resp.get("id") == 2
-          assert isinstance(tools_resp.get("result", {}).get("tools"), list)
-
-          proc.terminate()
-
-          print("OK: MCP handshake on installed wheel")
-          PY
+      - name: Upload verified release set
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/*
+          if-no-files-found: error
 
   publish:
-    needs:
-      - verify-linux
-      - verify-platform-smoke
+    if: github.event_name == 'push'
+    needs: collect
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.14"
 
-      - name: Install publish deps
-        run: |
-          python -m pip install -U pip twine
-
-      - name: Download verified dist artifact
+      - name: Download verified release set
         uses: actions/download-artifact@v4
         with:
           name: release-dist
           path: dist
 
-      - name: Determine repository
-        id: repo
+      - name: Install publish dependencies
+        run: python -m pip install -U pip twine
+
+      - name: Classify release channel
+        id: channel
         run: |
           TAG="${GITHUB_REF_NAME}"
           if [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)[0-9]+|(a|b|rc)[0-9]+)$ ]]; then
-            echo "name=testpypi" >> $GITHUB_OUTPUT
-            echo "url=https://test.pypi.org/legacy/" >> $GITHUB_OUTPUT
-            echo "token=${{ secrets.TEST_PYPI_API_TOKEN }}" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
-            echo "name=pypi" >> $GITHUB_OUTPUT
-            echo "url=https://upload.pypi.org/legacy/" >> $GITHUB_OUTPUT
-            echo "token=${{ secrets.PYPI_API_TOKEN }}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload to ${{ steps.repo.outputs.name }}
+      - name: Upload prerelease distribution to TestPyPI
+        if: steps.channel.outputs.prerelease == 'true'
         env:
           TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ steps.repo.outputs.token }}
-        run: |
-          python -m twine upload --repository-url "${{ steps.repo.outputs.url }}" dist/*
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: python -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+
+      - name: Upload stable distribution to PyPI
+        if: steps.channel.outputs.prerelease == 'false'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload --repository-url https://upload.pypi.org/legacy/ dist/*

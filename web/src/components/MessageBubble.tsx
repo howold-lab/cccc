@@ -1,5 +1,4 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import type { CSSProperties } from "react";
 import { FloatingPortal, autoUpdate, flip, offset, shift, useFloating } from "@floating-ui/react";
 import { useTranslation } from "react-i18next";
 import { useCopyFeedback } from "../hooks/useCopyFeedback";
@@ -14,9 +13,10 @@ import {
   PresentationMessageRef,
   TaskMessageRef,
 } from "../types";
-import { formatFullTime, formatMessageTimestamp, formatTime } from "../utils/time";
+import { formatFullTime, formatMessageTimestamp } from "../utils/time";
 import { classNames } from "../utils/classNames";
 import { getReplyEventId } from "../utils/chatReply";
+import { projectCrossGroupRecipients } from "../utils/crossGroupRecipients";
 import { isGroupBridgeInboundMessage } from "../utils/groupBridgeMessages";
 import { getPresentationMessageRefs, getPresentationRefChipLabel } from "../utils/presentationRefs";
 import {
@@ -50,31 +50,13 @@ import {
   getMessageBubbleMotionClass,
   mayContainMarkdown,
 } from "./messageBubble/helpers";
-import { LazyMarkdownRenderer } from "./LazyMarkdownRenderer";
+import { AgentStateTooltip } from "./messageBubble/AgentStateTooltip";
+import { MessageContent } from "./messageBubble/MessageContent";
+import { MessageBubbleSurface } from "./messageBubble/MessageBubbleSurface";
+import { buildMessageCopyText } from "./messageBubble/messageCopyText";
 
 const ANIMATED_MESSAGE_BUBBLE_KEYS = new Set<string>();
 const NEW_MESSAGE_ANIMATION_WINDOW_MS = 12000;
-
-const ACCENT_BORDER_CLASSES: Record<string, string> = {
-  // Dark mode accents
-  "text-sky-300": "border-l-sky-400/80",
-  "text-indigo-300": "border-l-indigo-400/80",
-  "text-violet-300": "border-l-violet-400/80",
-  "text-fuchsia-300": "border-l-fuchsia-400/80",
-  "text-cyan-300": "border-l-cyan-400/80",
-  "text-teal-300": "border-l-teal-400/80",
-  "text-emerald-300": "border-l-emerald-400/80",
-  "text-amber-300": "border-l-amber-400/80",
-  // Light mode accents
-  "text-sky-700": "border-l-sky-500",
-  "text-indigo-700": "border-l-indigo-500",
-  "text-violet-700": "border-l-violet-500",
-  "text-fuchsia-700": "border-l-fuchsia-500",
-  "text-cyan-700": "border-l-cyan-500",
-  "text-teal-700": "border-l-teal-500",
-  "text-emerald-700": "border-l-emerald-500",
-  "text-amber-700": "border-l-amber-500",
-};
 
 const TASK_REF_STATE_TONE_CLASS: Record<TaskRefStateKey, string> = {
   planned:
@@ -133,77 +115,6 @@ function shouldAnimateIncomingBubble(messageKey: string, eventTs?: string): bool
 
   ANIMATED_MESSAGE_BUBBLE_KEYS.add(stableKey);
   return true;
-}
-
-function PlainMessageText({ text, className }: { text: string; className?: string }) {
-  return (
-    <div
-      className={classNames(
-        "break-words whitespace-pre-wrap text-[var(--color-text-primary)] [overflow-wrap:anywhere]",
-        className,
-      )}
-    >
-      {text}
-    </div>
-  );
-}
-
-function buildMessageCopyText({
-  quoteText,
-  messageText,
-  insight,
-  insightLabel,
-  presentationRefs,
-  taskRefs,
-  attachments,
-}: {
-  quoteText?: string;
-  messageText: string;
-  insight: string;
-  insightLabel: string;
-  presentationRefs: PresentationMessageRef[];
-  taskRefs: TaskMessageRef[];
-  attachments: { title: string; path: string }[];
-}): string {
-  const sections: string[] = [];
-  const trimmedQuote = String(quoteText || "").trim();
-  const trimmedMessage = String(messageText || "").trim();
-
-  if (trimmedQuote) {
-    sections.push(`> ${trimmedQuote}`);
-  }
-  if (trimmedMessage) {
-    sections.push(trimmedMessage);
-  }
-  const trimmedInsight = String(insight || "").trim();
-  if (trimmedInsight) {
-    sections.push(`${String(insightLabel || "Sender perspective").trim()}:\n${trimmedInsight}`);
-  }
-  if (presentationRefs.length > 0) {
-    sections.push(
-      [
-        "Presentation refs:",
-        ...presentationRefs.map((ref) => `- ${getPresentationRefChipLabel(ref)}`),
-      ].join("\n"),
-    );
-  }
-  if (taskRefs.length > 0) {
-    sections.push(["Tasks:", ...taskRefs.map((ref) => `- ${getTaskRefChipLabel(ref)}`)].join("\n"));
-  }
-  if (attachments.length > 0) {
-    sections.push(
-      [
-        "Attachments:",
-        ...attachments.map((attachment) => {
-          const rawTitle = String(attachment.title || "").trim();
-          if (rawTitle) return `- ${rawTitle}`;
-          const parts = String(attachment.path || "").split("/");
-          return `- ${parts[parts.length - 1] || "file"}`;
-        }),
-      ].join("\n"),
-    );
-  }
-  return sections.join("\n\n").trim();
 }
 
 function MessageBubbleBody({
@@ -335,7 +246,7 @@ function MessageBubbleBody({
           {hasDestination
             ? (() => {
                 const dstLabel = String(groupLabelById?.[dstGroupId] || "").trim() || dstGroupId;
-                const dstToLabel = dstTo.length > 0 ? dstTo.join(", ") : "@all";
+                const dstToLabel = dstTo.join(", ");
                 // A delegation relay request is an agent contacting the
                 // target group on the user's behalf — show "Relayed to"
                 // so it never reads like a user direct cross-send.
@@ -464,13 +375,12 @@ function MessageBubbleBody({
 
       {insight ? (
         <div className={supportingSectionClass}>
-          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] opacity-50">
+          <div className="mb-1.5 text-[10px] font-semibold uppercase opacity-50">
             {t("senderPerspective")}
           </div>
-          <PlainMessageText
-            text={insight}
-            className="max-w-full text-[var(--color-text-secondary)]"
-          />
+          <div className="max-w-full break-words whitespace-pre-wrap text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+            {insight}
+          </div>
         </div>
       ) : null}
 
@@ -484,122 +394,6 @@ function MessageBubbleBody({
         sectionClassName={supportingSectionClass}
       />
     </>
-  );
-}
-
-function MessageContent({
-  fallbackText,
-  shouldRenderMarkdown,
-  isDark,
-}: {
-  fallbackText: string;
-  shouldRenderMarkdown: boolean;
-  isDark: boolean;
-}) {
-  if (shouldRenderMarkdown) {
-    return (
-      <LazyMarkdownRenderer
-        content={fallbackText}
-        isDark={isDark}
-        invertText={false}
-        enableMermaid
-        className="max-w-full break-words text-[var(--color-text-primary)] [overflow-wrap:anywhere]"
-        fallback={<PlainMessageText text={fallbackText} className="max-w-full" />}
-      />
-    );
-  }
-
-  return <PlainMessageText text={fallbackText} className="max-w-full" />;
-}
-
-function AgentStateTooltip({
-  isOpen,
-  canShow,
-  isPositioned,
-  setFloating,
-  floatingStyles,
-  senderDisplayName,
-  updatedAt,
-  agentStateDisplay,
-  stateTask,
-  blockerCount,
-  stateNext,
-  stateChanged,
-}: {
-  isOpen: boolean;
-  canShow: boolean;
-  isPositioned: boolean;
-  setFloating: (node: HTMLElement | null) => void;
-  floatingStyles: CSSProperties;
-  senderDisplayName: string;
-  updatedAt?: string;
-  agentStateDisplay: string;
-  stateTask: string;
-  blockerCount: number;
-  stateNext: string;
-  stateChanged: string;
-}) {
-  const { t } = useTranslation("chat");
-
-  if (!isOpen || !canShow) return null;
-
-  return (
-    <div
-      ref={setFloating}
-      style={floatingStyles}
-      className={classNames(
-        "pointer-events-none z-[80] w-[min(360px,calc(100vw-32px))] rounded-2xl px-3 py-2 shadow-2xl transition-opacity duration-150",
-        "glass-modal text-[var(--color-text-primary)]",
-        isPositioned ? "opacity-100" : "opacity-0",
-      )}
-      role="status"
-    >
-      <div className="flex items-center gap-2">
-        <div className="text-xs font-semibold text-[var(--color-text-primary)]">
-          {senderDisplayName}
-        </div>
-        {updatedAt ? (
-          <div
-            className={classNames(
-              "ml-auto text-xs tabular-nums",
-              "text-[var(--color-text-tertiary)]",
-            )}
-            title={formatFullTime(updatedAt)}
-          >
-            {t("updated", { time: formatTime(updatedAt) })}
-          </div>
-        ) : null}
-      </div>
-      <div className="mt-1 text-xs whitespace-pre-wrap text-[var(--color-text-secondary)]">
-        {agentStateDisplay}
-      </div>
-      {stateTask || blockerCount > 0 || stateNext || stateChanged ? (
-        <div className="mt-2 space-y-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {stateTask ? (
-              <span className="text-[11px] px-2 py-0.5 rounded bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]">
-                {t("taskShort", { id: stateTask })}
-              </span>
-            ) : null}
-            {blockerCount > 0 ? (
-              <span className="text-[11px] px-2 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-300">
-                {t("blockersShort", { count: blockerCount })}
-              </span>
-            ) : null}
-          </div>
-          {stateNext ? (
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">
-              {t("nextShort", { value: stateNext })}
-            </div>
-          ) : null}
-          {stateChanged ? (
-            <div className={classNames("text-[11px]", "text-[var(--color-text-tertiary)]")}>
-              {t("changedShort", { value: stateChanged })}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
   );
 }
 
@@ -617,6 +411,7 @@ export interface MessageBubbleProps {
   webModelDeliveryStatus?: WebModelDeliveryStatus;
   isHighlighted?: boolean;
   collapseHeader?: boolean;
+  resolvedReplyQuoteText?: string;
   onReply: () => void;
   onShowRecipients: () => void;
   onCopyLink?: (eventId: string) => void;
@@ -643,6 +438,7 @@ export const MessageBubble = memo(
     webModelDeliveryStatus,
     isHighlighted,
     collapseHeader,
+    resolvedReplyQuoteText,
     onReply,
     onShowRecipients,
     onCopyLink,
@@ -707,7 +503,8 @@ export const MessageBubble = memo(
     // Treat data as ChatMessageData.
     const msgData = ev.data as ChatMessageData | undefined;
     const insight = getMessageInsight(msgData);
-    const quoteText = msgData?.quote_text;
+    const quoteText =
+      String(msgData?.quote_text || resolvedReplyQuoteText || "").trim() || undefined;
     const replyToEventId =
       typeof msgData?.reply_to === "string" ? String(msgData.reply_to || "").trim() : "";
     const senderSnapshotTitle =
@@ -734,10 +531,8 @@ export const MessageBubble = memo(
     const dstGroupId =
       typeof msgData?.dst_group_id === "string" ? String(msgData.dst_group_id || "").trim() : "";
     const dstTo = useMemo(() => {
-      const raw = msgData?.dst_to;
-      if (!Array.isArray(raw)) return [];
-      return raw.map((t) => String(t || "").trim()).filter((t) => t);
-    }, [msgData?.dst_to]);
+      return projectCrossGroupRecipients(msgData);
+    }, [msgData]);
     const hasDestination = !!dstGroupId;
     const rawAttachments: MessageAttachment[] = Array.isArray(msgData?.attachments)
       ? msgData.attachments
@@ -905,11 +700,13 @@ export const MessageBubble = memo(
         group_bridgeSourceName: isGroupBridgeSource
           ? groupBridgeSourceName || t("remoteGroupFallback")
           : groupBridgeSourceName,
+        groupLabelById,
         displayNameMap,
       });
     }, [
       displayNameMap,
       ev.by,
+      groupLabelById,
       groupBridgeSourceName,
       isGroupBridgeSource,
       senderActor,
@@ -1088,26 +885,12 @@ export const MessageBubble = memo(
                 {t("important")}
               </span>
             )}
-            <div
-              className={classNames(
-                "inline-flex max-w-full flex-col px-4 py-3 text-sm leading-relaxed transition-[opacity,transform,box-shadow,background-color,border-color] duration-200 ease-out",
-                isStreaming ? "opacity-95 translate-y-0" : "opacity-100 translate-y-0",
-                bubbleMotionClass,
-                isUserMessage
-                  ? "glass-bubble w-auto min-w-[min(18rem,70vw)] rounded-[22px] rounded-tr-md"
-                  : classNames(
-                      "w-full rounded-[22px] rounded-tl-md border-y border-r border-l-4 bg-[var(--glass-panel-bg)] text-[var(--color-text-primary)] shadow-[0_10px_28px_rgba(15,23,42,0.04)] dark:shadow-[0_10px_28px_rgba(0,0,0,0.25)]",
-                      "border-y-[var(--glass-border-subtle)] border-r-[var(--glass-border-subtle)]",
-                      isGroupBridgeSource
-                        ? "border-l-emerald-500/85 bg-emerald-50/35 dark:border-l-emerald-400/80 dark:bg-emerald-950/15"
-                        : ACCENT_BORDER_CLASSES[senderAccent?.text || ""] ||
-                            "border-l-[var(--glass-border-subtle)]",
-                    ),
-                isAttention ? "ring-1 ring-amber-400/40 dark:ring-amber-500/40" : "",
-                isHighlighted
-                  ? "outline outline-2 outline-[rgb(35,36,37)]/16 outline-offset-2 dark:outline-white/18"
-                  : "",
-              )}
+            <MessageBubbleSurface
+              isUserMessage={isUserMessage}
+              isStreaming={isStreaming}
+              motionClass={bubbleMotionClass}
+              isAttention={isAttention}
+              isHighlighted={Boolean(isHighlighted)}
             >
               <MessageBubbleBody
                 event={ev}
@@ -1142,7 +925,7 @@ export const MessageBubble = memo(
                 onOpenTaskRef={onOpenTaskRef}
                 onOpenReplyTarget={onOpenReplyTarget}
               />
-            </div>
+            </MessageBubbleSurface>
           </div>
 
           <MessageFooter

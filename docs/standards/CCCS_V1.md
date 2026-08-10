@@ -115,14 +115,18 @@ Clients MUST treat unknown kinds as opaque and ignore them unless explicitly sup
 
 Chat message routing uses `to: string[]` with these token types:
 
+When a send request omits recipients or supplies an empty list, the daemon MUST materialize the group's `default_send_to` policy as `@foreman` or `@all` before appending the event.
+
 **Actor IDs**
 - Example: `"peer-1"`, `"claude-1"`
 
 **Selectors (MUST start with `@`)**
-- `@all`: all actors in the group
-- `@peers`: all peer actors
+- `@all`: all visible collaboration actors in the group
+- `@peers`: all visible peer actors
 - `@foreman`: foreman actor(s)
 - `@user`: the human user (UI recipient)
+
+Internal assistants such as Voice Secretary are not members of `@all`, `@peers`, or `@foreman`; they MUST be addressed by their explicit actor ID.
 
 **Compatibility**
 - Implementations MAY accept the literal token `"user"` as equivalent to `@user`.
@@ -254,6 +258,7 @@ data: {
   title?: string
   message?: string
   target_actor_id?: string | null                   // null = broadcast
+  im_visibility?: "internal" | "public"            // default "internal"
   context?: Record<string, unknown>                 // implementation-defined
   requires_ack?: boolean                            // default false
   related_event_id?: string | null                  // optional correlation
@@ -263,6 +268,7 @@ data: {
 **Rules**
 - Clients MUST ignore unknown `data.kind` values within `system.notify` (open enum).
 - Implementations MAY enforce an allowlist of `data.kind` values, but should not assume clients understand new kinds.
+- External IM bridges MUST fail closed: a `system.notify` is eligible for IM delivery only when `im_visibility="public"`. Missing, invalid, or `internal` values stay inside CCCC. Actor-targeted notifications remain internal even if a malformed producer also marks them public.
 
 ### 7.2 `system.notify_ack`
 
