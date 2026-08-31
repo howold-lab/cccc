@@ -38,7 +38,6 @@ import {
   restoreFailedSendComposerState,
   shouldShowInConversation,
   sortChatMessages,
-  shouldLockChatToBottomForSend,
   shouldRestoreDetachedScrollSnapshot,
   toVisibleConversationEvent,
 } from "../../src/hooks/useChatTab";
@@ -47,8 +46,6 @@ import { useGroupStore } from "../../src/stores/useGroupStore";
 import { CHAT_SCROLL_SNAPSHOT_COORDINATE_VERSION } from "../../src/stores/useUIStore";
 import {
   formatSendMessageError,
-  getGroupSendBlockedMessage,
-  getGroupSendBlockedReason,
   isFormalChatMessageEvent,
   supportsChatStreamingPlaceholder,
 } from "../../src/utils/chatSend";
@@ -56,8 +53,6 @@ import { latestSuggestedUserMessage } from "../../src/utils/suggestedUserMessage
 import type { LedgerEvent } from "../../src/types";
 
 void localStorageMock;
-
-const t = (key: string, options?: Record<string, unknown>) => String(options?.defaultValue || key);
 
 const resetComposerAndGroupSelection = () => {
   useGroupStore.setState({ selectedGroupId: "" });
@@ -68,8 +63,9 @@ const resetComposerAndGroupSelection = () => {
     toText: "",
     replyTarget: null,
     quotedPresentationRef: null,
-    priority: "normal",
-    replyRequired: false,
+    quotedVoiceDocumentRef: null,
+    preferredMessageMode: "send",
+    messageMode: "send",
     destGroupId: "",
     drafts: {},
     normalToTextByGroup: {},
@@ -341,8 +337,8 @@ describe("restoreFailedSendComposerState", () => {
       toText: "@foreman",
       replyTarget: { eventId: "evt-1", by: "peer-1", text: "prior" },
       quotedPresentationRef: null,
-      priority: "attention",
-      replyRequired: true,
+      quotedVoiceDocumentRef: null,
+      messageMode: "mail",
     });
 
     const state = useComposerStore.getState();
@@ -350,8 +346,7 @@ describe("restoreFailedSendComposerState", () => {
     expect(state.activeGroupId).toBe("g-a");
     expect(state.toText).toBe("@foreman");
     expect(state.replyTarget).toMatchObject({ eventId: "evt-1" });
-    expect(state.priority).toBe("attention");
-    expect(state.replyRequired).toBe(true);
+    expect(state.messageMode).toBe("mail");
   });
 
   it("stores the failed send as the origin group draft when selection moved away", () => {
@@ -368,8 +363,8 @@ describe("restoreFailedSendComposerState", () => {
       toText: "@foreman",
       replyTarget: { eventId: "evt-a", by: "peer-a", text: "prior a" },
       quotedPresentationRef: { kind: "presentation_ref", slot_id: "slot-1", title: "Deck" },
-      priority: "attention",
-      replyRequired: true,
+      quotedVoiceDocumentRef: null,
+      messageMode: "mail",
     });
 
     const state = useComposerStore.getState();
@@ -381,8 +376,8 @@ describe("restoreFailedSendComposerState", () => {
       toText: "@foreman",
       replyTarget: { eventId: "evt-a", by: "peer-a", text: "prior a" },
       quotedPresentationRef: { kind: "presentation_ref", slot_id: "slot-1", title: "Deck" },
-      priority: "attention",
-      replyRequired: true,
+      quotedVoiceDocumentRef: null,
+      messageMode: "mail",
     });
   });
 });
@@ -421,46 +416,15 @@ describe("isFormalChatMessageEvent", () => {
   });
 });
 
-describe("group send blocked state", () => {
-  it("blocks only explicit paused lifecycle states before optimistic send feedback", () => {
-    expect(
-      getGroupSendBlockedReason({ lifecycleState: "paused", runtimeRunning: true, actorCount: 2 }),
-    ).toBe("paused");
-    expect(
-      getGroupSendBlockedReason({ lifecycleState: "active", runtimeRunning: false, actorCount: 2 }),
-    ).toBeNull();
-    expect(
-      getGroupSendBlockedReason({
-        lifecycleState: "stopped",
-        runtimeRunning: false,
-        actorCount: 2,
-      }),
-    ).toBeNull();
-    expect(
-      getGroupSendBlockedReason({ lifecycleState: "idle", runtimeRunning: true, actorCount: 2 }),
-    ).toBeNull();
-  });
-
-  it("maps recipient-resolution failures to group-state recovery copy", () => {
-    expect(getGroupSendBlockedMessage("paused", t)).toBe(
-      "This group is paused. Resume the group before sending a message to agents.",
-    );
+describe("send error formatting", () => {
+  it("preserves the server error after automatic group wake-up", () => {
     expect(
       formatSendMessageError({
         code: "no_enabled_recipients",
         message: "No enabled recipients after excluding sender.",
-        groupSendBlockedReason: "paused",
-        t,
+        t: (key, options) => String(options?.defaultValue || key),
       }),
-    ).toBe("This group is paused. Resume the group before sending a message to agents.");
-    expect(
-      formatSendMessageError({
-        code: "invalid_recipient",
-        message: "unknown recipient",
-        groupSendBlockedReason: "paused",
-        t,
-      }),
-    ).toBe("invalid_recipient: unknown recipient");
+    ).toBe("no_enabled_recipients: No enabled recipients after excluding sender.");
   });
 });
 
@@ -1266,71 +1230,6 @@ describe("shouldRestoreDetachedScrollSnapshot", () => {
 
     expect(
       shouldRestoreDetachedScrollSnapshot({ mode: "detached", anchorId: "", updatedAt: now }, now),
-    ).toBe(false);
-  });
-});
-
-describe("shouldLockChatToBottomForSend", () => {
-  it("locks to bottom only when the current chat is cleanly following", () => {
-    const now = 1_700_000_000_000;
-
-    expect(
-      shouldLockChatToBottomForSend({
-        currentAtBottom: true,
-        showScrollButton: false,
-        chatUnreadCount: 0,
-        scrollSnapshot: null,
-        now,
-      }),
-    ).toBe(true);
-
-    expect(
-      shouldLockChatToBottomForSend({
-        currentAtBottom: false,
-        showScrollButton: false,
-        chatUnreadCount: 0,
-        scrollSnapshot: null,
-        now,
-      }),
-    ).toBe(false);
-  });
-
-  it("does not force bottom while the user is browsing detached history", () => {
-    const now = 1_700_000_000_000;
-
-    expect(
-      shouldLockChatToBottomForSend({
-        currentAtBottom: true,
-        showScrollButton: true,
-        chatUnreadCount: 0,
-        scrollSnapshot: null,
-        now,
-      }),
-    ).toBe(false);
-
-    expect(
-      shouldLockChatToBottomForSend({
-        currentAtBottom: true,
-        showScrollButton: false,
-        chatUnreadCount: 2,
-        scrollSnapshot: null,
-        now,
-      }),
-    ).toBe(false);
-
-    expect(
-      shouldLockChatToBottomForSend({
-        currentAtBottom: true,
-        showScrollButton: false,
-        chatUnreadCount: 0,
-        scrollSnapshot: {
-          coordinateVersion: CHAT_SCROLL_SNAPSHOT_COORDINATE_VERSION,
-          mode: "detached",
-          anchorId: "evt-older",
-          updatedAt: now - 1000,
-        },
-        now,
-      }),
     ).toBe(false);
   });
 });

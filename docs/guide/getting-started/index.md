@@ -39,9 +39,9 @@ CCCC offers two ways to get started:
 
 ## Prerequisites
 
-Both approaches require:
+The website installer does not require Python or a Rust toolchain. You need a
+supported 64-bit platform and at least one AI agent CLI:
 
-- **Python 3.11+** installed
 - At least one AI agent CLI:
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (recommended)
   - [Codex CLI](https://github.com/openai/codex)
@@ -97,26 +97,7 @@ rm -f ~/.local/bin/cccc ~/.local/bin/ccccd
 Version 0.4.x has a completely different command structure from 0.3.x. The old `init`, `run`, `bridge` commands are replaced with `attach`, `daemon`, `mcp`, etc.
 :::
 
-### From PyPI (recommended)
-
-```bash
-python -m pip install -U cccc-pair
-```
-
-PyPI is the stable CCCC product distribution, with Python as its stable and
-recommended implementation. Supported platform wheels also contain a private,
-version-matched **experimental Rust implementation** for opt-in performance
-evaluation with `cccc rust`. Feature and integration parity is still in progress;
-use `cccc python` for reliability-critical workflows. Other platforms receive the
-universal Python wheel.
-
-### Experimental standalone Rust preview
-
-::: warning Rust-only preview
-Use this optional channel only to evaluate deployment without Python. It has no
-Python fallback or implementation switching and is not yet the recommended
-replacement for the complete pip product.
-:::
+### Website installer (recommended)
 
 macOS or Linux:
 
@@ -130,44 +111,45 @@ Windows CMD or PowerShell:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
 ```
 
-The installer downloads a checksum-verified GitHub Release binary. It does not
-require a Rust or Python toolchain and refuses to overwrite an existing `cccc`
-command it does not own. Uninstall that command deliberately or choose another
-`CCCC_INSTALL_DIR` first. During the `v0.4.34-rc2` validation period, the hosted
-installer is pinned to that release candidate. You can also select it explicitly
-with `CCCC_VERSION`:
+The installer downloads a checksum-verified native executable and refuses to
+overwrite a command it does not own.
 
-Commands in other directories are never removed. The default installer puts its
-directory first in the user PATH and reports every remaining `cccc` command. Open
-a new terminal after installation and run `cccc doctor` to verify that PATH
-resolves to the executable you just installed.
+### From PyPI (v0.4.36+)
 
 ```bash
-curl -fsSL https://chesterra.github.io/cccc/install.sh | CCCC_VERSION=0.4.34-rc2 sh
+python -m pip install -U "cccc-pair>=0.4.36"
 ```
 
-```powershell
-$env:CCCC_VERSION = "0.4.34-rc2"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
-Remove-Item Env:CCCC_VERSION
-```
+The native platform wheel installs the same Rust `cccc` executable through pip.
+The lower bound prevents pip from silently selecting a historical Python-only
+release when 0.4.36 has no wheel for the current platform. It contains no Python
+daemon, product package, launcher, or fallback. Unsupported platforms therefore
+fail resolution rather than receiving a portable Python wheel. Generic
+`pip install .` and editable `pip install -e .` source builds are rejected
+instead of installing an empty package; use the source workflow below.
 
-### From TestPyPI (for explicit RC testing)
-
-```bash
-python -m pip install -U --pre \
-  --index-url https://test.pypi.org/simple \
-  --extra-index-url https://pypi.org/simple \
-  cccc-pair
-```
+The pip wheel and website installer record distinct ownership beside the
+executable. To switch a command directory from pip to the website installer,
+first run `python -m pip uninstall cccc-pair`; the installer will not overwrite
+pip-owned files, even when `CCCC_ALLOW_REPLACE_EXISTING=1` is set.
 
 ### From Source
+
+Source packaging requires Rust 1.88+, Node.js 24 with npm, and Python 3.11+
+only for the archive helper. Python is not included in the built product.
 
 ```bash
 git clone https://github.com/ChesterRa/cccc
 cd cccc
-pip install -e .
+./scripts/build_package.sh
+./target/release/cccc --version
+./target/release/cccc
 ```
+
+Use `cargo run --locked --features standalone -p cccc --bin cccc -- --port 0`
+for an iterative debug build. On Windows, run
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_package.ps1`
+and then `.\target\release\cccc.exe`.
 
 ## Verify Installation
 
@@ -176,13 +158,10 @@ cccc status
 cccc doctor
 ```
 
-`status` shows the selected, running, and available product implementations.
-Python is the stable initial default while no implementation choice has been
-saved. On a supported platform wheel, use `cccc rust` to opt into the bundled
-experimental Rust implementation or `cccc python` to return to stable Python;
-later bare invocations follow that persisted choice. `doctor` checks Python,
-agent runtimes, system configuration, the invoked CCCC executable, PATH
-resolution, and duplicate `cccc` commands.
+`status` shows the native product, daemon, groups, actors, and detected agent
+runtimes. `doctor` checks the installation, agent runtimes, system
+configuration, invoked CCCC executable, PATH resolution, and duplicate `cccc`
+commands.
 
 ## Next Steps
 

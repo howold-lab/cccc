@@ -20,40 +20,50 @@ pub fn handle(home: &HomeLayout, request: &DaemonRequest) -> Option<OpResult> {
 
 fn state(home: &HomeLayout) -> OpResult {
     let mut global = settings::load(home).map_err(OpError::io)?;
-    let before = global.remote_access.clone();
     normalize(&mut global.remote_access)?;
-    if global.remote_access != before {
-        settings::save(home, &global).map_err(OpError::io)?;
-    }
     object(payload(home, &global.remote_access))
 }
 
 fn configure(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     require_user(request)?;
+    if request
+        .args
+        .get("provider")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("reach"))
+    {
+        return Err(OpError::new(
+            "remote_access_invalid_config",
+            "reach is managed by cccc reach; use `cccc reach on`",
+        ));
+    }
     let mut global = settings::load(home).map_err(OpError::io)?;
+    if text(&global.remote_access, "provider", "off") == "reach"
+        && (boolean(&global.remote_access, "enabled", false)
+            || super::membership_cloudflared::status(home).running)
+    {
+        return Err(OpError::new(
+            "remote_access_invalid_config",
+            "reach is active; use `cccc reach off` before changing remote access configuration",
+        ));
+    }
     let before_host = text(&global.remote_access, "web_host", "127.0.0.1");
     let before_port = number(&global.remote_access, "web_port", 8848);
-    for key in [
-        "provider",
-        "mode",
-        "enabled",
-        "require_access_token",
-        "web_host",
-        "web_port",
-        "web_public_url",
-    ] {
-        if let Some(value) = request.args.get(key) {
-            global.remote_access.insert(key.into(), value.clone());
-        }
-    }
+    apply_configure_patch(&mut global.remote_access, request);
     normalize(&mut global.remote_access)?;
-    global
-        .remote_access
-        .insert("updated_at".into(), Value::String(utc_now()));
     let restart_required = before_host != text(&global.remote_access, "web_host", "127.0.0.1")
         || before_port != number(&global.remote_access, "web_port", 8848);
-    settings::save(home, &global).map_err(OpError::io)?;
-    let mut result = payload(home, &global.remote_access);
+    let remote_access = settings::update(home, |latest| {
+        apply_configure_patch(&mut latest.remote_access, request);
+        normalize(&mut latest.remote_access)
+            .map_err(|error| std::io::Error::other(error.message))?;
+        latest
+            .remote_access
+            .insert("updated_at".into(), Value::String(utc_now()));
+        Ok(latest.remote_access.clone())
+    })
+    .map_err(OpError::io)?;
+    let mut result = payload(home, &remote_access);
     if restart_required
         && let Some(remote) = result
             .get_mut("remote_access")
@@ -75,15 +85,18 @@ fn set_running(home: &HomeLayout, request: &DaemonRequest, running: bool) -> OpR
             "remote access provider is off",
         ));
     }
+    if provider == "reach" {
+        return if running {
+            super::membership::reach_on(home, request)
+        } else {
+            super::membership::reach_off(home, request)
+        };
+    }
     let host = text(&global.remote_access, "web_host", "127.0.0.1");
     let public_url = text(&global.remote_access, "web_public_url", "");
     let remotely_reachable = remote_web_exposure(&host, &public_url);
     let (_, admin_token_count) = token_counts(home);
-    if running
-        && remotely_reachable
-        && !environment_flag("CCCC_WEB_ALLOW_UNAUTHENTICATED")
-        && admin_token_count == 0
-    {
+    if running && remotely_reachable && admin_token_count == 0 {
         return Err(OpError::new(
             "remote_access_admin_token_required",
             "an administrator access token is required before remote access can start",
@@ -117,22 +130,43 @@ fn set_running(home: &HomeLayout, request: &DaemonRequest, running: bool) -> OpR
             ));
         }
     }
-    global
-        .remote_access
-        .insert("enabled".into(), Value::Bool(running));
-    global
-        .remote_access
-        .insert("updated_at".into(), Value::String(utc_now()));
-    settings::save(home, &global).map_err(OpError::io)?;
-    object(payload(home, &global.remote_access))
+    let remote_access = settings::update(home, |latest| {
+        normalize(&mut latest.remote_access)
+            .map_err(|error| std::io::Error::other(error.message))?;
+        latest
+            .remote_access
+            .insert("enabled".into(), Value::Bool(running));
+        latest
+            .remote_access
+            .insert("updated_at".into(), Value::String(utc_now()));
+        Ok(latest.remote_access.clone())
+    })
+    .map_err(OpError::io)?;
+    object(payload(home, &remote_access))
+}
+
+fn apply_configure_patch(config: &mut Map<String, Value>, request: &DaemonRequest) {
+    for key in [
+        "provider",
+        "mode",
+        "enabled",
+        "require_access_token",
+        "web_host",
+        "web_port",
+        "web_public_url",
+    ] {
+        if let Some(value) = request.args.get(key) {
+            config.insert(key.into(), value.clone());
+        }
+    }
 }
 
 fn normalize(config: &mut Map<String, Value>) -> Result<(), OpError> {
     let provider = text(config, "provider", "off").to_ascii_lowercase();
-    if !matches!(provider.as_str(), "off" | "manual" | "tailscale") {
+    if !matches!(provider.as_str(), "off" | "manual" | "tailscale" | "reach") {
         return Err(OpError::new(
             "remote_access_invalid_config",
-            "provider must be off, manual, or tailscale",
+            "provider must be off, manual, tailscale, or reach",
         ));
     }
     let mode = match text(config, "mode", REMOTE_ACCESS_MODE)
@@ -155,16 +189,27 @@ fn normalize(config: &mut Map<String, Value>) -> Result<(), OpError> {
         ));
     }
     let public_url = text(config, "web_public_url", "");
+    let host = text(config, "web_host", "127.0.0.1");
     if provider == "tailscale" && !public_url.is_empty() {
         return Err(OpError::new(
             "remote_access_invalid_config",
             "tailscale does not use web_public_url",
         ));
     }
-    if !public_url.is_empty() && !boolean(config, "require_access_token", true) {
+    if remote_web_exposure(&host, &public_url) && !boolean(config, "require_access_token", true) {
         return Err(OpError::new(
             "remote_access_invalid_config",
-            "public remote access requires an access token",
+            "remote Web exposure requires an access token",
+        ));
+    }
+    if provider == "manual"
+        && public_url.is_empty()
+        && !is_loopback_host(&host)
+        && !environment_flag("CCCC_REMOTE_ALLOW_INSECURE")
+    {
+        return Err(OpError::new(
+            "remote_access_invalid_config",
+            "plain HTTP LAN exposure requires CCCC_REMOTE_ALLOW_INSECURE=1; prefer an HTTPS reverse proxy or encrypted overlay",
         ));
     }
     config.insert("provider".into(), Value::String(provider));
@@ -183,13 +228,15 @@ fn payload(home: &HomeLayout, config: &Map<String, Value>) -> Value {
     let public_url = text(config, "web_public_url", "");
     let (tokens, admin_tokens) = token_counts(home);
     let tailscale_installed = command_exists("tailscale");
+    let reach_helper_running =
+        provider == "reach" && super::membership_cloudflared::status(home).running;
     let reachable = remote_web_exposure(&host, &public_url);
     let allow_unauthenticated_listener = environment_flag("CCCC_WEB_ALLOW_UNAUTHENTICATED");
     let allow_loopback_remote = environment_flag("CCCC_REMOTE_ALLOW_LOOPBACK");
-    let remote_listener_auth_required = reachable && !allow_unauthenticated_listener;
+    let remote_listener_auth_required = reachable;
     let remote_listener_auth_requirement_satisfied =
         !remote_listener_auth_required || admin_tokens > 0;
-    let effective_require_token = if !reachable || allow_unauthenticated_listener {
+    let effective_require_token = if !reachable {
         false
     } else if !public_url.is_empty() {
         true
@@ -225,12 +272,20 @@ fn payload(home: &HomeLayout, config: &Map<String, Value>) -> Value {
         "misconfigured"
     } else if provider == "tailscale" && !tailscale_installed {
         "not_installed"
+    } else if provider == "reach" {
+        if enabled && reach_helper_running {
+            "running"
+        } else if enabled || reach_helper_running {
+            "error"
+        } else {
+            "stopped"
+        }
     } else if enabled {
         "running"
     } else {
         "stopped"
     };
-    let endpoint = if enabled {
+    let endpoint = if status == "running" {
         if !public_url.is_empty() {
             Some(public_url.clone())
         } else {
@@ -274,7 +329,8 @@ fn payload(home: &HomeLayout, config: &Map<String, Value>) -> Value {
             "remote_listener_auth_requirement_satisfied":remote_listener_auth_requirement_satisfied,
             "allow_unauthenticated_listener_override":allow_unauthenticated_listener,
             "effective_require_access_token":effective_require_token,
-            "tailscale_installed":tailscale_installed
+            "tailscale_installed":tailscale_installed,
+            "reach_helper_running":reach_helper_running
             ,"desired_local_url":desired_local_url
             ,"desired_remote_url":desired_remote_url
             ,"live_runtime_present":live_runtime_present

@@ -6,6 +6,122 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ## [Unreleased]
 
+### Fixed
+- **Direct localhost Web use is passwordless again without creating a hidden administrator token.** Requests served on a loopback browser origin receive an in-memory local administrator principal, while public Host/Origin and non-local proxy sources remain behind the explicit Access Token boundary.
+- **Group Bridge v2 now proves the complete live handshake and pins both peers.** A fresh client nonce and server-signed ready transcript prevent challenge/ready replay, while the native client persists `min_session_protocol=2` and refuses later v1 fallback.
+- **Mobile Web sessions survive normal tab reclamation.** Access-token login establishes a rolling 30-day HttpOnly cookie and clears the temporary browser bearer after verification, avoiding repeated token entry without placing credentials in URLs or local storage.
+
+## [0.4.36] — 2026-08-30
+
+### Added
+- **The native daemon now owns the public `events_stream` control path.** SDK clients retain capability discovery, bounded resume, routing, heartbeat, and slow-reader behavior without a Python daemon owner.
+- **The native NotebookLM adapter supports explicit URL, YouTube, Drive, text, and project-scoped file ingestion against the upstream v0.8.1 protocol baseline.**
+
+### Changed
+- **CCCC now ships one native Rust product implementation.** The public `cccc` command owns the CLI, daemon, MCP server, and Web UI; 0.4.35 homes remain readable through explicit migration compatibility.
+- **The website installer and pip platform wheels distribute the same native executable.** Generic source builds are rejected, and unsupported pip platforms fail resolution instead of falling back to an older Python-only release.
+- **The default Docker image now builds and runs the same native product.** The separate Rust Dockerfile/Compose variant is retired while the existing data-volume contract remains intact.
+- **Browser projection, runtime recovery, background Group Bridge retry, shared agent resources, and Voice Secretary ASR readiness now have one native owner.** Retired Python attach, sidecar, and lifecycle paths no longer compete with the shipped product.
+- **NotebookLM source changes are explicit.** Automatic work/memory mirroring is retired, while legacy 0.4.35 sync metadata remains readable for upgrade status.
+
+### Fixed
+- **Pip and website installations cannot silently inherit or overwrite each other's update authority.** Their ownership markers are mutually exclusive, and switching channels requires uninstalling the current owner first.
+- **NotebookLM uncertain creates and stale retries no longer become duplicate or misdirected writes.** Unconfirmed provider outcomes remain unresolved, and retry verifies the Group's current notebook binding before mutating remote state.
+- **Supported 0.4.35 durable state remains available without a Python runtime.** Frozen upgrade coverage includes core state, identities and integrations, product state, and retired shadows that must not be resurrected.
+
+### Removed
+- **The Python product implementation and engine-selection layer are retired.** The Python daemon, Web server, launcher, importable `cccc` package, `cccc python` / `cccc rust` selectors, public `ccccd` alias, source distribution, and universal wheel are no longer shipped.
+- **Python-only NotebookLM mirroring and legacy IM lifecycle controls are retired.** Explicit NotebookLM ingestion replaces hidden sync writes, while Web and the native CLI replace the old IM `/context`, `/launch`, and `/quit` commands.
+
+## [0.4.35] — 2026-08-28
+
+### Added
+- **Messaging now has three explicit delivery modes: Send, Send + Reply, and Mail.** Immediate runtime handoff, reply obligations, and non-interrupting Inbox delivery are separate durable facts; Mail has its own consuming cursor and bounded, content-free reminder.
+- **DeepSeek Harness is a first-class managed headless runtime.** CCCC owns the tested ACP package composition under `CCCC_HOME`, isolates sessions by actor, and projects structured turns through the same durable runtime contract as other headless providers.
+- **CCCC Account and Reach add optional managed remote access.** The Web UI can link an installation through device authorization, while Linux and macOS users can explicitly publish Web through a supervised, checksum-pinned Cloudflare tunnel without uploading local ledgers or repositories.
+- **CCCC Self-Evolution is now a built-in, default-enabled Skill.** New and existing Groups receive the packaged capability once, while explicit disablement remains durable across restarts and upgrades.
+- **The Web workspace adds paged task/context views, directory creation in the project picker, and a full-screen mobile Presentation surface.**
+
+### Changed
+- **Python remains the stable default and Rust remains an experimental implementation of the same product.** Both engines use the same version, Web UI, daemon contract, and `CCCC_HOME`, with stronger parity around delivery, Reach, capabilities, runtime restoration, and shared state.
+- **Context and Task Board reads are paged and version-consistent.** Large Groups no longer require one oversized snapshot, and stale responses cannot overwrite the active Group view.
+- **Account and Reach setup now use a first-class Account surface and a shorter guided Web flow.** Local CCCC remains fully usable without an account.
+- **Per-push CI now focuses on source correctness instead of repeating release verification.** Python tests use two balanced shards, Linux Rust checks share one workspace, and slow native installers plus intermediate Python compatibility run nightly or on demand while release workflows retain exact artifact gates.
+- **Web Model automated tests and their visible browser prompt fixtures were removed.** Product implementation remains available, while the default Rust/frontend test run no longer opens local `Send` fixture pages in Chrome.
+
+### Fixed
+- **Delivery and recovery no longer conflate runtime handoff, Inbox read state, or replies.** Claims are settled durably, Mail never wakes an actor, reply requests can be cancelled, remote Group Bridge sends preserve their source identity, and interrupted work remains recoverable without silently duplicating committed turns.
+- **DeepSeek failures now have bounded, durable recovery behavior.** Missing credentials and context overflow require an explicit restart, large histories use indexed recovery, and daemon restarts cannot turn permanent provider failures into retry loops.
+- **Oversized Web messages no longer fail with Rust HTTP 413 responses.** Same-group and remote Group Bridge bodies above 64 KiB become UTF-8 text attachments; local cross-group text stays inline and the bounded daemon IPC limit now covers the Web JSON contract.
+- **Standalone Rust self-updates now adopt their exact markerless executable safely.** The CLI passes its canonical current path into the transactional installer, while every other markerless command—including legacy launchers and version-shaped foreign programs—requires explicit replacement and remains protected by default.
+- **Remote-control boundaries now fail closed across Python and Rust.** Unauthenticated daemon IPC rejects every non-loopback TCP bind; Reach admin links use short-lived, one-time, origin-bound exchanges instead of long-lived tokens; Reach verifies the exact local CCCC Web instance before opening a tunnel; and cookie-authenticated writes require an exact allowed Origin or same-origin Referer.
+- **The Vite development proxy now preserves the browser-facing Host for terminal WebSockets.** Rust Web Origin validation no longer rejects legitimate `127.0.0.1:5555` runtime-inspector connections and leaves the xterm surface blank.
+- **Stale Vite dependency chunks no longer collapse the Web composer during development.** Dynamic-import failures trigger one bounded page reload and then degrade only the Voice Secretary launcher, while base-relative manifest and icon paths avoid duplicate `/ui/ui/` requests.
+- **Provider exits and user-directed delivery now share one lifecycle contract across Python and Rust.** A natural provider exit records durable stop evidence without disabling the actor or Group; Send and Request Reply reactivate targeted recipients, manual delivery resumes a paused or stopped Group only after reserving new work, and Mail remains non-waking.
+- **Cross-Group Voice Secretary work and mobile Presentation controls stay in their visible scope.** A pending prompt refinement remains bound to its originating Group while navigation continues, and the full-screen mobile Presentation dialog keeps keyboard focus inside the active surface.
+- **Chat history, runtime activity, branding, and voice capture survive more browser edge cases.** Filtered views retain their scroll anchors, empty histories can page older events, installed PWA icons follow custom branding, and microphone resampling preserves buffered audio across input-rate changes.
+- **Windows combined-launcher cleanup now owns the exact process object instead of trusting a reusable PID.** Graceful shutdown is fenced to that daemon identity and receives the full lifecycle deadline before bounded fallback cleanup, so normal dispatch contention cannot trigger an early kill and descriptor handoff cannot stop a replacement daemon.
+- **Python release retries now verify immutable artifact hashes from one package-index snapshot.** Matching files remain idempotent, while a same-name rebuild fails instead of mixing distributions from different builds under one version.
+
+## [0.4.35-rc1] — 2026-08-20
+
+### Added
+- **DeepSeek Harness is now a first-class managed headless runtime.** CCCC installs the pinned ACP composition under `CCCC_HOME`, isolates provider sessions per actor, projects structured turn events, and keeps failed or interrupted delivery retryable without duplicating committed work.
+- **Optional membership and Reach are available as an explicit preview on Linux and macOS.** `cccc login`, `cccc logout`, and `cccc reach` bind a machine account, supervise a checksum-pinned `cloudflared`, and expose separately labeled Web and ChatGPT connector URLs without uploading the local ledger or repository.
+- **Windows project browsing now includes available drive roots**, allowing attached scopes to be selected outside the current drive from the Web UI.
+
+### Changed
+- **Runtime restoration and message delivery use stronger lifecycle boundaries.** Group restore is serialized with lifecycle mutations, large legacy headless histories migrate through bounded indexes, and delivery completion advances only across a contiguous committed prefix.
+- **Web task coordination and chat following were split into focused components.** Task Board controls, cards, columns, virtual-message anchoring, and send-follow behavior now avoid stale scroll requests and oversized container components.
+- **The combined Rust Web/daemon launcher owns only the Windows daemon process it created.** Startup waits through legacy-daemon handoff, shutdown leaves a replacement owner untouched, and failed Web startup cleans up the detached daemon before returning.
+
+### Fixed
+- **Windows standalone updates and daemon recovery no longer fail on expected stopped-state diagnostics.** PowerShell 5.1 now checks daemon commands by process exit code without promoting native stderr into a terminating installer error, empty restart diagnostics are null-safe, and a verified replacement is retained when only runtime restart fails. The Rust daemon publishes IPC before restoring actors in a detached worker, serializes each Group restore with lifecycle mutations, and keeps slow or failed recovery diagnosable without blocking daemon readiness; stale unlocked daemon files continue to be reclaimed through the operating-system lock.
+- **DeepSeek delivery, recovery, timeout, and write-failure paths now preserve one durable outcome.** Turn and operation identities are bounded, pending work survives restarts, and a provider failure cannot silently advance the inbox cursor.
+- **Daemon process and ledger locks now fail safely across restart races.** Stale unlocked files are reclaimed, owned process trees are bounded, and competing daemon owners are not terminated during cleanup.
+
+### Tests
+- Added deterministic DeepSeek ACP, durability, recovery, timeout, projection, and setup coverage across Python and Rust.
+- Added membership, Reach, cloudflared supervision, cross-engine state, Windows updater, daemon handoff, process-tree, and combined Web startup-failure coverage.
+
+## [0.4.34] — 2026-08-16
+
+### Added
+- **Supported native wheels now bundle an experimental Rust implementation behind the normal `cccc` launcher.** Python remains the stable default, `cccc rust` and `cccc python` switch the persisted implementation explicitly, and an optional Rust-only standalone preview is available for native deployment evaluation.
+- **ChatGPT Web Model actors now offer an experimental GPT Pro delivery mode.** The per-actor setting attaches one deterministic blank PNG to each batch for accounts where that ChatGPT behavior exposes the CCCC connector; Standard text-only delivery remains the default, and CCCC never selects the model.
+- **Cline is now a first-class PTY runtime** with discovery, actor defaults, MCP setup and repair, diagnostics, Web metadata, documentation, and Python/Rust coverage.
+
+### Changed
+- **Python and Rust now share one product version, public command, Web frontend, daemon contract, and durable `CCCC_HOME` authority.** Engine switching validates the bundled payload, replaces the active process pair, and never silently falls back.
+- **ChatGPT and NotebookLM use a unified projected-browser foundation.** Saved ChatGPT targets, new-chat binding, Page/Browser viewing, persistent profiles, pointer scrolling, Xvfb isolation, and the vendored NotebookLM 0.8.0 auth/provider boundary were aligned across implementations.
+- **The Web composer defaults a new preference to Need Reply and remembers later user choices.** Delivery receipts, capability availability, implementation banners, mobile controls, chat anchors, and terminal readiness are projected more consistently.
+
+### Fixed
+- **Cross-engine state no longer splits across browser connectors, Group Bridge trust, IM identifiers, Voice Secretary sessions, active Group selection, automation, capabilities, and runtime recovery.** Canonical shared stores and generation boundaries prevent stale state from being restored after an engine switch or actor recreation.
+- **Messaging and unread state follow ledger order and durable source identity.** Sends, replies, files, tracked work, cross-Group receipts, acknowledgements, cursor advances, and deferred retries avoid duplicate, skipped, or permanently stranded work.
+- **ChatGPT browser delivery is now single-flight, target-aware, and at-most-once after an ambiguous submit.** A failed batch cannot poison later delivery, bootstrap state survives reconciliation, and Python/Rust expose the same visible delivery evidence.
+- **Voice Secretary recording scope, document mutation, partial ASR failure, transcript cleanup, lease renewal, and speaker-analysis admission are bounded and consistent.** Switching Groups during recording no longer redirects background output, while manual controls continue to use the current Group.
+- **Runtime startup, hooks, resume, terminal replay, daemon handoff, shutdown, installers, and remote Web access received a broad reliability and security pass.** Hook-unavailable Codex launches retain CCCC MCP, native terminal reconnects preserve output order, scoped tokens cannot observe other Groups, and installers refuse unowned command replacement.
+
+## [0.4.34-rc4] — 2026-08-15
+
+### Changed
+- **CI now isolates process-lifecycle coverage and post-merge native verification.** The load-sensitive daemon/Web shutdown suite runs serially outside the parallel Rust workspace tests, while native distribution and Windows installer checks run after merge behind stable aggregate gates.
+- **GitHub Actions updates no longer rewrite the pinned Rust compiler version.** Dependabot continues maintaining normal Actions dependencies but ignores `dtolnay/rust-toolchain`, whose action ref intentionally encodes the workspace's Rust 1.88 toolchain.
+
+### Fixed
+- **Web startup banners now reflect the actual listener scope.** Loopback-only Python and Rust launches no longer advertise an unreachable LAN address; a detected `Network` URL is shown only for wildcard listeners that accept remote connections.
+- **Native capability installs now refresh slash-command catalogs reliably across clients.** Rust commits enablement and visibility together, emits one durable change event per semantic install, preserves the last known-good Web catalog across request races, and catches up during SSE reconnects and polling fallback.
+- **Claude headless resume failures can no longer restore stale session metadata.** Provider exits after the startup grace period are serialized with session recording, invalidated before retry, and reported through the existing resume-failure event path.
+- **Voice Secretary recordings keep their original Group scope while navigating.** Switching Groups during an active recording no longer redirects document checkpoints, final transcripts, Ask/Prompt work, or direct-composer text into the newly visible Group; the immutable recording scope continues targeting the original Group and document, with composer text routed to that Group's preserved draft.
+- **Silent Voice Secretary streams no longer grow the native ASR heap without bound.** Rust now resets sherpa-onnx at every detected endpoint even when the hypothesis is empty or unchanged, releasing accumulated streaming features while preserving final transcript events.
+- **Long Voice Secretary recordings no longer block later stops or permanently lose speaker labels.** Short WebSocket recordings still receive immediate final ASR; when speaker analysis is available, persistent recordings over 30 seconds, or recordings stopped while native inference is occupied, complete stop promptly and retain their durable live transcript while speaker analysis waits behind the active job instead of returning `worker_busy`. Final ASR paths that cannot defer reuse one SenseVoice recognizer across bounded 30-second ranges.
+- **Message delivery preferences and lifecycle state stay aligned across runtime paths.** Delivery recovery no longer drifts from the actor's persisted mode or leaves stale lifecycle projections behind.
+- **The embedded CLI reacts to daemon loss without polling.** Combined process shutdown follows the daemon exit signal directly, reducing delayed or inconsistent teardown behavior.
+- **Capability discovery exposes autoload candidates consistently.** The daemon includes the candidate state expected by clients, and the Web capability picker now has complete English, Chinese, and Japanese labels.
+
+## [0.4.34-rc3] — 2026-08-14
+
 ### Changed
 - **Distribution guidance now keeps PyPI as the stable, recommended product path.** The standalone Rust binary is presented consistently as an experimental Rust-only preview without Python fallback or implementation switching, including its GitHub Release metadata.
 - **Release publication now gates complete Python and standalone artifact sets without duplicating normal CI.** PyPI receives one source distribution, one portable wheel, and four version-matched native Rust wheels after parallel payload checks; standalone binaries execute on their build hosts and final Linux and Windows installer candidates are verified in parallel. Full source and cross-language interoperability suites remain in normal CI only.
@@ -14,6 +130,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 - **ChatGPT Web Model actors now have one shared per-actor delivery preference across Python and Rust.** Stable `Standard` delivery remains text-only and default; the explicitly experimental `GPT Pro` mode attaches one deterministic blank PNG before submission for accounts where that ChatGPT-side behavior exposes third-party MCP. The preference applies from the next accepted turn, survives daemon restarts and engine switches, and never selects a ChatGPT model.
 
 ### Fixed
+- **Actor restart recovery no longer replays every unread message body into a fresh PTY.** Python and Rust inject one transient bounded unread summary, preserve the canonical cursor, and direct the actor to the inbox tools while normal live backlog delivery remains ordered.
+- **Windows standalone updates no longer hang while restarting a running daemon.** The installer waits on the short-lived `daemon start` launcher itself instead of PowerShell's native process pipeline, while retaining a bounded failure timeout and rollback restart.
+- **SPA fallback routes now retain the HTML response type.** Browser deep links served through `index.html` no longer inherit an `application/octet-stream` MIME type from the extensionless request path.
+- **Windows Rust Web builds no longer compile Unix-only browser helpers.** Platform-specific imports and CDP port reservation are gated to the targets that use them.
 - **Codex hook injection now follows the documented provider contract in both backends.** Unsupported `PostToolUseFailure` and `StopFailure` registrations were removed; non-zero tool commands continue to complete through Codex's supported `PostToolUse` event instead of relying on hooks that never fire.
 - **Remote Web exposure now has one administrator-token boundary across the product.** The Web UI blocks LAN/public Save, Apply, and endpoint copying without an Admin Access Token; Python and Rust also reject remote start, apply, and listener startup, so scoped tokens or direct API calls cannot bypass the rule. The obsolete UI choice to disable remote token protection was removed, while localhost-only recovery and the explicit host-level unsafe override remain available.
 - **Settings dialog footers retain their normal mobile spacing when adding the device safe area.** Bottom actions no longer lose their base padding on notched devices.

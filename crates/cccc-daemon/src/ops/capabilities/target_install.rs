@@ -19,6 +19,7 @@ pub(super) fn run(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let access = super::authorize_scope_mutation(home, request, "actor")?;
     let group_id = access.actor.group_id;
     let actor_id = access.actor.actor_id;
+    let by = access.actor.by;
     let scope = access.scope;
     let target = string_arg(request, "target")
         .or_else(|| string_arg(request, "source_uri"))
@@ -35,14 +36,51 @@ pub(super) fn run(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let kind = classify(&target);
     let records = match kind {
         TargetKind::CapabilityId => {
+            let store = CapabilityStore::new(home.clone());
+            let already_enabled = store
+                .is_enabled_for(&target, &group_id, &actor_id, &scope)
+                .map_err(OpError::io)?;
+            let was_hidden = !actor_id.is_empty()
+                && store
+                    .is_hidden_for(&target, &group_id, &actor_id)
+                    .map_err(OpError::io)?;
             let enabled = enable(home, &group_id, &actor_id, &scope, ttl_seconds, &target)?;
-            return object(json!({
+            let use_ready = enabled
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let enabled_ids = if use_ready {
+                vec![target.clone()]
+            } else {
+                Vec::new()
+            };
+            let changed_ids = if use_ready && (!already_enabled || was_hidden) {
+                enabled_ids.clone()
+            } else {
+                Vec::new()
+            };
+            let result = object(json!({
                 "action_id":action_id,"group_id":group_id,"actor_id":actor_id,
                 "target":target,"target_kind":"capability_id","scope":scope,
-                "installed_capability_ids":[target],"enabled_capability_ids":[target],
-                "use_ready_capability_ids":[target],"requires_setup":false,
-                "refresh_required":true,"enable_result":enabled,"state":"ready"
-            }));
+                "installed_capability_ids":[target],"enabled_capability_ids":enabled_ids,
+                "use_ready_capability_ids":enabled_ids,
+                "requires_setup":!use_ready,
+                "refresh_required":!changed_ids.is_empty(),
+                "state":if use_ready {"ready"} else {"needs_setup"},
+                "enable_result":enabled
+            }))?;
+            return super::install_events::finish(
+                home,
+                result,
+                &super::install_events::InstallChange {
+                    action_id: &action_id,
+                    group_id: &group_id,
+                    actor_id: &actor_id,
+                    by: &by,
+                    scope: &scope,
+                    capability_ids: &changed_ids,
+                },
+            );
         }
         TargetKind::Local => local_records(&target)?,
         TargetKind::Url => vec![url_record(&target)?],
@@ -65,6 +103,7 @@ pub(super) fn run(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let mut imported = Vec::new();
     let mut installed = Vec::new();
     let mut enabled = Vec::new();
+    let mut changed = Vec::new();
     for (index, record) in records.into_iter().enumerate() {
         let snapshot = &snapshots[index];
         let capability = match store.import_record(record.clone()) {
@@ -89,48 +128,67 @@ pub(super) fn run(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 return Err(OpError::invalid(error));
             }
         };
-        let enable_result = if snapshot.enabled {
-            object(json!({
-                "capability_id":capability.id,"state":"ready","enabled":true,
-                "scope":scope,"refresh_required":false,"already_enabled":true
-            }))?
-        } else {
-            match enable(
-                home,
-                &group_id,
-                &actor_id,
-                &scope,
-                ttl_seconds,
-                &capability.id,
-            ) {
-                Ok(result) => result,
-                Err(error) => {
-                    rollback_install(
-                        home,
-                        &store,
-                        &snapshots[..=index],
-                        &group_id,
-                        &actor_id,
-                        &scope,
-                    )?;
-                    return Err(error);
-                }
+        let enable_result = match enable(
+            home,
+            &group_id,
+            &actor_id,
+            &scope,
+            ttl_seconds,
+            &capability.id,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                rollback_install(
+                    home,
+                    &store,
+                    &snapshots[..=index],
+                    &group_id,
+                    &actor_id,
+                    &scope,
+                )?;
+                return Err(error);
             }
         };
+        let active_after_import = enable_result
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         installed.push(capability.id.clone());
-        enabled.push(capability.id.clone());
+        let record_changed =
+            super::install_events::records_differ(snapshot.previous_record.as_ref(), Some(&record));
+        if active_after_import {
+            enabled.push(capability.id.clone());
+        }
+        if record_changed || (active_after_import && (!snapshot.enabled || snapshot.hidden)) {
+            changed.push(capability.id.clone());
+        }
         imported.push(json!({
-            "capability_id":capability.id,"ok":true,"state":"ready",
-            "active_after_import":true,"record":record,"enable_result":enable_result
+            "capability_id":capability.id,"ok":true,
+            "state":enable_result.get("state").and_then(Value::as_str).unwrap_or("blocked"),
+            "active_after_import":active_after_import,"record":record,"enable_result":enable_result
         }));
     }
-    object(json!({
+    let requires_setup = enabled.len() < installed.len();
+    let result = object(json!({
         "action_id":action_id,"group_id":group_id,"actor_id":actor_id,
         "target":target,"target_kind":kind.as_str(),"scope":scope,
         "installed_capability_ids":installed,"enabled_capability_ids":enabled,
-        "use_ready_capability_ids":enabled,"requires_setup":false,
-        "refresh_required":true,"imported_capabilities":imported,"state":"ready"
-    }))
+        "use_ready_capability_ids":enabled,"requires_setup":requires_setup,
+        "refresh_required":!changed.is_empty(),"imported_capabilities":imported,
+        "state":if requires_setup {"needs_setup"} else {"ready"}
+    }))?;
+    super::install_events::finish(
+        home,
+        result,
+        &super::install_events::InstallChange {
+            action_id: &action_id,
+            group_id: &group_id,
+            actor_id: &actor_id,
+            by: &by,
+            scope: &scope,
+            capability_ids: &changed,
+        },
+    )
 }
 
 pub(super) fn enable(
@@ -142,20 +200,43 @@ pub(super) fn enable(
     capability_id: &str,
 ) -> Result<Map<String, Value>, OpError> {
     let store = CapabilityStore::new(home.clone());
+    if let Some((blocked_scope, block)) = store
+        .blocked_for_group(capability_id, group_id)
+        .map_err(OpError::io)?
+    {
+        let reason = if blocked_scope == "global" {
+            "blocked_by_global_policy"
+        } else {
+            "blocked_by_group_policy"
+        };
+        return object(json!({
+            "group_id":group_id,"actor_id":actor_id,"capability_id":capability_id,
+            "scope":scope,"enabled":false,"state":"blocked",
+            "refresh_required":false,"reason":reason,
+            "policy_level":"blocked","blocked_scope":blocked_scope,
+            "blocked_reason":block.get("reason").and_then(Value::as_str).unwrap_or("")
+        }));
+    }
     let record = store.catalog_record(capability_id).map_err(OpError::io)?;
     if let Some(record) = record.as_ref() {
         validate_enableable(record, capability_id)?;
         package_install::ensure_installed(home, capability_id, record)?;
     }
+    let already_enabled = store
+        .is_enabled_for(capability_id, group_id, actor_id, scope)
+        .map_err(OpError::io)?;
+    let was_hidden = !actor_id.is_empty()
+        && store
+            .is_hidden_for(capability_id, group_id, actor_id)
+            .map_err(OpError::io)?;
     let state = store
-        .set_enabled_for(capability_id, true, group_id, actor_id, scope, ttl_seconds)
+        .enable_and_unhide_for(capability_id, group_id, actor_id, scope, ttl_seconds)
         .map_err(OpError::invalid)?;
-    if !actor_id.is_empty() {
-        let _ = store.set_hidden_for(capability_id, false, group_id, actor_id);
-    }
     object(json!({
         "capability_id":capability_id,"state":"ready","enabled":true,
-        "scope":scope,"refresh_required":true,"capability_state":state
+        "scope":scope,"refresh_required":!already_enabled || was_hidden,
+        "already_enabled":already_enabled,"visibility_changed":was_hidden,
+        "capability_state":state
     }))
 }
 
@@ -235,12 +316,12 @@ fn rollback_install(
             ) {
                 failures.push(error.to_string());
             }
-            if snapshot.hidden
-                && let Err(error) =
-                    store.set_hidden_for(&snapshot.capability_id, true, group_id, actor_id)
-            {
-                failures.push(error.to_string());
-            }
+        }
+        if snapshot.hidden
+            && let Err(error) =
+                store.set_hidden_for(&snapshot.capability_id, true, group_id, actor_id)
+        {
+            failures.push(error.to_string());
         }
         if let Err(error) =
             store.restore_record(&snapshot.capability_id, snapshot.previous_record.clone())

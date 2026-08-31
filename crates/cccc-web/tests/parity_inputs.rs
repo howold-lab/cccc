@@ -1,9 +1,9 @@
 #![cfg(unix)]
+mod auth_support;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use cccc_contracts::Event;
-use cccc_core::{GroupStore, HomeLayout, ledger};
+use cccc_core::{GroupStore, HomeLayout};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -11,7 +11,7 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn terminal_clear_accepts_actor_id_from_query_without_json_body() {
     let (_temp, home, group_id, daemon) = running_home("terminal clear").await;
-    let response = cccc_web::app(home.clone())
+    let response = auth_support::authenticated_app(home.clone())
         .oneshot(
             Request::post(format!(
                 "/api/v1/groups/{group_id}/terminal/clear?actor_id=missing"
@@ -29,9 +29,9 @@ async fn terminal_clear_accepts_actor_id_from_query_without_json_body() {
         .expect("body")
         .to_bytes();
     shutdown(home, daemon).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let payload: Value = serde_json::from_slice(&body).expect("json error response");
-    assert_eq!(payload["error"]["code"], "runtime_error");
+    assert_eq!(payload["error"]["code"], "actor_not_found");
 }
 
 #[tokio::test]
@@ -48,7 +48,7 @@ async fn invalid_refs_json_is_rejected_before_upload_commit() {
         ),
         boundary = boundary,
     );
-    let response = cccc_web::app(home.clone())
+    let response = auth_support::authenticated_app(home.clone())
         .oneshot(
             Request::post(format!("/api/v1/groups/{group_id}/send_upload"))
                 .header(
@@ -79,20 +79,56 @@ async fn invalid_refs_json_is_rejected_before_upload_commit() {
 }
 
 #[tokio::test]
-async fn web_ack_is_fixed_to_user_identity() {
-    let (_temp, home, group_id, daemon) = running_home("ack identity").await;
-    let store = GroupStore::new(home.clone()).expect("store");
-    let mut message = Event::new("chat.message", &group_id);
-    message.id = "message-1".into();
-    message.by = "user".into();
-    message.data.insert("text".into(), json!("hello"));
-    ledger::append(&store.ledger_path(&group_id).expect("ledger"), &message).expect("append");
-
-    let response = cccc_web::app(home.clone())
+async fn group_update_http_surface_returns_the_standard_receipt() {
+    let (_temp, home, group_id, daemon) = running_home("group update").await;
+    let app = auth_support::authenticated_app(home.clone());
+    let response = app
+        .clone()
         .oneshot(
-            Request::post(format!("/api/v1/groups/{group_id}/events/message-1/ack"))
+            Request::put(format!("/api/v1/groups/{group_id}"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"by":"peer-reviewer"}"#))
+                .body(Body::from(
+                    json!({"title":"updated title","topic":"updated topic","by":"user"})
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let payload = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["result"]["group_id"], group_id);
+    assert_eq!(payload["result"]["group"]["title"], "updated title");
+    assert_eq!(
+        payload["result"]["event"]["data"]["patch"],
+        json!({"title":"updated title","topic":"updated topic"})
+    );
+
+    let no_change = app
+        .oneshot(
+            Request::put(format!("/api/v1/groups/{group_id}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"title":null,"by":"user"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("no-change response");
+    let no_change_status = no_change.status();
+    let no_change = response_json(no_change).await;
+    shutdown(home, daemon).await;
+    assert_eq!(no_change_status, StatusCode::OK);
+    assert_eq!(no_change["result"]["message"], "no changes");
+}
+
+#[tokio::test]
+async fn capability_install_http_surface_uses_the_canonical_daemon_operation() {
+    let (_temp, home, group_id, daemon) = running_home("capability install").await;
+    let response = auth_support::authenticated_app(home.clone())
+        .oneshot(
+            Request::post(format!("/api/v1/groups/{group_id}/capabilities/install"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
                 .expect("request"),
         )
         .await
@@ -100,15 +136,54 @@ async fn web_ack_is_fixed_to_user_identity() {
     let status = response.status();
     let payload = response_json(response).await;
     shutdown(home, daemon).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(payload["result"]["event"]["by"], "user");
-    assert_eq!(payload["result"]["event"]["data"]["actor_id"], "user");
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(payload["error"]["code"], "missing_install_target");
+}
+
+#[tokio::test]
+async fn message_control_http_routes_use_existing_event_operations() {
+    let (_temp, home, group_id, daemon) = running_home("message controls").await;
+    let app = auth_support::authenticated_app(home.clone());
+    let deliver = app
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/groups/{group_id}/messages/missing-event/deliver"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"actor_ids":["peer-1"]}"#))
+            .expect("request"),
+        )
+        .await
+        .expect("response");
+    let deliver_status = deliver.status();
+    let deliver = response_json(deliver).await;
+    let cancel = app
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/groups/{group_id}/messages/missing-event/reply-request/cancel"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("request"),
+        )
+        .await
+        .expect("response");
+    let cancel_status = cancel.status();
+    let cancel = response_json(cancel).await;
+    shutdown(home, daemon).await;
+
+    assert_eq!(deliver_status, StatusCode::NOT_FOUND);
+    assert_eq!(deliver["error"]["code"], "event_not_found");
+    assert_eq!(cancel_status, StatusCode::NOT_FOUND);
+    assert_eq!(cancel["error"]["code"], "event_not_found");
 }
 
 #[tokio::test]
 async fn actor_command_uses_shell_quoting_like_python() {
     let (_temp, home, group_id, daemon) = running_home("quoted command").await;
-    let response = cccc_web::app(home.clone())
+    let response = auth_support::authenticated_app(home.clone())
         .oneshot(
             Request::post(format!("/api/v1/groups/{group_id}/actors"))
                 .header(header::CONTENT_TYPE, "application/json")

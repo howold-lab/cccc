@@ -62,6 +62,16 @@ export default defineConfig({
         manualChunks(id) {
           const normalizedId = id.split(path.sep).join("/");
 
+          // Leave the complete voice feature graph to Rollup's dynamic-import
+          // splitter. A named manual chunk can become an entry dependency when
+          // it also owns shared modules, which eagerly downloads the feature.
+          if (
+            normalizedId.includes("/src/pages/chat/VoiceSecretaryComposerControl.tsx") ||
+            normalizedId.includes("/src/pages/chat/voice-secretary/")
+          ) {
+            return;
+          }
+
           if (
             normalizedId.includes("/src/pages/chat/") ||
             normalizedId.includes("/src/components/messageBubble/") ||
@@ -113,6 +123,14 @@ export default defineConfig({
     port: 5555,
     strictPort: true,
     hmr: { host: "127.0.0.1", protocol: "ws", clientPort: 5555 },
-    proxy: { "/api": { target: backendTarget, changeOrigin: true, ws: true } },
+    proxy: {
+      // Preserve the browser-facing Host so backend WebSocket Origin checks see
+      // the same origin as the page instead of Vite's internal target origin.
+      "/api": { target: backendTarget, changeOrigin: false, ws: true, xfwd: true },
+      "/ui/manifest.webmanifest": { target: backendTarget, changeOrigin: true },
+      "/pwa-icon.svg": { target: backendTarget, changeOrigin: true },
+      "/pwa-icon-maskable.svg": { target: backendTarget, changeOrigin: true },
+      "/apple-touch-icon.png": { target: backendTarget, changeOrigin: true },
+    },
   },
 });

@@ -7,12 +7,42 @@ use crate::AppState;
 use crate::api::{ApiError, ApiResult, body_object, call, object};
 use crate::auth::Principal;
 
+mod oversized_text;
+pub(super) mod upload_fields;
+
 const MAX_LOCAL_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
+const MAX_MESSAGE_JSON_BYTES: usize = 12 * 1024 * 1024;
 const MULTIPART_OVERHEAD_BYTES: usize = 1024 * 1024;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/v1/groups/{group_id}/send", post(send))
+        .merge(json_routes())
+        .route(
+            "/api/v1/groups/{group_id}/messages/{source_event_id}/deliver",
+            post(message_deliver),
+        )
+        .route(
+            "/api/v1/groups/{group_id}/messages/{source_event_id}/reply-request/cancel",
+            post(reply_request_cancel),
+        )
+        .route(
+            "/api/v1/groups/{group_id}/inbox/{actor_id}",
+            get(inbox_peek),
+        )
+        .route(
+            "/api/v1/groups/{group_id}/inbox/{actor_id}/read",
+            post(inbox_read),
+        )
+        .route(
+            "/api/v1/groups/{group_id}/blobs/{blob_name}",
+            get(super::blob_download::download),
+        )
+        .merge(upload_routes())
+}
+
+fn json_routes() -> Router<AppState> {
+    Router::new()
+        .merge(large_message_json_routes())
         .route("/api/v1/groups/{group_id}/tracked_send", post(tracked_send))
         .route(
             "/api/v1/groups/{group_id}/delegate_contact",
@@ -22,21 +52,13 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/groups/{group_id}/slash_skill_dispatch",
             post(slash_skill_dispatch),
         )
+}
+
+fn large_message_json_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/groups/{group_id}/send", post(send))
         .route("/api/v1/groups/{group_id}/reply", post(reply))
-        .route("/api/v1/groups/{group_id}/events/{event_id}/ack", post(ack))
-        .route(
-            "/api/v1/groups/{group_id}/inbox/{actor_id}",
-            get(inbox_list),
-        )
-        .route(
-            "/api/v1/groups/{group_id}/inbox/{actor_id}/read",
-            post(inbox_read),
-        )
-        .route(
-            "/api/v1/groups/{group_id}/blobs/{blob_name}",
-            get(blob_download),
-        )
-        .merge(upload_routes())
+        .layer(DefaultBodyLimit::max(MAX_MESSAGE_JSON_BYTES))
 }
 
 fn upload_routes() -> Router<AppState> {
@@ -53,7 +75,8 @@ async fn send(
     Path(group_id): Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResult {
-    daemon_body(&state, "send", group_id, body).await
+    let mut args = body_object(body)?;
+    oversized_text::dispatch(&state, group_id, "send", &mut args).await
 }
 async fn tracked_send(
     State(state): State<AppState>,
@@ -84,35 +107,50 @@ async fn reply(
     Path(group_id): Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResult {
-    daemon_body(&state, "reply", group_id, body).await
+    let mut args = body_object(body)?;
+    args.remove("quote_text");
+    oversized_text::dispatch(&state, group_id, "reply", &mut args).await
 }
-async fn ack(
+async fn message_deliver(
     State(state): State<AppState>,
-    Path((group_id, event_id)): Path<(String, String)>,
+    Path((group_id, source_event_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> ApiResult {
-    let _ = body_object(body)?;
-    let actor_id = "user";
-    call(
-        &state,
-        "chat_ack",
-        object(json!({"group_id":group_id,"event_id":event_id,"actor_id":actor_id,"by":actor_id})),
-    )
-    .await
+    let mut args = body_object(body)?;
+    args.insert("group_id".into(), Value::String(group_id));
+    args.insert("source_event_id".into(), Value::String(source_event_id));
+    args.insert("by".into(), Value::String("user".into()));
+    call(&state, "message_deliver", args).await
 }
-async fn inbox_list(
+async fn reply_request_cancel(
+    State(state): State<AppState>,
+    Path((group_id, source_event_id)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let mut args = body_object(body)?;
+    if !args.is_empty() {
+        return Err(ApiError::bad(
+            "reply-request cancellation body must be empty",
+        ));
+    }
+    args.insert("group_id".into(), Value::String(group_id));
+    args.insert("source_event_id".into(), Value::String(source_event_id));
+    args.insert("by".into(), Value::String("user".into()));
+    call(&state, "reply_request_cancel", args).await
+}
+async fn inbox_peek(
     State(state): State<AppState>,
     Path((group_id, actor_id)): Path<(String, String)>,
     Query(query): Query<InboxQuery>,
 ) -> ApiResult {
     call(
         &state,
-        "inbox_list",
+        "inbox_peek",
         object(json!({
             "group_id":group_id,
             "actor_id":actor_id,
             "by":"user",
-            "limit":query.limit.unwrap_or(50).clamp(1, 1000),
+            "limit":query.limit.unwrap_or(50),
         })),
     )
     .await
@@ -130,7 +168,8 @@ async fn inbox_read(
     let mut args = body_object(body)?;
     args.insert("group_id".into(), Value::String(group_id));
     args.insert("actor_id".into(), Value::String(actor_id));
-    call(&state, "inbox_mark_read", args).await
+    args.insert("by".into(), Value::String("user".into()));
+    call(&state, "inbox_read", args).await
 }
 
 async fn send_upload(
@@ -191,8 +230,48 @@ async fn upload(
                 .text()
                 .await
                 .map_err(|error| ApiError::bad(error.to_string()))?;
-            insert_upload_field(&mut args, name, value)?;
+            upload_fields::insert(&mut args, name, value)?;
         }
+    }
+    if is_reply {
+        let message_mode = args
+            .get("message_mode")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("send")
+            .to_owned();
+        if !matches!(message_mode.as_str(), "send" | "mail") {
+            return Err(ApiError::bad_code(
+                "invalid_message_mode",
+                "reply message_mode must be send or mail",
+                json!({}),
+            ));
+        }
+        args.insert("message_mode".into(), Value::String(message_mode));
+    }
+    args.insert("group_id".into(), Value::String(group_id.into()));
+    let mut preflight_args = args.clone();
+    preflight_args.insert(
+        "operation".into(),
+        Value::String(if is_reply { "reply" } else { "send" }.into()),
+    );
+    preflight_args.insert(
+        "has_attachments".into(),
+        Value::Bool(!staged_uploads.is_empty()),
+    );
+    let Json(preflight_response) = call(state, "message_upload_preflight", preflight_args).await?;
+    let preflight = preflight_response
+        .get("result")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if preflight.get("duplicate").and_then(Value::as_bool) == Some(true) {
+        let result = preflight
+            .get("result")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        return Ok(Json(json!({"ok":true,"result":result})));
     }
     for (upload, filename, content_type) in staged_uploads {
         let blob = upload
@@ -200,96 +279,20 @@ async fn upload(
             .map_err(|error| ApiError::bad(error.to_string()))?;
         attachments.push(json!({"kind":"file","path":blob.path,"title":filename,"mime_type":content_type,"bytes":blob.bytes,"sha256":blob.sha256}));
     }
-    args.insert("group_id".into(), Value::String(group_id.into()));
     args.insert("attachments".into(), Value::Array(attachments));
     call(state, if is_reply { "reply" } else { "send" }, args).await
 }
 
-pub(super) fn insert_upload_field(
-    args: &mut serde_json::Map<String, Value>,
-    name: String,
-    value: String,
-) -> Result<(), ApiError> {
-    match name.as_str() {
-        "to_json" => {
-            args.insert(
-                "to".into(),
-                serde_json::from_str(&value).unwrap_or_else(|_| json!([])),
-            );
-        }
-        "refs_json" => {
-            let refs = serde_json::from_str::<Value>(&value).map_err(|error| {
-                ApiError::bad_code("invalid_refs", error.to_string(), json!({}))
-            })?;
-            let refs = refs.as_array().ok_or_else(|| {
-                ApiError::bad_code("invalid_refs", "refs_json must be a JSON array", json!({}))
-            })?;
-            args.insert(
-                "refs".into(),
-                Value::Array(
-                    refs.iter()
-                        .filter(|item| item.is_object())
-                        .cloned()
-                        .collect(),
-                ),
-            );
-        }
-        "reply_required" => {
-            args.insert(
-                name,
-                Value::Bool(matches!(value.as_str(), "true" | "1" | "yes")),
-            );
-        }
-        _ => {
-            args.insert(name, Value::String(value));
-        }
-    }
-    Ok(())
-}
-
-async fn blob_download(
-    State(state): State<AppState>,
-    Path((group_id, blob_name)): Path<(String, String)>,
-) -> Result<axum::response::Response, ApiError> {
-    let path = cccc_core::blobs::resolve(&state.home, &group_id, &blob_name)
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
-    let prefix = super::file_response::prefix(&path, 16)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
-    let content_type = blob_content_type(&blob_name, &prefix);
-    super::file_response::stream(&path, &content_type, None, None)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))
-}
-
-fn blob_content_type(blob_name: &str, bytes: &[u8]) -> String {
-    let guessed = mime_guess::from_path(blob_name).first_or_octet_stream();
-    if guessed != mime_guess::mime::APPLICATION_OCTET_STREAM {
-        return guessed.essence_str().to_owned();
-    }
-    let detected = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        "image/gif"
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else if bytes.starts_with(b"BM") {
-        "image/bmp"
-    } else if bytes.len() >= 12
-        && &bytes[4..8] == b"ftyp"
-        && matches!(&bytes[8..12], b"avif" | b"avis")
-    {
-        "image/avif"
-    } else {
-        "application/octet-stream"
-    };
-    detected.to_owned()
-}
-
 async fn daemon_body(state: &AppState, op: &str, group_id: String, body: Value) -> ApiResult {
-    let mut args = body_object(body)?;
+    daemon_args(state, op, group_id, body_object(body)?).await
+}
+
+async fn daemon_args(
+    state: &AppState,
+    op: &str,
+    group_id: String,
+    mut args: serde_json::Map<String, Value>,
+) -> ApiResult {
     args.insert("group_id".into(), Value::String(group_id));
     call(state, op, args).await
 }

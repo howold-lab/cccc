@@ -7,6 +7,11 @@ mod actor_listing;
 mod actor_profile_runtime;
 pub(crate) mod actor_runtime;
 #[cfg(test)]
+mod actor_runtime_mcp_tests;
+mod actor_runtime_status;
+#[cfg(test)]
+mod actor_runtime_status_tests;
+#[cfg(test)]
 mod actor_runtime_tests;
 mod actor_saga;
 mod actor_secrets;
@@ -21,8 +26,10 @@ mod claude_hooks;
 mod codex_mcp;
 mod context;
 mod context_projection;
+mod deepseek_runtime;
 mod diagnostics;
 mod group_bridge;
+pub(crate) use group_bridge::{schedule_due_retries, schedule_pending_route_retry};
 mod group_copy;
 mod group_create_rollback;
 mod group_creation;
@@ -35,6 +42,9 @@ mod hermes_runtime;
 mod im;
 pub(crate) mod local_headless;
 mod maintenance;
+mod membership;
+mod membership_account;
+mod membership_cloudflared;
 mod memory;
 mod message_idempotency;
 mod message_metadata;
@@ -49,13 +59,15 @@ mod profile_access;
 mod profiles;
 mod remote_access;
 mod runtime_completion;
-mod runtime_hook_input;
+pub(crate) mod runtime_delivery;
+pub(crate) mod runtime_hook_input;
 mod runtime_hook_session;
 mod runtime_mcp;
 pub(crate) mod runtime_restore;
 mod runtime_session;
 mod runtime_state;
 mod settings;
+mod task_list;
 mod terminal;
 mod terminal_history_source;
 mod terminal_text;
@@ -86,6 +98,7 @@ pub fn handle(home: &HomeLayout, request: &DaemonRequest) -> Result<Option<OpRes
         profiles::handle,
         diagnostics::handle,
         remote_access::handle,
+        membership::handle,
         runtime_state::handle,
         maintenance::handle,
         im::handle,

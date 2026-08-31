@@ -43,14 +43,10 @@ describe("api error normalization", () => {
     vi.stubGlobal("sessionStorage", sessionStorageMock);
   });
 
-  it("accepts Python/Rust success envelopes and rejects malformed 200 payloads", async () => {
+  it("accepts the canonical success envelope and rejects malformed 200 payloads", async () => {
     const { normalizeApiResponse } = await import("../../src/services/api/base");
-    for (const fixture of [
-      { backend: "python", payload: { ok: true, result: { value: 1 } } },
-      { backend: "rust", payload: { ok: true, result: { value: 1 } } },
-    ]) {
-      expect(normalizeApiResponse(fixture.payload), fixture.backend).toEqual(fixture.payload);
-    }
+    const payload = { ok: true, result: { value: 1 } };
+    expect(normalizeApiResponse(payload)).toEqual(payload);
     for (const payload of [
       { result: { value: 1 } },
       { ok: "true", result: { value: 1 } },
@@ -77,7 +73,7 @@ describe("api error normalization", () => {
     expect(
       formatApiErrorMessage({
         code: "daemon_unavailable",
-        message: "ccccd unavailable",
+        message: "CCCC daemon unavailable",
         details: {
           transport: "tcp",
           endpoint: { host: "127.0.0.1", port: 9001 },
@@ -85,7 +81,7 @@ describe("api error normalization", () => {
           reason: "os_error",
         },
       }),
-    ).toBe("ccccd unavailable · tcp 127.0.0.1:9001 · connect os error");
+    ).toBe("CCCC daemon unavailable · tcp 127.0.0.1:9001 · connect os error");
   });
 
   it("normalizes daemon_unavailable messages from response bodies", async () => {
@@ -100,7 +96,7 @@ describe("api error normalization", () => {
               ok: false,
               error: {
                 code: "daemon_unavailable",
-                message: "ccccd unavailable",
+                message: "CCCC daemon unavailable",
                 details: {
                   transport: "unix",
                   endpoint: { path: "/tmp/ccccd.sock" },
@@ -121,7 +117,9 @@ describe("api error normalization", () => {
     if (resp.ok) {
       throw new Error("expected error response");
     }
-    expect(resp.error.message).toBe("ccccd unavailable · unix /tmp/ccccd.sock · read timeout");
+    expect(resp.error.message).toBe(
+      "CCCC daemon unavailable · unix /tmp/ccccd.sock · read timeout",
+    );
     expect(resp.error.details).toEqual({
       transport: "unix",
       endpoint: { path: "/tmp/ccccd.sock" },
@@ -271,22 +269,22 @@ describe("api.fetchPresentation", () => {
     expect(resp.result.presentation.slots[1]?.card?.content.table?.rows).toEqual([["demo"]]);
   });
 
-  it("builds token-aware asset urls for presentation slots", async () => {
+  it("builds cookie-authenticated asset urls without query secrets", async () => {
     sessionStorageMock.setItem("cccc_dev_token", "dev-token");
     const api = await import("../../src/services/api");
     expect(api.getPresentationAssetUrl("g-demo", "slot-4")).toBe(
-      "/api/v1/groups/g-demo/presentation/slots/slot-4/asset?token=dev-token",
+      "/api/v1/groups/g-demo/presentation/slots/slot-4/asset",
     );
     expect(api.getPresentationAssetUrl("g-demo", "slot-4", "tick-2")).toBe(
-      "/api/v1/groups/g-demo/presentation/slots/slot-4/asset?token=dev-token&v=tick-2",
+      "/api/v1/groups/g-demo/presentation/slots/slot-4/asset?v=tick-2",
     );
   });
 
-  it("builds token-aware blob urls only for group-scoped blob paths", async () => {
+  it("builds cookie-authenticated blob urls only for group-scoped blob paths", async () => {
     sessionStorageMock.setItem("cccc_dev_token", "dev-token");
     const api = await import("../../src/services/api");
     expect(api.getGroupBlobUrl("g-demo", "state/blobs/sha256_demo.jpg")).toBe(
-      "/api/v1/groups/g-demo/blobs/sha256_demo.jpg?token=dev-token",
+      "/api/v1/groups/g-demo/blobs/sha256_demo.jpg",
     );
     expect(api.getGroupBlobUrl("g-demo", "workspace/demo.jpg")).toBe("");
   });
@@ -343,12 +341,12 @@ describe("api.fetchPresentation", () => {
     );
   });
 
-  it("builds a token-aware websocket url for browser-surface streaming", async () => {
+  it("builds a cookie-authenticated websocket url without query secrets", async () => {
     sessionStorageMock.setItem("cccc_dev_token", "dev-token");
     vi.stubGlobal("window", { location: { search: "", protocol: "https:", host: "cccc.test" } });
     const api = await import("../../src/services/api");
     expect(api.getPresentationBrowserSurfaceWebSocketUrl("g-demo", "slot-3")).toBe(
-      "wss://cccc.test/api/v1/groups/g-demo/presentation/browser_surface/ws?slot=slot-3&token=dev-token",
+      "wss://cccc.test/api/v1/groups/g-demo/presentation/browser_surface/ws?slot=slot-3",
     );
   });
 
@@ -716,8 +714,9 @@ describe("api assistant voice model helpers", () => {
               lifecycle: "idle",
               health: {
                 service: {
+                  ready: true,
                   selected_model_id: "mock_asr",
-                  managed_model: { model_id: "mock_asr", status: "ready", command_ready: true },
+                  model: { model_id: "mock_asr", status: "ready", command_ready: true },
                 },
               },
               config: {
@@ -870,7 +869,7 @@ describe("api assistant voice model helpers", () => {
     expect(model?.offline).toEqual({ engine: "sense_voice" });
   });
 
-  it("preserves native runtime lifecycle capabilities in assistant state", async () => {
+  it("preserves built-in ASR readiness and version in assistant state", async () => {
     fetchMock.mockResolvedValue({
       status: 200,
       ok: true,
@@ -888,9 +887,9 @@ describe("api assistant voice model helpers", () => {
             service_runtime: {
               runtime_id: "sherpa_onnx_streaming",
               status: "ready",
-              managed: true,
-              removable: false,
-              implementation: "rust",
+              available: true,
+              installed: true,
+              installed_version: "1.13.4",
             },
           },
         }),
@@ -902,9 +901,11 @@ describe("api assistant voice model helpers", () => {
     expect(resp.ok).toBe(true);
     if (!resp.ok) throw new Error("expected ok response");
     expect(resp.result.service_runtime).toMatchObject({
-      managed: true,
-      removable: false,
-      implementation: "rust",
+      runtime_id: "sherpa_onnx_streaming",
+      status: "ready",
+      available: true,
+      installed: true,
+      installed_version: "1.13.4",
     });
   });
 });
@@ -937,8 +938,7 @@ describe("api.message refs", () => {
       "please review",
       ["worker-1"],
       undefined,
-      "normal",
-      false,
+      "send",
       "client-1",
       refs,
     );
@@ -952,8 +952,7 @@ describe("api.message refs", () => {
           by: "user",
           to: ["worker-1"],
           path: "",
-          priority: "normal",
-          reply_required: false,
+          message_mode: "send",
           client_id: "client-1",
           refs,
         }),
@@ -965,7 +964,8 @@ describe("api.message refs", () => {
     fetchMock.mockResolvedValue({
       status: 200,
       ok: true,
-      text: async () => JSON.stringify({ ok: true, result: { delivered: true } }),
+      text: async () =>
+        JSON.stringify({ ok: true, result: { accepted: true, message_mode: "send" } }),
     });
 
     const api = await import("../../src/services/api");
@@ -974,8 +974,6 @@ describe("api.message refs", () => {
       command: "/using-superpowers",
       capabilityId: "skill:agent_self_proposed:using-superpowers",
       to: ["worker-1"],
-      priority: "attention",
-      replyRequired: true,
       clientId: "client-1",
       replyTo: "evt-parent",
       quoteText: "原始消息",
@@ -990,8 +988,6 @@ describe("api.message refs", () => {
           command: "/using-superpowers",
           capability_id: "skill:agent_self_proposed:using-superpowers",
           to: ["worker-1"],
-          priority: "attention",
-          reply_required: true,
           client_id: "client-1",
           reply_to: "evt-parent",
           quote_text: "原始消息",
@@ -1012,14 +1008,7 @@ describe("api.message refs", () => {
     });
 
     const api = await import("../../src/services/api");
-    await api.sendCrossGroupMessage(
-      "g-src",
-      "g-dst",
-      "route this",
-      ["@foreman"],
-      "attention",
-      true,
-    );
+    await api.sendCrossGroupMessage("g-src", "g-dst", "route this", ["@foreman"], "request_reply");
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/groups/g-src/send_cross_group",
@@ -1030,8 +1019,7 @@ describe("api.message refs", () => {
           by: "user",
           dst_group_id: "g-dst",
           to: ["@foreman"],
-          priority: "attention",
-          reply_required: true,
+          message_mode: "request_reply",
         }),
       }),
     );
@@ -1045,21 +1033,12 @@ describe("api.message refs", () => {
     });
 
     const api = await import("../../src/services/api");
-    await api.sendCrossGroupMessage(
-      "g-src",
-      "g-dst",
-      "你好",
-      ["@foreman"],
-      "normal",
-      false,
-      undefined,
-      {
-        replyTo: "evt-original",
-        quoteText: "原消息",
-        clientId: "local-1",
-        remoteReplyToEventId: "evt-remote-original",
-      },
-    );
+    await api.sendCrossGroupMessage("g-src", "g-dst", "你好", ["@foreman"], "send", undefined, {
+      replyTo: "evt-original",
+      quoteText: "原消息",
+      clientId: "local-1",
+      remoteReplyToEventId: "evt-remote-original",
+    });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/groups/g-src/send_cross_group",
@@ -1070,8 +1049,7 @@ describe("api.message refs", () => {
           by: "user",
           dst_group_id: "g-dst",
           to: ["@foreman"],
-          priority: "normal",
-          reply_required: false,
+          message_mode: "send",
           reply_to: "evt-original",
           quote_text: "原消息",
           client_id: "local-1",
@@ -1095,8 +1073,7 @@ describe("api.message refs", () => {
       "g-dst",
       "你好",
       ["@foreman"],
-      "attention",
-      true,
+      "request_reply",
       [file],
       {
         replyTo: "evt-local-source",
@@ -1117,8 +1094,7 @@ describe("api.message refs", () => {
     expect(form.get("quote_text")).toBe("原消息");
     expect(form.get("client_id")).toBe("local-1");
     expect(form.get("remote_reply_to_event_id")).toBe("evt-remote-original");
-    expect(form.get("reply_required")).toBe("true");
-    expect(form.get("priority")).toBe("attention");
+    expect(form.get("message_mode")).toBe("request_reply");
   });
 
   it("sends tracked delegation payloads through the daemon endpoint", async () => {
@@ -1136,6 +1112,7 @@ describe("api.message refs", () => {
       to: ["reviewer"],
       outcome: "Review evidence reported.",
       checklist: [{ text: "Inspect code" }],
+      task_priority: "high",
       idempotency_key: "req-1",
       refs,
     });
@@ -1155,8 +1132,7 @@ describe("api.message refs", () => {
           waiting_on: "actor",
           handoff_to: "",
           notes: "",
-          priority: "normal",
-          reply_required: true,
+          task_priority: "high",
           idempotency_key: "req-1",
           refs,
         }),
@@ -1182,10 +1158,10 @@ describe("api.message refs", () => {
       ["worker-2"],
       "evt-parent",
       [file],
-      "attention",
-      true,
       "client-2",
       refs,
+      "",
+      "mail",
     );
 
     const [url, requestInit] = fetchMock.mock.calls[0] ?? [];
@@ -1195,9 +1171,9 @@ describe("api.message refs", () => {
     );
     const form = requestInit.body as FormData;
     expect(form.get("reply_to")).toBe("evt-parent");
-    expect(form.get("reply_required")).toBe("true");
     expect(form.get("client_id")).toBe("client-2");
     expect(form.get("refs_json")).toBe(JSON.stringify(refs));
+    expect(form.get("message_mode")).toBe("mail");
     expect(form.get("files")).toBe(file);
   });
 });

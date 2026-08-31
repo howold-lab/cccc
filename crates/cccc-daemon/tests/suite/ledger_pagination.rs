@@ -136,6 +136,7 @@ fn message_persists_immutable_sender_snapshot() {
             "by":"alice",
             "to":["user"],
             "text":"hello",
+            "message_mode":"send",
             "sender_title":"Spoofed title",
             "sender_runtime":"custom",
             "sender_avatar_path":"state/blobs/spoofed"
@@ -166,7 +167,7 @@ fn message_persists_immutable_sender_snapshot() {
 }
 
 #[test]
-fn ledger_statuses_restore_read_ack_and_reply_state() {
+fn ledger_statuses_restore_read_and_reply_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
     let created = call(&home, "group_create", json!({"title":"message statuses"}));
@@ -188,13 +189,27 @@ fn ledger_statuses_restore_read_ack_and_reply_state() {
             "by":"user",
             "to":["alice"],
             "text":"please respond",
-            "priority":"attention",
-            "reply_required":true
+            "message_mode":"request_reply"
         }),
     );
-    let event_id = sent.result["event"]["id"]
+    let request_event_id = sent.result["event"]["id"]
         .as_str()
         .expect("event id")
+        .to_owned();
+    let mail = call(
+        &home,
+        "send",
+        json!({
+            "group_id":group_id,
+            "by":"user",
+            "to":["alice"],
+            "text":"read when ready",
+            "message_mode":"mail"
+        }),
+    );
+    let mail_event_id = mail.result["event"]["id"]
+        .as_str()
+        .expect("Mail event id")
         .to_owned();
     call(
         &home,
@@ -204,45 +219,65 @@ fn ledger_statuses_restore_read_ack_and_reply_state() {
             "by":"user",
             "to":[],
             "text":"proxied user message",
-            "reply_to":event_id,
-            "actor_id":"alice"
+            "reply_to":request_event_id,
+            "actor_id":"alice",
+            "message_mode":"send"
         }),
     );
 
     let before = call(
         &home,
         "ledger_statuses",
-        json!({"group_id":group_id,"event_ids":[event_id]}),
+        json!({"group_id":group_id,"event_ids":[request_event_id,mail_event_id]}),
     );
     assert_eq!(
-        before.result["statuses"][&event_id]["read_status"]["alice"],
+        before.result["statuses"][&mail_event_id]["read_status"]["alice"],
         false
     );
     assert_eq!(
-        before.result["statuses"][&event_id]["ack_status"]["alice"],
-        false
-    );
-    assert_eq!(
-        before.result["statuses"][&event_id]["obligation_status"]["alice"]["replied"],
+        before.result["statuses"][&request_event_id]["obligation_status"]["alice"]["replied"],
         false
     );
     assert!(
-        before.result["statuses"][&event_id]["read_status"]
+        before.result["statuses"][&request_event_id]
+            .get("read_status")
+            .is_none()
+    );
+    assert!(
+        before.result["statuses"][&mail_event_id]["read_status"]
             .get("bob")
             .is_none()
     );
 
     call(
         &home,
-        "inbox_mark_read",
-        json!({"group_id":group_id,"actor_id":"alice","event_id":event_id,"by":"user"}),
+        "inbox_read",
+        json!({"group_id":group_id,"actor_id":"alice","limit":1,"by":"user"}),
+    );
+    let after_read = call(
+        &home,
+        "ledger_statuses",
+        json!({"group_id":group_id,"event_ids":[request_event_id,mail_event_id]}),
+    );
+    assert_eq!(
+        after_read.result["statuses"][&mail_event_id]["read_status"]["alice"],
+        true
+    );
+    assert_eq!(
+        after_read.result["statuses"][&request_event_id]["obligation_status"]["alice"]["replied"],
+        false
+    );
+    assert!(
+        after_read.result["statuses"][&request_event_id]
+            .get("read_status")
+            .is_none()
     );
     call(
         &home,
         "reply",
         json!({
             "group_id":group_id,
-            "reply_to":event_id,
+            "reply_to":request_event_id,
             "text":"done",
             "by":"alice"
         }),
@@ -251,22 +286,62 @@ fn ledger_statuses_restore_read_ack_and_reply_state() {
     let after = call(
         &home,
         "ledger_statuses",
-        json!({"group_id":group_id,"event_ids":[event_id]}),
+        json!({"group_id":group_id,"event_ids":[request_event_id,mail_event_id]}),
     );
-    let status = &after.result["statuses"][&event_id];
-    assert_eq!(status["read_status"]["alice"], true);
-    assert_eq!(status["ack_status"]["alice"], true);
-    assert_eq!(status["obligation_status"]["alice"]["read"], true);
-    assert_eq!(status["obligation_status"]["alice"]["acked"], true);
+    assert_eq!(
+        after.result["statuses"][&mail_event_id]["read_status"]["alice"],
+        true
+    );
+    let status = &after.result["statuses"][&request_event_id];
+    assert!(status.get("read_status").is_none());
     assert_eq!(status["obligation_status"]["alice"]["replied"], true);
-    assert_eq!(status["obligation_status"]["alice"]["reply_required"], true);
+    assert_eq!(
+        status["obligation_status"]["alice"]["reply_requested"],
+        true
+    );
+    assert!(status.get("ack_status").is_none());
 
     let single = call(
         &home,
         "message_read_status",
-        json!({"group_id":group_id,"event_id":event_id}),
+        json!({"group_id":group_id,"event_id":mail_event_id}),
     );
     assert_eq!(single.result["read_status"]["alice"], true);
+}
+
+#[test]
+fn ledger_and_context_reads_reject_a_missing_group() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    for (op, args) in [
+        ("ledger_tail", json!({"group_id":"g_missing"})),
+        ("ledger_search", json!({"group_id":"g_missing","q":"x"})),
+        (
+            "ledger_window",
+            json!({"group_id":"g_missing","center":"event-missing"}),
+        ),
+        (
+            "ledger_statuses",
+            json!({"group_id":"g_missing","event_ids":["event-missing"]}),
+        ),
+        (
+            "message_read_status",
+            json!({"group_id":"g_missing","event_id":"event-missing"}),
+        ),
+        (
+            "context_get",
+            json!({"group_id":"g_missing","detail":"summary"}),
+        ),
+        ("task_list", json!({"group_id":"g_missing"})),
+    ] {
+        let response = call_raw(&home, op, args);
+        assert!(!response.ok, "{op} unexpectedly succeeded");
+        assert_eq!(
+            response.error.expect("missing-group error").code,
+            "group_not_found",
+            "{op} returned the wrong error"
+        );
+    }
 }
 
 fn append(home: &HomeLayout, group_id: &str, kind: &str, id: &str) {
@@ -287,14 +362,18 @@ fn ids(response: &DaemonResponse) -> Vec<&str> {
 }
 
 fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
-    let response = cccc_daemon::handle_request(
+    let response = call_raw(home, op, args);
+    assert!(response.ok, "{op}: {:?}", response.error);
+    response
+}
+
+fn call_raw(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
+    cccc_daemon::handle_request(
         home,
         &DaemonRequest {
             v: 1,
             op: op.into(),
             args: args.as_object().cloned().unwrap_or_else(Map::new),
         },
-    );
-    assert!(response.ok, "{op}: {:?}", response.error);
-    response
+    )
 }

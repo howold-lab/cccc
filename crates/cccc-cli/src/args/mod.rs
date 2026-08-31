@@ -10,7 +10,8 @@ pub use integrations::{
     SpaceCredentialAction, SpaceJobsAction,
 };
 pub use messaging::{
-    InboxArgs, LedgerAction, LedgerArgs, ReadArgs, ReplyArgs, SendArgs, TailArgs, TrackedSendArgs,
+    CancelReplyArgs, DeliverArgs, InboxArgs, LedgerAction, LedgerArgs, ReplyArgs, SendArgs,
+    TailArgs, TrackedSendArgs,
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -27,10 +28,10 @@ pub struct WebArgs {
     pub mode: Option<WebModeArg>,
     #[arg(long, conflicts_with = "mode")]
     pub exhibit: bool,
-    /// Accepted for Python CLI compatibility; the standalone server is not a source reloader.
+    /// Accepted for legacy CLI compatibility; the native server does not use a source reloader.
     #[arg(long)]
     pub reload: bool,
-    /// Accepted for Python CLI compatibility.
+    /// Accepted for legacy CLI compatibility.
     #[arg(long, default_value = "info")]
     pub log_level: String,
 }
@@ -47,7 +48,7 @@ pub struct SetupArgs {
 pub struct UpdateArgs {
     #[arg(long, value_enum)]
     pub channel: Option<ReleaseChannelArg>,
-    /// Show the detected installation and update source without changing files.
+    /// Show the standalone installation and release channel without changing files.
     #[arg(long)]
     pub check: bool,
 }
@@ -97,11 +98,13 @@ pub enum CommandKind {
     Prompt(PromptArgs),
     Im(ImArgs),
     Space(SpaceArgs),
+    /// Read and consume the next unread Mail batch for an actor.
     Inbox(InboxArgs),
-    Read(ReadArgs),
     Send(SendArgs),
     TrackedSend(TrackedSendArgs),
     Reply(ReplyArgs),
+    Deliver(DeliverArgs),
+    CancelReply(CancelReplyArgs),
     Tail(TailArgs),
     Ledger(LedgerArgs),
     Daemon {
@@ -111,6 +114,14 @@ pub enum CommandKind {
     Runtime {
         #[command(subcommand)]
         action: RuntimeAction,
+    },
+    /// Bind this machine to a CCCC membership account.
+    Login,
+    /// Remove local membership identity. The next login is a new hostname.
+    Logout,
+    Reach {
+        #[command(subcommand)]
+        action: ReachAction,
     },
     Status,
     Doctor(DoctorArgs),
@@ -132,6 +143,14 @@ pub enum CommandKind {
 pub enum HookAction {
     CodexState,
     ClaudeState,
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+pub enum ReachAction {
+    On,
+    Off,
+    Status,
+    Install,
 }
 
 #[derive(Debug, Subcommand)]
@@ -181,6 +200,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_membership_verbs() {
+        assert!(matches!(
+            Cli::try_parse_from(["cccc", "login"])
+                .expect("login")
+                .command,
+            Some(CommandKind::Login)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["cccc", "logout"])
+                .expect("logout")
+                .command,
+            Some(CommandKind::Logout)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["cccc", "reach", "on"])
+                .expect("reach on")
+                .command,
+            Some(CommandKind::Reach {
+                action: ReachAction::On
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["cccc", "reach", "status"])
+                .expect("reach status")
+                .command,
+            Some(CommandKind::Reach {
+                action: ReachAction::Status
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["cccc", "reach", "install"])
+                .expect("reach install")
+                .command,
+            Some(CommandKind::Reach {
+                action: ReachAction::Install
+            })
+        ));
+    }
+
+    #[test]
     fn parses_exhibit_web_modes() {
         let cli = Cli::try_parse_from(["cccc", "web", "--exhibit"]).expect("exhibit");
         assert!(matches!(
@@ -211,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_python_compatible_prompt_tail_and_runtime_flags() {
+    fn parses_legacy_prompt_tail_and_runtime_flags() {
         let cli = Cli::try_parse_from(["cccc", "prompt", "--actor-id", "peer"]).expect("prompt");
         assert!(matches!(
             cli.command,
@@ -237,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_python_compatible_space_subcommands() {
+    fn parses_legacy_space_subcommands() {
         let cli = Cli::try_parse_from([
             "cccc", "space", "jobs", "list", "--lane", "work", "--state", "failed", "--limit", "25",
         ])
@@ -297,7 +356,8 @@ mod tests {
             "lead",
             "--notes",
             "note",
-            "--no-reply-required",
+            "--task-priority",
+            "high",
             "--idempotency-key",
             "retry-1",
         ])
@@ -306,7 +366,32 @@ mod tests {
             panic!("wrong command");
         };
         assert_eq!(args.title, "Task");
-        assert!(args.no_reply_required);
+        assert_eq!(args.task_priority, "high");
         assert_eq!(args.idempotency_key, "retry-1");
+    }
+
+    #[test]
+    fn parses_message_delivery_control_commands() {
+        let cli = Cli::try_parse_from([
+            "cccc",
+            "deliver",
+            "event-1",
+            "--to",
+            "peer-1,peer-2",
+            "--force-ambiguous",
+        ])
+        .expect("deliver");
+        let Some(CommandKind::Deliver(args)) = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(args.event_id, "event-1");
+        assert_eq!(args.actor_ids, ["peer-1,peer-2"]);
+        assert!(args.force_ambiguous);
+
+        let cli = Cli::try_parse_from(["cccc", "cancel-reply", "event-2"]).expect("cancel reply");
+        let Some(CommandKind::CancelReply(args)) = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(args.event_id, "event-2");
     }
 }

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vite-plus/test";
-import { readFileSync } from "node:fs";
 
 import type { LedgerEvent } from "../types";
 import {
@@ -26,7 +25,7 @@ describe("buildGroupBridgeDisplayNameMap", () => {
 
   it("ignores non-chat events and group_bridge messages without a source name", () => {
     const messages: LedgerEvent[] = [
-      { kind: "chat.read", by: "group_bridge:peer_read", data: { source_user_name: "Read Group" } },
+      { kind: "mail.read", by: "group_bridge:peer_read", data: { source_user_name: "Read Group" } },
       { kind: "chat.message", by: "group_bridge:peer_without_name", data: { text: "hello" } },
     ];
 
@@ -90,25 +89,5 @@ describe("virtual message list tail append auto-scroll", () => {
         forceStickToBottom: false,
       }),
     ).toBe(true);
-  });
-});
-
-describe("virtual message list group switch snapshot", () => {
-  it("captures the live DOM position in a layout cleanup before the old group is removed", () => {
-    const source = readFileSync(new URL("./VirtualMessageList.tsx", import.meta.url), "utf8");
-    expect(source).toMatch(
-      /useLayoutEffect\(\(\) => \{\s*return \(\) => \{[\s\S]*?captureScrollSnapshotRef\.current\(\)/,
-    );
-  });
-
-  it("does not clear fresh virtualizer measurements after a keyed group mount", () => {
-    const source = readFileSync(new URL("./VirtualMessageList.tsx", import.meta.url), "utf8");
-    expect(source).not.toContain("virtualizer.measure();");
-  });
-
-  it("seeds a remounted virtualizer from the captured absolute scroll offset", () => {
-    const source = readFileSync(new URL("./VirtualMessageList.tsx", import.meta.url), "utf8");
-    expect(source).toContain("initialOffset: Math.max(0, Number(initialScrollOffsetPx) || 0)");
-    expect(source).toContain("scrollTop: el.scrollTop");
   });
 });

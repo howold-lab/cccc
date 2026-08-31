@@ -1,9 +1,14 @@
 use axum::Router;
 use axum::extract::{Query, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io;
+
+mod create_directory;
+mod path_display;
+
+use path_display::{display_path, drive_label, filesystem_roots};
 
 use crate::AppState;
 use crate::api::{ApiError, ApiResult, success};
@@ -20,6 +25,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/fs/list", get(list))
         .route("/api/v1/fs/recent", get(recent))
+        .route("/api/v1/fs/directory", post(create_directory::create))
 }
 
 async fn list(State(state): State<AppState>, Query(query): Query<ListQuery>) -> ApiResult {
@@ -45,8 +51,8 @@ async fn list(State(state): State<AppState>, Query(query): Query<ListQuery>) -> 
     });
     items.truncate(100);
     Ok(success(json!({
-        "path": target,
-        "parent": cccc_core::path_input::parent(&target),
+        "path": display_path(&target),
+        "parent": target.parent().filter(|parent| *parent != target).map(display_path),
         "items": items,
         "readable": readable,
     })))
@@ -71,7 +77,12 @@ fn recent_suggestions() -> Vec<Value> {
     let Ok(home) = cccc_core::path_input::expand_user_path("~") else {
         return Vec::new();
     };
-    let mut candidates = vec![("Home", home.clone(), "🏠")];
+    let mut candidates = vec![("Home".to_owned(), home.clone(), "home")];
+    candidates.extend(
+        filesystem_roots()
+            .into_iter()
+            .map(|path| (format!("Drive {}", drive_label(&path)), path, "drive")),
+    );
     candidates.extend(
         [
             "dev",
@@ -83,23 +94,25 @@ fn recent_suggestions() -> Vec<Value> {
             "github",
             "work",
         ]
-        .map(|name| (name, home.join(name), "📁")),
+        .map(|name| (name.to_owned(), home.join(name), "folder")),
     );
     candidates.extend([
-        ("Desktop", home.join("Desktop"), "🖥️"),
-        ("Documents", home.join("Documents"), "📄"),
-        ("Downloads", home.join("Downloads"), "⬇️"),
+        ("Desktop".to_owned(), home.join("Desktop"), "desktop"),
+        ("Documents".to_owned(), home.join("Documents"), "document"),
+        ("Downloads".to_owned(), home.join("Downloads"), "download"),
     ]);
     if let Ok(cwd) = std::env::current_dir()
         && cwd != home
     {
-        candidates.push(("Current Dir", cwd, "📍"));
+        candidates.push(("Current Dir".to_owned(), cwd, "current"));
     }
     candidates
         .into_iter()
         .filter(|(_, path, _)| path.is_dir())
         .take(10)
-        .map(|(name, path, icon)| json!({"name": title(name), "path": path, "icon": icon}))
+        .map(|(name, path, icon)| {
+            json!({"name": title(&name), "path": display_path(&path), "icon": icon})
+        })
         .collect()
 }
 
@@ -107,7 +120,7 @@ fn directory_item(entry: std::fs::DirEntry) -> Value {
     let path = entry.path();
     json!({
         "name": entry.file_name().to_string_lossy(),
-        "path": path,
+        "path": display_path(&path),
         "is_dir": path.is_dir(),
     })
 }

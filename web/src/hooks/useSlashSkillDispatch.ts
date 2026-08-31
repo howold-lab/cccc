@@ -3,12 +3,7 @@ import { useCallback } from "react";
 import * as api from "../services/api";
 import type { ChatFilter } from "../stores/useUIStore";
 import type { LedgerEvent, ReplyTarget } from "../types";
-import {
-  formatSendMessageError,
-  getGroupSendBlockedMessage,
-  type ChatTFunction,
-  type GroupSendBlockedReason,
-} from "../utils/chatSend";
+import { formatSendMessageError, type ChatTFunction } from "../utils/chatSend";
 import type { SlashDispatchMessageOptions } from "./useSlashCommands";
 
 export async function sendSlashSkillMessageRequest(args: {
@@ -17,8 +12,6 @@ export async function sendSlashSkillMessageRequest(args: {
   command?: string;
   capabilityId?: string;
   toTokens: string[];
-  priority: "normal" | "attention";
-  replyRequired: boolean;
   localId: string;
   replyTarget: ReplyTarget;
 }) {
@@ -32,8 +25,6 @@ export async function sendSlashSkillMessageRequest(args: {
         args.toTokens,
         args.replyTarget.eventId,
         undefined,
-        args.priority,
-        args.replyRequired,
         args.localId,
         [],
         args.replyTarget.text,
@@ -44,8 +35,7 @@ export async function sendSlashSkillMessageRequest(args: {
       args.message,
       args.toTokens,
       undefined,
-      args.priority,
-      args.replyRequired,
+      "send",
       args.localId,
       [],
     );
@@ -55,8 +45,6 @@ export async function sendSlashSkillMessageRequest(args: {
     command,
     capabilityId,
     to: args.toTokens,
-    priority: args.priority,
-    replyRequired: args.replyRequired,
     clientId: args.localId,
     replyTo: args.replyTarget?.eventId || "",
     quoteText: args.replyTarget?.text || "",
@@ -66,9 +54,6 @@ export async function sendSlashSkillMessageRequest(args: {
 export function useSlashSkillDispatch(args: {
   selectedGroupId: string;
   toTokens: string[];
-  priority: "normal" | "attention" | string;
-  replyRequired: boolean;
-  groupSendBlockedReason: GroupSendBlockedReason | null;
   clearDraft: (groupId: string) => void;
   setChatUnreadCount: (groupId: string, count: number) => void;
   setChatFilter: (groupId: string, filter: ChatFilter) => void;
@@ -82,9 +67,6 @@ export function useSlashSkillDispatch(args: {
   const {
     selectedGroupId,
     toTokens,
-    priority,
-    replyRequired,
-    groupSendBlockedReason,
     clearDraft,
     setChatUnreadCount,
     setChatFilter,
@@ -105,32 +87,19 @@ export function useSlashSkillDispatch(args: {
       const command = String(options?.command || "").trim();
       const capabilityId = String(options?.capabilityId || "").trim();
       const replyTarget: ReplyTarget = options?.replyTarget || null;
-      if (groupSendBlockedReason) {
-        showError(getGroupSendBlockedMessage(groupSendBlockedReason, t));
-        return false;
-      }
-
       const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const prio = replyRequired ? "attention" : priority || "normal";
       const resp = await sendSlashSkillMessageRequest({
         selectedGroupId,
         message,
         command,
         capabilityId,
         toTokens,
-        priority: prio as "normal" | "attention",
-        replyRequired,
         localId,
         replyTarget,
       });
       if (!resp.ok) {
         showError(
-          formatSendMessageError({
-            code: resp.error.code,
-            message: resp.error.message,
-            groupSendBlockedReason,
-            t,
-          }),
+          formatSendMessageError({ code: resp.error.code, message: resp.error.message, t }),
         );
         return false;
       }
@@ -144,10 +113,7 @@ export function useSlashSkillDispatch(args: {
     },
     [
       clearDraft,
-      groupSendBlockedReason,
       onMessageSent,
-      priority,
-      replyRequired,
       selectedGroupId,
       setChatFilter,
       setChatMobileSurface,

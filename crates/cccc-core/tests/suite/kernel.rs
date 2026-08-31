@@ -1,7 +1,7 @@
 // Included by the crate-level integration test harness.
 use cccc_contracts::{Actor, ActorRole, Event};
 use cccc_core::actors;
-use cccc_core::context::ContextStore;
+use cccc_core::context::{ContextDoc, ContextStore};
 use cccc_core::inbox;
 use cccc_core::ledger;
 use cccc_core::{GroupStore, HomeLayout};
@@ -46,7 +46,6 @@ fn actor_order_defines_stable_roles() {
         Some(ActorRole::Peer)
     );
 }
-
 #[test]
 fn context_sync_is_atomic_and_dry_run_does_not_persist() {
     let (_temp, home, _store, group_id) = fixture();
@@ -69,6 +68,66 @@ fn context_sync_is_atomic_and_dry_run_does_not_persist() {
         .expect("dry run");
     let stored = contexts.load(&group_id).expect("stored context");
     assert!(stored.coordination.get("notes").is_none());
+
+    let valid_then_invalid = [
+        json!({"op":"task.update","task_id":"T001","notes":"must roll back"})
+            .as_object()
+            .cloned()
+            .expect("valid update"),
+        json!({"op":"task.move","task_id":"T001","status":"bogus"})
+            .as_object()
+            .cloned()
+            .expect("invalid move"),
+    ];
+    assert!(
+        contexts
+            .sync(
+                &group_id,
+                &valid_then_invalid,
+                Some(&first.version),
+                "user",
+                false,
+            )
+            .is_err()
+    );
+    let stored = contexts.load(&group_id).expect("stored after rejection");
+    assert!(stored.tasks[0].get("notes").is_none());
+    assert_eq!(stored.tasks[0]["status"], "planned");
+}
+
+#[test]
+fn legacy_context_json_is_migrated_once_without_deleting_the_source() {
+    let temp = tempfile::tempdir().expect("temp home");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    let groups = GroupStore::new(home.clone()).expect("groups");
+    let group = groups.create("migration", "").expect("group");
+    let group_dir = groups.group_dir(&group.group_id).expect("group dir");
+    let mut legacy = ContextDoc::default();
+    legacy.tasks.push(
+        json!({"id":"t_legacy","title":"legacy Rust task","status":"done"})
+            .as_object()
+            .cloned()
+            .expect("task"),
+    );
+    std::fs::write(
+        group_dir.join("state/context.json"),
+        serde_json::to_vec_pretty(&legacy).expect("legacy JSON"),
+    )
+    .expect("write legacy");
+
+    let contexts = ContextStore::new(home).expect("contexts");
+    let first = contexts.load(&group.group_id).expect("migrated context");
+    let second = contexts.load(&group.group_id).expect("idempotent context");
+    assert_eq!(first.tasks, second.tasks);
+    assert_eq!(first.tasks.len(), 1);
+    assert_eq!(first.tasks[0]["id"], "T001");
+    assert!(group_dir.join("context/tasks/T001.yaml").is_file());
+    assert!(
+        group_dir
+            .join("context/.rust-state-migrated-v1.json")
+            .is_file()
+    );
+    assert!(group_dir.join("state/context.json").is_file());
 }
 
 #[test]
@@ -83,7 +142,7 @@ fn inbox_filters_targeted_messages_and_persists_cursor() {
         .expect("actors");
     let mut message = Event::new("chat.message", &group_id);
     message.by = "lead".into();
-    message.data = json!({"text": "hello", "to": ["peer"]})
+    message.data = json!({"text": "hello", "to": ["peer"], "message_mode": "mail"})
         .as_object()
         .cloned()
         .unwrap_or_else(Map::<String, Value>::new);
@@ -96,7 +155,9 @@ fn inbox_filters_targeted_messages_and_persists_cursor() {
             .expect("batch unread");
     assert!(unread_many["lead"].is_empty());
     assert_eq!(unread_many["peer"], unread);
-    inbox::mark_read(&home, &group_id, "peer", &message.id).expect("mark read");
+    let consumed = inbox::consume_unread(&home, &group, "peer", "peer", 50).expect("consume Mail");
+    assert_eq!(consumed.messages, vec![message]);
+    assert_eq!(consumed.read_event.expect("mail.read").kind, "mail.read");
     assert!(
         inbox::list_unread(&home, &group, "peer", 50)
             .expect("read inbox")
@@ -183,26 +244,4 @@ fn system_notification_respects_its_explicit_actor_target() {
 
     assert!(inbox::is_for_actor(&group, &notification, "peer"));
     assert!(!inbox::is_for_actor(&group, &notification, "lead"));
-}
-
-#[test]
-fn legacy_chat_notice_is_folded_into_its_source_message() {
-    let (_temp, _home, store, group_id) = fixture();
-    store
-        .mutate(&group_id, |group| actors::add(group, Actor::new("peer")))
-        .expect("actor");
-    let group = store.load(&group_id).expect("load");
-    let mut notification = Event::new("system.notify", &group_id);
-    notification.by = "system".into();
-    notification.data = json!({
-        "target_actor_id": "peer",
-        "title": "New message",
-        "message": "New message from user. Check your inbox.",
-        "context": {"event_id": "source-message", "from": "user"}
-    })
-    .as_object()
-    .cloned()
-    .expect("notification data");
-
-    assert!(!inbox::is_for_actor(&group, &notification, "peer"));
 }

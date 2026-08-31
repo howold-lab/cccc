@@ -2,11 +2,17 @@ use cccc_core::context::ContextDoc;
 use serde_json::{Map, Value, json};
 
 pub(super) fn project(document: ContextDoc, version: String, detail: &str) -> Value {
+    if detail == "overview" {
+        return context_overview::project(document, version);
+    }
     let tasks = document.tasks;
-    let attention = attention(&tasks);
-    let coordination = coordination(&document.coordination, &tasks, detail == "full");
+    let tasks_version = format!("tasksv:{}", document.tasks_revision);
+    let full = detail == "full";
+    let attention = attention(&tasks, full);
+    let coordination = coordination(&document.coordination, &tasks, full);
     let mut result = Map::from_iter([
         ("version".into(), Value::String(version)),
+        ("tasks_version".into(), Value::String(tasks_version)),
         ("coordination".into(), Value::Object(coordination)),
         ("agent_states".into(), agent_states(document.agent_states)),
         ("actors_runtime".into(), Value::Array(Vec::new())),
@@ -16,10 +22,6 @@ pub(super) fn project(document: ContextDoc, version: String, detail: &str) -> Va
     ]);
     if detail == "full" {
         result.insert("board".into(), board(&tasks));
-        result.insert(
-            "actor_notes".into(),
-            serde_json::to_value(document.actor_notes).unwrap_or_else(|_| json!({})),
-        );
     }
     Value::Object(result)
 }
@@ -36,7 +38,18 @@ fn coordination(
     );
     result.insert(
         "tasks".into(),
-        Value::Array(tasks.iter().cloned().map(Value::Object).collect()),
+        Value::Array(
+            tasks
+                .iter()
+                .map(|task| {
+                    if full {
+                        Value::Object(task.clone())
+                    } else {
+                        Value::Object(summary_task(task))
+                    }
+                })
+                .collect(),
+        ),
     );
     if full {
         for key in ["recent_decisions", "recent_handoffs"] {
@@ -47,6 +60,38 @@ fn coordination(
         }
     }
     result
+}
+
+fn summary_task(task: &Map<String, Value>) -> Map<String, Value> {
+    const FIELDS: [&str; 18] = [
+        "id",
+        "title",
+        "outcome",
+        "parent_id",
+        "status",
+        "archived_from",
+        "assignee",
+        "priority",
+        "blocked_by",
+        "waiting_on",
+        "handoff_to",
+        "task_type",
+        "notes",
+        "checklist",
+        "created_at",
+        "updated_at",
+        "progress",
+        "is_root",
+    ];
+    FIELDS
+        .into_iter()
+        .filter_map(|field| {
+            task.get(field)
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(|value| (field.into(), value))
+        })
+        .collect()
 }
 
 fn agent_states(states: std::collections::BTreeMap<String, Map<String, Value>>) -> Value {
@@ -67,55 +112,89 @@ fn status(task: &Map<String, Value>) -> &str {
         .unwrap_or("planned")
 }
 
+fn is_blocked(task: &Map<String, Value>) -> bool {
+    task.get("blocked_by")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        || matches!(
+            task.get("waiting_on").and_then(Value::as_str),
+            Some("actor" | "external")
+        )
+}
+
 fn task_summary(tasks: &[Map<String, Value>], attention: &Value) -> Value {
     let count = |wanted| tasks.iter().filter(|task| status(task) == wanted).count();
     let attention = attention.as_object();
+    let attention_count = |key| {
+        attention
+            .and_then(|item| item.get(key))
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_array().map(|items| items.len() as u64))
+            })
+            .unwrap_or(0)
+    };
     json!({
         "total":tasks.iter().filter(|task| status(task) != "archived").count(),
         "planned":count("planned"),
         "active":count("active"),
         "done":count("done"),
         "archived":count("archived"),
-        "blocked":attention.and_then(|item| item["blocked"].as_array()).map_or(0, Vec::len),
-        "waiting_user":attention.and_then(|item| item["waiting_user"].as_array()).map_or(0, Vec::len),
-        "pending_handoffs":attention.and_then(|item| item["pending_handoffs"].as_array()).map_or(0, Vec::len),
+        "blocked":attention_count("blocked"),
+        "waiting_user":attention_count("waiting_user"),
+        "pending_handoffs":attention_count("pending_handoffs"),
     })
 }
 
-fn attention(tasks: &[Map<String, Value>]) -> Value {
+fn attention(tasks: &[Map<String, Value>], full: bool) -> Value {
     let live = tasks
         .iter()
         .filter(|task| !matches!(status(task), "done" | "archived"));
-    let blocked = live
-        .clone()
-        .filter(|task| {
-            task.get("blocked_by")
-                .and_then(Value::as_array)
-                .is_some_and(|items| !items.is_empty())
-        })
-        .cloned()
-        .map(Value::Object)
-        .collect::<Vec<_>>();
+    let blocked = live.clone().filter(|task| is_blocked(task)).count();
     let waiting_user = live
         .clone()
         .filter(|task| task.get("waiting_on").and_then(Value::as_str) == Some("user"))
-        .cloned()
-        .map(Value::Object)
-        .collect::<Vec<_>>();
+        .count();
     let pending_handoffs = live
         .filter(|task| {
             task.get("handoff_to")
                 .and_then(Value::as_str)
                 .is_some_and(|value| !value.is_empty())
         })
-        .cloned()
-        .map(Value::Object)
-        .collect::<Vec<_>>();
-    json!({
-        "blocked":blocked,
-        "waiting_user":waiting_user,
-        "pending_handoffs":pending_handoffs,
-    })
+        .count();
+    if full {
+        let entries = |wanted: &str| {
+            tasks
+                .iter()
+                .filter(|task| status(task) != "done" && status(task) != "archived")
+                .filter(|task| match wanted {
+                    "blocked" => is_blocked(task),
+                    "waiting_user" => {
+                        task.get("waiting_on").and_then(Value::as_str) == Some("user")
+                    }
+                    "pending_handoffs" => task
+                        .get("handoff_to")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.is_empty()),
+                    _ => false,
+                })
+                .cloned()
+                .map(Value::Object)
+                .collect::<Vec<_>>()
+        };
+        json!({
+            "blocked":entries("blocked"),
+            "waiting_user":entries("waiting_user"),
+            "pending_handoffs":entries("pending_handoffs"),
+        })
+    } else {
+        json!({
+            "blocked":blocked,
+            "waiting_user":waiting_user,
+            "pending_handoffs":pending_handoffs,
+        })
+    }
 }
 
 fn board(tasks: &[Map<String, Value>]) -> Value {
@@ -135,3 +214,9 @@ fn board(tasks: &[Map<String, Value>]) -> Value {
     }
     Value::Object(result)
 }
+
+#[cfg(test)]
+mod tests;
+
+#[path = "context_overview.rs"]
+mod context_overview;

@@ -77,6 +77,16 @@ pub(super) fn normalize_outbound_payload(
 }
 
 pub(super) fn validate_remote_payload(payload: &mut Map<String, Value>) -> Result<(), OpError> {
+    let legacy_fields = ["priority", "reply_required", "requires_ack"]
+        .into_iter()
+        .filter(|field| payload.contains_key(*field))
+        .collect::<Vec<_>>();
+    if !legacy_fields.is_empty() {
+        return Err(OpError::new(
+            "unsupported_message_fields",
+            "use message_mode; legacy priority/reply_required/requires_ack fields are not supported",
+        ));
+    }
     require_recipients(payload)?;
     let Some(recipients) = payload.get("to").and_then(Value::as_array) else {
         return Err(OpError::new(
@@ -98,6 +108,31 @@ pub(super) fn validate_remote_payload(payload: &mut Map<String, Value>) -> Resul
         ));
     }
     payload.insert("to".into(), json!(recipients));
+    let message_mode = payload
+        .get("message_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !matches!(message_mode, "send" | "request_reply" | "mail") {
+        return Err(OpError::new(
+            "invalid_message_mode",
+            "message_mode is required and must be send, request_reply, or mail",
+        ));
+    }
+    crate::ops::messaging_recipients::validate_message_audience(&recipients, message_mode)?;
+    if message_mode == "request_reply"
+        && payload
+            .get("to")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|recipient| matches!(recipient.trim(), "@all" | "@peers" | "@foreman"))
+    {
+        return Err(OpError::new(
+            "concrete_recipients_required",
+            "request_reply requires one or more explicit concrete recipients",
+        ));
+    }
     if payload
         .get("refs")
         .and_then(Value::as_array)
@@ -118,16 +153,6 @@ pub(super) fn validate_remote_payload(payload: &mut Map<String, Value>) -> Resul
             "format must be plain or markdown",
         ));
     }
-    if payload
-        .get("priority")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !matches!(value, "normal" | "attention"))
-    {
-        return Err(OpError::new(
-            "invalid_payload",
-            "priority must be normal or attention",
-        ));
-    }
     let has_text = payload
         .get("text")
         .and_then(Value::as_str)
@@ -143,12 +168,54 @@ pub(super) fn validate_remote_payload(payload: &mut Map<String, Value>) -> Resul
         ));
     }
     payload.entry("format").or_insert_with(|| json!("plain"));
-    payload.entry("priority").or_insert_with(|| json!("normal"));
-    payload
-        .entry("reply_required")
-        .or_insert_with(|| json!(false));
     payload.entry("refs").or_insert_with(|| json!([]));
     payload.entry("attachments").or_insert_with(|| json!([]));
+    Ok(())
+}
+
+pub(super) fn encode_outbound_attachments(
+    home: &HomeLayout,
+    group_id: &str,
+    payload: &mut Map<String, Value>,
+) -> Result<(), OpError> {
+    let Some(attachments) = payload.get_mut("attachments").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for attachment in attachments {
+        let item = attachment
+            .as_object_mut()
+            .ok_or_else(|| OpError::new("invalid_attachments", "attachment must be an object"))?;
+        if item
+            .get("content_base64")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            item.remove("path");
+            continue;
+        }
+        let relative = item
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| OpError::new("invalid_attachments", "attachment path is required"))?;
+        let path = cccc_core::blobs::resolve(home, group_id, relative)
+            .map_err(|error| OpError::new("invalid_attachments", error.to_string()))?;
+        let bytes = std::fs::read(path)
+            .map_err(|error| OpError::new("invalid_attachments", error.to_string()))?;
+        if bytes.len() > 10 * 1024 * 1024 {
+            return Err(OpError::new(
+                "invalid_attachments",
+                "remote attachment exceeds 10 MiB",
+            ));
+        }
+        item.insert("bytes".into(), json!(bytes.len()));
+        item.insert(
+            "content_base64".into(),
+            json!(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        );
+        item.remove("path");
+    }
     Ok(())
 }
 

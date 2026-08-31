@@ -1,7 +1,3 @@
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as api from "../services/api";
@@ -18,39 +14,8 @@ vi.mock("../services/api", () => ({
   sendCrossGroupMessage: vi.fn(),
 }));
 
-const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "useChatTab.ts"), "utf8");
-
 describe("useChatTab request triggers", () => {
   beforeEach(() => vi.clearAllMocks());
-
-  it("does not refresh slash commands from chat ledger event changes", () => {
-    expect(source).not.toContain("latestFormalChatEventKey");
-    expect(source).not.toMatch(/latestFormalChatEventKey[\s\S]*refreshSlashCommands/);
-  });
-
-  it("delegates message-body mention suggestions to the focused builder", () => {
-    expect(source).not.toContain("buildGroupMentionSuggestions");
-    expect(source).toContain("buildComposerMentionSuggestions");
-    expect(source).toMatch(
-      /const mentionSuggestions = useMemo\(\(\) => \{[\s\S]*return buildComposerMentionSuggestions\(\{/,
-    );
-    expect(source).toContain("kind: mentionKind");
-    expect(source).toContain("filter: mentionFilter");
-    expect(source).toContain('mentionActorScope === "selected" ? actors : recipientActors');
-    expect(source).toContain("recipientActors");
-    expect(source).toContain("groups");
-  });
-
-  it("does not promote selected @ mentions into recipient state", () => {
-    expect(source).not.toContain("appendRecipientToken");
-    expect(source).not.toContain("pruneMissingMentionRecipientTokens");
-    expect(source).toContain("Message-body mentions are text helpers");
-  });
-
-  it("uses composer destination group state for route chips", () => {
-    expect(source).toContain("destGroupId: composerStateSnapshot.destGroupId");
-    expect(source).not.toContain("destGroupId: latestSelectedGroupId");
-  });
 
   it("keeps cross-group sends aligned with the composer recipient snapshot", async () => {
     const crossTo = buildComposerSendRecipientTokens({
@@ -67,8 +32,7 @@ describe("useChatTab request triggers", () => {
       localTo: ["local-only"],
       crossTo,
       files: [],
-      priority: "normal",
-      replyRequired: false,
+      messageMode: "send",
       localId: "local_1",
       refs: [],
       replyTarget: null,
@@ -83,16 +47,42 @@ describe("useChatTab request triggers", () => {
       "g_remote",
       "hello",
       ["remote-agent"],
-      "normal",
-      false,
+      "send",
       undefined,
     );
   });
 
-  it("treats remote group chips as cross-group for slash command guards", () => {
-    expect(source).toContain("const slashGuardSendGroupId = sendsCrossGroup");
-    expect(source).toContain("sendGroupId: slashGuardSendGroupId");
-    expect(source).not.toContain("sendGroupId: dstGroup,\n    }))");
+  it("can fulfill a reply through Mail without requesting an immediate prompt", async () => {
+    vi.mocked(api.replyMessage).mockResolvedValue({ ok: true, result: {} });
+
+    const result = await dispatchPreparedMessage({
+      selectedGroupId: "g_local",
+      text: "reply later",
+      localTo: ["user"],
+      crossTo: [],
+      files: [],
+      messageMode: "mail",
+      localId: "local_reply_1",
+      refs: [],
+      replyTarget: { eventId: "event-1", by: "user", text: "question" },
+      remoteReplyGroupId: "",
+      remoteReplyTo: [],
+      sendPlanTargets: [{ groupId: "g_local", isCrossGroup: false, source: "selected_group" }],
+      sendsCrossGroup: false,
+    });
+
+    expect(result.successfulSendCount).toBe(1);
+    expect(api.replyMessage).toHaveBeenCalledWith(
+      "g_local",
+      "reply later",
+      ["user"],
+      "event-1",
+      undefined,
+      "local_reply_1",
+      [],
+      "question",
+      "mail",
+    );
   });
 
   it("does not restore the full composer after a partial multi-target cross-group send", async () => {
@@ -105,8 +95,7 @@ describe("useChatTab request triggers", () => {
       localTo: [],
       crossTo: ["@foreman"],
       files: [],
-      priority: "normal",
-      replyRequired: false,
+      messageMode: "send",
       localId: "local_1",
       refs: [],
       replyTarget: null,
@@ -148,8 +137,7 @@ describe("useChatTab request triggers", () => {
       localTo: [],
       crossTo: [],
       files: [file],
-      priority: "normal",
-      replyRequired: false,
+      messageMode: "send",
       localId: "local_1",
       refs: [],
       replyTarget: null,
@@ -172,8 +160,7 @@ describe("useChatTab request triggers", () => {
       "g_remote",
       "hello",
       ["@foreman"],
-      "normal",
-      false,
+      "send",
       [file],
     );
   });

@@ -103,6 +103,7 @@ export interface GroupState {
   setActors: (actors: Actor[]) => void;
   updateGroupRuntimeState: (groupId: string, patch: Partial<GroupRuntimeStatus>) => void;
   incrementActorUnread: (actorIds: string[]) => void;
+  incrementWebModelQueued: (actorIds: string[]) => void;
   updateActorActivity: (
     updates: Array<{
       id: string;
@@ -116,14 +117,18 @@ export interface GroupState {
       runtime_session_resume_eligible?: boolean | null;
       runtime_session_last_resume_error?: string | null;
     }>,
+    groupId: string,
   ) => void;
   setGroupContext: (ctx: GroupContext | null) => void;
   setGroupSettings: (settings: GroupSettings | null) => void;
   setGroupPresentation: (presentation: GroupPresentation | null) => void;
   setRuntimes: (runtimes: RuntimeInfo[]) => void;
   updateReadStatus: (eventId: string, actorId: string, groupId?: string) => void;
-  updateAckStatus: (eventId: string, actorId: string, groupId?: string) => void;
-  updateReplyStatus: (eventId: string, actorId: string, groupId?: string) => void;
+  updateObligationStatus: (
+    eventId: string,
+    patch: { actorId?: string; replied?: true; cancelled?: true; deliveryState?: string },
+    groupId?: string,
+  ) => void;
   setHasMoreHistory: (v: boolean, groupId?: string) => void;
   setIsLoadingHistory: (v: boolean, groupId?: string) => void;
   setIsChatWindowLoading: (v: boolean, groupId?: string) => void;

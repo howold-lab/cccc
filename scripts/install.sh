@@ -9,9 +9,11 @@ VERSION="${CCCC_VERSION:-}"
 INSTALL_DIR="${CCCC_INSTALL_DIR:-$HOME/.local/bin}"
 NO_MODIFY_PATH="${CCCC_NO_MODIFY_PATH:-0}"
 ALLOW_REPLACE_EXISTING="${CCCC_ALLOW_REPLACE_EXISTING:-0}"
+TRUSTED_EXISTING_CLI="${CCCC_TRUSTED_EXISTING_CLI:-}"
 BINARIES="cccc"
 INSTALL_MARKER=".cccc-standalone"
 INSTALL_MARKER_VERSION="standalone-v1"
+PIP_INSTALL_MARKER_VERSION="pip-v1"
 
 case "$RELEASE_TAG_PREFIX" in
   @*) RELEASE_TAG_PREFIX=v ;;
@@ -31,6 +33,7 @@ need tar
 need awk
 need grep
 need mktemp
+need sed
 
 canonical_command_path() {
   command_path=$1
@@ -129,6 +132,11 @@ fi
 
 package="cccc-v${VERSION}-${target}"
 archive="${package}.tar.gz"
+wheel_version=$(printf '%s\n' "$VERSION" | sed \
+  -e 's/-alpha\([0-9][0-9]*\)$/a\1/' \
+  -e 's/-beta\([0-9][0-9]*\)$/b\1/' \
+  -e 's/-rc\([0-9][0-9]*\)$/rc\1/' \
+  -e 's/-//g')
 download_url="$RELEASE_BASE_URL/download/${RELEASE_TAG_PREFIX}${VERSION}"
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/cccc-install.XXXXXX")
 stage_suffix=".cccc-install.$$"
@@ -194,12 +202,16 @@ trap 'exit 143' TERM
 
 printf 'Downloading CCCC v%s for %s...\n' "$VERSION" "$target"
 download "$download_url/SHA256SUMS" "$tmp_dir/SHA256SUMS"
-if ! awk -v version="$VERSION" '
+if ! awk -v version="$VERSION" -v wheel_version="$wheel_version" '
   BEGIN {
-    valid["cccc-v" version "-x86_64-unknown-linux-gnu.tar.gz"] = 1
-    valid["cccc-v" version "-x86_64-apple-darwin.tar.gz"] = 1
-    valid["cccc-v" version "-aarch64-apple-darwin.tar.gz"] = 1
-    valid["cccc-v" version "-x86_64-pc-windows-msvc.zip"] = 1
+    valid["cccc-v" version "-x86_64-unknown-linux-gnu.tar.gz"] = "archive"
+    valid["cccc-v" version "-x86_64-apple-darwin.tar.gz"] = "archive"
+    valid["cccc-v" version "-aarch64-apple-darwin.tar.gz"] = "archive"
+    valid["cccc-v" version "-x86_64-pc-windows-msvc.zip"] = "archive"
+    valid["cccc_pair-" wheel_version "-py3-none-manylinux_2_28_x86_64.whl"] = "wheel"
+    valid["cccc_pair-" wheel_version "-py3-none-macosx_11_0_x86_64.whl"] = "wheel"
+    valid["cccc_pair-" wheel_version "-py3-none-macosx_11_0_arm64.whl"] = "wheel"
+    valid["cccc_pair-" wheel_version "-py3-none-win_amd64.whl"] = "wheel"
   }
   NF == 0 { next }
   NF != 2 || length($1) != 64 || $1 ~ /[^0-9A-Fa-f]/ { exit 1 }
@@ -209,9 +221,15 @@ if ! awk -v version="$VERSION" '
     if (!(name in valid) || seen[name]++) { exit 1 }
     count++
   }
-  END { if (count != 4) exit 1 }
+  END {
+    if (count != 4 && count != 8) exit 1
+    for (name in valid) {
+      if (valid[name] == "archive" && !seen[name]) exit 1
+      if (count == 8 && !seen[name]) exit 1
+    }
+  }
 ' "$tmp_dir/SHA256SUMS"; then
-  fail "SHA256SUMS must contain four unique, well-formed archive entries"
+  fail "SHA256SUMS must contain four release archives, optionally plus the four native wheels"
 fi
 
 expected=$(awk -v name="$archive" '$2 == name || $2 == "*" name { print $1 }' "$tmp_dir/SHA256SUMS")
@@ -265,19 +283,34 @@ lock_acquired=1
 printf '%s\n' "$$" > "$install_lock/pid"
 existing_cli="$INSTALL_DIR/cccc"
 marker_owned=0
+marker_present=0
 marker_path="$INSTALL_DIR/$INSTALL_MARKER"
 if [ -e "$marker_path" ] || [ -L "$marker_path" ]; then
+  marker_present=1
   [ -f "$marker_path" ] && [ ! -L "$marker_path" ] ||
     fail "existing standalone ownership marker is not a regular file: $marker_path"
   marker_value=
   if marker_value=$(cat "$marker_path" 2>/dev/null) &&
     [ "$marker_value" = "$INSTALL_MARKER_VERSION" ]; then
     marker_owned=1
+  elif [ "$marker_value" = "$PIP_INSTALL_MARKER_VERSION" ]; then
+    fail "existing $existing_cli is managed by pip; run python -m pip uninstall cccc-pair before installing the standalone release"
   fi
 fi
+trusted_existing=0
+if [ "$marker_present" -eq 0 ] && [ -n "$TRUSTED_EXISTING_CLI" ] &&
+  [ -f "$existing_cli" ] && [ ! -L "$existing_cli" ]; then
+  trusted_path=$(canonical_command_path "$TRUSTED_EXISTING_CLI")
+  existing_path=$(canonical_command_path "$existing_cli")
+  [ "$trusted_path" = "$existing_path" ] && trusted_existing=1
+fi
 if { [ -e "$existing_cli" ] || [ -L "$existing_cli" ]; } &&
-  [ "$marker_owned" -ne 1 ] && [ "$ALLOW_REPLACE_EXISTING" != "1" ]; then
+  [ "$marker_owned" -ne 1 ] && [ "$trusted_existing" -ne 1 ] &&
+  [ "$ALLOW_REPLACE_EXISTING" != "1" ]; then
   fail "existing $existing_cli is managed by another installation; refusing to replace it. Remove it, choose a different CCCC_INSTALL_DIR, or set CCCC_ALLOW_REPLACE_EXISTING=1 to replace it deliberately"
+fi
+if [ "$marker_owned" -ne 1 ] && [ "$trusted_existing" -eq 1 ]; then
+  printf 'Adopting existing CCCC command at %s into the standalone installation.\n' "$existing_cli"
 fi
 for binary in $BINARIES; do
   if [ -e "$INSTALL_DIR/$binary" ]; then
@@ -367,10 +400,8 @@ if [ "$NO_MODIFY_PATH" != "1" ] && [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
       add_path_profile "$HOME/.bashrc"
       activation_hint='source ~/.bashrc'
       ;;
-    *) printf 'Move %s to the front of PATH, then open a new terminal.\n' "$INSTALL_DIR" ;;
+    *) : ;;
   esac
-else
-  printf 'Move %s to the front of PATH, then open a new terminal.\n' "$INSTALL_DIR"
 fi
 
 installed_command=$(canonical_command_path "$INSTALL_DIR/cccc")
@@ -394,11 +425,22 @@ resolved_command=$(canonical_command_path "$resolved_command")
 [ "$resolved_command" = "$installed_command" ] ||
   fail "PATH verification resolved cccc to $resolved_command instead of $installed_command"
 
-printf 'Installed CCCC v%s in %s\n' "$VERSION" "$INSTALL_DIR"
-printf 'Verify installed command directly: "%s/cccc" doctor\n' "$INSTALL_DIR"
+printf '\n'
+printf '✅ CCCC v%s installed successfully!\n' "$VERSION"
+printf '\n'
+printf '   📦 Installed to: %s\n' "$installed_command"
 if [ -n "$activation_hint" ]; then
-  printf 'Activate in this shell: %s\n' "$activation_hint"
+  printf '   ⚡ Activate now: %s\n' "$activation_hint"
+  printf '   🔍 Verify:       cccc doctor\n'
 elif [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
-  printf 'Activate in this shell: export PATH="$HOME/.local/bin:$PATH"; hash -r\n'
+  printf '   ⚡ Activate now: export PATH="$HOME/.local/bin:$PATH"; hash -r\n'
+  printf '   🔍 Verify:       cccc doctor\n'
+else
+  printf '   🔍 Verify:       "%s" doctor\n' "$installed_command"
 fi
-printf 'Verify after opening a new terminal: cccc doctor\n'
+printf '\n'
+if [ -n "$activation_hint" ]; then
+  printf '🎉 Open a new terminal and run: cccc\n'
+else
+  printf 'ℹ️  Add %s to your shell PATH to run cccc directly.\n' "$INSTALL_DIR"
+fi

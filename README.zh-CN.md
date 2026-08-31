@@ -1,9 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="web/public/logo-dark.svg">
-  <img src="web/public/logo.svg" width="160" alt="CCCC logo" />
-</picture>
+<img src="https://raw.githubusercontent.com/ChesterRa/cccc/main/assets/readme/hero.svg" width="100%" alt="CCCC 通过同一份持久化协作组账本，连接用户、协调负责人、编码智能体伙伴与可信远端协作组" />
 
 # CCCC
 
@@ -16,12 +13,10 @@ Claude Code、Codex、ChatGPT Web 等 17 种运行时，在同一个持久协作
 
 一条安装命令，无需 Rust 工具链或额外基础设施。
 
-[![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=blue)](https://pypi.org/project/cccc-pair/)
-[![Python](https://img.shields.io/pypi/pyversions/cccc-pair)](https://pypi.org/project/cccc-pair/)
-[![Downloads](https://static.pepy.tech/badge/cccc-pair/month)](https://pepy.tech/projects/cccc-pair)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-online-blue)](https://chesterra.github.io/cccc/)
-[![Telegram](https://img.shields.io/badge/Telegram-ccccpair-2CA5E8?logo=telegram&logoColor=white)](https://t.me/ccccpair)
+[![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=232425)](https://pypi.org/project/cccc-pair/)
+[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-232425)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-online-232425)](https://chesterra.github.io/cccc/)
 
 [English](README.md) | **中文** | [日本語](README.ja.md)
 
@@ -39,12 +34,12 @@ Claude Code、Codex、ChatGPT Web 等 17 种运行时，在同一个持久协作
 
 ## 为什么选择 CCCC
 
-多智能体开发的现实是：协作记录散落在终端滚动缓冲区里、重启即消失；agent 到底有没有*读到*你的消息无从得知；启停、恢复、催办分散在多个工具里；出门之后长时间运行的协作组就彻底失控。这些不是小问题——它们是绝大多数多智能体方案停留在"脆弱 demo"阶段的根本原因。
+多智能体开发的现实是：协作记录散落在终端滚动缓冲区里、重启即消失；消息已存储、交给 runtime、经 Inbox 消费和得到回复经常混为一谈；启停、恢复、催办分散在多个工具里；出门之后长时间运行的协作组就彻底失控。这些不是小问题——它们是绝大多数多智能体方案停留在"脆弱 demo"阶段的根本原因。
 
 CCCC 让你的 agent 作为一套持久、可协调的系统运行：
 
 - **协作可持久** — 工作状态进入 append-only ledger，而不是埋在终端滚动缓冲区里。
-- **触达可验证** — 消息具备路由、已读、ACK、reply-required 追踪，而不是"发过去了应该看到了"。
+- **触达事实可见** — 路由、存储、runtime 投递、已读和回复各自记录，不再把“已发送”当作“已看到”。
 - **控制面统一** — Web UI、CLI、MCP、IM 桥接全部围绕同一 daemon 运作，不会出现多套状态。
 - **多运行时是默认能力** — Claude Code、Codex CLI、ChatGPT Web、Grok Build 以及其它一线 runtime 可以在同一协作组内协同工作。
 - **Group Bridge 连接远端协作组** — 可信 CCCC group 可以显式互发消息，并在授权后读取或操作彼此的本地资源。
@@ -57,7 +52,7 @@ CCCC 只需一条安装命令，不需要数据库、不需要消息队列、不
 | 能力 | 实现方式 |
 |---|---|
 | **唯一事实源** | append-only ledger（`ledger.jsonl`）记录所有消息和事件 — 可回放、可审计、永不丢失 |
-| **可靠的消息语义** | 已读游标、attention ACK、reply-required 义务追踪 — 谁看到了什么一清二楚 |
+| **可靠的消息语义** | Send / Send + Reply / Mail 三种模式，投递、已读、回复事实分离；只含 Mail 的 Inbox 按 ledger 顺序消费 — runtime 接收不冒充已读 |
 | **统一控制面** | Web UI、CLI、MCP 工具、IM 桥接全部对接同一 daemon — 不存在状态分裂 |
 | **多运行时编排** | Claude Code、Cline CLI、Codex CLI、GitHub Copilot CLI、Cursor CLI、Devin CLI、Kiro CLI、Kilo Code CLI、Antigravity CLI、Grok Build、OpenCode、ChatGPT Web 等 17 种一线运行时可混用，此外还支持 `custom` 运行时兜底 |
 | **Group Bridge** | 连接跨机器或跨团队的可信远端协作组，从显式消息开始，并可按需授予 read/full 本地访问权限 |
@@ -69,32 +64,38 @@ CCCC 只需一条安装命令，不需要数据库、不需要消息队列、不
 ### 安装
 
 ```bash
-# 稳定的完整产品发行版（推荐；要求 Python 3.11+）
-python -m pip install -U cccc-pair
+# macOS / Linux（推荐）
+curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
 
-# RC 通道（TestPyPI）
-python -m pip install -U --pre \
-  --index-url https://test.pypi.org/simple/ \
-  --extra-index-url https://pypi.org/simple/ \
-  cccc-pair
+# Windows CMD 或 PowerShell（推荐）
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
+
+# 兼容 pip 的原生平台 wheel
+python -m pip install -U "cccc-pair>=0.4.36"
 ```
 
-> PyPI 包是当前稳定且推荐的 CCCC 发行方式，Python 是其中稳定的默认实现。在
-> Linux x86-64、Intel/Apple Silicon macOS 和 Windows x86-64 上，对应平台 wheel
-> 还会包含一个私有且版本严格匹配的**实验性 Rust 实现**，可通过 `cccc rust`
-> 显式选择并评估性能。其功能与集成细节仍在持续对齐；可靠性敏感的工作请使用
-> `cccc python`。如果要专门测试无 Python 的 Rust-only 部署，可选用下文的
-> [实验性独立 Rust 预览版](#实验性独立-rust-预览版)。
+> **CCCC 0.4.36 只有一个产品实现：Rust。** 推荐使用官网安装脚本；pip 命令用于
+> 包管理器兼容，安装的是同一个原生可执行文件，不包含 Python daemon、启动器或
+> 回退实现。支持 Linux x86-64（glibc 2.28+）、Intel/Apple Silicon macOS 11+
+> 和 Windows x86-64。
 
 ### 升级
 
 ```bash
+# 官网安装脚本所有的安装
 cccc update
+
+# 由 pip 管理的安装
+python -m pip install -U "cccc-pair>=0.4.36"
 ```
 
-如需先查看检测到的安装类型和升级来源，可使用 `cccc update --check`。推荐的 pip
-安装会从检测到的 PyPI 通道更新完整的 `cccc-pair` 产品；实验性独立安装则通过
-GitHub Pages 安装器更新。两种路径都会先停止当前 Web/daemon 进程对，再替换文件。
+官网安装脚本部署可先运行 `cccc update --check` 查看升级来源。由 pip 管理的命令会
+明确拒绝 standalone 自更新并提示包管理器命令。两条渠道安装的是同一个原生产品，
+但文件始终由最初创建它们的安装器管理。使用 pip 升级前请运行
+`cccc daemon stop` 并关闭前台 CCCC 进程，确保包管理器可以替换可执行文件，
+Windows 尤其如此。如果要在同一命令目录从 pip 切换到官网安装脚本，请先运行
+`python -m pip uninstall cccc-pair`；即使设置了
+`CCCC_ALLOW_REPLACE_EXISTING=1`，官网安装器也不会覆盖 pip 管理的文件。
 
 ### 启动
 
@@ -103,23 +104,18 @@ cccc
 ```
 
 打开 **http://127.0.0.1:8848** — 默认会一起拉起 daemon 和本地 Web UI。
-
-在推荐的 pip 发行版中，Python 是稳定的初始默认实现；Rust 是用于性能评估的
-实验性显式选项。可以持久切换，也可以在切换后立即执行命令：
+直接通过 `localhost` / `127.0.0.1` 使用时保持免密，也不会自动创建 Access Token。
+只有开启 LAN、Reach、公网 URL 或反向代理访问时才需要显式管理员 Token。
 
 ```bash
-cccc status            # 查看已选、正在运行和可用的实现
-cccc rust              # 选择实验性 Rust，然后启动 CCCC
-cccc python            # 选择稳定 Python，然后启动 CCCC
-cccc rust doctor        # 选择实验性 Rust，然后执行 doctor
+cccc status            # 查看产品、daemon、group、actor 和 agent runtime
+cccc doctor            # 检查安装与运行环境
+cccc daemon status     # 显式查看 daemon 生命周期状态
 ```
 
-切换属于显式生命周期操作：CCCC 会先校验目标载荷，再停止当前 Web/daemon，
-且绝不会悄悄回退到另一实现。各 agent runtime 的 MCP 配置始终指向公开的
-`cccc` 启动器，因此之后切换实现时无需逐个重配。
-任何时候都可以运行 `cccc python` 回到稳定实现。
-
-实验性独立发行版只包含 Rust，因此其中不会提供 `cccc python` 或实现切换。
+`cccc python`、`cccc rust` 和原来的 `ccccd` 别名均已退役。已有自动化应改用
+`cccc daemon ...`；daemon 状态文件名保持兼容，因此可以在没有 Python runtime
+的情况下直接接管 0.4.35 的 home。
 
 ### 建立多智能体协作组
 
@@ -148,6 +144,7 @@ cccc tracked-send "请接手第一个具体任务，并回复验证证据。" \
 ```bash
 pip install -U cccc-sdk
 npm install cccc-sdk
+cargo add cccc-sdk
 ```
 
 SDK 不包含 daemon，需要连接已运行的 `cccc` 本体实例。
@@ -264,7 +261,7 @@ Actor 可以以 **PTY**（嵌入式终端）或 **headless**（无终端的结�
 
 ChatGPT Web 可以作为真正的 CCCC actor 加入协作组，而不只是外部聊天窗口：CCCC 通过浏览器投递把组消息送进绑定的 ChatGPT 对话，GPT-5.x 再经由 actor 绑定的远程 MCP connector 回连 CCCC —— 接收路由消息、可见回复、查看和编辑仓库文件、运行受 scope 限制的 shell/git 命令，体验接近原生本地编码 agent。这也能把闲置的 ChatGPT Web 用量转化为额外的本地开发 agent 容量。
 
-配置需要通过公网 HTTPS URL 暴露 MCP connector（Cloudflare Tunnel、ngrok、Tailscale Funnel 或反向代理）。注意 GPT-5.x Pro 会话目前不支持此用法 —— 它不暴露第三方 MCP connector。完整配置与排障见 [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+配置需要通过公网 HTTPS URL 暴露 MCP connector（Cloudflare Tunnel、ngrok、Tailscale Funnel 或反向代理）。CCCC 默认使用稳定的纯文本投递，也提供实验性的 **GPT Pro** 模式：每次投递会附带一张极小的空白 PNG，以兼容部分账户中由此开放第三方 MCP 的 ChatGPT 行为。CCCC 不会替你切换模型，也不保证该兼容方式在 ChatGPT 改版后继续有效。完整配置与排障见 [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
 
 ## Group Bridge：连接远端协作组
 
@@ -287,25 +284,26 @@ Group Bridge 将 CCCC 从一个本地 working group 扩展为一组可信协作�
 CCCC 实现的是 IM 级消息语义，而不是"往终端里粘贴一段文字"：
 
 - **收件人路由** — `@all`、`@peers`、`@foreman`，或指定 actor ID
-- **已读游标** — 每个 agent 通过 MCP 显式标记已读
+- **三种明确模式** — Send 主动投递，Send + Reply 要求具体回复，Mail 只进入 Inbox 而不立即打断
+- **事实彼此分离** — `runtime.delivery`、Mail 已读游标、回复、取消和任务完成互不冒充
+- **消费式 Inbox 读取** — `cccc_inbox_read` 按顺序返回下一批 Mail，并原子推进 Mail 游标
 - **回复与引用** — 结构化的 `reply_to` + 引用上下文
-- **Attention ACK** — 高优先级消息要求显式确认
-- **Reply-required 义务** — 持续追踪直到收件人回复
-- **自动唤醒** — 收到消息时，已停用的 actor 自动启动
+- **回复请求** — Send + Reply 持续追踪到收件人回复或发送方取消
+- **生命周期边界** — paused、stopped 或 disabled actor 不会被消息投递静默唤醒
 - **远端协作组收件人** — Group Bridge 目标以显式 remote recipient 出现，而不是隐藏广播
 
-普通 `send` 适合聊天、询问和轻量请求。需要明确负责人、完成标准、证据、交接或验收轨迹的委派工作，应使用 `tracked-send`。`@all` 仍可用于公告或紧急共享约束，但不应作为具体任务分派的默认方式。
+有用但可以延后查看的 agent 信息使用 Mail；延迟知晓的代价高于打断时使用 Send；还必须得到具体回答时才使用 Send + Reply。Mail 不能发给人类用户。单条消息只能发给 `user`，或发给一个/多个 agent，不能混合两类受众；需要同时通知时应拆成两条消息。需要明确负责人、完成标准、证据、交接或验收轨迹的委派工作，应使用 `tracked-send`。`@all` 仍可用于公告或紧急共享约束，但不应作为具体任务分派的默认方式。
 
-消息会通过 daemon 管理的投递链路送达到各 actor 运行时，daemon 对每条消息的触达状态持续追踪。
+主动投递通过 daemon 管理的链路执行，其 `runtime.delivery` 事实与 Inbox 已读状态和回复始终分开。
 
 ## 自动化与策略
 
-内置规则引擎处理运维关切，免去人工盯盘：
+少量投递计时器与自动化规则处理运维关切，同时避免把每条消息都变成 prompt：
 
 | 策略 | 功能 |
 |------|------|
-| **催办（Nudge）** | 可配置超时后提醒 agent 处理未读消息 |
-| **Reply-required 跟进** | 必回消息逾期时升级提醒 |
+| **Mail 提醒** | 明确收件人的 Mail 等待到配置期限后，最多发送一次不含正文的提醒 |
+| **回复提醒** | 已投递的 Send + Reply 尚未回复时，最多发送一次提醒 |
 | **Actor 空闲检测** | agent 沉默时通知 foreman |
 | **Keepalive** | 周期性向 foreman 发送签到提醒 |
 | **静默检测** | 整个协作组无活动时告警 |
@@ -395,8 +393,7 @@ cccc reply <event_id> "回复"
 cccc tail -n 50 -f             # 实时追踪 ledger
 
 # 收件箱
-cccc inbox                     # 查看未读消息
-cccc inbox --mark-read         # 全部标为已读
+cccc inbox --actor-id <id>     # 读取并消费下一批未读 Mail
 
 # 运维
 cccc doctor                    # 环境检查
@@ -415,7 +412,7 @@ Agent 通过一套紧凑的 action-oriented MCP surface 与 CCCC 交互。核心
 | 能力面 | 示例 |
 |--------|------|
 | **会话与指引** | `cccc_bootstrap`、`cccc_help`、`cccc_project_info` |
-| **消息与文件** | `cccc_inbox_list`、`cccc_inbox_mark_read`、`cccc_message_send`、`cccc_message_reply`、`cccc_file` |
+| **消息与文件** | `cccc_inbox_read`、`cccc_message_history`、`cccc_message_send`、`cccc_message_reply`、`cccc_file` |
 | **协作组与 actor 控制** | `cccc_group`、`cccc_actor` |
 | **协调与状态** | `cccc_context_get`、`cccc_coordination`、`cccc_task`、`cccc_agent_state`、`cccc_context_sync` |
 | **远端协作组访问** | `cccc_remote_access`、`cccc_remote_context`、`cccc_remote_repo`、`cccc_remote_git`、`cccc_remote_apply_patch`、`cccc_remote_exec_command` |
@@ -443,8 +440,8 @@ CCCC 是**协作内核** — 它拥有协调层，与外部 CI/CD、编排器、
 | 如果你在用 | 它的强项 | CCCC 补上的 |
 |---|---|---|
 | **原生 agent 团队**（如 Claude Code subagents/teams） | 单厂商、单会话内体验最顺滑 | 跨厂商混编（Claude + Codex + Grok + Kimi…）、重启不丢的持久状态、手机/IM 远程运维、完整审计 ledger |
-| **并行任务执行器**（worktree/任务板类工具） | 隔离的并行任务执行 | 一个协调层：agent 之间对话、交接、ACK、被催办 —— 外加 7×24 daemon 运维 |
-| **IM 助理网关** | 住在聊天软件里的个人助理 | 面向真实工作的投递语义：tracked task、已读/ACK 回执、多 agent 协作组、持久审计链 |
+| **并行任务执行器**（worktree/任务板类工具） | 隔离的并行任务执行 | 一个协调层：agent 之间对话、交接、选择打扰级别并接收有界提醒 —— 外加 7×24 daemon 运维 |
+| **IM 助理网关** | 住在聊天软件里的个人助理 | 面向真实工作的投递语义：tracked task、投递/已读/回复事实、多 agent 协作组、持久审计链 |
 
 CCCC 不替代你的 agent —— 它是让它们成为一个团队的那一层。更完整的讨论见 [FAQ — CCCC 与其他方案的对比](https://chesterra.github.io/cccc/guide/faq#how-does-cccc-compare-to-native-agent-teams-and-other-tools)。
 
@@ -470,13 +467,13 @@ CCCC 不替代你的 agent —— 它是让它们成为一个团队的那一层�
 | [Web UI 指南](https://chesterra.github.io/cccc/guide/web-ui) | 看板导航 |
 | [IM 桥接配置](https://chesterra.github.io/cccc/guide/im-bridge/) | 连接 Telegram、Slack、Discord、飞书、钉钉、企业微信、微信 |
 | [Group Space](https://chesterra.github.io/cccc/guide/group-space-notebooklm) | NotebookLM 知识集成 |
-| [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime) | 将 ChatGPT Web / 支持 MCP 的 GPT-5.x 接入为 CCCC actor；GPT-5.x Pro 更适合作为建议和 review 辅助 |
+| [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime) | 将支持 MCP 的 ChatGPT Web 接入为 CCCC actor；可选的实验性 GPT Pro 模式会附带一张极小的空白 PNG |
 | [能力白名单](https://chesterra.github.io/cccc/guide/capability-allowlist) | MCP 能力治理 |
 | [最佳实践](https://chesterra.github.io/cccc/guide/best-practices) | 推荐模式与工作流 |
 | [常见问题](https://chesterra.github.io/cccc/guide/faq) | FAQ |
 | [运维手册](https://chesterra.github.io/cccc/guide/operations) | 恢复、排障、维护 |
 | [CLI 参考](https://chesterra.github.io/cccc/reference/cli) | 完整命令参考 |
-| [SDK（Python/TypeScript）](https://github.com/ChesterRa/cccc-sdk) | 用官方客户端将 CCCC 接入应用与服务 |
+| [SDK（Python/TypeScript/Rust）](https://github.com/ChesterRa/cccc-sdk) | 用官方客户端将 CCCC 接入应用与服务 |
 | [架构](https://chesterra.github.io/cccc/reference/architecture) | 设计决策与系统模型 |
 | [功能详解](https://chesterra.github.io/cccc/reference/features) | 消息、自动化、运行时深度解读 |
 | [CCCS 标准](docs/standards/CCCS_V1.md) | 协作协议规范 |
@@ -484,19 +481,7 @@ CCCC 不替代你的 agent —— 它是让它们成为一个团队的那一层�
 
 ## 安装选项
 
-### pip（稳定、推荐）
-
-```bash
-python -m pip install -U cccc-pair
-```
-
-这是完整且受支持的产品发行版，其中 Python 是稳定且推荐的实现。在 Linux
-x86-64、Intel/Apple Silicon macOS 和 Windows x86-64 上，pip 会选择还包含一个
-私有、版本严格匹配的实验性 Rust 可执行文件的平台 wheel，用于显式的性能评估。
-其他平台使用通用 Python wheel；`cccc status` 会明确显示 Rust 不可用，而不会
-假装切换成功。
-
-### 实验性独立 Rust 预览版
+### 官网安装脚本（推荐）
 
 ```bash
 # macOS / Linux
@@ -506,49 +491,55 @@ curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
 ```
 
-这个可选通道只适合在无 Python 的 Rust-only 部署中评估实验性 Rust 实现。它会
-从 GitHub Releases 下载并校验二进制，也可通过同一安装器执行 `cccc update`，
-但不具备 Python 回退或实现切换能力，不作为稳定 pip/Python 路径的推荐替代品。
+安装器会从 GitHub Releases 下载并校验原生产品，也可通过同一安装器执行
+`cccc update`。
 安装器不会覆盖不属于它的
 现有 `cccc` 命令；请先有意卸载原命令，或改用其它 `CCCC_INSTALL_DIR`。
 其它目录中的同名命令会原样保留。使用默认安装目录时，安装器会把新命令放到用户
 PATH 最前面，并列出仍然存在的重复命令。打开新终端后运行 `cccc doctor`，其
 `Installation` 部分会显示本次入口、PATH 实际命中的命令以及全部冲突路径。
 
-当前托管的原生安装器固定安装 `v0.4.34-rc2` 候选版本。
+安装器默认选择当前已发布的正式版本；也可以通过 `CCCC_VERSION` 显式指定版本。
 
-### pip（RC 版，TestPyPI）
+### pip 兼容安装（v0.4.36 及以上）
 
 ```bash
-python -m pip install -U --pre \
-  --index-url https://test.pypi.org/simple/ \
-  --extra-index-url https://pypi.org/simple/ \
-  cccc-pair
+python -m pip install -U "cccc-pair>=0.4.36"
 ```
+
+Pip 会安装包含同一个 `cccc` 可执行文件的 0.4.36 或更高版本平台 wheel。最低
+版本约束可避免 pip 在当前平台没有 0.4.36 wheel 时静默选择历史 Python 版本。
+0.4.36 不再提供 sdist、通用 wheel、可导入的 CCCC Python 包或回退实现；因此
+不支持的平台会解析失败。通用的 `pip install .` 源码构建也会直接拒绝，而不是
+安装一个空包；`pip install -e .` 也不再是开发入口，请使用下方的源码构建命令。
 
 Cargo 安装仅保留给工作区开发使用，不作为受支持的终端用户发行方式。
 
 ### 从源码安装
 
+源码打包需要 Rust 1.88+、带 npm 的 Node.js 24，以及仅供归档脚本使用的
+Python 3.11+；构建出的 CCCC 产品本身不包含 Python。
+
 ```bash
 git clone https://github.com/ChesterRa/cccc
 cd cccc
-pip install -e .
+./scripts/build_package.sh
+./target/release/cccc --version
+./target/release/cccc
 ```
 
-### uv（快速，Windows 推荐）
-
-```bash
-uv venv -p 3.14 .venv
-uv pip install -e .
-uv run cccc --help
-```
+如需迭代调试，请使用
+`cargo run --locked --features standalone -p cccc --bin cccc -- --port 0`。
+Windows 用户应运行
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_package.ps1`，
+然后启动 `.\target\release\cccc.exe`。
 
 ### Windows 原生运行
 
-- 推荐直接使用仓库根目录的 `start.ps1` 启动开发环境。
-- 如果 `cccc doctor` 显示 `Windows PTY: NOT READY`，先执行 `python -m pip install pywinpty`，或重新执行 `uv pip install -e .`。
-- Web 打包可用 `scripts/build_web.ps1`，完整打包可用 `scripts/build_package.ps1`。
+- `scripts/build_package.ps1` 会安装锁定的 Web 依赖、嵌入 Web bundle、编译原生
+  可执行文件并创建归档。
+- 使用 `x86_64-pc-windows-msvc` Rust 工具链，构建后运行新生成的
+  `cccc.exe doctor`。
 
 ### Docker
 

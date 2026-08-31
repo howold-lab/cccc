@@ -10,15 +10,15 @@ Frequently asked questions about CCCC.
 Native teams give you the smoothest experience inside one vendor and one session — if you only run Claude Code and your work fits in a session, they are a great default. CCCC adds what a single vendor structurally cannot:
 
 - **Cross-vendor groups** — Claude Code, Codex CLI, Grok Build, Kimi CLI, ChatGPT Web, and more in one group, so you can route work to whichever model or subscription fits each role.
-- **Durable state** — groups, messages, read/ack receipts, and tasks live in an append-only ledger owned by a daemon. Restarting a terminal (or your machine) does not dissolve the team.
+- **Durable state** — groups, messages, delivery/read/reply facts, and tasks live in an append-only ledger owned by a daemon. Restarting a terminal (or your machine) does not dissolve the team.
 - **Remote operations** — check, pause, resume, and redirect a running group from Telegram, Slack, Discord, Feishu, DingTalk, WeCom, or Weixin.
 - **An audit trail** — every message and its delivery state is replayable for review and debugging.
 
 **vs. parallel task runners (worktree/task-board tools).**
-These tools excel at fanning out isolated tasks in parallel. CCCC's focus is the coordination layer they intentionally skip: agents that talk to each other, hand off work, acknowledge attention messages, and get nudged when they stall — plus daemon-owned lifecycle and IM-side operations. The two approaches compose well: keep a task runner for fan-out and use CCCC as the durable coordination plane.
+These tools excel at fanning out isolated tasks in parallel. CCCC's focus is the coordination layer they intentionally skip: agents that talk to each other, choose whether a message should interrupt or wait in Mail, hand off tracked work, and expose delivery/read/reply state — plus daemon-owned lifecycle and IM-side operations. The two approaches compose well: keep a task runner for fan-out and use CCCC as the durable coordination plane.
 
 **vs. IM assistant gateways (personal-assistant products that live in your chat app).**
-Those products put a general assistant in your messenger. CCCC is built for delivery-grade collaboration on real work: tracked tasks with owners and outcomes, read/ack semantics, multi-agent groups bound to a repository scope, and a tiered token and capability-allowlist security model.
+Those products put a general assistant in your messenger. CCCC is built for delivery-grade collaboration on real work: tracked tasks with owners and outcomes, explicit delivery/read/reply semantics, multi-agent groups bound to a repository scope, and a tiered token and capability-allowlist security model.
 
 In short: CCCC does not replace your agents — it is the coordination layer that turns them into a durable, observable team. See also [Positioning](/reference/positioning) for what CCCC deliberately is and is not.
 
@@ -27,47 +27,64 @@ In short: CCCC does not replace your agents — it is the coordination layer tha
 ### How do I install CCCC?
 
 ```bash
-# Stable product distribution from PyPI (recommended)
-python -m pip install -U cccc-pair
+# Recommended native installer (macOS / Linux)
+curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
 
-# From TestPyPI (explicit RC testing)
-python -m pip install -U --pre \
-  --index-url https://test.pypi.org/simple \
-  --extra-index-url https://pypi.org/simple \
-  cccc-pair
+# Package-manager-compatible native wheel
+python -m pip install -U "cccc-pair>=0.4.36"
 
 # From source
 git clone https://github.com/ChesterRa/cccc
 cd cccc
-pip install -e .
+./scripts/build_package.sh
+./target/release/cccc --version
 ```
 
-Supported PyPI platform wheels include stable Python plus a private,
-version-matched experimental Rust implementation for opt-in performance
-evaluation. An experimental Rust-only standalone preview is also available for
-deployment testing:
+The source package helper requires Rust 1.88+, Node.js 24 with npm, and Python
+3.11+ for archive assembly only; the resulting CCCC executable has no Python
+runtime dependency.
+
+Keep the v0.4.36 lower bound so an unsupported platform fails clearly instead
+of selecting the historical Python product.
+
+Windows CMD or PowerShell uses the native installer:
 
 ```bash
-# macOS / Linux
-curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
-
-# Windows CMD or PowerShell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
 ```
 
-The preview has no Python fallback or implementation switching and is not the
-recommended replacement for the pip product.
+Both installation channels provide the same Rust executable. The pip wheel has
+no importable CCCC Python package or fallback implementation.
 
 ### Why does `cccc` still start an older installation after an upgrade?
 
 CCCC does not delete commands owned by another Python environment or installer.
 Run `cccc doctor` and inspect the `Installation` section. It shows the current
 launcher, the first command selected by PATH, and every duplicate. The standalone
-installer puts its default directory first for new terminals; an existing terminal
-must be reopened (or its PATH refreshed). Custom install directories and
+installer never infers ownership from version output. Rust self-update identifies
+its exact current executable only when the containing directory has the complete
+`.cccc-standalone` ownership marker. Markerless commands and foreign ownership
+markers remain untouched unless `CCCC_ALLOW_REPLACE_EXISTING=1` explicitly
+authorizes migration through the installer. It puts its default directory first for new terminals; an
+existing terminal must be reopened (or its PATH refreshed). Custom install directories and
 `CCCC_NO_MODIFY_PATH=1` require you to move that directory to the front manually.
 When PATH still selects the old command, run the newly installed executable by
 the absolute path printed by the installer to get the current diagnostic report.
+The native pip wheel uses the same marker path with value `pip-v1`, so a pip
+install cannot inherit stale standalone self-update authority. To move that
+command directory to the website installer, uninstall `cccc-pair` with pip
+first; the explicit replacement flag does not override pip ownership.
+
+### How do I uninstall CCCC without losing my groups?
+
+Run `cccc home` first and stop the running product. Pip installations should be
+removed with `python -m pip uninstall cccc-pair`. For a website-script install,
+verify the complete `.cccc-standalone` ownership marker and remove only the
+owned executable and marker; do not delete a shared command directory. CCCC
+intentionally retains `CCCC_HOME`, so groups, ledgers, settings, credentials,
+and browser profiles remain available after reinstall. Exact macOS/Linux and
+Windows standalone steps are in the
+[distribution and migration guide](../rust-migration.md#uninstall-without-removing-user-data).
 
 ### How do I upgrade from an older version (0.3.x)?
 
@@ -88,30 +105,17 @@ Then install the new version. Note that 0.4.x has a completely different command
 
 ### What are the system requirements?
 
-- Python 3.11+ on macOS, Linux, or Windows for the recommended PyPI distribution
+- A supported 64-bit Linux, macOS, or Windows target
 - At least one supported agent runtime CLI
 
-The experimental standalone Rust preview does not require Python or a Rust
-toolchain, but supports fewer platforms and contains only the Rust implementation.
+Normal installation requires neither Python nor a Rust toolchain. The MCP
+JavaScript code mode additionally requires Node.js on the CCCC host.
 
-### How do I choose the Python or Rust implementation?
+### Can I choose a different product implementation?
 
-```bash
-cccc status
-cccc rust              # persist experimental Rust and launch CCCC
-cccc python            # persist stable Python and launch CCCC
-cccc rust doctor       # persist experimental Rust, then run one command
-```
-
-These selectors belong to the recommended pip distribution. Python is the stable
-default; `cccc rust` explicitly opts into the experimental Rust implementation,
-whose feature and integration parity is still in progress. Use `cccc python` for
-reliability-critical workflows or to switch back. Supported PyPI platform wheels
-contain Rust privately; other platforms receive the universal Python wheel and
-report Rust as unavailable. The selector validates the payload and stops the
-active Web/daemon pair. It never installs a second command or silently falls
-back. The standalone preview contains Rust only and therefore does not expose
-implementation switching.
+You do not. CCCC 0.4.36 has one Rust product implementation. The 0.4.35
+`cccc python` / `cccc rust` selectors and persisted implementation preference
+are retired.
 
 ### How do I check if CCCC is working?
 
@@ -120,8 +124,8 @@ cccc status
 cccc doctor
 ```
 
-These show implementation availability, Python version, agent runtimes, and
-daemon status.
+These show native product and daemon status, agent runtimes, installation
+ownership, and environment diagnostics.
 
 ### Does a leftover `cccc-web.lock` mean CCCC is still running?
 
@@ -197,7 +201,9 @@ Or in the Web UI, type `@agent-name` in your message.
 
 ### How do read receipts work?
 
-Agents call `cccc_inbox_mark_read` to mark messages as read. This is cumulative - marking message X means all messages up to X are read.
+Agents call `cccc_inbox_read` to receive and consume the next ordered batch.
+The returned batch boundary is committed cumulatively; bootstrap previews and
+Web polling do not consume messages.
 
 ## Remote Access
 
@@ -229,7 +235,7 @@ Use Cloudflare Access or Tailscale for additional security.
 
 ### How much resources does CCCC use?
 
-- Daemon: Minimal (Python async)
+- Daemon: Minimal native background service
 - Web UI: Standard React app
 - Agents: Depends on the runtime
 

@@ -11,17 +11,13 @@ import {
 import {
   getEffectiveComposerDestGroupId,
   isComposerGroupSettled,
+  normalizeReplyMessageMode,
 } from "../stores/useComposerStore";
 import { getChatSession } from "../stores/useUIStore";
 import { useChatOutboxStore, selectOutboxEntries } from "../stores/chatOutboxStore";
-import type { Actor, GroupMeta, LedgerEvent, MessageRef, Task } from "../types";
+import type { Actor, GroupMeta, LedgerEvent, MessageRef } from "../types";
 import * as api from "../services/api";
-import {
-  formatSendMessageError,
-  getGroupSendBlockedMessage,
-  getGroupSendBlockedReason,
-  shouldBlockLocalCrossGroupAttachments,
-} from "../utils/chatSend";
+import { formatSendMessageError, shouldBlockLocalCrossGroupAttachments } from "../utils/chatSend";
 import { useSlashCommands } from "./useSlashCommands";
 import { useSlashSkillDispatch } from "./useSlashSkillDispatch";
 import type { ComposerAgentMentionToken, ComposerGroupMentionToken } from "./composerGroupMentions";
@@ -44,11 +40,15 @@ import {
   completeCanonicalOutboxReconciliation,
   reconcileCanonicalOutboxEvent,
 } from "../utils/chatOutboxReconciliation";
-
 import {
-  buildComposerTrustFetchGroupId,
-  shouldLockChatToBottomForSend,
-} from "./chat/chatTabBasics";
+  consumeChatSendScrollRequest,
+  createChatSendScrollRequest,
+  invalidateChatSendScrollRequestForOwner,
+  type ChatSendScrollRequest,
+} from "../utils/chatSendScrollRequest";
+
+import { buildComposerTrustFetchGroupId } from "./chat/chatTabBasics";
+import { shouldFollowChatSendFromViewport } from "./chat/chatSendAutoFollow";
 import {
   buildComposerSendRecipientTokens,
   buildComposerSendRoutingSnapshot,
@@ -65,8 +65,10 @@ import {
   buildOptimisticMessage,
   dispatchPreparedMessage,
 } from "./chat/chatMessageSend";
+import { prepareComposerMessage } from "./chat/prepareComposerMessage";
 import { useChatMessageActions } from "./chat/useChatMessageActions";
 import { useChatMessageView } from "./chat/useChatMessageView";
+import { useTaskReferenceIndex } from "./chat/useTaskReferenceIndex";
 interface UseChatTabOptions {
   selectedGroupId: string;
   selectedGroupRunning: boolean;
@@ -101,7 +103,8 @@ export function useChatTab({
   scrollRef,
 }: UseChatTabOptions) {
   const { t } = useTranslation(["chat", "common"]);
-  const [forceStickToBottomToken, setForceStickToBottomToken] = useState(0);
+  const [sendScrollRequest, setSendScrollRequest] = useState<ChatSendScrollRequest | null>(null);
+  const nextSendScrollRequestIdRef = useRef(0);
   const [group_bridgeTrusts, setGroupBridgeTrusts] = useState<GroupBridgeTrust[]>([]);
   const [selectedRemoteGroupIds, setSelectedRemoteGroupIds] = useState<string[]>([]);
   // ============ Stores ============
@@ -141,11 +144,6 @@ export function useChatTab({
   const setChatMobileSurface = useUIStore((s) => s.setChatMobileSurface);
   const showError = useUIStore((s) => s.showError);
 
-  const isCurrentScrollAtBottom = useCallback(() => {
-    const el = scrollRef?.current;
-    if (!el) return chatAtBottomRef ? chatAtBottomRef.current : true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-  }, [chatAtBottomRef, scrollRef]);
   const setChatAtBottom = useCallback(
     (value: boolean) => {
       if (chatAtBottomRef) chatAtBottomRef.current = value;
@@ -167,8 +165,8 @@ export function useChatTab({
     toText,
     replyTarget,
     quotedPresentationRef,
-    priority,
-    replyRequired,
+    quotedVoiceDocumentRef,
+    messageMode,
     destGroupId,
     setComposerText,
     setComposerFiles,
@@ -176,8 +174,8 @@ export function useChatTab({
     setReplyToText,
     setReplyTarget,
     setQuotedPresentationRef,
-    setPriority,
-    setReplyRequired,
+    setQuotedVoiceDocumentRef,
+    setMessageMode,
     setDestGroupId,
     upsertDraft,
     clearDraft,
@@ -369,28 +367,9 @@ export function useChatTab({
   const needsActors = !!selectedGroupId && actors.length === 0;
   const needsStart = !!selectedGroupId && actors.length > 0 && !selectedGroupRunning;
   const showSetupCard = needsScope || needsActors || needsStart;
-  const selectedGroupLifecycleState = useMemo(() => {
-    if (!groupDoc || String(groupDoc.group_id || "") !== String(selectedGroupId || "")) return "";
-    return String(groupDoc.runtime_status?.lifecycle_state || groupDoc.state || "")
-      .trim()
-      .toLowerCase();
-  }, [groupDoc, selectedGroupId]);
-  const groupSendBlockedReason = useMemo(
-    () =>
-      getGroupSendBlockedReason({
-        lifecycleState: selectedGroupLifecycleState,
-        runtimeRunning: selectedGroupRunning,
-        actorCount: actors.length,
-      }),
-    [actors.length, selectedGroupLifecycleState, selectedGroupRunning],
-  );
-
   const dispatchSlashSkillMessage = useSlashSkillDispatch({
     selectedGroupId,
     toTokens,
-    priority,
-    replyRequired,
-    groupSendBlockedReason,
     clearDraft,
     setChatUnreadCount,
     setChatFilter,
@@ -450,6 +429,21 @@ export function useChatTab({
     needsActors,
   });
 
+  const shouldFollowCurrentSend = useCallback(
+    () => shouldFollowChatSendFromViewport(scrollRef?.current, chatMessages.length),
+    [chatMessages.length, scrollRef],
+  );
+
+  useEffect(() => {
+    setSendScrollRequest((current) =>
+      invalidateChatSendScrollRequestForOwner(current, selectedGroupId, chatViewKey),
+    );
+  }, [chatViewKey, selectedGroupId]);
+
+  const consumeSendScrollRequest = useCallback((requestId: number) => {
+    setSendScrollRequest((current) => consumeChatSendScrollRequest(current, requestId));
+  }, []);
+
   const updateChatFilter = useCallback(
     (nextFilter: ReturnType<typeof getChatSession>["chatFilter"]) => {
       if (!selectedGroupId) return;
@@ -460,18 +454,12 @@ export function useChatTab({
 
   // Agent state snapshot
   const agentStates = useMemo(() => groupContext?.agent_states || [], [groupContext]);
-  const tasks = useMemo(
-    () => (Array.isArray(groupContext?.coordination?.tasks) ? groupContext.coordination.tasks : []),
-    [groupContext],
-  );
-  const taskById = useMemo(() => {
-    const map = new Map<string, Task>();
-    for (const task of tasks) {
-      const taskId = String(task?.id || "").trim();
-      if (taskId) map.set(taskId, task);
-    }
-    return map;
-  }, [tasks]);
+  const taskById = useTaskReferenceIndex({
+    groupId: selectedGroupId,
+    events: chatMessages,
+    tasksVersion: groupContext?.tasks_version,
+    seedTasks: groupContext?.coordination?.tasks,
+  });
 
   // ============ Actions ============
 
@@ -545,11 +533,9 @@ export function useChatTab({
     });
     if (!routingSnapshot.composerGroupSettled) return;
     const originGroupId = routingSnapshot.selectedGroupId;
-
-    const txt = String(composerStateSnapshot.composerText || "").trim();
-    const composerFilesSnapshot = composerStateSnapshot.composerFiles.slice();
-    if (!txt && composerFilesSnapshot.length === 0) return;
-
+    const draftTextSnapshot = String(composerStateSnapshot.composerText || "").trim();
+    const draftFilesSnapshot = composerStateSnapshot.composerFiles.slice();
+    if (!draftTextSnapshot && draftFilesSnapshot.length === 0) return;
     const dstGroup = routingSnapshot.destGroupId;
     const isCrossGroup = routingSnapshot.isCrossGroup;
     const selectedRemoteGroupIdsSnapshot = selectedRemoteGroupIds.slice();
@@ -579,6 +565,11 @@ export function useChatTab({
     });
     const sendsCrossGroup = sendPlanTargets.some((target) => target.isCrossGroup);
     const sendsLocal = sendPlanTargets.some((target) => !target.isCrossGroup);
+    const { text: txt, files: composerFilesSnapshot } = prepareComposerMessage({
+      text: draftTextSnapshot,
+      files: draftFilesSnapshot,
+      targets: sendPlanTargets,
+    });
     const slashGuardSendGroupId = sendsCrossGroup
       ? sendPlanTargets.find((target) => target.isCrossGroup)?.groupId || dstGroup
       : dstGroup;
@@ -588,26 +579,23 @@ export function useChatTab({
         composerFilesCount: composerFilesSnapshot.length,
         hasReplyTarget: !!composerStateSnapshot.replyTarget,
         replyTarget: composerStateSnapshot.replyTarget,
-        replyRequired: composerStateSnapshot.replyRequired,
         hasQuotedPresentationRef: !!composerStateSnapshot.quotedPresentationRef,
+        hasQuotedVoiceDocumentRef: !!composerStateSnapshot.quotedVoiceDocumentRef,
         sendGroupId: slashGuardSendGroupId,
       })
     ) {
       return;
     }
-    if (groupSendBlockedReason) {
-      showError(getGroupSendBlockedMessage(groupSendBlockedReason, t));
-      return;
-    }
-
     const replyTargetSnapshot = composerStateSnapshot.replyTarget;
     const remoteReplyDstGroupId = String(replyTargetSnapshot?.remoteDstGroupId || "").trim();
     const remoteReplyDstTo = Array.isArray(replyTargetSnapshot?.remoteDstTo)
       ? replyTargetSnapshot.remoteDstTo.map((token) => String(token || "").trim()).filter(Boolean)
       : [];
     const quotedPresentationRefSnapshot = composerStateSnapshot.quotedPresentationRef;
+    const quotedVoiceDocumentRefSnapshot = composerStateSnapshot.quotedVoiceDocumentRef;
     const refsSnapshot: MessageRef[] = [
       ...(quotedPresentationRefSnapshot ? [quotedPresentationRefSnapshot] : []),
+      ...(quotedVoiceDocumentRefSnapshot ? [quotedVoiceDocumentRefSnapshot] : []),
       ...buildComposerLocalGroupRouteRefs({
         text: composerStateSnapshot.composerText,
         selectedGroupId,
@@ -620,15 +608,16 @@ export function useChatTab({
         groups: composerRouteGroups,
       }),
     ];
-    const prioritySnapshot = composerStateSnapshot.priority;
-    const replyRequiredSnapshot = composerStateSnapshot.replyRequired;
+    const messageModeSnapshot = replyTargetSnapshot
+      ? normalizeReplyMessageMode(composerStateSnapshot.messageMode)
+      : composerStateSnapshot.messageMode;
     const groupMentionTokensSnapshot = composerGroupMentionTokens;
     const agentMentionTokensSnapshot = composerAgentMentionTokens;
-    const prio = replyRequiredSnapshot ? "attention" : prioritySnapshot || "normal";
     const assistantTargets =
-      sendsLocal && !sendsCrossGroup ? resolveAssistantTargets(localToTokensSnapshot) : [];
+      sendsLocal && !sendsCrossGroup && messageModeSnapshot !== "mail"
+        ? resolveAssistantTargets(localToTokensSnapshot)
+        : [];
 
-    // Generate a local ID for outbox tracking
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const insertLocalAssistantPlaceholders = () => {
       for (const placeholder of buildAssistantPlaceholders(
@@ -648,21 +637,21 @@ export function useChatTab({
       restoreFailedSendComposerState(
         {
           originGroupId,
-          composerText: txt,
-          composerFiles: composerFilesSnapshot,
+          composerText: draftTextSnapshot,
+          composerFiles: draftFilesSnapshot,
           toText: toTextSnapshot,
           replyTarget: replyTargetSnapshot,
           quotedPresentationRef: quotedPresentationRefSnapshot,
-          priority: prioritySnapshot,
-          replyRequired: replyRequiredSnapshot,
+          quotedVoiceDocumentRef: quotedVoiceDocumentRefSnapshot,
+          messageMode: messageModeSnapshot,
         },
         {
           setComposerText,
           setComposerFiles,
           setReplyTarget,
           setQuotedPresentationRef,
-          setPriority,
-          setReplyRequired,
+          setQuotedVoiceDocumentRef,
+          setMessageMode,
           setToText,
           upsertDraft,
         },
@@ -672,13 +661,7 @@ export function useChatTab({
       setSelectedRemoteGroupIds(selectedRemoteGroupIdsSnapshot);
     };
 
-    const applyImmediateComposerFeedback = () => {
-      const shouldLockBottom = shouldLockChatToBottomForSend({
-        currentAtBottom: isCurrentScrollAtBottom(),
-        showScrollButton,
-        chatUnreadCount,
-        scrollSnapshot,
-      });
+    const applyImmediateComposerFeedback = (shouldLockBottom: boolean) => {
       clearComposer();
       setComposerGroupMentionTokens([]);
       setComposerAgentMentionTokens([]);
@@ -688,11 +671,17 @@ export function useChatTab({
         setShowScrollButton(selectedGroupId, !shouldLockBottom);
       }
       if (shouldLockBottom) {
-        setForceStickToBottomToken((value) => value + 1);
+        nextSendScrollRequestIdRef.current += 1;
+        setSendScrollRequest(
+          createChatSendScrollRequest(
+            nextSendScrollRequestIdRef.current,
+            selectedGroupId,
+            chatViewKey,
+          ),
+        );
       }
     };
 
-    // Local validations that must pass before clearing the composer
     if (replyTargetSnapshot && sendsCrossGroup && !remoteReplyDstGroupId) {
       showError("Cross-group send does not support replies.");
       setDestGroupId(selectedGroupId);
@@ -700,6 +689,11 @@ export function useChatTab({
     }
     if (quotedPresentationRefSnapshot && sendsCrossGroup) {
       showError("Cross-group send does not support quoted presentation views.");
+      setDestGroupId(selectedGroupId);
+      return;
+    }
+    if (quotedVoiceDocumentRefSnapshot && sendsCrossGroup) {
+      showError("Cross-group send does not support quoted voice documents.");
       setDestGroupId(selectedGroupId);
       return;
     }
@@ -715,16 +709,17 @@ export function useChatTab({
       return;
     }
 
-    // Optimistic: enqueue to outbox immediately for same-group sends.
-    // If the request fails, we remove the pending entry and restore the composer.
+    // Preserve reading intent before optimistic rows change the list geometry.
+    const shouldLockBottomAfterSend = shouldFollowCurrentSend();
+
+    // Failed optimistic sends restore the original composer snapshot.
     if (sendsLocal && !sendsCrossGroup) {
       const optimisticEvent = buildOptimisticMessage({
         localId,
         groupId: selectedGroupId,
         text: txt,
         to: localToTokensSnapshot,
-        priority: prio,
-        replyRequired: replyRequiredSnapshot,
+        messageMode: messageModeSnapshot,
         replyTarget: replyTargetSnapshot,
         refs: refsSnapshot,
         files: composerFilesSnapshot,
@@ -733,7 +728,7 @@ export function useChatTab({
       insertLocalAssistantPlaceholders();
     }
 
-    applyImmediateComposerFeedback();
+    applyImmediateComposerFeedback(shouldLockBottomAfterSend);
     sendInFlightRef.current = true;
     let successfulSendCount = 0;
     try {
@@ -743,8 +738,7 @@ export function useChatTab({
         localTo: localToTokensSnapshot,
         crossTo: crossToTokensSnapshot,
         files: composerFilesSnapshot,
-        priority: prio,
-        replyRequired: replyRequiredSnapshot,
+        messageMode: messageModeSnapshot,
         localId,
         refs: refsSnapshot,
         replyTarget: replyTargetSnapshot,
@@ -762,14 +756,7 @@ export function useChatTab({
         const shouldRestoreComposer = shouldRestoreComposerAfterFailedSend(successfulSendCount);
         if (shouldRestoreComposer) restoreComposerState();
         const sendError = resp.error || { code: "send_failed", message: "send failed" };
-        showError(
-          formatSendMessageError({
-            code: sendError.code,
-            message: sendError.message,
-            groupSendBlockedReason,
-            t,
-          }),
-        );
+        showError(formatSendMessageError({ code: sendError.code, message: sendError.message, t }));
         return;
       }
       const canonicalEvent =
@@ -822,7 +809,6 @@ export function useChatTab({
     }
   }, [
     selectedGroupId,
-    groupSendBlockedReason,
     tryExecuteSlashCommand,
     validRecipientSet,
     crossGroupValidRecipientSet,
@@ -836,18 +822,15 @@ export function useChatTab({
     setComposerFiles,
     setReplyTarget,
     setQuotedPresentationRef,
-    setPriority,
-    setReplyRequired,
+    setQuotedVoiceDocumentRef,
+    setMessageMode,
     setToText,
     setDestGroupId,
     upsertDraft,
     clearDraft,
     closeChatWindow,
     fileInputRef,
-    isCurrentScrollAtBottom,
-    showScrollButton,
-    chatUnreadCount,
-    scrollSnapshot,
+    shouldFollowCurrentSend,
     setChatFilter,
     setChatMobileSurface,
     setShowScrollButton,
@@ -863,6 +846,7 @@ export function useChatTab({
     composerRouteGroups,
     selectedRemoteGroupIds,
     chatAtBottomRef,
+    chatViewKey,
   ]);
 
   const {
@@ -933,7 +917,8 @@ export function useChatTab({
     busy,
     showScrollButton,
     chatUnreadCount,
-    forceStickToBottomToken,
+    sendScrollRequest,
+    consumeSendScrollRequest,
 
     // Setup checklist
     showSetupCard,
@@ -954,17 +939,18 @@ export function useChatTab({
     removeComposerFile,
     replyTarget,
     quotedPresentationRef,
+    quotedVoiceDocumentRef,
     cancelReply,
     clearQuotedPresentationRef: () => setQuotedPresentationRef(null),
+    setQuotedVoiceDocumentRef,
+    clearQuotedVoiceDocumentRef: () => setQuotedVoiceDocumentRef(null),
     toTokens,
     toggleRecipient,
     selectedRemoteGroupIds,
     toggleRemoteGroupRecipient,
     clearRecipients,
-    priority,
-    replyRequired,
-    setPriority,
-    setReplyRequired,
+    messageMode,
+    setMessageMode,
     destGroupId: sendGroupId,
     setDestGroupId,
     composerGroupSettled,

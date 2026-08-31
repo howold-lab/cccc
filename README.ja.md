@@ -1,9 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="web/public/logo-dark.svg">
-  <img src="web/public/logo.svg" width="160" alt="CCCC logo" />
-</picture>
+<img src="https://raw.githubusercontent.com/ChesterRa/cccc/main/assets/readme/hero.svg" width="100%" alt="CCCC は、単一の永続的なグループ台帳を通じて、ユーザー、統括役、複数のコーディングエージェント、信頼済みのリモートグループを連携させます" />
 
 # CCCC
 
@@ -16,12 +13,10 @@ Claude Code、Codex、ChatGPT Web など 17 のランタイムをひとつの永
 
 インストールコマンドひとつ。Rust ツールチェーンも追加インフラも不要です。
 
-[![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=blue)](https://pypi.org/project/cccc-pair/)
-[![Python](https://img.shields.io/pypi/pyversions/cccc-pair)](https://pypi.org/project/cccc-pair/)
-[![Downloads](https://static.pepy.tech/badge/cccc-pair/month)](https://pepy.tech/projects/cccc-pair)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-online-blue)](https://chesterra.github.io/cccc/)
-[![Telegram](https://img.shields.io/badge/Telegram-ccccpair-2CA5E8?logo=telegram&logoColor=white)](https://t.me/ccccpair)
+[![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=232425)](https://pypi.org/project/cccc-pair/)
+[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-232425)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-online-232425)](https://chesterra.github.io/cccc/)
 
 [English](README.md) | [中文](README.zh-CN.md) | **日本語**
 
@@ -39,12 +34,12 @@ Claude Code、Codex、ChatGPT Web など 17 のランタイムをひとつの永
 
 ## なぜ CCCC か
 
-複数のコーディングエージェントを使う現実はこうです：協調記録はターミナルのスクロールバッファに埋もれて再起動で消え、エージェントがメッセージを*読んだ*かどうか確認できず、起動/停止/復旧はツールごとに分散し、外出先から稼働中のグループを確認する手段もない。これが、マルチエージェント環境が「脆いデモ」で終わってしまう根本原因です。
+複数のコーディングエージェントを使う現実はこうです：協調記録はターミナルのスクロールバッファに埋もれて再起動で消え、保存済み、runtime への引き渡し、Inbox での消費、返信が混同され、起動/停止/復旧はツールごとに分散し、外出先から稼働中のグループを確認する手段もない。これが、マルチエージェント環境が「脆いデモ」で終わってしまう根本原因です。
 
 CCCC はエージェント群を、永続的で協調された 1 つのシステムとして運用します：
 
 - **永続協調** — 作業状態はターミナルスクロールではなく、append-only ledger に残ります。
-- **到達の可視化** — メッセージはルーティング、既読、ACK、reply-required 追跡を持ち、「送ったはず」で終わりません。
+- **配信事実の可視化** — ルーティング、保存、runtime 配信、既読、返信を個別に記録し、「送信済み」を「確認済み」と扱いません。
 - **1 つのコントロールプレーン** — Web UI、CLI、MCP、IM ブリッジがすべて同じ daemon 状態を共有します。
 - **マルチランタイム前提** — Claude Code、Codex CLI、ChatGPT Web、Grok Build などの主要ランタイムを 1 つのグループで混在運用できます。
 - **Group Bridge によるリモート連携** — 信頼済み CCCC group 同士が明示的なメッセージを交換し、許可された場合は相手のローカルリソースを調査・操作できます。
@@ -57,7 +52,7 @@ CCCC はコマンド一つで導入でき、データベース、メッセージ
 | 機能 | 実現方法 |
 |---|---|
 | **唯一の事実源** | append-only ledger（`ledger.jsonl`）が全メッセージ・イベントを記録 — 再生可能、監査可能、喪失なし |
-| **信頼性のあるメッセージング** | 既読カーソル、attention ACK、reply-required 義務追跡 — 誰が何を確認したか明確 |
+| **信頼性のあるメッセージング** | Send / Send + Reply / Mail、配信・既読・返信の事実を分離し、Mail 専用 Inbox を ledger 順で消費 — runtime への引き渡しを既読と偽りません |
 | **統一コントロールプレーン** | Web UI、CLI、MCP ツール、IM ブリッジがすべて 1 つの daemon に接続 — 状態の分断なし |
 | **マルチランタイム編成** | Claude Code、Cline CLI、Codex CLI、GitHub Copilot CLI、Cursor CLI、Devin CLI、Kiro CLI、Kilo Code CLI、Antigravity CLI、Grok Build、OpenCode、ChatGPT Web など 17 種の主要ランタイムを混在利用でき、さらに `custom` も扱える |
 | **Group Bridge** | マシンやチームをまたぐ信頼済みリモートグループを接続し、明示的メッセージから始めて read/full のローカルアクセスを必要時だけ付与 |
@@ -69,34 +64,41 @@ CCCC はコマンド一つで導入でき、データベース、メッセージ
 ### インストール
 
 ```bash
-# 安定した製品ディストリビューション（推奨、Python 3.11+）
-python -m pip install -U cccc-pair
+# macOS / Linux（推奨）
+curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
 
-# RC チャネル（TestPyPI）
-python -m pip install -U --pre \
-  --index-url https://test.pypi.org/simple/ \
-  --extra-index-url https://pypi.org/simple/ \
-  cccc-pair
+# Windows CMD または PowerShell（推奨）
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
+
+# pip 互換のネイティブ platform wheel
+python -m pip install -U "cccc-pair>=0.4.36"
 ```
 
-> PyPI パッケージが、現在の安定した推奨 CCCC ディストリビューションであり、
-> Python が安定版のデフォルト実装です。Linux x86-64、Intel/Apple Silicon macOS、
-> Windows x86-64 の platform wheel には、`cccc rust` で明示的に選択して性能を
-> 評価するための、Python と同じバージョンの private な**実験的 Rust 実装**も
-> 含まれます。機能とインテグレーションの parity は現在も整備中です。信頼性を
-> 重視するワークフローでは `cccc python` を使用してください。Python なしの
-> Rust-only 配備を試す場合に限り、下記の実験的スタンドアロン版を利用できます。
+> **CCCC 0.4.36 の製品実装は Rust の 1 つだけです。** Web サイトのインストーラーを
+> 推奨します。pip はパッケージマネージャー互換用で、同じネイティブ実行ファイルを
+> platform wheel として導入します。Python daemon、launcher、fallback は含みません。
+> 対応対象は Linux x86-64（glibc 2.28+）、Intel/Apple Silicon macOS 11+、
+> Windows x86-64 です。
 
 ### アップグレード
 
 ```bash
+# Web サイトインストーラーが所有する場合
 cccc update
+
+# pip が管理する場合
+python -m pip install -U "cccc-pair>=0.4.36"
 ```
 
-インストール種別と更新元を事前確認するには `cccc update --check` を使用してください。
-推奨の pip 版は、検出した PyPI チャネルから `cccc-pair` 製品全体を更新します。
-実験的スタンドアロン版は GitHub Pages インストーラーから更新します。どちらも
-ファイルを置き換える前に稼働中の Web/daemon ペアを停止します。
+Web サイトインストーラーによる導入では、`cccc update --check` で更新元を確認
+できます。pip 管理下のコマンドは standalone 自己更新を明示的に拒否し、代わりに
+パッケージマネージャーのコマンドを表示します。どちらも同じネイティブ製品を
+導入しますが、ファイルは作成元のインストーラーが管理し続けます。pip で更新する
+前に `cccc daemon stop` を実行し、foreground の CCCC process も終了してください。
+特に Windows では executable の置換に必要です。同じコマンドディレクトリを pip
+から Web サイトインストーラーへ切り替える場合は、先に
+`python -m pip uninstall cccc-pair` を実行してください。
+`CCCC_ALLOW_REPLACE_EXISTING=1` を設定しても、pip 管理下のファイルは上書きしません。
 
 ### 起動
 
@@ -106,24 +108,15 @@ cccc
 
 **http://127.0.0.1:8848** を開く — デフォルトで daemon とローカル Web UI が一緒に起動します。
 
-推奨の pip ディストリビューションでは、Python が安定版の初期デフォルト実装です。
-Rust は性能評価向けの実験的な明示選択です。永続的に切り替えるか、切り替えと
-コマンド実行を 1 ステップで行えます。
-
 ```bash
-cccc status            # 選択中・実行中・利用可能な実装を表示
-cccc rust              # 実験的 Rust を選択して CCCC を起動
-cccc python             # 安定版 Python を選択して CCCC を起動
-cccc rust doctor        # 実験的 Rust を選択して doctor を実行
+cccc status            # 製品、daemon、group、actor、agent runtime を表示
+cccc doctor            # インストールと実行環境を診断
+cccc daemon status     # daemon のライフサイクル状態を明示的に確認
 ```
 
-切り替えは明示的なライフサイクル操作です。CCCC は対象 payload を検証してから現在の
-Web/daemon を停止し、別実装へ暗黙にフォールバックしません。Agent runtime の MCP 設定は
-安定した公開 `cccc` launcher を参照するため、後の切り替えでも再設定は不要です。
-いつでも `cccc python` で安定版の実装へ戻せます。
-
-実験的スタンドアロン版には Rust だけが含まれるため、`cccc python` と実装切り替えは
-利用できません。
+`cccc python`、`cccc rust`、旧 `ccccd` alias は廃止されました。既存の自動化は
+`cccc daemon ...` を使用してください。daemon の状態ファイル名は互換性のため維持し、
+Python runtime なしで 0.4.35 home を引き継げます。
 
 ### マルチエージェントグループの作成
 
@@ -152,6 +145,7 @@ cccc tracked-send "最初の具体タスクを担当し、検証証拠を添え�
 ```bash
 pip install -U cccc-sdk
 npm install cccc-sdk
+cargo add cccc-sdk
 ```
 
 SDK には daemon は含まれません。実行中の `cccc` 本体に接続して利用します。
@@ -266,7 +260,7 @@ Actor は **PTY**（埋め込みターミナル）または **headless**（タ�
 
 ChatGPT Web は外部チャットウィンドウではなく、実際の CCCC actor としてグループに参加できます。CCCC はブラウザ配信で紐付けた ChatGPT 会話へグループメッセージを届け、GPT-5.x は actor に紐付いた Remote MCP connector 経由で CCCC に接続します — ルーティングされたメッセージの受信、可視返信、リポジトリの確認/編集、scope 内の shell/git 実行まで、ネイティブなローカルコーディングエージェントに近い体験です。ChatGPT Web の余剰利用枠を、追加のローカル開発 agent 容量として活用することもできます。
 
-セットアップには MCP connector 用の public HTTPS URL（Cloudflare Tunnel、ngrok、Tailscale Funnel、またはリバースプロキシ）が必要です。なお GPT-5.x Pro セッションは第三者 MCP connector を公開しないため、現在この用途には使えません。詳細な設定とトラブルシュート: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+セットアップには MCP connector 用の public HTTPS URL（Cloudflare Tunnel、ngrok、Tailscale Funnel、またはリバースプロキシ）が必要です。CCCC は安定したテキストのみの配信を既定とし、実験的な **GPT Pro** モードも提供します。このモードは、画像添付によって第三者 MCP が利用可能になる一部アカウント向けに、ごく小さな空白 PNG を各配信へ添付します。CCCC はモデルを切り替えず、ChatGPT の変更後もこの互換手段が動作し続けることを保証しません。詳細な設定とトラブルシュート: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
 
 ## Group Bridge: リモートグループを接続
 
@@ -289,25 +283,26 @@ Web UI の **Settings > Group Bridge** から開始します。一方が一回�
 CCCC は IM グレードのメッセージングセマンティクスを実装 — 「ターミナルにテキストを貼り付ける」だけではありません：
 
 - **宛先ルーティング** — `@all`、`@peers`、`@foreman`、または特定の actor ID
-- **既読カーソル** — 各エージェントが MCP 経由で明示的に既読をマーク
+- **明示的な 3 モード** — Send は能動配信、Send + Reply は具体的な返信要求、Mail は即時中断なしの Inbox 配信
+- **事実の分離** — `runtime.delivery`、Mail 既読カーソル、返信、取消、タスク完了は互いを代用しません
+- **消費型 Inbox 読取** — `cccc_inbox_read` が次の順序付き Mail バッチを返し、Mail カーソルを原子的に進めます
 - **返信と引用** — 構造化された `reply_to` + 引用コンテキスト
-- **Attention ACK** — 優先メッセージは明示的な確認が必要
-- **Reply-required 義務** — 受信者が返信するまで追跡
-- **自動ウェイク** — メッセージ受信時、無効化された agent を自動起動
+- **返信要求** — Send + Reply は受信者の返信または送信者の取消まで追跡
+- **ライフサイクル境界** — paused、stopped、disabled の actor を配信が暗黙に起動することはありません
 - **リモートグループ宛先** — Group Bridge の対象は、隠れたブロードキャストではなく明示的な remote recipient として扱われます
 
-通常の `send` はチャット、質問、軽い依頼に使います。明確な担当者、完了条件、証拠、引き継ぎ、受け入れ履歴が必要な委任作業には `tracked-send` を使ってください。`@all` は告知や緊急の共有制約には使えますが、具体タスクのデフォルト分配先にはしません。
+待てる有用な agent 向け情報には Mail、遅延の損失が中断コストを上回る場合は Send、さらに具体的な回答が必要な場合だけ Send + Reply を使います。Mail は人間の user には送れません。1 件のメッセージは `user` のみ、または 1 人以上の agent のどちらか一方を宛先とし、両者へ必要な場合は別々に送信します。明確な担当者、完了条件、証拠、引き継ぎ、受け入れ履歴が必要な委任作業には `tracked-send` を使ってください。`@all` は告知や緊急の共有制約には使えますが、具体タスクのデフォルト分配先にはしません。
 
-メッセージは daemon が管理する配信パイプラインを通じて各 actor ランタイムへ届けられ、daemon が全メッセージの到達状態を追跡します。
+能動配信は daemon 管理のパイプラインを通り、その `runtime.delivery` 事実は Inbox の既読状態や返信とは分離されます。
 
 ## オートメーションとポリシー
 
-内蔵ルールエンジンが運用面の懸念を処理し、手動監視を不要に：
+少数の配信タイマーと自動化ルールが運用面を処理し、すべてのメッセージを prompt に変えることを避けます：
 
 | ポリシー | 機能 |
 |----------|------|
-| **催促（Nudge）** | 設定可能なタイムアウト後に未読メッセージを agent にリマインド |
-| **Reply-required フォローアップ** | 必須返信が遅延した場合にエスカレート |
+| **Mail 通知** | 宛先が明確な Mail に対し、設定時間後に本文なしの通知を最大 1 回送信 |
+| **返信通知** | 配信済みの Send + Reply が未返信の場合に最大 1 回通知 |
 | **Actor アイドル検出** | agent が沈黙した際に foreman に通知 |
 | **Keepalive** | foreman への定期的なチェックインリマインダー |
 | **沈黙検出** | グループ全体が静かになった場合にアラート |
@@ -397,8 +392,7 @@ cccc reply <event_id> "返信"
 cccc tail -n 50 -f             # ledger をリアルタイム追跡
 
 # 受信箱
-cccc inbox                     # 未読メッセージを表示
-cccc inbox --mark-read         # 全件既読にする
+cccc inbox --actor-id <id>     # 次の未読 Mail バッチを読み取り、消費する
 
 # 運用
 cccc doctor                    # 環境チェック
@@ -417,7 +411,7 @@ cccc im start|stop|status
 | サーフェス | 例 |
 |------------|----|
 | **セッションとガイダンス** | `cccc_bootstrap`、`cccc_help`、`cccc_project_info` |
-| **メッセージングとファイル** | `cccc_inbox_list`、`cccc_inbox_mark_read`、`cccc_message_send`、`cccc_message_reply`、`cccc_file` |
+| **メッセージングとファイル** | `cccc_inbox_read`、`cccc_message_history`、`cccc_message_send`、`cccc_message_reply`、`cccc_file` |
 | **グループと actor 制御** | `cccc_group`、`cccc_actor` |
 | **協調と状態** | `cccc_context_get`、`cccc_coordination`、`cccc_task`、`cccc_agent_state`、`cccc_context_sync` |
 | **リモートグループアクセス** | `cccc_remote_access`、`cccc_remote_context`、`cccc_remote_repo`、`cccc_remote_git`、`cccc_remote_apply_patch`、`cccc_remote_exec_command` |
@@ -445,8 +439,8 @@ CCCC は**協調カーネル** — 協調レイヤーを担い、外部の CI/CD
 | すでに使っているもの | その強み | CCCC が加えるもの |
 |---|---|---|
 | **ネイティブのエージェントチーム**（例：Claude Code subagents/teams） | 単一ベンダー・単一セッション内で最もスムーズな連携 | ベンダー横断のグループ（Claude + Codex + Grok + Kimi…）、再起動後も残る状態、スマホ/IM からの運用、完全な監査 ledger |
-| **並列タスクランナー**（worktree/タスクボード系ツール） | 隔離された並列タスク実行 | 協調レイヤー：エージェント同士が対話・引き継ぎ・ACK・催促される — さらに 24/7 の daemon 運用 |
-| **IM アシスタントゲートウェイ** | チャットアプリに住む個人アシスタント | 実作業向けの配信セマンティクス：tracked task、既読/ACK、マルチエージェントグループ、永続監査証跡 |
+| **並列タスクランナー**（worktree/タスクボード系ツール） | 隔離された並列タスク実行 | 協調レイヤー：エージェント同士が対話・引き継ぎ・割り込みレベルを選択し、有界なリマインダーを受ける — さらに 24/7 の daemon 運用 |
+| **IM アシスタントゲートウェイ** | チャットアプリに住む個人アシスタント | 実作業向けの配信セマンティクス：tracked task、配信/既読/返信の事実、マルチエージェントグループ、永続監査証跡 |
 
 CCCC はエージェントを置き換えるものではなく、それらをチームにするレイヤーです。詳しい議論: [FAQ — 他ツールとの比較](https://chesterra.github.io/cccc/guide/faq#how-does-cccc-compare-to-native-agent-teams-and-other-tools)
 
@@ -472,13 +466,13 @@ CCCC はエージェントを置き換えるものではなく、それらをチ
 | [Web UI ガイド](https://chesterra.github.io/cccc/guide/web-ui) | ダッシュボードのナビゲーション |
 | [IM ブリッジ設定](https://chesterra.github.io/cccc/guide/im-bridge/) | Telegram、Slack、Discord、Feishu、DingTalk、WeCom、Weixin の接続 |
 | [Group Space](https://chesterra.github.io/cccc/guide/group-space-notebooklm) | NotebookLM ナレッジ統合 |
-| [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime) | ChatGPT Web / MCP 対応 GPT-5.x を CCCC actor として接続。GPT-5.x Pro は助言・レビュー用途に適しています |
+| [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime) | MCP 対応 ChatGPT Web を CCCC actor として接続。任意の実験的 GPT Pro モードでは小さな空白 PNG を添付します |
 | [Capability Allowlist](https://chesterra.github.io/cccc/guide/capability-allowlist) | MCP 機能ガバナンス |
 | [ベストプラクティス](https://chesterra.github.io/cccc/guide/best-practices) | 推奨パターンとワークフロー |
 | [FAQ](https://chesterra.github.io/cccc/guide/faq) | よくある質問 |
 | [運用ランブック](https://chesterra.github.io/cccc/guide/operations) | 復旧、トラブルシューティング、メンテナンス |
 | [CLI リファレンス](https://chesterra.github.io/cccc/reference/cli) | 完全なコマンドリファレンス |
-| [SDK（Python/TypeScript）](https://github.com/ChesterRa/cccc-sdk) | 公式クライアントでアプリ/サービスから daemon を利用 |
+| [SDK（Python/TypeScript/Rust）](https://github.com/ChesterRa/cccc-sdk) | 公式クライアントでアプリ/サービスから daemon を利用 |
 | [アーキテクチャ](https://chesterra.github.io/cccc/reference/architecture) | 設計決定とシステムモデル |
 | [機能詳細](https://chesterra.github.io/cccc/reference/features) | メッセージング、オートメーション、ランタイムの詳細 |
 | [CCCS 標準](docs/standards/CCCS_V1.md) | 協調プロトコル仕様 |
@@ -486,19 +480,7 @@ CCCC はエージェントを置き換えるものではなく、それらをチ
 
 ## インストールオプション
 
-### pip（安定版・推奨）
-
-```bash
-python -m pip install -U cccc-pair
-```
-
-これは完全にサポートされる製品ディストリビューションで、Python が安定版の
-推奨実装です。Linux x86-64、Intel/Apple Silicon macOS、Windows x86-64 では、
-性能評価向けに Python と同じバージョンの private な実験的 Rust 実行ファイルも
-含む platform wheel が選択されます。それ以外では universal Python wheel を使い、
-`cccc status` が Rust を利用不可と明示します。
-
-### 実験的スタンドアロン Rust プレビュー
+### Web サイトインストーラー（推奨）
 
 ```bash
 # macOS / Linux
@@ -508,10 +490,8 @@ curl -fsSL https://chesterra.github.io/cccc/install.sh | sh
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod 'https://chesterra.github.io/cccc/install.ps1' | Invoke-Expression"
 ```
 
-このオプションは、Python なしの Rust-only 配備で実験的 Rust 実装を評価する場合に
-限って利用してください。GitHub Releases からチェックサム検証済みバイナリを取得し、
-同じインストーラーで `cccc update` できますが、Python fallback と実装切り替えは
-ありません。安定版の pip/Python 経路の推奨代替ではありません。インストーラーは
+GitHub Releases からチェックサム検証済みのネイティブ製品を取得し、同じ
+インストーラーで `cccc update` できます。インストーラーは
 自身が所有しない既存の `cccc`
 コマンドを上書きしないため、意図的にアンインストールするか、別の
 `CCCC_INSTALL_DIR` を指定してください。
@@ -520,41 +500,51 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointMan
 新しいターミナルで `cccc doctor` を実行すると、`Installation` セクションに
 実行中の入口、PATH が選ぶコマンド、競合するすべてのパスが表示されます。
 
-現在のネイティブインストーラーは `v0.4.34-rc2` リリース候補を固定してインストールします。
+インストーラーは、`CCCC_VERSION` を明示しない限り、現在公開中の安定版を
+選択します。
 
-### pip（RC 版、TestPyPI）
+### pip 互換インストール（v0.4.36 以降）
 
 ```bash
-python -m pip install -U --pre \
-  --index-url https://test.pypi.org/simple/ \
-  --extra-index-url https://pypi.org/simple/ \
-  cccc-pair
+python -m pip install -U "cccc-pair>=0.4.36"
 ```
+
+Pip は同じ `cccc` 実行ファイルを含む 0.4.36 以降の platform wheel を導入します。
+最低 version 制約により、現在の platform に 0.4.36 wheel がない場合に過去の
+Python 版が暗黙に選ばれることを防ぎます。0.4.36 では sdist、universal wheel、
+import 可能な CCCC Python package、fallback 実装を提供しないため、未対応
+platform は解決に失敗します。汎用の `pip install .` source build も空 package を
+導入せず明示的に拒否されます。`pip install -e .` も開発入口ではないため、下記の
+source build コマンドを使用してください。
 
 Cargo インストールは workspace 開発用にのみ残し、サポート対象のエンドユーザー
 配布にはしません。
 
 ### ソースから
 
+source package の作成には Rust 1.88+、npm 付き Node.js 24、および archive helper
+専用の Python 3.11+ が必要です。build 済み CCCC product に Python は含まれません。
+
 ```bash
 git clone https://github.com/ChesterRa/cccc
 cd cccc
-pip install -e .
+./scripts/build_package.sh
+./target/release/cccc --version
+./target/release/cccc
 ```
 
-### uv（高速、Windows 推奨）
-
-```bash
-uv venv -p 3.14 .venv
-uv pip install -e .
-uv run cccc --help
-```
+反復的なデバッグには
+`cargo run --locked --features standalone -p cccc --bin cccc -- --port 0` を使用します。
+Windows では
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_package.ps1`
+を実行し、その後 `.\target\release\cccc.exe` を起動します。
 
 ### Windows ネイティブ
 
-- ローカル開発には、リポジトリルートの `start.ps1` を推奨します。
-- `cccc doctor` が `Windows PTY: NOT READY` を表示した場合は、先に `python -m pip install pywinpty` を実行するか、`uv pip install -e .` で再インストールしてください。
-- Web バンドルには `scripts/build_web.ps1`、完全パッケージビルドには `scripts/build_package.ps1` を使用してください。
+- `scripts/build_package.ps1` は lock 済み Web 依存関係を導入し、Web bundle を
+  埋め込み、ネイティブ実行ファイルと archive を作成します。
+- `x86_64-pc-windows-msvc` Rust toolchain を使用し、ビルド後に生成された
+  `cccc.exe doctor` を実行してください。
 
 ### Docker
 

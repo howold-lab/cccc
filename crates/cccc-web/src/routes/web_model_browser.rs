@@ -385,14 +385,6 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         "bound" => "bound",
         _ => "idle",
     };
-    let cursor_committed = matches!(
-        internal_delivery_status,
-        "submitted"
-            | "pending_new_chat_bind"
-            | "submission_ambiguous"
-            | "legacy_submission_unverified"
-            | "bound"
-    );
     let (target_state, target_label, target_reason) = if invalid_target {
         (
             "invalid",
@@ -546,7 +538,6 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "last_submission_evidence":submission_evidence,
             "last_send_selector":send_selector,
             "last_error":if delivery_state == "pending_bind" && last_error == "conversation_url_pending" {""} else {last_error},
-            "cursor_committed":cursor_committed,
             "mode":delivery_mode
         },
         "next_action":{"recommended":next_action,"label":next_label,"reason":next_reason}
@@ -735,116 +726,4 @@ fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
 
 fn io_error(error: io::Error) -> ApiError {
     ApiError::bad(error.to_string())
-}
-
-#[cfg(test)]
-mod profile_tests {
-    use super::browser_profile_path;
-
-    #[test]
-    fn browser_profile_prefers_shared_cross_implementation_login() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let shared = temp
-            .path()
-            .join("state/web_model_browser/_shared/chatgpt_web/chrome_profile");
-        let legacy = temp.path().join("browser-profiles/web-model/group/web1");
-        std::fs::create_dir_all(&shared).expect("shared profile");
-        std::fs::create_dir_all(&legacy).expect("legacy profile");
-        std::fs::write(shared.join("Cookies"), b"shared").expect("shared marker");
-        std::fs::write(legacy.join("Cookies"), b"legacy").expect("legacy marker");
-
-        assert_eq!(
-            browser_profile_path(temp.path(), "group", "web1").expect("profile"),
-            shared
-        );
-    }
-
-    #[test]
-    fn browser_profile_keeps_legacy_rust_login_until_shared_migration() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let legacy = temp.path().join("browser-profiles/web-model/group/web1");
-        std::fs::create_dir_all(&legacy).expect("legacy profile");
-        std::fs::write(legacy.join("Cookies"), b"legacy").expect("legacy marker");
-
-        assert_eq!(
-            browser_profile_path(temp.path(), "group", "web1").expect("profile"),
-            legacy
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{browser_open_url, required_identifier};
-    use serde_json::json;
-
-    #[test]
-    fn browser_open_prefers_the_saved_delivery_target() {
-        assert_eq!(
-            browser_open_url(
-                &json!({
-                    "kind":"existing_chat",
-                    "url":"https://chatgpt.com/c/bound-chat"
-                }),
-                "https://chatgpt.com/",
-            ),
-            "https://chatgpt.com/c/bound-chat"
-        );
-        assert_eq!(
-            browser_open_url(
-                &json!({"kind":"new_chat","url":"https://chatgpt.com/"}),
-                "https://example.test/",
-            ),
-            "https://chatgpt.com/"
-        );
-    }
-
-    #[test]
-    fn browser_open_falls_back_for_missing_or_invalid_targets() {
-        assert_eq!(
-            browser_open_url(&json!({}), "https://chatgpt.com/"),
-            "https://chatgpt.com/"
-        );
-        assert_eq!(
-            browser_open_url(
-                &json!({"kind":"existing_chat","url":"javascript:alert(1)"}),
-                "https://chatgpt.com/",
-            ),
-            "https://chatgpt.com/"
-        );
-        assert_eq!(
-            browser_open_url(
-                &json!({
-                    "kind":"existing_chat",
-                    "url":"https://chatgpt.com/c/WEB:temporary"
-                }),
-                "https://chatgpt.com/",
-            ),
-            "https://chatgpt.com/"
-        );
-    }
-
-    #[test]
-    fn query_identifiers_are_required_and_trimmed() {
-        assert_eq!(
-            required_identifier(" g_one ", "group_id").expect("group id"),
-            "g_one"
-        );
-        assert_eq!(
-            required_identifier(" chatgpt-web-1 ", "actor_id").expect("actor id"),
-            "chatgpt-web-1"
-        );
-        assert_eq!(
-            required_identifier(" ", "group_id")
-                .expect_err("empty group id")
-                .to_string(),
-            "invalid_request: group_id is required"
-        );
-        assert_eq!(
-            required_identifier("", "actor_id")
-                .expect_err("empty actor id")
-                .to_string(),
-            "invalid_request: actor_id is required"
-        );
-    }
 }

@@ -1,35 +1,13 @@
 use super::{
     commit_reaped, start, start_with_history, status, stop, stop_all, stop_if_started_at,
-    submit_interruptible, submit_sequence_interruptible,
+    submit_interruptible, submit_sequence_interruptible, write,
 };
 use crate::registry::lookup;
-use crate::{HistoryConfig, LaunchSpec, history, history_since};
-use cccc_contracts::RunnerKind;
-use std::collections::BTreeMap;
+use crate::test_support::{spec, test_guard};
+use crate::{HistoryConfig, RuntimeError, history, history_since};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
-
-fn test_guard() -> MutexGuard<'static, ()> {
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("test lock")
-}
-
-fn spec(temp: &tempfile::TempDir, group: &str, actor: &str, command: &str) -> LaunchSpec {
-    LaunchSpec {
-        group_id: group.into(),
-        actor_id: actor.into(),
-        runner: RunnerKind::Headless,
-        command: vec!["sh".into(), "-c".into(), command.into()],
-        cwd: temp.path().into(),
-        env: BTreeMap::new(),
-        cols: 80,
-        rows: 24,
-    }
-}
 
 #[test]
 fn captures_process_output() {
@@ -100,6 +78,28 @@ fn restarts_a_naturally_exited_session_without_reap() {
 }
 
 #[test]
+fn write_rejects_a_naturally_exited_session_before_reap() {
+    let _guard = test_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let group_id = "g_write_exited";
+    let actor_id = "peer1";
+    start(spec(&temp, group_id, actor_id, "exit 0")).expect("start");
+    for _ in 0..100 {
+        if !status(group_id, actor_id).expect("status").running {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(matches!(
+        write(group_id, actor_id, b"must-not-be-reported-as-delivered"),
+        Err(RuntimeError::NotFound(group, actor))
+            if group == group_id && actor == actor_id
+    ));
+    stop(group_id, actor_id).expect("cleanup");
+}
+
+#[test]
 fn reap_does_not_report_a_session_replaced_after_its_snapshot() {
     let _guard = test_guard();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -148,6 +148,18 @@ fn stop_is_bounded_when_a_background_child_keeps_the_pty_open() {
         "trap '' HUP; sleep 3 & echo $! > background.pid",
     ))
     .expect("start");
+    let pid_path = temp.path().join("background.pid");
+    for _ in 0..100 {
+        if pid_path.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let background_pid = std::fs::read_to_string(&pid_path)
+        .expect("background pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric background pid");
     for _ in 0..100 {
         if !status("g_background_child", "peer1")
             .expect("status")
@@ -166,12 +178,16 @@ fn stop_is_bounded_when_a_background_child_keeps_the_pty_open() {
     let started = std::time::Instant::now();
     let result = stop("g_background_child", "peer1");
     let elapsed = started.elapsed();
-    if let Ok(pid) = std::fs::read_to_string(temp.path().join("background.pid")) {
-        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
-    }
 
     result.expect("stop");
     assert!(elapsed < Duration::from_secs(1), "stop took {elapsed:?}");
+    for _ in 0..100 {
+        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(background_pid), None).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("background process {background_pid} survived actor stop");
 }
 
 #[test]

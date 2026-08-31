@@ -104,8 +104,8 @@ pub fn scope(
         nested(&value, &["session_enabled", group_id, actor_id]),
         &mut scope.enabled,
     );
-    collect_strings(value.get("global_blocked"), &mut scope.blocked);
-    collect_strings(
+    collect_blocks(value.get("global_blocked"), &mut scope.blocked);
+    collect_blocks(
         nested(&value, &["group_blocked", group_id]),
         &mut scope.blocked,
     );
@@ -143,11 +143,30 @@ fn parse_capability(value: &Value) -> Option<Capability> {
         source_uri: nonempty(value.get("source_uri"))
             .unwrap_or_default()
             .to_owned(),
+        qualification_status: nonempty(value.get("qualification_status"))
+            .unwrap_or("qualified")
+            .to_owned(),
+        enable_supported: value
+            .get("enable_supported")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     })
 }
 
 fn collect_strings(value: Option<&Value>, output: &mut BTreeSet<String>) {
     output.extend(strings(value));
+}
+
+fn collect_blocks(value: Option<&Value>, output: &mut BTreeSet<String>) {
+    match value {
+        Some(Value::Object(entries)) => output.extend(
+            entries
+                .iter()
+                .filter(|(_, entry)| crate::capabilities::block_entry_is_active(entry))
+                .map(|(id, _)| id.clone()),
+        ),
+        _ => collect_strings(value, output),
+    }
 }
 
 fn collect_session(value: Option<&Value>, output: &mut BTreeSet<String>) {

@@ -1,10 +1,16 @@
-use cccc_contracts::{Event, utc_now};
-use cccc_core::{GroupStore, integration_state, ledger};
+use cccc_contracts::{DaemonRequest, Event};
+use cccc_core::{GroupStore, ledger};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use super::{STORE_KEY, root, voice_asr, voice_inference, voice_speaker_transcript};
+use super::{
+    voice_asr, voice_inference, voice_segment_analysis, voice_segmented_recording::RecordingSegment,
+};
 use crate::AppState;
+
+static DIARIZATION_JOBS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 pub(super) enum SpawnStatus {
     Started,
@@ -21,7 +27,27 @@ pub(super) struct DiarizationJob {
     pub(super) language: String,
 }
 
-pub(super) fn spawn(job: DiarizationJob, recording: tempfile::NamedTempFile) -> SpawnStatus {
+fn available(state: &AppState, model_id: &str) -> bool {
+    voice_asr::diarization_available(&state.home, model_id)
+}
+
+pub(super) fn try_reserve(
+    state: &AppState,
+    model_id: &str,
+) -> Result<OwnedSemaphorePermit, &'static str> {
+    if !available(state, model_id) {
+        return Err("model_not_ready");
+    }
+    reservation_semaphore()
+        .try_acquire_owned()
+        .map_err(|_| "busy")
+}
+
+pub(super) fn spawn(
+    job: DiarizationJob,
+    recordings: Vec<RecordingSegment>,
+    reservation: OwnedSemaphorePermit,
+) -> SpawnStatus {
     let DiarizationJob {
         state,
         group_id,
@@ -31,39 +57,21 @@ pub(super) fn spawn(job: DiarizationJob, recording: tempfile::NamedTempFile) -> 
         transcript_model,
         language,
     } = job;
-    if !voice_asr::diarization_available(&state.home, &diarization_model) {
-        return SpawnStatus::Skipped("model_not_ready");
-    }
-    let Some(permit) = voice_inference::try_acquire() else {
-        return SpawnStatus::Skipped("worker_busy");
-    };
     tokio::spawn(async move {
+        let _reservation = reservation;
         let home = state.home.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || -> Result<Option<Value>, voice_asr::VoiceError> {
-                let Some(mut result) = voice_asr::diarize_pcm16_file(
-                    &home,
-                    &diarization_model,
-                    recording.path(),
-                    16_000,
-                )?
-                else {
-                    return Ok(None);
-                };
-                voice_speaker_transcript::normalize_diarization_result(&mut result);
-                let transcript = voice_speaker_transcript::build(
-                    &home,
-                    &transcript_model,
-                    recording.path(),
-                    &language,
-                    &result,
-                )?;
-                result["speaker_transcript_segments"] = json!(transcript.segments);
-                result["speaker_transcript_model_id"] = json!(transcript.model_id);
-                Ok(Some(result))
-            })
-            .await;
-        drop(permit);
+        let permit = voice_inference::acquire().await;
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            voice_segment_analysis::analyze(
+                &home,
+                &diarization_model,
+                &transcript_model,
+                &language,
+                &recordings,
+            )
+        })
+        .await;
         let (action, result, error_code, error_message) = match outcome {
             Ok(Ok(Some(result))) => ("diarization_ready", Some(result), "", String::new()),
             Ok(Ok(None)) => (
@@ -80,7 +88,7 @@ pub(super) fn spawn(job: DiarizationJob, recording: tempfile::NamedTempFile) -> 
                 error.to_string(),
             ),
         };
-        if persist_result(
+        if let Err(error) = persist_result(
             &state,
             &group_id,
             &session_id,
@@ -89,8 +97,14 @@ pub(super) fn spawn(job: DiarizationJob, recording: tempfile::NamedTempFile) -> 
             error_code,
             &error_message,
         )
-        .is_err()
+        .await
         {
+            tracing::error!(
+                %error,
+                %group_id,
+                %session_id,
+                "failed to persist voice diarization completion"
+            );
             return;
         }
         if let Err(error) = emit_event_with_retry(
@@ -115,7 +129,13 @@ pub(super) fn spawn(job: DiarizationJob, recording: tempfile::NamedTempFile) -> 
     SpawnStatus::Started
 }
 
-fn persist_result(
+fn reservation_semaphore() -> Arc<Semaphore> {
+    DIARIZATION_JOBS
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
+        .clone()
+}
+
+async fn persist_result(
     state: &AppState,
     group_id: &str,
     session_id: &str,
@@ -124,37 +144,68 @@ fn persist_result(
     error_code: &str,
     error_message: &str,
 ) -> std::io::Result<()> {
-    let store = GroupStore::new(state.home.clone())?;
-    integration_state::group_update(&store, group_id, STORE_KEY, |value| {
-        let sessions = root(value)
-            .entry("sessions")
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("sessions initialized");
-        let index = sessions
-            .iter()
-            .position(|item| item["session_id"] == session_id)
-            .unwrap_or_else(|| {
-                sessions.push(json!({
-                    "session_id":session_id,"document_path":document_path,
-                    "capture_mode":"document","segments":[],"transcript":"","created_at":utc_now()
-                }));
-                sessions.len() - 1
-            });
-        let session = &mut sessions[index];
-        session["updated_at"] = json!(utc_now());
-        session["capture_mode"] = json!("document");
-        session["diarization_ready"] = json!(result.is_some());
-        if let Some(result) = result {
-            session["diarization"] = result;
-            if let Some(session) = session.as_object_mut() {
-                session.remove("diarization_error");
-            }
-        } else {
-            session["diarization_error"] = json!({"code":error_code,"message":error_message});
-        }
+    let response = state
+        .client
+        .call(&completion_request(
+            group_id,
+            session_id,
+            document_path,
+            result,
+            error_code,
+            error_message,
+        ))
+        .await
+        .map_err(std::io::Error::other)?;
+    if response.ok {
         Ok(())
-    })
+    } else {
+        Err(std::io::Error::other(
+            response
+                .error
+                .map(|error| format!("{}: {}", error.code, error.message))
+                .unwrap_or_else(|| "voice session update failed".into()),
+        ))
+    }
+}
+
+fn completion_request(
+    group_id: &str,
+    session_id: &str,
+    document_path: &str,
+    result: Option<Value>,
+    error_code: &str,
+    error_message: &str,
+) -> DaemonRequest {
+    let patch = if let Some(result) = result {
+        json!({
+            "status":"closed",
+            "document_path":document_path,
+            "diarization_ready":true,
+            "diarization":result,
+            "error":null
+        })
+    } else {
+        json!({
+            "status":"closed",
+            "document_path":document_path,
+            "diarization_ready":false,
+            "diarization_error":{"code":error_code,"message":error_message},
+            "error":{"code":error_code,"message":error_message}
+        })
+    };
+    DaemonRequest {
+        v: 1,
+        op: "assistant_voice_session_update".into(),
+        args: json!({
+            "group_id":group_id,
+            "session_id":session_id,
+            "by":"assistant:voice_secretary",
+            "patch":patch
+        })
+        .as_object()
+        .cloned()
+        .expect("voice session update args"),
+    }
 }
 
 async fn emit_event_with_retry(
@@ -198,3 +249,7 @@ async fn emit_event_with_retry(
     }
     Err(last_error.unwrap_or_else(|| std::io::Error::other("event append failed")))
 }
+
+#[cfg(test)]
+#[path = "voice_diarization/tests.rs"]
+mod tests;

@@ -4,7 +4,8 @@ import {
   getEffectiveComposerDestGroupId,
   isComposerGroupSettled,
 } from "../../stores/useComposerStore";
-import type { PresentationMessageRef, ReplyTarget } from "../../types";
+import type { PresentationMessageRef, ReplyTarget, VoiceDocumentMessageRef } from "../../types";
+import type { ComposerMessageMode } from "../../stores/useComposerStore";
 
 export type FailedSendComposerSnapshot = {
   originGroupId: string;
@@ -13,8 +14,8 @@ export type FailedSendComposerSnapshot = {
   toText: string;
   replyTarget: ReplyTarget;
   quotedPresentationRef: PresentationMessageRef | null;
-  priority: "normal" | "attention";
-  replyRequired: boolean;
+  quotedVoiceDocumentRef: VoiceDocumentMessageRef | null;
+  messageMode: ComposerMessageMode;
 };
 
 type FailedSendComposerRestoreActions = Pick<
@@ -24,8 +25,8 @@ type FailedSendComposerRestoreActions = Pick<
   | "setToText"
   | "setReplyTarget"
   | "setQuotedPresentationRef"
-  | "setPriority"
-  | "setReplyRequired"
+  | "setQuotedVoiceDocumentRef"
+  | "setMessageMode"
   | "upsertDraft"
 >;
 
@@ -48,8 +49,8 @@ export function restoreFailedSendComposerState(
     restoreActions.setComposerFiles(snapshot.composerFiles);
     restoreActions.setReplyTarget(snapshot.replyTarget);
     restoreActions.setQuotedPresentationRef(snapshot.quotedPresentationRef);
-    restoreActions.setPriority(snapshot.priority);
-    restoreActions.setReplyRequired(snapshot.replyRequired);
+    restoreActions.setQuotedVoiceDocumentRef(snapshot.quotedVoiceDocumentRef);
+    restoreActions.setMessageMode(snapshot.messageMode);
     restoreActions.setToText(snapshot.toText);
     return;
   }
@@ -60,8 +61,8 @@ export function restoreFailedSendComposerState(
     toText: snapshot.toText,
     replyTarget: snapshot.replyTarget,
     quotedPresentationRef: snapshot.quotedPresentationRef,
-    priority: snapshot.priority,
-    replyRequired: snapshot.replyRequired,
+    quotedVoiceDocumentRef: snapshot.quotedVoiceDocumentRef,
+    messageMode: snapshot.messageMode,
   }));
 }
 

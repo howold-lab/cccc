@@ -1,7 +1,14 @@
 // ChatComposer renders the chat message composer.
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Actor, GroupMeta, LedgerEvent, PresentationMessageRef, ReplyTarget } from "../../types";
+import {
+  Actor,
+  GroupMeta,
+  LedgerEvent,
+  PresentationMessageRef,
+  ReplyTarget,
+  VoiceDocumentMessageRef,
+} from "../../types";
 import { classNames } from "../../utils/classNames";
 import {
   AttachmentIcon,
@@ -9,15 +16,16 @@ import {
   ChevronDownIcon,
   ReplyIcon,
   CloseIcon,
-  AlertIcon,
+  InboxIcon,
   SparklesIcon,
 } from "../../components/Icons";
 import { getPresentationRefChipLabel } from "../../utils/presentationRefs";
+import { getVoiceDocumentRefLabel } from "../../utils/voiceDocumentRefs";
 import { useTranslation } from "react-i18next";
 import {
-  VoiceSecretaryComposerControl,
+  LazyVoiceSecretaryComposerControl,
   type VoiceSecretaryCaptureMode,
-} from "./VoiceSecretaryComposerControl";
+} from "./LazyVoiceSecretaryComposerControl";
 import { SlashCommandMenu } from "./SlashCommandMenu";
 import { useGroupStore } from "../../stores";
 import {
@@ -25,7 +33,7 @@ import {
   getVisibleSlashCommandPage,
   type SlashCommandItem,
 } from "../../utils/slashCommands";
-import { getComposerActionVisibility, getComposerCanSend } from "./chatComposerActions";
+import { getComposerCanSend, hasConcreteReplyRecipients } from "./chatComposerActions";
 import { ComposerFilePreview } from "./ComposerFilePreview";
 import { getMentionMenuLeft, getMentionTriggerX } from "./mentionMenuPosition";
 import { ChatMentionMenu } from "./ChatMentionMenu";
@@ -53,6 +61,7 @@ import {
   readConsumedSuggestedUserMessageIds,
 } from "../../utils/suggestedUserMessage";
 import { ComposerRecipientsRow } from "./ComposerRecipientsRow";
+import { useComposerTextareaAutoResize } from "./useComposerTextareaAutoResize";
 import {
   buildComposerHistoryEntries,
   canStartComposerHistory,
@@ -61,6 +70,7 @@ import {
   startComposerHistory,
   type ComposerHistorySession,
 } from "./chatComposerHistory";
+import { normalizeReplyMessageMode, type ComposerMessageMode } from "../../stores/useComposerStore";
 
 const SLASH_COMMAND_PAGE_SIZE = 8;
 const MENTION_MENU_DESKTOP_WIDTH = 320;
@@ -115,6 +125,9 @@ export interface ChatComposerProps {
   onCancelReply: () => void;
   quotedPresentationRef: PresentationMessageRef | null;
   onClearQuotedPresentationRef: () => void;
+  quotedVoiceDocumentRef: VoiceDocumentMessageRef | null;
+  onQuoteVoiceDocumentRef: (ref: VoiceDocumentMessageRef) => void;
+  onClearQuotedVoiceDocumentRef: () => void;
 
   // Recipients
   toTokens: string[];
@@ -134,10 +147,8 @@ export interface ChatComposerProps {
   composerRef: RefObject<HTMLTextAreaElement | null>;
   composerText: string;
   setComposerText: Dispatch<SetStateAction<string>>;
-  priority: "normal" | "attention";
-  replyRequired: boolean;
-  setPriority: (priority: "normal" | "attention") => void;
-  setReplyRequired: (value: boolean) => void;
+  messageMode: ComposerMessageMode;
+  setMessageMode: (mode: ComposerMessageMode) => void;
   onSendMessage: () => void;
 
   // Mention menu
@@ -176,6 +187,9 @@ export function ChatComposer({
   onCancelReply,
   quotedPresentationRef,
   onClearQuotedPresentationRef,
+  quotedVoiceDocumentRef,
+  onQuoteVoiceDocumentRef,
+  onClearQuotedVoiceDocumentRef,
   toTokens,
   onToggleRecipient,
   remoteGroups = [],
@@ -189,10 +203,8 @@ export function ChatComposer({
   composerRef,
   composerText,
   setComposerText,
-  priority,
-  replyRequired,
-  setPriority,
-  setReplyRequired,
+  messageMode,
+  setMessageMode,
   onSendMessage,
   showMentionMenu,
   setShowMentionMenu,
@@ -209,8 +221,6 @@ export function ChatComposer({
   setComposerAgentMentionTokens,
   slashCommands,
 }: ChatComposerProps) {
-  const composerHeightRef = useRef(0);
-  const isUserInputRef = useRef(false);
   const composerHistoryRef = useRef<ComposerHistorySession | null>(null);
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -236,22 +246,20 @@ export function ChatComposer({
 
   const [rootFontScale, setRootFontScale] = useState(readRootFontScale);
   const baseComposerHeight = (isSmallScreen ? 44 : 48) * rootFontScale;
-  const maxComposerHeight = 128 * rootFontScale;
+  const desktopComposerHeight = 64 * rootFontScale;
+  const minComposerHeight = isSmallScreen
+    ? Math.max(baseComposerHeight + 6, 52)
+    : desktopComposerHeight;
+  const maxComposerHeight = isSmallScreen ? 128 * rootFontScale : desktopComposerHeight;
   const composerFontSize = (isSmallScreen ? 15 : 14) * rootFontScale;
   const composerLineHeight = (isSmallScreen ? 24 : 20) * rootFontScale;
 
-  const resizeComposer = useCallback(
-    (node: HTMLTextAreaElement) => {
-      node.style.height = "auto";
-      const nextHeight = Math.min(
-        Math.max(node.scrollHeight, baseComposerHeight),
-        maxComposerHeight,
-      );
-      node.style.height = `${nextHeight}px`;
-      composerHeightRef.current = nextHeight;
-    },
-    [baseComposerHeight, maxComposerHeight],
-  );
+  useComposerTextareaAutoResize({
+    composerRef,
+    value: composerText,
+    minHeight: minComposerHeight,
+    maxHeight: maxComposerHeight,
+  });
 
   const exitComposerHistory = useCallback(() => {
     composerHistoryRef.current = null;
@@ -307,44 +315,14 @@ export function ChatComposer({
     [composerRef, isSmallScreen],
   );
 
-  // Auto-adjust textarea height when composerText changes programmatically
-  // (e.g. mention selection). Skips when handleChange already handled resize.
   useEffect(() => {
-    if (isUserInputRef.current) {
-      isUserInputRef.current = false;
-      return;
-    }
-    const el = composerRef.current;
-    if (!el) return;
-
-    const rafId = requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        resizeComposer(el);
-      });
-    });
-
-    return () => cancelAnimationFrame(rafId);
-  }, [composerText, composerRef, resizeComposer]);
-
-  useEffect(() => {
-    const el = composerRef.current;
-    if (!el) return;
-
-    let rafId = 0;
     const observer = new MutationObserver(() => {
       setRootFontScale(readRootFontScale());
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        resizeComposer(el);
-      });
     });
 
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
-    return () => {
-      cancelAnimationFrame(rafId);
-      observer.disconnect();
-    };
-  }, [composerRef, resizeComposer]);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!showModeMenu) return;
@@ -381,6 +359,10 @@ export function ChatComposer({
   const quotedPresentationRefLabel = useMemo(
     () => (quotedPresentationRef ? getPresentationRefChipLabel(quotedPresentationRef) : ""),
     [quotedPresentationRef],
+  );
+  const quotedVoiceDocumentRefLabel = useMemo(
+    () => (quotedVoiceDocumentRef ? getVoiceDocumentRefLabel(quotedVoiceDocumentRef) : ""),
+    [quotedVoiceDocumentRef],
   );
   const slashSuggestions = useMemo(
     () => filterSlashCommands(slashCommands, composerText),
@@ -539,7 +521,6 @@ export function ChatComposer({
     if (showSuggestedUserMessage && val.trim()) {
       markSuggestedUserMessageConsumed();
     }
-    isUserInputRef.current = true;
     setComposerText(val);
     setComposerGroupMentionTokens((tokens) =>
       pruneComposerGroupMentionTokens({ text: val, tokens }),
@@ -547,12 +528,6 @@ export function ChatComposer({
     setComposerAgentMentionTokens((tokens) =>
       pruneComposerAgentMentionTokens({ text: val, tokens }),
     );
-    const target = e.target;
-    // Use requestAnimationFrame to avoid forced reflow during layout.
-    requestAnimationFrame(() => {
-      resizeComposer(target);
-    });
-
     const slashModeActive =
       val === val.trimStart() && val.startsWith("/") && !val.slice(1).includes(" ");
     // A user's `#<group>` token is a local-group agent delegation hint, not a
@@ -846,44 +821,32 @@ export function ChatComposer({
     requestAnimationFrame(() => composerRef.current?.focus());
   };
 
+  const isCrossGroup = !!destGroupId && destGroupId !== selectedGroupId;
+  const allModeOptions: Array<{ key: ComposerMessageMode; label: string; description: string }> = [
+    { key: "send", label: t("modeSend"), description: t("modeSendDesc") },
+    { key: "request_reply", label: t("modeSendReply"), description: t("modeSendReplyDesc") },
+    { key: "mail", label: t("modeMail"), description: t("modeMailDesc") },
+  ];
+  const modeOptions = replyTarget
+    ? allModeOptions.filter((option) => option.key !== "request_reply")
+    : allModeOptions;
+
+  const effectiveMessageMode: ComposerMessageMode = replyTarget
+    ? normalizeReplyMessageMode(messageMode)
+    : messageMode;
+  const activeMode = modeOptions.find((opt) => opt.key === effectiveMessageMode) || modeOptions[0];
+  const requestReplyRecipientsReady = hasConcreteReplyRecipients(
+    toTokens,
+    selectedRemoteGroupIds.length > 0,
+  );
   const canSend = getComposerCanSend({
     composerText,
     composerFilesCount: composerFiles.length,
     recipientResolutionBusy: selectedGroupActorsHydrating || recipientActorsBusy,
+    messageMode: effectiveMessageMode,
+    toTokens,
+    hasRemoteGroupSelection: selectedRemoteGroupIds.length > 0,
   });
-  const isAttention = priority === "attention";
-  const isCrossGroup = !!destGroupId && destGroupId !== selectedGroupId;
-  const actionVisibility = getComposerActionVisibility(isSmallScreen);
-
-  type MessageMode = "normal" | "attention" | "task";
-  const modeOptions: Array<{ key: MessageMode; label: string; description: string }> = [
-    { key: "normal", label: t("modeNormal"), description: t("modeNormalDesc") },
-    { key: "attention", label: t("modeImportant"), description: t("modeImportantDesc") },
-    { key: "task", label: t("modeNeedReply"), description: t("modeNeedReplyDesc") },
-  ];
-
-  const messageMode: MessageMode = replyRequired ? "task" : isAttention ? "attention" : "normal";
-  const setMessageMode = (mode: MessageMode) => {
-    if (mode === "normal") {
-      setPriority("normal");
-      setReplyRequired(false);
-      return;
-    }
-    if (mode === "attention") {
-      setPriority("attention");
-      setReplyRequired(false);
-      return;
-    }
-    setPriority("normal");
-    setReplyRequired(true);
-  };
-  const activeMode = modeOptions.find((opt) => opt.key === messageMode) || modeOptions[0];
-  const modeNotice =
-    messageMode === "task"
-      ? t("modeNoticeNeedReply")
-      : messageMode === "attention"
-        ? t("modeNoticeImportant")
-        : "";
 
   const recentChatExcerpt = useMemo(
     () => buildRecentChatExcerptForVoicePrompt(recentMessages),
@@ -893,23 +856,22 @@ export function ChatComposer({
   const composerAssistantContext = useMemo<Record<string, unknown>>(
     () => ({
       recipients: toTokens,
-      message_mode: messageMode,
-      priority,
-      reply_required: replyRequired,
+      message_mode: effectiveMessageMode,
       reply_target: replyTarget
         ? `${replyTarget.by || "unknown"}: ${String(replyTarget.text || "").slice(0, 240)}`
         : "",
       quoted_reference: quotedPresentationRef
         ? getPresentationRefChipLabel(quotedPresentationRef)
-        : "",
+        : quotedVoiceDocumentRef
+          ? `Voice document: ${getVoiceDocumentRefLabel(quotedVoiceDocumentRef)} (${quotedVoiceDocumentRef.document_path})`
+          : "",
       recent_chat_excerpt: recentChatExcerpt,
     }),
     [
-      messageMode,
-      priority,
+      effectiveMessageMode,
       quotedPresentationRef,
+      quotedVoiceDocumentRef,
       recentChatExcerpt,
-      replyRequired,
       replyTarget,
       toTokens,
     ],
@@ -950,10 +912,13 @@ export function ChatComposer({
     }
     return "Ctrl+Enter";
   }, []);
-  const sendButtonTitle = t("sendMessageWithShortcut", {
-    shortcut: sendShortcutLabel,
-    defaultValue: "Send message ({{shortcut}})",
-  });
+  const sendButtonTitle =
+    effectiveMessageMode === "request_reply" && !requestReplyRecipientsReady
+      ? t("modeSendReplyRequiresConcrete")
+      : t("sendMessageWithShortcut", {
+          shortcut: sendShortcutLabel,
+          defaultValue: "Send message ({{shortcut}})",
+        });
   const composerPlaceholder = showSuggestedUserMessage
     ? ""
     : isSmallScreen
@@ -1044,6 +1009,49 @@ export function ChatComposer({
         </div>
       )}
 
+      {quotedVoiceDocumentRef && (
+        <div
+          className={classNames(
+            "mb-2.5 flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px]",
+            isDark
+              ? "border-violet-400/12 bg-violet-500/6 text-[var(--color-text-tertiary)]"
+              : "border-violet-200/70 bg-violet-50/70 text-gray-600",
+          )}
+        >
+          <span
+            className={classNames(
+              "flex-shrink-0 font-medium",
+              isDark ? "text-violet-100/90" : "text-violet-700",
+            )}
+          >
+            {t("voiceSecretaryQuotedDocumentLabel", { defaultValue: "Quoted document" })}
+          </span>
+          <span
+            className="min-w-0 flex-1 truncate opacity-80"
+            title={quotedVoiceDocumentRef.document_path}
+          >
+            {quotedVoiceDocumentRefLabel}
+          </span>
+          <button
+            className={classNames(
+              "rounded-full p-1 transition-colors",
+              isDark
+                ? "text-[var(--color-text-tertiary)] hover:bg-white/[0.08] hover:text-[var(--color-text-primary)]"
+                : "text-gray-400 hover:bg-black/[0.06] hover:text-gray-600",
+            )}
+            onClick={onClearQuotedVoiceDocumentRef}
+            title={t("voiceSecretaryRemoveQuotedDocument", {
+              defaultValue: "Remove quoted document",
+            })}
+            aria-label={t("voiceSecretaryRemoveQuotedDocument", {
+              defaultValue: "Remove quoted document",
+            })}
+          >
+            <CloseIcon size={14} />
+          </button>
+        </div>
+      )}
+
       {/* File list */}
       {composerFiles.length > 0 && (
         <div className="mb-3 flex flex-wrap gap-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -1057,25 +1065,6 @@ export function ChatComposer({
           ))}
         </div>
       )}
-
-      {modeNotice ? (
-        <div
-          className={classNames(
-            "mb-3 rounded-lg border px-3 py-1.5 text-[11px] leading-5",
-            messageMode === "task"
-              ? isDark
-                ? "border-violet-500/30 bg-violet-500/10 text-violet-200"
-                : "border-violet-200 bg-violet-50 text-violet-700"
-              : isDark
-                ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
-                : "border-amber-200 bg-amber-50 text-amber-700",
-          )}
-          role="status"
-          aria-live="polite"
-        >
-          {modeNotice}
-        </div>
-      ) : null}
 
       <input
         ref={fileInputRef as RefObject<HTMLInputElement>}
@@ -1113,7 +1102,7 @@ export function ChatComposer({
               <div
                 className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words border-none px-4 py-3 text-transparent"
                 style={{
-                  minHeight: `${Math.max(baseComposerHeight + 6, 52)}px`,
+                  minHeight: `${minComposerHeight}px`,
                   maxHeight: `${maxComposerHeight}px`,
                   fontSize: `${composerFontSize}px`,
                   lineHeight: `${composerLineHeight}px`,
@@ -1134,7 +1123,7 @@ export function ChatComposer({
                 showSuggestedUserMessage ? "pl-11 pr-4" : "px-4",
               )}
               style={{
-                minHeight: `${Math.max(baseComposerHeight + 6, 52)}px`,
+                minHeight: `${minComposerHeight}px`,
                 maxHeight: `${maxComposerHeight}px`,
                 fontSize: `${composerFontSize}px`,
                 lineHeight: `${composerLineHeight}px`,
@@ -1228,7 +1217,7 @@ export function ChatComposer({
           {/* Row 3 — Action bar */}
           <div
             className={classNames(
-              "grid grid-cols-[2.75rem_minmax(0,1fr)_2.75rem] items-center gap-2 px-2 pb-2 pt-1 sm:flex sm:justify-between",
+              "grid grid-cols-[2.75rem_minmax(0,1fr)_2.75rem_2.75rem] items-center gap-2 px-2 pb-2 pt-1 sm:flex sm:justify-between",
             )}
           >
             <div className="contents sm:flex sm:items-center sm:gap-1.5">
@@ -1250,7 +1239,7 @@ export function ChatComposer({
               </button>
 
               <div className="min-w-0 sm:min-w-max">
-                <VoiceSecretaryComposerControl
+                <LazyVoiceSecretaryComposerControl
                   isDark={isDark}
                   selectedGroupId={selectedGroupId}
                   busy={busy}
@@ -1260,144 +1249,147 @@ export function ChatComposer({
                   onCaptureModeChange={setVoiceCaptureMode}
                   composerText={composerText}
                   composerContext={composerAssistantContext}
+                  onQuoteDocument={onQuoteVoiceDocumentRef}
                   onPromptDraft={fillPromptDraftFromSpeech}
                 />
               </div>
             </div>
 
             <div className="contents sm:flex sm:items-center sm:gap-1.5">
-              {actionVisibility.showMessageModeSelector ? (
-                <div ref={modeMenuRef} className="relative z-20">
-                  <button
-                    type="button"
-                    className={classNames(
-                      "inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-                      busy === "send" || !selectedGroupId
+              <div ref={modeMenuRef} className="relative z-20">
+                <button
+                  type="button"
+                  className={classNames(
+                    "inline-flex h-11 w-11 items-center justify-center gap-0.5 rounded-lg px-0 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60 sm:h-9 sm:w-auto sm:gap-1.5 sm:px-2.5",
+                    busy === "send" || !selectedGroupId
+                      ? isDark
+                        ? "text-[var(--color-text-tertiary)]"
+                        : "text-gray-400"
+                      : effectiveMessageMode === "request_reply"
                         ? isDark
-                          ? "text-[var(--color-text-tertiary)]"
-                          : "text-gray-400"
-                        : messageMode === "task"
+                          ? "bg-violet-500/18 text-violet-200 hover:bg-violet-500/26"
+                          : "bg-violet-100 text-violet-700 hover:bg-violet-200"
+                        : effectiveMessageMode === "mail"
                           ? isDark
-                            ? "bg-violet-500/18 text-violet-200 hover:bg-violet-500/26"
-                            : "bg-violet-100 text-violet-700 hover:bg-violet-200"
-                          : messageMode === "attention"
-                            ? isDark
-                              ? "bg-amber-500/18 text-amber-200 hover:bg-amber-500/26"
-                              : "bg-amber-100 text-amber-700 hover:bg-amber-200"
-                            : isDark
-                              ? "text-slate-200 hover:bg-white/10"
-                              : "text-gray-700 hover:bg-black/5",
-                    )}
-                    disabled={busy === "send" || !selectedGroupId}
-                    onClick={() => setShowModeMenu((v) => !v)}
-                    aria-label={t("messageType")}
-                    aria-haspopup="menu"
-                    aria-expanded={showModeMenu}
-                    title={t("messageMode", { mode: activeMode.label })}
-                  >
-                    {messageMode === "task" ? (
-                      <ReplyIcon size={13} />
-                    ) : messageMode === "attention" ? (
-                      <AlertIcon size={13} />
-                    ) : (
-                      <span className="text-[11px] font-black italic leading-none">N</span>
-                    )}
-                    <span className="hidden sm:inline">{activeMode.label}</span>
-                    <ChevronDownIcon size={12} className="opacity-70" />
-                  </button>
+                            ? "bg-sky-500/14 text-sky-200 hover:bg-sky-500/22"
+                            : "bg-sky-50 text-sky-700 hover:bg-sky-100"
+                          : isDark
+                            ? "text-slate-200 hover:bg-white/10"
+                            : "text-gray-700 hover:bg-black/5",
+                  )}
+                  disabled={busy === "send" || !selectedGroupId}
+                  onClick={() => setShowModeMenu((v) => !v)}
+                  aria-label={t("messageMode", { mode: activeMode.label })}
+                  aria-haspopup="menu"
+                  aria-expanded={showModeMenu}
+                  title={t("messageMode", { mode: activeMode.label })}
+                >
+                  {effectiveMessageMode === "request_reply" ? (
+                    <ReplyIcon size={13} />
+                  ) : effectiveMessageMode === "mail" ? (
+                    <InboxIcon size={13} />
+                  ) : (
+                    <SendIcon size={13} />
+                  )}
+                  <span className="hidden sm:inline">{activeMode.label}</span>
+                  <ChevronDownIcon size={12} className="opacity-70" />
+                </button>
 
-                  {showModeMenu && (
-                    <div
-                      className={classNames(
-                        "glass-panel absolute bottom-full right-0 mb-2 z-40 w-56 sm:w-64 rounded-2xl border p-1.5 shadow-2xl pointer-events-auto",
-                      )}
-                      role="menu"
-                      aria-label={t("messageTypeOptions")}
-                    >
-                      {modeOptions.map((opt) => {
-                        const active = messageMode === opt.key;
-                        return (
-                          <button
-                            key={opt.key}
-                            type="button"
+                {showModeMenu && (
+                  <div
+                    className={classNames(
+                      "glass-panel absolute bottom-full right-0 mb-2 z-40 w-56 sm:w-64 rounded-2xl border p-1.5 shadow-2xl pointer-events-auto",
+                    )}
+                    role="menu"
+                    aria-label={t("messageTypeOptions")}
+                  >
+                    {modeOptions.map((opt) => {
+                      const active = effectiveMessageMode === opt.key;
+                      const unavailable =
+                        opt.key === "request_reply" && !requestReplyRecipientsReady;
+                      return (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          className={classNames(
+                            "w-full rounded-xl px-3 py-2.5 text-left flex items-center gap-2.5 transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                            active
+                              ? isDark
+                                ? "bg-white/10"
+                                : "bg-black/5"
+                              : isDark
+                                ? "hover:bg-white/5"
+                                : "hover:bg-black/5",
+                          )}
+                          role="menuitemradio"
+                          aria-checked={active}
+                          disabled={unavailable}
+                          aria-disabled={unavailable}
+                          title={unavailable ? t("modeSendReplyRequiresConcrete") : opt.description}
+                          onClick={() => {
+                            if (unavailable) return;
+                            setMessageMode(opt.key);
+                            setShowModeMenu(false);
+                          }}
+                        >
+                          <span
                             className={classNames(
-                              "w-full rounded-xl px-3 py-2.5 text-left flex items-center gap-2.5 transition-colors",
-                              active
+                              "w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0",
+                              opt.key === "request_reply"
                                 ? isDark
-                                  ? "bg-white/10"
-                                  : "bg-black/5"
-                                : isDark
-                                  ? "hover:bg-white/5"
-                                  : "hover:bg-black/5",
+                                  ? "bg-violet-500/25 text-violet-200"
+                                  : "bg-violet-100 text-violet-700"
+                                : opt.key === "mail"
+                                  ? isDark
+                                    ? "bg-sky-500/20 text-sky-200"
+                                    : "bg-sky-50 text-sky-700"
+                                  : isDark
+                                    ? "bg-slate-700 text-slate-200"
+                                    : "bg-gray-100 text-gray-700",
                             )}
-                            role="menuitemradio"
-                            aria-checked={active}
-                            onClick={() => {
-                              setMessageMode(opt.key);
-                              setShowModeMenu(false);
-                            }}
                           >
+                            {opt.key === "request_reply" ? (
+                              <ReplyIcon size={13} />
+                            ) : opt.key === "mail" ? (
+                              <InboxIcon size={13} />
+                            ) : (
+                              <SendIcon size={13} />
+                            )}
+                          </span>
+                          <span className="min-w-0 flex-1">
                             <span
                               className={classNames(
-                                "w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0",
-                                opt.key === "task"
-                                  ? isDark
-                                    ? "bg-violet-500/25 text-violet-200"
-                                    : "bg-violet-100 text-violet-700"
-                                  : opt.key === "attention"
-                                    ? isDark
-                                      ? "bg-amber-500/25 text-amber-200"
-                                      : "bg-amber-100 text-amber-700"
-                                    : isDark
-                                      ? "bg-slate-700 text-slate-200"
-                                      : "bg-gray-100 text-gray-700",
+                                "block text-sm font-semibold",
+                                isDark ? "text-slate-100" : "text-gray-900",
                               )}
                             >
-                              {opt.key === "task" ? (
-                                <ReplyIcon size={13} />
-                              ) : opt.key === "attention" ? (
-                                <AlertIcon size={13} />
-                              ) : (
-                                <span className="text-[11px] font-black italic leading-none">
-                                  N
-                                </span>
+                              {opt.label}
+                            </span>
+                            <span
+                              className={classNames(
+                                "block text-[11px]",
+                                isDark ? "text-[var(--color-text-tertiary)]" : "text-gray-500",
                               )}
+                            >
+                              {opt.description}
                             </span>
-                            <span className="min-w-0 flex-1">
-                              <span
-                                className={classNames(
-                                  "block text-sm font-semibold",
-                                  isDark ? "text-slate-100" : "text-gray-900",
-                                )}
-                              >
-                                {opt.label}
-                              </span>
-                              <span
-                                className={classNames(
-                                  "block text-[11px]",
-                                  isDark ? "text-[var(--color-text-tertiary)]" : "text-gray-500",
-                                )}
-                              >
-                                {opt.description}
-                              </span>
+                          </span>
+                          {active && (
+                            <span
+                              className={classNames(
+                                "text-xs font-semibold",
+                                isDark ? "text-emerald-300" : "text-emerald-600",
+                              )}
+                            >
+                              ✓
                             </span>
-                            {active && (
-                              <span
-                                className={classNames(
-                                  "text-xs font-semibold",
-                                  isDark ? "text-emerald-300" : "text-emerald-600",
-                                )}
-                              >
-                                ✓
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              ) : null}
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
               <button
                 className={classNames(

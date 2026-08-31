@@ -42,7 +42,7 @@ When a group appears stuck:
 1. Check daemon health.
 2. Check group state (`active/idle/paused/stopped`).
 3. Check actor runtime status.
-4. Check message obligations (reply-required/attention ack).
+4. Check runtime delivery, Inbox read state, pending replies, and tracked tasks.
 5. Check automation and delivery policy.
 
 Useful commands:
@@ -99,8 +99,20 @@ Do not:
 ### Upgrade
 
 ```bash
-python -m pip install -U cccc-pair
+# Website-installer ownership
+cccc update
+
+# Pip ownership
+python -m pip install -U "cccc-pair>=0.4.36"
 ```
+
+Do not remove the v0.4.36 lower bound. Before a pip upgrade, run
+`cccc daemon stop` and close any
+foreground CCCC process so the executable is replaceable on every platform.
+Do not layer the website installer over a pip-owned command. To switch
+installation channels in the same directory, uninstall `cccc-pair` with pip
+first; the installer refuses `pip-v1` ownership even when
+`CCCC_ALLOW_REPLACE_EXISTING=1` is set.
 
 ### After upgrade
 
@@ -134,7 +146,10 @@ Backup `CCCC_HOME`:
 ## 8) Operational Guardrails
 
 - Keep one source of truth: decisions should be in CCCC messages.
-- Use `reply_required` for critical asks.
+- Use `message_mode=request_reply` only for a concrete recipient whose reply is
+  required; use Mail for useful but non-urgent context.
+- Mail is agent-only. Address either `user` alone or one/more agents in each
+  message; split messages instead of mixing those audiences.
 - Prefer explicit recipients over broad broadcast when scope is narrow.
 - Keep automation focused on objective reminders, not chat noise.
 
@@ -153,12 +168,11 @@ If an issue repeats:
 
 ## 10) Group Space (NotebookLM) Runbook
 
-### Enable real adapter path (opt-in)
+### Activate the provider
 
-```bash
-export CCCC_NOTEBOOKLM_REAL=1
-cccc daemon restart
-```
+Connect Google from the Notebook settings in CCCC Web. That flow stores the
+credential and provider state used by the daemon. No feature toggle or
+environment variable is required.
 
 ### Validate control plane
 
@@ -167,32 +181,24 @@ cccc space credential status
 cccc space health
 ```
 
-### Validate curated context export path
+### Validate explicit local-file ingestion
 
-After a `context_sync` update (`vision.update` / `overview.manual.update` / `task.*` / `agent.*`), check queue:
-
-```bash
-cccc space jobs list --state pending
-```
-
-Expected: a `kind=context_sync` job appears for bound groups.
-
-### Validate repo `space/` reconciliation
+Create a supported file under the attached scope and ingest it explicitly.
+The native daemon rejects paths outside that scope before any provider write.
 
 ```bash
-cccc space sync --force
+cccc space ingest --kind resource_ingest \
+  --payload '{"source_type":"file","file_path":"space/spec.md","title":"Spec"}'
 ```
 
-Expected: result reports `converged=true` and `unsynced_count=0` when provider is healthy.
+Expected: the result contains the created NotebookLM `source_id`.
 
-### Safe rollback (core workflows keep running)
+### Disconnect safely (core workflows keep running)
 
-```bash
-unset CCCC_NOTEBOOKLM_REAL
-cccc daemon restart
-```
+Use **Disconnect Google** in the Notebook settings to remove this machine's
+stored credential and disable provider access from this installation.
 
-Expected after rollback:
+Expected after disconnect:
 
 - Group Space operations may return degraded/disabled provider results.
 - Core CCCC chat/task/actor workflows continue normally.

@@ -108,19 +108,29 @@ export function shouldForceTokenLogin(): boolean {
   }
 }
 
+export function removeAuthTokenFromUrl(): void {
+  try {
+    const current = new URL(window.location.href);
+    if (!current.searchParams.has("token")) return;
+    current.searchParams.delete("token");
+    const search = current.searchParams.toString();
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${current.pathname}${search ? `?${search}` : ""}${current.hash}`,
+    );
+  } catch {
+    void 0;
+  }
+}
+
 function getAuthToken(): string | null {
   if (cachedToken !== null) return cachedToken || null;
 
   const urlParams = new URLSearchParams(window.location.search);
   const urlToken = urlParams.get("token");
   if (urlToken) {
-    cachedToken = urlToken;
-    try {
-      sessionStorage.setItem("cccc_dev_token", urlToken);
-    } catch {
-      void 0;
-    }
-    return urlToken;
+    removeAuthTokenFromUrl();
   }
 
   try {
@@ -143,24 +153,17 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 export function withAuthToken(url: string): string {
-  const token = getAuthToken();
-  if (!token) return url;
-  try {
-    const absolute = /^[a-z][a-z\d+.-]*:/i.test(url);
-    const parsed = new URL(url, window.location.origin);
-    parsed.searchParams.set("token", token);
-    return absolute ? parsed.toString() : `${parsed.pathname}${parsed.search}${parsed.hash}`;
-  } catch {
-    const sep = url.includes("?") ? "&" : "?";
-    return `${url}${sep}token=${encodeURIComponent(token)}`;
-  }
+  return url;
 }
 
 export function refreshAuthTokenInUrl(url: string): string {
   try {
     const parsed = new URL(url, window.location.href);
     if (!parsed.searchParams.has("token")) return url;
-    return withAuthToken(url);
+    if (parsed.origin !== window.location.origin) return url;
+    parsed.searchParams.delete("token");
+    const absolute = /^[a-z][a-z\d+.-]*:/i.test(url);
+    return absolute ? parsed.toString() : `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
     return url;
   }
@@ -297,12 +300,10 @@ export function clearActorsReadOnlyRequest(groupId: string): void {
 }
 
 export function clearContextRequest(groupId: string, detail?: ContextDetailLevel): void {
-  if (detail) {
-    clearSharedReadRequest(contextRequestKey(groupId, detail));
-    return;
+  const details = detail ? [detail] : (["overview", "summary", "full"] as const);
+  for (const level of details) {
+    clearSharedReadRequest(contextRequestKey(groupId, level));
   }
-  clearSharedReadRequest(contextRequestKey(groupId, "summary"));
-  clearSharedReadRequest(contextRequestKey(groupId, "full"));
 }
 
 export function invalidateContextRead(groupId: string): void {
@@ -532,7 +533,7 @@ export function normalizeContext(raw: unknown): GroupContext {
   const coordination = asRecord(record.coordination) ?? {};
   const tasks = Array.isArray(coordination.tasks)
     ? coordination.tasks.map((item) => normalizeTask(item)).filter((item): item is Task => !!item)
-    : [];
+    : undefined;
   const agentStates = Array.isArray(record.agent_states)
     ? record.agent_states
         .map((item) => normalizeAgentState(item))
@@ -544,13 +545,14 @@ export function normalizeContext(raw: unknown): GroupContext {
         .filter((item): item is ActorRuntimeState => !!item)
     : [];
   const briefRecord = asRecord(coordination.brief);
-  const summary = normalizeTaskSummary(record.tasks_summary, tasks);
+  const summary = normalizeTaskSummary(record.tasks_summary, tasks || []);
   const boardRecord = asRecord(record.board);
   const attentionRecord = asRecord(record.attention);
   const metaRecord = asRecord(record.meta);
 
   return {
     version: asString(record.version).trim() || undefined,
+    tasks_version: asString(record.tasks_version).trim() || undefined,
     coordination: {
       brief: briefRecord
         ? {

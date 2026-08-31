@@ -1,9 +1,10 @@
 #![cfg(unix)]
+mod auth_support;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cccc_contracts::{Actor, Event};
-use cccc_core::{GroupStore, HomeLayout, ledger};
+use cccc_core::{GroupStore, HomeLayout, context::ContextStore, ledger};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -25,6 +26,7 @@ async fn query_flags_change_final_actor_ledger_and_context_responses() {
     message.by = "user".into();
     message.data.insert("to".into(), json!(["internal-helper"]));
     message.data.insert("text".into(), json!("hello"));
+    message.data.insert("message_mode".into(), json!("mail"));
     ledger::append(&store.ledger_path(&group_id).expect("ledger"), &message).expect("append");
 
     let plain_actors = get(&home, format!("/api/v1/groups/{group_id}/actors")).await;
@@ -41,13 +43,25 @@ async fn query_flags_change_final_actor_ledger_and_context_responses() {
     let status_tail = get(
         &home,
         format!(
-            "/api/v1/groups/{group_id}/ledger/tail?kind=chat&with_read_status=true&with_ack_status=true&with_obligation_status=true"
+            "/api/v1/groups/{group_id}/ledger/tail?kind=chat&with_read_status=true&with_obligation_status=true"
         ),
     )
     .await;
     let summary = get(
         &home,
         format!("/api/v1/groups/{group_id}/context?detail=summary&fresh=true"),
+    )
+    .await;
+    let overview = get(
+        &home,
+        format!("/api/v1/groups/{group_id}/context?detail=overview"),
+    )
+    .await;
+    let task_pages = get(
+        &home,
+        format!(
+            "/api/v1/groups/{group_id}/tasks?statuses=planned,active,done&limit=30&include_index=true"
+        ),
     )
     .await;
     let full = get(
@@ -75,9 +89,37 @@ async fn query_flags_change_final_actor_ledger_and_context_responses() {
     assert!(status_tail["result"]["events"][0]["_read_status"].is_object());
     assert!(status_tail["result"]["events"][0]["_obligation_status"].is_object());
     assert!(summary["result"].get("board").is_none());
+    assert!(overview["result"]["coordination"].get("tasks").is_none());
+    assert!(overview["result"].get("tasks_summary").is_none());
+    assert_eq!(overview["result"]["tasks_version"], "tasksv:1");
+    assert_eq!(task_pages["result"]["pages"]["planned"]["count"], 1);
+    assert_eq!(task_pages["result"]["task_index"][0]["id"], "T001");
     assert!(full["result"]["board"].is_object());
     assert_eq!(invalid["status"], 400);
     assert_eq!(invalid["body"]["error"]["code"], "invalid_boolean");
+}
+
+#[tokio::test]
+async fn missing_group_reads_return_a_resource_error_instead_of_empty_state() {
+    let (_temp, home, _group_id, daemon) = running_home().await;
+    for path in [
+        "/api/v1/groups/g_missing/ledger/tail?kind=chat",
+        "/api/v1/groups/g_missing/ledger/search?kind=chat&q=x",
+        "/api/v1/groups/g_missing/ledger/window?kind=chat&center=event-missing",
+        "/api/v1/groups/g_missing/events/event-missing/read_status",
+        "/api/v1/groups/g_missing/context?detail=summary",
+        "/api/v1/groups/g_missing/context?detail=overview",
+        "/api/v1/groups/g_missing/context?detail=full",
+        "/api/v1/groups/g_missing/tasks",
+    ] {
+        let response = get(&home, path.into()).await;
+        assert_eq!(response["status"], 404, "{path}");
+        assert_eq!(
+            response["body"]["error"]["code"], "group_not_found",
+            "{path}"
+        );
+    }
+    daemon.0.abort();
 }
 
 fn actor<'a>(payload: &'a Value, id: &str) -> Option<&'a Value> {
@@ -90,7 +132,7 @@ fn actor<'a>(payload: &'a Value, id: &str) -> Option<&'a Value> {
 async fn get(home: &HomeLayout, path: String) -> Value {
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        cccc_web::app(home.clone())
+        auth_support::authenticated_app(home.clone())
             .oneshot(Request::get(&path).body(Body::empty()).expect("request")),
     )
     .await
@@ -120,6 +162,19 @@ async fn running_home() -> (tempfile::TempDir, HomeLayout, String, DaemonGuard) 
         .expect("store")
         .create("query semantics", "")
         .expect("group");
+    ContextStore::new(home.clone())
+        .expect("contexts")
+        .sync(
+            &group.group_id,
+            &[json!({"op":"task.create","title":"route task"})
+                .as_object()
+                .cloned()
+                .expect("task op")],
+            None,
+            "user",
+            false,
+        )
+        .expect("seed task");
     let daemon_home = home.clone();
     let daemon = tokio::spawn(async move {
         cccc_daemon::run(daemon_home).await.expect("daemon");

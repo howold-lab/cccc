@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  CircleUserRound,
   Clock3,
   Check,
   Clipboard,
@@ -16,6 +17,8 @@ import {
   Copy,
   EllipsisVertical,
   File,
+  FileCheck,
+  FileText,
   Folder,
   Globe,
   GripVertical,
@@ -28,6 +31,7 @@ import {
   Menu,
   Mic,
   MessageSquare,
+  MessageSquareQuote,
   MessageSquareText,
   Minimize2,
   Monitor,
@@ -140,10 +144,14 @@ export const CameraIcon = createIcon(Camera, 1.9);
 export const ReplyIcon = createIcon(Reply);
 export const PowerIcon = createIcon(Power);
 export const AlertIcon = createIcon(CircleAlert, 2);
+export const AccountIcon = createIcon(CircleUserRound, 1.8);
 export const InfoIcon = createIcon(Info, 2);
 export const ImageIcon = createIcon(Image);
 export const FileIcon = createIcon(File);
+export const FileCheckIcon = createIcon(FileCheck, 1.9);
+export const FileTextIcon = createIcon(FileText, 1.8);
 export const MessageSquareIcon = createIcon(MessageSquare);
+export const MessageSquareQuoteIcon = createIcon(MessageSquareQuote);
 export const MessageSquareTextIcon = createIcon(MessageSquareText);
 export const BellIcon = createIcon(Bell);
 export const SparklesIcon = createIcon(Sparkles);

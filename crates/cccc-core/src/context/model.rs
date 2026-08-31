@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 pub struct ContextDoc {
     pub v: u8,
     pub revision: u64,
+    #[serde(default)]
+    pub tasks_revision: u64,
     pub updated_at: String,
     #[serde(default)]
     pub coordination: Map<String, Value>,
@@ -14,8 +16,6 @@ pub struct ContextDoc {
     pub tasks: Vec<Map<String, Value>>,
     #[serde(default)]
     pub agent_states: BTreeMap<String, Map<String, Value>>,
-    #[serde(default)]
-    pub actor_notes: BTreeMap<String, Value>,
     #[serde(default)]
     pub meta: Map<String, Value>,
 }
@@ -25,11 +25,11 @@ impl Default for ContextDoc {
         Self {
             v: 3,
             revision: 0,
+            tasks_revision: 0,
             updated_at: utc_now(),
             coordination: Map::new(),
             tasks: Vec::new(),
             agent_states: BTreeMap::new(),
-            actor_notes: BTreeMap::new(),
             meta: Map::new(),
         }
     }

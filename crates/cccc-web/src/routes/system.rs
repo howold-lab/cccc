@@ -1,16 +1,17 @@
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::api::{ApiResult, call, object, success};
+use crate::auth::Principal;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/ping", get(ping))
         .route("/api/v1/health", get(health))
-        .route("/api/v1/ready", get(health))
+        .route("/api/v1/ready", get(ready))
         .route("/api/v1/runtimes", get(runtimes))
         .route(
             "/api/v1/observability",
@@ -28,8 +29,21 @@ struct PingQuery {
     include_home: bool,
 }
 
-async fn ping(State(state): State<AppState>, Query(query): Query<PingQuery>) -> ApiResult {
+#[derive(serde::Deserialize)]
+struct ReadyQuery {
+    #[serde(default)]
+    challenge: String,
+}
+
+async fn ping(
+    State(state): State<AppState>,
+    Query(query): Query<PingQuery>,
+    principal: Option<Extension<Principal>>,
+) -> ApiResult {
     let response = call(&state, "ping", Default::default()).await?;
+    if principal.is_none() {
+        return Ok(success(json!({"status":"ok"})));
+    }
     let daemon = response.0["result"].clone();
     let mut result = json!({
         "daemon": daemon,
@@ -39,19 +53,39 @@ async fn ping(State(state): State<AppState>, Query(query): Query<PingQuery>) -> 
             "read_only": state.web_mode.is_read_only()
         }
     });
-    if query.include_home {
+    if query.include_home && principal.is_some_and(|value| value.is_admin) {
         result["home"] = json!(state.home.root().to_string_lossy());
     }
     Ok(success(result))
 }
-async fn health(State(state): State<AppState>) -> ApiResult {
+async fn health(
+    State(state): State<AppState>,
+    principal: Option<Extension<Principal>>,
+) -> ApiResult {
     let mut response = call(&state, "ping", Default::default()).await?;
+    if principal.is_none() {
+        return Ok(success(json!({"status":"ok"})));
+    }
     response
         .0
         .get_mut("result")
         .and_then(Value::as_object_mut)
         .map(|value| value.insert("status".into(), Value::String("ok".into())));
     Ok(response)
+}
+async fn ready(
+    State(state): State<AppState>,
+    Query(query): Query<ReadyQuery>,
+    principal: Option<Extension<Principal>>,
+) -> Json<Value> {
+    if principal.is_some() {
+        return success(json!({"web":"ready","runtime_id":state.runtime_id}));
+    }
+    let proof = cccc_core::web_runtime_proof::sign(&state.runtime_proof_key, &query.challenge);
+    success(match proof {
+        Some(proof) => json!({"web":"ready","runtime_id":state.runtime_id,"proof":proof}),
+        None => json!({"web":"ready"}),
+    })
 }
 async fn runtimes() -> Json<Value> {
     let runtimes = cccc_runtime::detect_runtimes();

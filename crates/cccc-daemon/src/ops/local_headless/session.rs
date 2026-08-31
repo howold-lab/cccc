@@ -1,4 +1,4 @@
-use super::{Session, Turn, output, poisoned, protocol};
+use super::{ActiveTurn, Session, Turn, TurnOutputState, output, poisoned, protocol};
 use cccc_contracts::{ActorRuntime, utc_now};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, BufReader, Write};
@@ -19,7 +19,12 @@ impl Session {
     }
 
     pub(super) fn stop(&self) {
+        self.stop_after_invalidate(|| {});
+    }
+
+    pub(super) fn stop_after_invalidate(&self, after_invalidate: impl FnOnce()) {
         let first_stop = !self.stopped.swap(true, Ordering::AcqRel);
+        after_invalidate();
         if let Ok(mut child) = self.child.lock() {
             if child.try_wait().ok().flatten().is_none() {
                 let _ = child.kill();
@@ -106,11 +111,53 @@ pub(super) fn spawn_reader(
                     output::handle_message(&session, message);
                 }
             }
-            session.stopped.store(true, Ordering::Release);
+            let unexpected_exit = !session.stopped.swap(true, Ordering::AcqRel);
+            if unexpected_exit {
+                invalidate_pending_claude_resume(
+                    &session,
+                    "claude headless resume process exited before completing a turn",
+                );
+            }
             session.set_status("stopped", None);
             session.completion.1.notify_all();
         })?;
     Ok(())
+}
+
+pub(super) fn invalidate_pending_claude_resume(session: &Session, error: &str) {
+    if session.runtime != ActorRuntime::Claude {
+        return;
+    }
+    let provider_session_id = session
+        .resumed_provider_session_id
+        .lock()
+        .ok()
+        .map(|mut session_id| std::mem::take(&mut *session_id))
+        .unwrap_or_default();
+    if provider_session_id.is_empty() {
+        return;
+    }
+    if let Err(persist_error) = super::super::runtime_session::mark_resume_failed(
+        &session.home,
+        &session.group_id,
+        &session.actor_id,
+        error,
+    ) {
+        tracing::warn!(
+            error = %persist_error,
+            group_id = %session.group_id,
+            actor_id = %session.actor_id,
+            "failed to invalidate rejected Claude resume metadata"
+        );
+    }
+    output::emit(
+        session,
+        "headless.session.resume_failed",
+        serde_json::Map::from_iter([
+            ("provider_session_id".into(), json!(provider_session_id)),
+            ("error".into(), json!(error)),
+        ]),
+    );
 }
 
 pub(super) fn spawn_stderr(
@@ -142,9 +189,17 @@ pub(super) fn spawn_worker(session: Arc<Session>, receiver: Receiver<Turn>) -> i
                     .lock()
                     .map(|value| *value)
                     .unwrap_or_default();
-                if let Ok(mut active_event_id) = session.active_event_id.lock() {
-                    active_event_id.clone_from(&turn.event_id);
-                }
+                let Ok(mut active_turn) = session.active_turn.lock() else {
+                    break;
+                };
+                *active_turn = Some(ActiveTurn {
+                    event_id: turn.event_id.clone(),
+                    turn_id: String::new(),
+                    control_kind: turn.control_kind.clone(),
+                    output_state: TurnOutputState::Buffering,
+                    pending_messages: Vec::new(),
+                });
+                drop(active_turn);
                 session.set_status(
                     "working",
                     Some(turn.event_id.clone()).filter(|id| !id.is_empty()),
@@ -155,20 +210,26 @@ pub(super) fn spawn_worker(session: Arc<Session>, receiver: Receiver<Turn>) -> i
                     protocol::submit_claude(&session, &turn)
                 };
                 let Ok(turn_id) = result else {
+                    if let Ok(mut active_turn) = session.active_turn.lock() {
+                        active_turn.take();
+                    }
                     session.set_status("waiting", None);
                     output::emit_turn(&session, &turn, "headless.turn.failed", "");
                     continue;
                 };
+                if let Ok(mut active_turn) = session.active_turn.lock()
+                    && let Some(active_turn) = active_turn.as_mut()
+                {
+                    active_turn.turn_id.clone_from(&turn_id);
+                }
                 if let Ok(mut state) = session.status.lock()
                     && state.status == "working"
                 {
                     state.task_id = Some(turn_id.clone());
                     state.updated_at = utc_now();
                 }
-                if !turn.control {
-                    output::mark_read(&session, &turn);
-                }
                 output::emit_turn(&session, &turn, "headless.turn.started", &turn_id);
+                output::announce_turn(&session);
                 let mut completed = match session.completion.0.lock() {
                     Ok(value) => value,
                     Err(_) => break,

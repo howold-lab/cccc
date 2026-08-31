@@ -45,13 +45,17 @@ pub fn valid_id(id: &str) -> bool {
 
 pub fn cookie(token: &str, secure: bool) -> String {
     let policy = if secure {
-        "SameSite=None; Secure"
+        "SameSite=Lax; Secure"
     } else {
         "SameSite=Lax"
     };
     let encoded = utf8_percent_encode(token, COOKIE_VALUE_ENCODE_SET);
-    format!("cccc_access_token={encoded}; Path=/; HttpOnly; {policy}")
+    format!(
+        "cccc_access_token={encoded}; Path=/; HttpOnly; Max-Age={WEB_SESSION_MAX_AGE_SECONDS}; {policy}"
+    )
 }
+
+const WEB_SESSION_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 const COOKIE_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -62,10 +66,11 @@ const COOKIE_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'%');
 
 pub fn server_error(error_value: impl std::fmt::Display) -> Response {
+    tracing::error!(error = %error_value, "failed to access CCCC access token store");
     error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "access_token_store_error",
-        &error_value.to_string(),
+        "access token store is unavailable",
     )
 }
 
@@ -100,5 +105,8 @@ mod tests {
         let value = cookie("token;含 空格", false);
         assert!(value.starts_with("cccc_access_token=token%3B"));
         assert!(!value.contains("含 空格"));
+        assert!(value.contains("HttpOnly"));
+        assert!(value.contains("Max-Age=2592000"));
+        assert!(value.contains("SameSite=Lax"));
     }
 }

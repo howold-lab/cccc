@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 mod connection;
 use connection::Connection;
+pub use connection::DaemonStream;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -36,7 +37,6 @@ pub struct DaemonClient {
 #[derive(Debug, Default)]
 struct ClientShared {
     address: RwLock<Option<DaemonAddress>>,
-    pool: Mutex<Vec<Connection>>,
 }
 
 #[derive(Debug)]
@@ -84,6 +84,27 @@ impl DaemonClient {
         }
     }
 
+    /// Opens a dedicated connection and preserves it after the response line
+    /// for protocol operations that upgrade to a raw stream.
+    pub async fn upgrade(
+        &self,
+        request: &DaemonRequest,
+    ) -> Result<(DaemonResponse, DaemonStream), ClientError> {
+        let exchange_started = AtomicBool::new(false);
+        match tokio::time::timeout(self.timeout, self.upgrade_inner(request, &exchange_started))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) if exchange_started.load(Ordering::Acquire) => {
+                Err(ClientError::OutcomeUnknown {
+                    op: request.op.clone(),
+                    message: "request timed out after exchange started".into(),
+                })
+            }
+            Err(_) => Err(ClientError::Timeout),
+        }
+    }
+
     async fn call_inner(
         &self,
         request: &DaemonRequest,
@@ -110,28 +131,57 @@ impl DaemonClient {
         }
     }
 
-    async fn call_once(
+    async fn upgrade_inner(
         &self,
         request: &DaemonRequest,
         exchange_started: &AtomicBool,
-    ) -> Result<DaemonResponse, CallFailure> {
-        let mut connection = loop {
-            match self.shared.pool.lock().await.pop() {
-                Some(connection) if connection.is_usable() => break connection,
-                Some(_) => continue,
-                None => break self.connect().await.map_err(CallFailure::Connect)?,
+    ) -> Result<(DaemonResponse, DaemonStream), ClientError> {
+        match self.upgrade_once(request, exchange_started).await {
+            Err(CallFailure::Connect(ClientError::Transport(_))) => {
+                self.invalidate_transport().await;
+                match self.upgrade_once(request, exchange_started).await {
+                    Err(CallFailure::Exchange(error)) => {
+                        self.invalidate_transport().await;
+                        Err(outcome_unknown(request, error))
+                    }
+                    Err(error) => Err(error.into_client_error()),
+                    Ok(result) => Ok(result),
+                }
             }
-        };
+            Err(CallFailure::Exchange(error)) => {
+                self.invalidate_transport().await;
+                Err(outcome_unknown(request, error))
+            }
+            Err(error) => Err(error.into_client_error()),
+            Ok(result) => Ok(result),
+        }
+    }
+
+    async fn upgrade_once(
+        &self,
+        request: &DaemonRequest,
+        exchange_started: &AtomicBool,
+    ) -> Result<(DaemonResponse, DaemonStream), CallFailure> {
+        let mut connection = self.connect().await.map_err(CallFailure::Connect)?;
         exchange_started.store(true, Ordering::Release);
         let response = connection
             .exchange(request)
             .await
             .map_err(CallFailure::Exchange)?;
-        let mut pool = self.shared.pool.lock().await;
-        if pool.len() < 8 {
-            pool.push(connection);
-        }
-        Ok(response)
+        Ok((response, DaemonStream::new(connection)))
+    }
+
+    async fn call_once(
+        &self,
+        request: &DaemonRequest,
+        exchange_started: &AtomicBool,
+    ) -> Result<DaemonResponse, CallFailure> {
+        let mut connection = self.connect().await.map_err(CallFailure::Connect)?;
+        exchange_started.store(true, Ordering::Release);
+        connection
+            .exchange(request)
+            .await
+            .map_err(CallFailure::Exchange)
     }
 
     async fn connect(&self) -> Result<Connection, ClientError> {
@@ -154,7 +204,6 @@ impl DaemonClient {
 
     async fn invalidate_transport(&self) {
         *self.shared.address.write().await = None;
-        self.shared.pool.lock().await.clear();
     }
 }
 

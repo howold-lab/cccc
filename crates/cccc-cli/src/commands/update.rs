@@ -14,6 +14,7 @@ const UNIX_INSTALLER_URL: &str = "https://chesterra.github.io/cccc/install.sh";
 const WINDOWS_INSTALLER_URL: &str = "https://chesterra.github.io/cccc/install.ps1";
 const INSTALL_MARKER: &str = ".cccc-standalone";
 const INSTALL_MARKER_VERSION: &str = "standalone-v1";
+const PIP_INSTALL_MARKER_VERSION: &str = "pip-v1";
 #[cfg(any(windows, test))]
 const WINDOWS_INSTALL_COMMAND: &str = concat!(
     "Wait-Process -Id $env:CCCC_UPDATE_PARENT_PID -ErrorAction SilentlyContinue; ",
@@ -36,7 +37,7 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     }
 
     let version = latest_channel_version(channel).await?;
-    run_installer(&install_dir, Some(&version))
+    run_installer(&install_dir, &executable, Some(&version))
 }
 
 fn effective_channel(requested: Option<ReleaseChannelArg>) -> ReleaseChannelArg {
@@ -120,24 +121,32 @@ fn standalone_install_dir(executable: &Path) -> Result<PathBuf> {
     let install_dir = executable
         .parent()
         .context("CCCC executable has no parent directory")?;
-    let owned_by_standalone_installer = std::fs::read_to_string(install_dir.join(INSTALL_MARKER))
-        .is_ok_and(|value| value.trim() == INSTALL_MARKER_VERSION);
-    if !owned_by_standalone_installer {
-        bail!(
-            "this Rust executable is managed by another installation; update it through that installer"
-        );
+    let marker = install_dir.join(INSTALL_MARKER);
+    match std::fs::read_to_string(&marker) {
+        Ok(value) if value.trim() == INSTALL_MARKER_VERSION => {}
+        Ok(value) if value.trim() == PIP_INSTALL_MARKER_VERSION => bail!(
+            "this CCCC executable is managed by pip; update it with python -m pip install --upgrade \"cccc-pair>=0.4.36\""
+        ),
+        Ok(_) => bail!(
+            "this Rust executable is managed by another installation or has an unrecognized owner; update it through that installer"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => bail!(
+            "this CCCC executable is not an owned standalone installation; update it through its package manager (for pip: python -m pip install --upgrade \"cccc-pair>=0.4.36\")"
+        ),
+        Err(error) => return Err(error).context(format!("could not read {}", marker.display())),
     }
     Ok(install_dir.to_path_buf())
 }
 
 #[cfg(not(windows))]
-fn run_installer(install_dir: &Path, version: Option<&str>) -> Result<()> {
+fn run_installer(install_dir: &Path, executable: &Path, version: Option<&str>) -> Result<()> {
     let mut command = Command::new("sh");
     command
         .arg("-c")
         .arg("curl -fsSL \"$CCCC_INSTALLER_URL\" | sh")
         .env("CCCC_INSTALLER_URL", UNIX_INSTALLER_URL)
-        .env("CCCC_INSTALL_DIR", install_dir);
+        .env("CCCC_INSTALL_DIR", install_dir)
+        .env("CCCC_TRUSTED_EXISTING_CLI", executable);
     if let Some(version) = version {
         command.env("CCCC_VERSION", version);
     }
@@ -151,7 +160,7 @@ fn run_installer(install_dir: &Path, version: Option<&str>) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn run_installer(install_dir: &Path, version: Option<&str>) -> Result<()> {
+fn run_installer(install_dir: &Path, executable: &Path, version: Option<&str>) -> Result<()> {
     let mut command = Command::new("powershell.exe");
     command
         .args([
@@ -165,6 +174,7 @@ fn run_installer(install_dir: &Path, version: Option<&str>) -> Result<()> {
         .env("CCCC_UPDATE_PARENT_PID", std::process::id().to_string())
         .env("CCCC_INSTALLER_URL", WINDOWS_INSTALLER_URL)
         .env("CCCC_INSTALL_DIR", install_dir)
+        .env("CCCC_TRUSTED_EXISTING_CLI", executable)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -193,13 +203,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn standalone_install_requires_the_installer_marker() {
+    fn standalone_self_update_requires_the_complete_ownership_marker() {
         let temp = tempfile::tempdir().expect("tempdir");
         let executable = temp
             .path()
             .join(if cfg!(windows) { "cccc.exe" } else { "cccc" });
         std::fs::write(&executable, b"binary").expect("binary");
-        assert!(standalone_install_dir(&executable).is_err());
+        let missing = standalone_install_dir(&executable).expect_err("missing marker");
+        assert!(
+            missing
+                .to_string()
+                .contains("python -m pip install --upgrade \"cccc-pair>=0.4.36\"")
+        );
 
         std::fs::write(temp.path().join(INSTALL_MARKER), b"foreign-v1\n").expect("foreign marker");
         assert!(standalone_install_dir(&executable).is_err());
@@ -213,6 +228,11 @@ mod tests {
             standalone_install_dir(&executable).expect("standalone install"),
             temp.path()
         );
+
+        std::fs::write(temp.path().join(INSTALL_MARKER), b"pip-v1\n").expect("pip marker");
+        let pip_owned = standalone_install_dir(&executable)
+            .expect_err("pip ownership must override a stale standalone marker");
+        assert!(pip_owned.to_string().contains("managed by pip"));
     }
 
     #[test]

@@ -12,6 +12,8 @@ use super::group_bridge::{ensure_access, required};
 use super::group_bridge_pairing_endpoint::{
     normalize_endpoint, preferred_issuer_endpoint, requester_endpoint,
 };
+use super::group_bridge_pairing_http::{get_remote, post_remote};
+use super::group_bridge_pairing_policy::consume_pending_invite;
 use super::group_bridge_store::{BridgeStore, items, items_mut, short_id};
 use crate::AppState;
 use crate::api::{ApiError, ApiResult, success};
@@ -157,6 +159,9 @@ async fn create_request(
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::NotFound, "pairing invite not found")
                 })?;
+            if !consume_pending_invite(invite)? {
+                return Ok(None);
+            }
             let request_id = format!("preq_{}", short_id());
             let request = json!({
                 "request_id":request_id,"invite_id":invite["invite_id"],
@@ -167,10 +172,12 @@ async fn create_request(
             invite["status"] = json!("requested");
             invite["request_id"] = json!(request_id);
             items_mut(value, "requests").push(request.clone());
-            Ok(request)
+            Ok(Some(request))
         })
         .map_err(|error| ApiError::bad(error.to_string()))?;
-    Ok(success(json!({"request":request})))
+    request
+        .map(|request| success(json!({"request":request})))
+        .ok_or_else(|| ApiError::bad("pairing invite expired"))
 }
 
 async fn list_requests(
@@ -209,6 +216,9 @@ async fn approve(
             request["status"] = json!("approved");
             request["approved_by"] = body.get("approver_user_id").cloned().unwrap_or(json!(""));
             request["registration_id"] = json!(registration_id.clone());
+            request["claim_expires_at"] =
+                json!((Utc::now() + Duration::minutes(10)).to_rfc3339());
+            request["claimed_at"] = Value::Null;
             request["updated_at"] = json!(utc_now());
             let approved = request.clone();
             let registration = json!({
@@ -455,34 +465,13 @@ async fn sync_outbound(
     let (remote_response, mut error) = get_remote(&endpoint, &path).await;
     let remote_request = normalize_remote_request(&remote_response);
     let approved = remote_request["status"] == "approved";
-    let direct_token = remote_request["remote_send_token"]
-        .as_str()
-        .filter(|value| !value.is_empty());
-    let (claim, claim_error) = if error.is_empty() && approved {
-        if let Some(token) = direct_token {
-            (
-                json!({"claim":{
-                    "registration_id":remote_request["registration_id"],
-                    "credential":token,
-                    "access_level":remote_request["access_level"].as_str().unwrap_or("messages")
-                }}),
-                String::new(),
-            )
-        } else {
-            post_remote(
-                &endpoint,
-                "/api/group-bridge/pairing/requests/remote/claim",
-                &json!({
-                    "request_id":request_id,
-                    "invite_id":invite_id,
-                    "pairing_code":current["pairing_code"]
-                }),
-            )
-            .await
-        }
-    } else {
-        (json!({}), String::new())
-    };
+    let (claim, claim_error) = super::group_bridge_outbound_claim::claim_approved(
+        &endpoint,
+        &current,
+        &remote_request,
+        error.is_empty() && approved,
+    )
+    .await;
     if !claim_error.is_empty() {
         error = claim_error;
     }
@@ -502,9 +491,11 @@ async fn sync_outbound(
             }
             if let Some(claim) = claim.get("claim") {
                 item["credential"] = claim["credential"].clone();
-                // Outbound is a pairing-flow record: its terminal state is `approved`,
-                // mirroring the Python `pairing_outbound_sync.approve_outbound_from_remote_request`
-                // contract. Routing/session liveness lives on `trust` and `registration`,
+                if let Some(item) = item.as_object_mut() {
+                    item.remove("pairing_code");
+                }
+                // Outbound is a pairing-flow record: its canonical terminal state is
+                // `approved`. Routing/session liveness lives on `trust` and `registration`,
                 // which stay `active` below — the outbound's own `status` is never read by
                 // any routing path, and `approved` is what `projectRecentOutbounds` filters
                 // out so completed requests leave the "sent requests" list.
@@ -525,6 +516,14 @@ async fn sync_outbound(
                     .and_then(|trust| trust["created_at"].as_str())
                     .map(str::to_owned)
                     .unwrap_or_else(utc_now);
+                let min_session_protocol = existing
+                    .as_ref()
+                    .filter(|trust| {
+                        trust["registration_id"] == claim["registration_id"]
+                            && trust["remote_peer_id"] == item["issuer_peer_id"]
+                    })
+                    .and_then(|trust| trust["min_session_protocol"].as_u64())
+                    .unwrap_or(1);
                 let trust = json!({
                     "trust_id":trust_id,"request_id":request_id,"group_id":local_group_id,
                     "remote_group_id":remote_group_id,
@@ -534,6 +533,7 @@ async fn sync_outbound(
                     "registration_id":claim["registration_id"],
                     "credential":claim["credential"],
                     "transport":"group_bridge_session","status":"active",
+                    "min_session_protocol":min_session_protocol,
                     "access_level":"messages","remote_access_level":claim["access_level"],
                     "created_at":created_at,"updated_at":utc_now()
                 });
@@ -685,49 +685,6 @@ fn normalize_remote_request(value: &Value) -> Value {
 fn pairing_code() -> String {
     let raw = Uuid::new_v4().simple().to_string().to_ascii_uppercase();
     format!("{}-{}", &raw[..4], &raw[4..8])
-}
-async fn post_remote(endpoint: &str, path: &str, body: &Value) -> (Value, String) {
-    let client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => return (json!({}), error.to_string()),
-    };
-    match client
-        .post(format!("{endpoint}{path}"))
-        .json(body)
-        .send()
-        .await
-    {
-        Ok(response) => parse_remote(response).await,
-        Err(error) => (json!({}), error.to_string()),
-    }
-}
-async fn get_remote(endpoint: &str, path: &str) -> (Value, String) {
-    let client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => return (json!({}), error.to_string()),
-    };
-    match client.get(format!("{endpoint}{path}")).send().await {
-        Ok(response) => parse_remote(response).await,
-        Err(error) => (json!({}), error.to_string()),
-    }
-}
-async fn parse_remote(response: reqwest::Response) -> (Value, String) {
-    let status = response.status();
-    match response.json::<Value>().await {
-        Ok(value) if status.is_success() => {
-            (value.get("result").cloned().unwrap_or(value), String::new())
-        }
-        Ok(value) => (json!({}), value.to_string()),
-        Err(error) => (json!({}), error.to_string()),
-    }
 }
 fn state_error(error: io::Error) -> ApiError {
     match error.kind() {

@@ -1,7 +1,7 @@
 import { memo, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { measureElement as measureVirtualElement, useVirtualizer } from "@tanstack/react-virtual";
 import { useTranslation } from "react-i18next";
-import { ArrowDownIcon, MessageSquareTextIcon } from "./Icons";
+import { ArrowDownIcon } from "./Icons";
 import { getChatTailMutationSnapshot, getChatTailSnapshot } from "../utils/chatAutoFollow";
 import {
   CHAT_SCROLL_SNAPSHOT_COORDINATE_VERSION,
@@ -12,11 +12,9 @@ import {
   getStableMessageKey,
   isVirtualizedScrollNearEnd,
   shouldAutoScrollToBottom,
-  shouldApplyExternalForceStickToBottom,
   shouldDetachChatFollowOnScroll,
   shouldNotifyScrollChange,
   shouldPromoteScrollToFollow,
-  shouldRunScheduledBottomScroll,
   shouldUseVirtualizedMessageList,
   VIRTUAL_OVERSCAN_ROWS,
   wasAtBottomBeforeContentChange,
@@ -33,7 +31,7 @@ import type { VirtualMessageListProps } from "./virtualMessageList/types";
 import { useReplyTargetNavigation } from "./virtualMessageList/useReplyTargetNavigation";
 import { MessageRows } from "./virtualMessageList/MessageRows";
 import { useVirtualScrollState } from "./virtualMessageList/useVirtualScrollState";
-import { useScrollAnchorRestoration } from "./virtualMessageList/useScrollAnchorRestoration";
+import { useScrollAnchorRestoration as useAnchorRestoration } from "./virtualMessageList/useScrollAnchorRestoration";
 import { useInitialMessageScroll } from "./virtualMessageList/useInitialMessageScroll";
 import { useMessageTailAutoFollow } from "./virtualMessageList/useMessageTailAutoFollow";
 import { cacheMessageRowHeight } from "./virtualMessageList/rowHeightCache";
@@ -41,6 +39,14 @@ import {
   getMessageAnchorOffset,
   getScrollOffsetForMessageAnchor,
 } from "./virtualMessageListAnchorRestore";
+import { useSendScrollRequestLifecycle } from "./virtualMessageList/useSendScrollRequestLifecycle";
+import { useBottomScrollController } from "./virtualMessageList/useBottomScrollController";
+import {
+  useForcedBottomFollow,
+  useForcedBottomFollowKeyboardCancel as useBottomFollowKeyCancel,
+} from "./virtualMessageList/useForcedBottomFollow";
+import { useViewChangeAutoFollow } from "./virtualMessageList/useViewChangeAutoFollow";
+import { VirtualMessageListEmptyState } from "./virtualMessageList/VirtualMessageListEmptyState";
 
 export type { VirtualMessageListProps } from "./virtualMessageList/types";
 
@@ -56,7 +62,8 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   groupId,
   groupLabelById,
   webModelDeliveryStatusByEventId,
-  viewKey: _viewKey,
+  viewKey,
+  followOnViewChangeKey,
   initialScrollTargetId,
   initialScrollAnchorId,
   initialScrollAnchorOffsetPx,
@@ -78,9 +85,11 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   chatUnreadCount,
   onScrollChange,
   onScrollSnapshot,
-  forceStickToBottomToken = 0,
+  sendScrollRequest,
+  onSendScrollRequestConsumed,
   isLoadingHistory = false,
   hasMoreHistory = true,
+  isFilteredEmpty = false,
   onLoadMore,
   resetKey,
 }: VirtualMessageListInnerProps) {
@@ -101,6 +110,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   );
   const shouldVirtualize = shouldUseVirtualizedMessageList(displayMessages.length);
   const topInset = Math.max(0, Number(topInsetPx) || 0);
+  const ownerViewKey = String(viewKey ?? groupId);
 
   const {
     isAtBottomRef,
@@ -118,7 +128,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     lastScrollTopRef,
     previousContentSizeRef,
     isContainerResizingRef,
-    forceStickToBottomUntilRef,
+    forceStickToBottomRef,
     prevResetKeyRef,
     latestSnapshotRef,
     getEstimatedSize,
@@ -326,52 +336,29 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     captureScrollSnapshotRef.current = captureCurrentScrollSnapshot;
   }, [captureCurrentScrollSnapshot]);
 
-  const scrollToBottom = useCallback(
-    (opts?: { force?: boolean; requestToken?: number }) => {
-      const el = parentRef.current;
-      if (!el || displayMessages.length <= 0) return;
-      window.requestAnimationFrame(() => {
-        if (
-          opts?.requestToken != null &&
-          bottomScrollRequestTokenRef.current !== opts.requestToken
-        ) {
-          return;
-        }
-        if (
-          !shouldRunScheduledBottomScroll({
-            followMode: followModeRef.current,
-            isAtBottom: isAtBottomRef.current,
-            forceStickToBottom: forceStickToBottomUntilRef.current > performance.now(),
-            explicitForce: !!opts?.force,
-          })
-        ) {
-          return;
-        }
-        el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
-      });
-    },
-    [
-      bottomScrollRequestTokenRef,
-      displayMessages.length,
+  const { activeRequestRef: activeSendScrollRequestRef, scrollToBottom } =
+    useBottomScrollController({
+      parentRef,
+      messageCount: displayMessages.length,
+      groupId,
+      viewKey: ownerViewKey,
+      requestTokenRef: bottomScrollRequestTokenRef,
       followModeRef,
-      forceStickToBottomUntilRef,
       isAtBottomRef,
-    ],
-  );
+      forceStickToBottomRef,
+    });
 
-  const cancelScheduledScroll = useCallback(() => {
-    const rid = scrollRafRef.current;
-    if (rid != null) {
-      scrollRafRef.current = null;
-      window.cancelAnimationFrame(rid);
-    }
-  }, [scrollRafRef]);
-
-  const cancelPendingBottomScroll = useCallback(() => {
-    bottomScrollRequestTokenRef.current += 1;
-    forceStickToBottomUntilRef.current = 0;
-    cancelScheduledScroll();
-  }, [bottomScrollRequestTokenRef, cancelScheduledScroll, forceStickToBottomUntilRef]);
+  const {
+    cancelPendingBottomScroll,
+    cancelScheduledScroll,
+    scheduleForceStickToBottom,
+    shouldForceStickToBottom,
+  } = useForcedBottomFollow({
+    requestTokenRef: bottomScrollRequestTokenRef,
+    scrollRafRef,
+    forceStickToBottomRef,
+    scrollToBottom,
+  });
 
   const applyRestoredAnchor = useCallback(
     ({ anchorId, offsetPx }: { anchorId: string; offsetPx: number }) => {
@@ -414,7 +401,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     },
     [displayMessages, getMessageRowById, lastScrollTopRef, shouldVirtualize, virtualizer],
   );
-  const anchorRestoration = useScrollAnchorRestoration(applyRestoredAnchor);
+  const anchorRestoration = useAnchorRestoration(applyRestoredAnchor, cancelPendingBottomScroll);
 
   const topHistoryLoad = useTopHistoryLoadCoordinator({
     compensation: prependCompensation,
@@ -428,9 +415,11 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     onLoadMore,
   });
 
-  const shouldForceStickToBottom = useCallback(() => {
-    return forceStickToBottomUntilRef.current > performance.now();
-  }, [forceStickToBottomUntilRef]);
+  const cancelForcedFollowForUserScroll = useCallback(() => {
+    anchorRestoration.cancel();
+    if (shouldForceStickToBottom()) cancelPendingBottomScroll();
+  }, [anchorRestoration, cancelPendingBottomScroll, shouldForceStickToBottom]);
+  const cancelForcedFollowOnKey = useBottomFollowKeyCancel(cancelForcedFollowForUserScroll);
 
   const wasFollowingBeforeContentChange = useCallback(
     (previousContentSize?: number) => {
@@ -458,23 +447,14 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     [followModeRef, isAtBottomRef, shouldForceStickToBottom, wasFollowingBeforeContentChange],
   );
 
-  const scheduleForceStickToBottom = useCallback(() => {
-    bottomScrollRequestTokenRef.current += 1;
-    const requestToken = bottomScrollRequestTokenRef.current;
-    forceStickToBottomUntilRef.current = performance.now() + 900;
-    cancelScheduledScroll();
-    scrollRafRef.current = window.requestAnimationFrame(() => {
-      scrollRafRef.current = null;
-      if (bottomScrollRequestTokenRef.current !== requestToken) return;
-      scrollToBottom({ force: true, requestToken });
-    });
-  }, [
-    bottomScrollRequestTokenRef,
-    cancelScheduledScroll,
-    forceStickToBottomUntilRef,
-    scrollRafRef,
-    scrollToBottom,
-  ]);
+  useViewChangeAutoFollow({
+    changeKey: followOnViewChangeKey,
+    messageCount: displayMessages.length,
+    setAtBottom,
+    setFollowMode,
+    cancelAnchorRestoration: anchorRestoration.cancel,
+    scheduleForceStickToBottom,
+  });
 
   const scheduleScroll = useCallback(
     (fn: () => void) => {
@@ -542,6 +522,8 @@ const VirtualMessageListInner = function VirtualMessageListInner({
         ) {
           setFollowMode("follow");
         }
+      } else if (shouldForceStickToBottom()) {
+        scrollToBottom({ force: true, requestToken: bottomScrollRequestTokenRef.current });
       } else {
         setFollowMode("detached");
         cancelPendingBottomScroll();
@@ -571,7 +553,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
           previousTop,
           currentTop: curTop,
           atBottom,
-          isContainerResizing: isContainerResizingRef.current,
+          isContainerResizing: isContainerResizingRef.current || shouldForceStickToBottom(),
           topLoadThresholdPx: topTriggerPx,
         })
       ) {
@@ -625,7 +607,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
       // Use a hysteresis "arm/disarm" gate instead of relying on scroll direction.
       // This prevents repeated loads when the scroll position jitters near the top
       // (e.g. due to browser scroll anchoring or dynamic row measurement).
-      if (!isRestoringAnchor) {
+      if (!isRestoringAnchor && !shouldForceStickToBottom()) {
         topHistoryLoad.handleTopHistoryScroll({
           scrollTop: curTop,
           topTriggerPx,
@@ -638,6 +620,7 @@ const VirtualMessageListInner = function VirtualMessageListInner({
   }, [
     cancelPendingBottomScroll,
     anchorRestoration,
+    bottomScrollRequestTokenRef,
     chatUnreadCount,
     checkIsAtBottom,
     getAnchorSnapshot,
@@ -651,6 +634,8 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     onScrollChange,
     onScrollSnapshot,
     scrollRafScheduledRef,
+    scrollToBottom,
+    shouldForceStickToBottom,
     setAtBottom,
     setFollowMode,
     showScrollButton,
@@ -756,19 +741,19 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     onRestoreAwayFromBottom: notifyRestoredAwayFromBottom,
   });
 
-  useEffect(() => {
-    if (!forceStickToBottomToken) return;
-    if (!shouldApplyExternalForceStickToBottom({ followMode: followModeRef.current })) return;
-    setAtBottom(true);
-    setFollowMode("follow");
-    scheduleForceStickToBottom();
-  }, [
-    followModeRef,
-    forceStickToBottomToken,
-    scheduleForceStickToBottom,
+  useSendScrollRequestLifecycle({
+    activeRequestRef: activeSendScrollRequestRef,
+    groupId,
+    viewKey: ownerViewKey,
+    request: sendScrollRequest,
+    onConsumed: onSendScrollRequestConsumed,
     setAtBottom,
     setFollowMode,
-  ]);
+    requestTokenRef: bottomScrollRequestTokenRef,
+    scheduleScroll,
+    scrollToBottom,
+    cancelPendingBottomScroll,
+  });
 
   useMessageTailAutoFollow({
     messages: displayMessages,
@@ -782,8 +767,6 @@ const VirtualMessageListInner = function VirtualMessageListInner({
     scheduleScroll,
     scrollToBottom,
   });
-
-  useEffect(() => cancelScheduledScroll, [cancelScheduledScroll]);
 
   useEffect(() => {
     const scrollEl = parentRef.current;
@@ -872,51 +855,24 @@ const VirtualMessageListInner = function VirtualMessageListInner({
         }}
         className={classNames("flex-1 min-h-0 overflow-auto px-4 py-4 relative", className)}
         style={{ overflowAnchor: "none" }}
-        onWheel={anchorRestoration.cancel}
-        onPointerDown={anchorRestoration.cancel}
-        onTouchStart={anchorRestoration.cancel}
+        onKeyDownCapture={cancelForcedFollowOnKey}
+        onWheel={cancelForcedFollowForUserScroll}
+        onPointerDown={(event) => {
+          if (event.target === event.currentTarget) cancelForcedFollowForUserScroll();
+          else anchorRestoration.cancel();
+        }}
+        onTouchStart={cancelForcedFollowForUserScroll}
         onScroll={displayMessages.length > 0 ? handleScroll : undefined}
         role="log"
         aria-label="Chat messages"
       >
         {displayMessages.length === 0 ? (
-          isLoadingHistory || hasMoreHistory ? (
-            <div className="flex flex-col items-center justify-center h-full text-center pb-20">
-              <div className="glass-panel flex items-center gap-2 rounded-full px-3 py-1.5 text-[var(--color-text-secondary)] shadow-md">
-                <div className="animate-spin w-4 h-4 border-2 border-current border-t-transparent rounded-full" />
-                <span className="text-xs">
-                  {t("loadingHistory", { defaultValue: "Loading..." })}
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full text-center pb-20">
-              <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-muted)]">
-                <MessageSquareTextIcon size={28} />
-              </div>
-              <p className="text-sm font-medium text-[var(--color-text-secondary)]">
-                {t("emptyStateTitle")}
-              </p>
-              <p className="text-xs mt-1 text-[var(--color-text-tertiary)]">
-                {t("emptyStateSubtitle")}
-              </p>
-              <div className="mt-4 w-full max-w-sm space-y-2 text-left text-xs text-[var(--color-text-tertiary)]">
-                {[
-                  [t("emptyStateQuickNoteTitle"), t("emptyStateQuickNoteBody")],
-                  [t("emptyStateAskForemanTitle"), t("emptyStateAskForemanBody")],
-                  [t("emptyStateDurableTitle"), t("emptyStateDurableBody")],
-                ].map(([title, body]) => (
-                  <div
-                    key={title}
-                    className="flex gap-2 border-t border-[var(--glass-border-subtle)] pt-2"
-                  >
-                    <span className="text-[var(--color-text-secondary)]">{title}</span>
-                    <span>{body}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )
+          <VirtualMessageListEmptyState
+            isLoadingHistory={isLoadingHistory}
+            hasMoreHistory={hasMoreHistory}
+            isFilteredEmpty={isFilteredEmpty}
+            onLoadMore={onLoadMore}
+          />
         ) : (
           <>
             {showHistoryStatus && (

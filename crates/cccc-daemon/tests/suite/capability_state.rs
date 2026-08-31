@@ -4,6 +4,272 @@ use cccc_core::GroupStore;
 use cccc_core::HomeLayout;
 use serde_json::{Map, Value, json};
 
+const SELF_EVOLUTION_CAPABILITY_ID: &str = "skill:cccc:self-evolution";
+const LEGACY_SELF_EVOLUTION_CAPABILITY_ID: &str = "skill:agent_self_proposed:cccc-self-evolution";
+
+#[test]
+fn self_evolution_is_builtin_and_default_enabled_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("self evolution", "")
+        .expect("group");
+
+    let first = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    assert!(
+        first["enabled_capabilities"]
+            .as_array()
+            .expect("enabled")
+            .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+    );
+    assert!(
+        first["active_capsule_skills"]
+            .as_array()
+            .expect("skills")
+            .iter()
+            .any(|row| row["capability_id"] == SELF_EVOLUTION_CAPABILITY_ID)
+    );
+    let builtin = cccc_core::capabilities::CapabilityStore::new(home.clone())
+        .require(SELF_EVOLUTION_CAPABILITY_ID)
+        .expect("built-in self evolution");
+    assert_eq!(builtin.source, "cccc_builtin");
+
+    call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"actor_id":"user","by":"user",
+            "capability_id":SELF_EVOLUTION_CAPABILITY_ID,"scope":"group","enabled":false
+        }),
+    );
+    for _ in 0..2 {
+        let state = call(
+            &home,
+            "capability_state",
+            json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+        );
+        assert!(
+            !state["enabled_capabilities"]
+                .as_array()
+                .expect("enabled")
+                .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+        );
+    }
+}
+
+#[test]
+fn self_evolution_disable_before_first_state_read_is_durable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("early self evolution disable", "")
+        .expect("group");
+
+    call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"actor_id":"user","by":"user",
+            "capability_id":SELF_EVOLUTION_CAPABILITY_ID,"scope":"group","enabled":false
+        }),
+    );
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    assert!(
+        !state["enabled_capabilities"]
+            .as_array()
+            .expect("enabled")
+            .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+    );
+}
+
+#[test]
+fn legacy_self_evolution_binding_migrates_without_duplicate_activation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("self evolution migration", "")
+        .expect("group");
+    std::fs::create_dir_all(home.root().join("state/capabilities")).expect("state dir");
+    write_json(
+        &home.root().join("state/capabilities/state.json"),
+        json!({"v":1,"group_enabled":{(group.group_id.clone()):[LEGACY_SELF_EVOLUTION_CAPABILITY_ID]}}),
+    );
+
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    let enabled = state["enabled_capabilities"].as_array().expect("enabled");
+    assert!(enabled.contains(&json!(SELF_EVOLUTION_CAPABILITY_ID)));
+    assert!(!enabled.contains(&json!(LEGACY_SELF_EVOLUTION_CAPABILITY_ID)));
+
+    let persisted: Value =
+        cccc_core::fs::read_json(&home.root().join("state/capabilities/state.json"))
+            .expect("persisted state");
+    assert!(
+        persisted["group_removed"][&group.group_id]
+            .as_array()
+            .expect("removed")
+            .contains(&json!(LEGACY_SELF_EVOLUTION_CAPABILITY_ID))
+    );
+}
+
+#[test]
+fn legacy_self_evolution_disable_migrates_to_the_builtin_capability() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("self evolution disable migration", "")
+        .expect("group");
+    std::fs::create_dir_all(home.root().join("state/capabilities")).expect("state dir");
+    write_json(
+        &home.root().join("state/capabilities/state.json"),
+        json!({"v":1,"group_removed":{(group.group_id.clone()):[LEGACY_SELF_EVOLUTION_CAPABILITY_ID]}}),
+    );
+
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    assert!(
+        !state["enabled_capabilities"]
+            .as_array()
+            .expect("enabled")
+            .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+    );
+
+    let persisted: Value =
+        cccc_core::fs::read_json(&home.root().join("state/capabilities/state.json"))
+            .expect("persisted state");
+    assert!(
+        persisted["group_removed"][&group.group_id]
+            .as_array()
+            .expect("removed")
+            .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+    );
+}
+
+#[test]
+fn legacy_self_evolution_controls_migrate_with_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("self evolution control migration", "")
+        .expect("group");
+    let global_block = json!({
+        "reason":"global policy","by":"user",
+        "blocked_at":"2026-08-25T00:00:00Z","expires_at":""
+    });
+    let group_block = json!({
+        "reason":"group policy","by":"foreman",
+        "blocked_at":"2026-08-25T01:00:00Z","expires_at":""
+    });
+    std::fs::create_dir_all(home.root().join("state/capabilities")).expect("state dir");
+    write_json(
+        &home.root().join("state/capabilities/state.json"),
+        json!({
+            "v":1,
+            "default_group_capability_seed_versions":{(group.group_id.clone()):1},
+            "global_blocked":{LEGACY_SELF_EVOLUTION_CAPABILITY_ID:global_block.clone()},
+            "group_blocked":{
+                (group.group_id.clone()):{LEGACY_SELF_EVOLUTION_CAPABILITY_ID:group_block.clone()}
+            },
+            "actor_hidden":{
+                (group.group_id.clone()):{"user":[LEGACY_SELF_EVOLUTION_CAPABILITY_ID]}
+            }
+        }),
+    );
+
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    assert!(
+        !state["enabled_capabilities"]
+            .as_array()
+            .expect("enabled")
+            .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+    );
+    assert!(
+        state["actor_hidden_capabilities"]
+            .as_array()
+            .expect("hidden")
+            .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+    );
+
+    let persisted: Value =
+        cccc_core::fs::read_json(&home.root().join("state/capabilities/state.json"))
+            .expect("persisted state");
+    assert_eq!(
+        persisted["global_blocked"][SELF_EVOLUTION_CAPABILITY_ID],
+        global_block
+    );
+    assert_eq!(
+        persisted["group_blocked"][&group.group_id][SELF_EVOLUTION_CAPABILITY_ID],
+        group_block
+    );
+    assert!(
+        persisted["actor_hidden"][&group.group_id]["user"]
+            .as_array()
+            .expect("hidden")
+            .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+    );
+}
+
+#[test]
+fn blocked_default_self_evolution_is_not_active() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("blocked self evolution", "")
+        .expect("group");
+    call(
+        &home,
+        "capability_block",
+        json!({
+            "group_id":group.group_id,"actor_id":"user","by":"user",
+            "capability_id":SELF_EVOLUTION_CAPABILITY_ID,"scope":"group",
+            "blocked":true,"reason":"test"
+        }),
+    );
+
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    assert!(
+        !state["enabled_capabilities"]
+            .as_array()
+            .expect("enabled")
+            .contains(&json!(SELF_EVOLUTION_CAPABILITY_ID))
+    );
+    assert!(
+        !state["active_capsule_skills"]
+            .as_array()
+            .expect("skills")
+            .iter()
+            .any(|row| row["capability_id"] == SELF_EVOLUTION_CAPABILITY_ID)
+    );
+}
+
 #[test]
 fn legacy_registered_skills_are_projected_for_slash_commands() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -51,15 +317,47 @@ fn legacy_registered_skills_are_projected_for_slash_commands() {
         "capability_overview",
         json!({"kind":"skill","limit":80,"offset":0}),
     );
-    assert_eq!(overview["total_count"], 1);
-    assert_eq!(overview["kind_counts"]["skill"], 1);
-    assert_eq!(overview["items"][0]["capability_id"], "skill:test:review");
-    assert_eq!(overview["items"][0]["kind"], "skill");
-    assert_eq!(overview["items"][0]["source_id"], "github_skills_curated");
-    assert_eq!(
-        overview["items"][0]["source_uri"],
-        "https://example.test/review"
+    assert_eq!(overview["total_count"], 2);
+    assert_eq!(overview["kind_counts"]["skill"], 2);
+    let review = overview["items"]
+        .as_array()
+        .expect("overview items")
+        .iter()
+        .find(|row| row["capability_id"] == "skill:test:review")
+        .expect("legacy review skill");
+    assert_eq!(review["kind"], "skill");
+    assert_eq!(review["source_id"], "github_skills_curated");
+    assert_eq!(review["source_uri"], "https://example.test/review");
+    assert_eq!(review["autoload_candidate"], true);
+}
+
+#[test]
+fn unsupported_catalog_records_are_not_autoload_candidates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("initialize");
+    std::fs::create_dir_all(home.root().join("state/capabilities")).expect("capability state");
+    write_json(
+        &home.root().join("state/capabilities/catalog.json"),
+        json!({"records":{"skill:test:unsupported":{
+            "capability_id":"skill:test:unsupported",
+            "kind":"skill",
+            "name":"unsupported",
+            "qualification_status":"blocked",
+            "enable_supported":false
+        }}}),
     );
+
+    let overview = call(
+        &home,
+        "capability_overview",
+        json!({"query":"skill:test:unsupported"}),
+    );
+
+    assert_eq!(overview["total_count"], 1);
+    assert_eq!(overview["items"][0]["qualification_status"], "blocked");
+    assert_eq!(overview["items"][0]["enable_supported"], false);
+    assert_eq!(overview["items"][0]["autoload_candidate"], false);
 }
 
 #[test]
@@ -136,13 +434,19 @@ fn native_updates_override_legacy_capability_flags() {
         "capability_state",
         json!({"group_id":group_id,"actor_id":"user"}),
     );
-    assert_eq!(state["enabled_capabilities"], json!([]));
+    assert_eq!(
+        state["enabled_capabilities"],
+        json!([SELF_EVOLUTION_CAPABILITY_ID])
+    );
     assert_eq!(state["actor_hidden_capabilities"], json!([]));
     let stored: Value = serde_json::from_slice(
         &std::fs::read(home.root().join("state/capabilities/state.json")).expect("state"),
     )
     .expect("state JSON");
-    assert!(stored["group_enabled"].get(&group_id).is_none());
+    assert_eq!(
+        stored["group_enabled"][&group_id],
+        json!([SELF_EVOLUTION_CAPABILITY_ID])
+    );
     assert!(
         stored["global_blocked"]
             .as_object()
@@ -293,6 +597,445 @@ fn local_skill_uninstall_is_group_scoped_and_reenable_clears_marker() {
     )
     .expect("state JSON");
     assert!(!state.to_string().contains("skill:local:review"));
+}
+
+#[test]
+fn group_block_revokes_group_bindings_and_runtime_exposure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("capability block revocation", "")
+        .expect("group");
+    let capability_id = "pack:space";
+
+    call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"capability_id":capability_id,
+            "scope":"group","enabled":true,"by":"user"
+        }),
+    );
+    let runtime_path = home.root().join("state/capabilities/runtime.json");
+    std::fs::create_dir_all(runtime_path.parent().expect("runtime parent")).expect("runtime dir");
+    write_json(
+        &runtime_path,
+        json!({
+            "v":2,
+            "actor_instances":{
+                (group.group_id.clone()):{
+                    "peer-1":{
+                        (capability_id):{
+                            "artifact_id":"art_test","state":"ready"
+                        }
+                    }
+                }
+            }
+        }),
+    );
+
+    let blocked = call(
+        &home,
+        "capability_block",
+        json!({
+            "group_id":group.group_id,"capability_id":capability_id,
+            "scope":"group","blocked":true,"reason":"unsafe","by":"user"
+        }),
+    );
+
+    assert!(
+        blocked["action_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("cblk_"))
+    );
+    assert_eq!(blocked["state"], "blocked");
+    assert_eq!(blocked["blocked"], true);
+    assert_eq!(blocked["removed_bindings"], 1);
+    assert_eq!(blocked["removed_runtime_bindings"], 1);
+    assert_eq!(blocked["refresh_required"], true);
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(home.root().join("state/capabilities/state.json")).expect("state"),
+    )
+    .expect("state JSON");
+    assert!(state["group_enabled"].get(&group.group_id).is_none());
+    let runtime: Value = serde_json::from_slice(&std::fs::read(runtime_path).expect("runtime"))
+        .expect("runtime JSON");
+    assert!(
+        runtime["actor_instances"]
+            .get(&group.group_id)
+            .and_then(|actors| actors.get("peer-1"))
+            .and_then(|capabilities| capabilities.get(capability_id))
+            .is_none()
+    );
+
+    let reenable = call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"capability_id":capability_id,
+            "scope":"group","enabled":true,"by":"user"
+        }),
+    );
+    assert_eq!(reenable["state"], "blocked");
+    assert_eq!(reenable["enabled"], false);
+    assert_eq!(reenable["reason"], "blocked_by_group_policy");
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(home.root().join("state/capabilities/state.json")).expect("state"),
+    )
+    .expect("state JSON");
+    assert!(state["group_enabled"].get(&group.group_id).is_none());
+}
+
+#[test]
+fn expired_block_does_not_prevent_enable_or_effective_exposure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("expired capability block", "")
+        .expect("group");
+    let state_path = home.root().join("state/capabilities/state.json");
+    std::fs::create_dir_all(state_path.parent().expect("state parent")).expect("state dir");
+    write_json(
+        &state_path,
+        json!({
+            "v":1,
+            "group_blocked":{
+                (group.group_id.clone()):{
+                    "pack:space":{
+                        "reason":"temporary","by":"user",
+                        "blocked_at":"2000-01-01T00:00:00Z",
+                        "expires_at":"2000-01-01T00:00:01Z"
+                    }
+                }
+            }
+        }),
+    );
+
+    let enabled = call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"capability_id":"pack:space",
+            "scope":"group","enabled":true,"by":"user"
+        }),
+    );
+    assert_ne!(enabled["state"], "blocked");
+    assert_eq!(enabled["enabled"], true);
+    let effective = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    assert_eq!(
+        effective["enabled_capabilities"],
+        json!(["pack:space", SELF_EVOLUTION_CAPABILITY_ID])
+    );
+}
+
+#[test]
+fn non_object_capability_state_fails_closed_without_overwrite() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("invalid capability state", "")
+        .expect("group");
+    let state_path = home.root().join("state/capabilities/state.json");
+    std::fs::create_dir_all(state_path.parent().expect("state parent")).expect("state dir");
+    write_json(&state_path, json!([]));
+    let before = std::fs::read(&state_path).expect("state bytes");
+
+    let result = response(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"capability_id":"pack:space",
+            "scope":"group","enabled":true,"by":"user"
+        }),
+    );
+
+    assert!(!result.ok);
+    assert_eq!(std::fs::read(&state_path).expect("state bytes"), before);
+}
+
+#[test]
+fn allowlist_expected_revision_is_checked_inside_the_write_lock() {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+    use std::sync::{Arc, Barrier};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("initialize");
+    let revision = call(&home, "capability_allowlist_get", json!({}))["revision"]
+        .as_str()
+        .expect("revision")
+        .to_owned();
+    let lock_path = home
+        .root()
+        .join("config/capability-allowlist.user.yaml.lock");
+    std::fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("lock dir");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("lockfile");
+    lock.lock_exclusive().expect("hold allowlist lock");
+
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for (name, level) in [("source-a", "mounted"), ("source-b", "indexed")] {
+        let home = home.clone();
+        let revision = revision.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            response(
+                &home,
+                "capability_allowlist_update",
+                json!({
+                    "by":"user","mode":"patch","expected_revision":revision,
+                    "patch":{"defaults":{"source_level":{(name):level}}}
+                }),
+            )
+        }));
+    }
+    barrier.wait();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    FileExt::unlock(&lock).expect("release allowlist lock");
+
+    let responses = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("worker"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.iter().filter(|response| response.ok).count(), 1);
+    assert_eq!(
+        responses
+            .iter()
+            .filter_map(|response| response.error.as_ref())
+            .filter(|error| error.code == "allowlist_revision_mismatch")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn capability_state_reports_assignment_usage_and_enforces_self_inspection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"capability usage"}));
+    let group_id = created["group"]["group_id"]
+        .as_str()
+        .expect("group id")
+        .to_owned();
+    for actor_id in ["peer-a", "peer-b"] {
+        call(
+            &home,
+            "actor_add",
+            json!({"group_id":group_id,"actor_id":actor_id,"by":"user"}),
+        );
+    }
+    call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group_id,"by":"user","actor_id":"peer-a",
+            "capability_id":"pack:space","scope":"actor","enabled":true
+        }),
+    );
+
+    let state = call(
+        &home,
+        "capability_state",
+        json!({
+            "group_id":group_id,"by":"user","actor_id":"user",
+            "capability_id":"pack:space"
+        }),
+    );
+    let usage = &state["capability_usage"];
+    assert_eq!(usage["capability_id"], "pack:space");
+    assert_eq!(usage["used"], true);
+    assert_eq!(usage["group_enabled"], false);
+    assert_eq!(usage["group_actor_count"], 2);
+    assert_eq!(usage["active_actor_count"], 1);
+    assert_eq!(usage["actor_enabled"][0]["actor_id"], "peer-a");
+
+    let denied = response(
+        &home,
+        "capability_state",
+        json!({"group_id":group_id,"by":"peer-b","actor_id":"peer-a"}),
+    );
+    assert_eq!(
+        denied.error.expect("cross-actor inspection denial").code,
+        "permission_denied"
+    );
+}
+
+#[test]
+fn capability_enable_returns_the_declared_lifecycle_shape() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("capability enable receipt", "")
+        .expect("group");
+
+    let enabled = call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"capability_id":"pack:space",
+            "scope":"group","enabled":true,"by":"user"
+        }),
+    );
+    assert!(
+        enabled["action_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("cact_"))
+    );
+    assert_eq!(enabled["group_id"], group.group_id);
+    assert_eq!(enabled["actor_id"], "user");
+    assert_eq!(enabled["scope"], "group");
+    assert_eq!(enabled["enabled"], true);
+    assert_eq!(enabled["state"], "activation_pending");
+    assert_eq!(enabled["refresh_required"], true);
+
+    let disabled = call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"capability_id":"pack:space",
+            "scope":"group","enabled":false,"by":"user"
+        }),
+    );
+    assert!(
+        disabled["action_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("cact_"))
+    );
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(disabled["state"], "disabled");
+    assert_eq!(disabled["refresh_required"], true);
+}
+
+#[test]
+fn external_stdio_capability_completes_the_mcp_initialized_handshake() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("strict MCP lifecycle", "")
+        .expect("group");
+    let server = temp.path().join("strict_mcp.py");
+    std::fs::write(
+        &server,
+        r#"import json, sys
+initialized = False
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"strict","version":"1"}}}), flush=True)
+    elif method == "notifications/initialized":
+        initialized = True
+    elif method == "tools/list":
+        if not initialized:
+            print(json.dumps({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32002,"message":"not initialized"}}), flush=True)
+        else:
+            print(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{}}}]}}), flush=True)
+    elif method == "tools/call":
+        if not initialized:
+            print(json.dumps({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32002,"message":"not initialized"}}), flush=True)
+        else:
+            print(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":"ok"}]}}), flush=True)
+"#,
+    )
+    .expect("strict MCP fixture");
+    cccc_core::capabilities::CapabilityStore::new(home.clone())
+        .import_record(json!({
+            "capability_id":"mcp:test:strict","kind":"mcp_toolpack","name":"Strict MCP",
+            "source_id":"manual_import","qualification_status":"qualified",
+            "enable_supported":true,"install_mode":"command",
+            "install_spec":{"command_candidates":[
+                ["python3",server.to_string_lossy()],
+                ["python",server.to_string_lossy()]
+            ]}
+        }))
+        .expect("catalog record");
+
+    let enabled = call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group.group_id,"actor_id":"user","by":"user",
+            "capability_id":"mcp:test:strict","scope":"actor","enabled":true
+        }),
+    );
+    assert_eq!(enabled["state"], "activation_pending");
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    let tool_name = state["dynamic_tools"][0]["name"]
+        .as_str()
+        .expect("dynamic tool")
+        .to_owned();
+    let invoked = call(
+        &home,
+        "capability_tool_call",
+        json!({
+            "group_id":group.group_id,"actor_id":"user","by":"user",
+            "tool_name":tool_name,"arguments":{"value":"hello"}
+        }),
+    );
+    assert_eq!(invoked["capability_id"], "mcp:test:strict");
+    assert_eq!(invoked["result"]["content"][0]["text"], "ok");
+    let runtime: Value = serde_json::from_slice(
+        &std::fs::read(home.root().join("state/capabilities/runtime.json")).expect("runtime"),
+    )
+    .expect("runtime JSON");
+    assert_eq!(
+        runtime["actor_instances"][&group.group_id]["user"]["mcp:test:strict"]["state"],
+        "verified"
+    );
+    assert_eq!(
+        runtime["recent_success"]["mcp:test:strict"]["success_count"],
+        1
+    );
+    let after = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    assert_eq!(after["dynamic_tools"][0]["name"], tool_name);
+}
+
+#[test]
+fn target_install_is_the_only_daemon_operation_name() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("canonical capability install", "")
+        .expect("group");
+    let args = json!({"group_id":group.group_id,"by":"user"});
+
+    let canonical = response(&home, "capability_install_target", args.clone());
+    assert_eq!(
+        canonical.error.expect("missing target").code,
+        "missing_install_target"
+    );
+
+    let removed_alias = response(&home, "capability_install", args);
+    assert_eq!(
+        removed_alias.error.expect("removed alias").code,
+        "unknown_op"
+    );
 }
 
 #[test]
@@ -631,6 +1374,251 @@ fn capability_import_rejects_missing_skill_capsule_and_wrong_self_proposed_names
         "capability_import_invalid"
     );
     assert!(!home.root().join("state/capabilities/catalog.json").exists());
+}
+
+#[test]
+fn actor_start_applies_and_projects_role_profile_and_actor_autoload() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("startup capability baseline", "")
+        .expect("group");
+    let group_id = group.group_id;
+    call(
+        &home,
+        "group_stop",
+        json!({"group_id":group_id,"by":"user"}),
+    );
+    call(
+        &home,
+        "actor_profile_upsert",
+        json!({
+            "by":"user",
+            "profile":{
+                "id":"autoload-profile",
+                "name":"Autoload Profile",
+                "runtime":"web_model",
+                "runner":"headless",
+                "command":[],
+                "submit":"enter",
+                "capability_defaults":{
+                    "autoload_capabilities":["pack:space"],
+                    "default_scope":"actor"
+                }
+            }
+        }),
+    );
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"lead1",
+            "runtime":"web_model",
+            "runner":"headless",
+            "profile_id":"autoload-profile",
+            "capability_autoload":["pack:context-advanced"],
+            "by":"user"
+        }),
+    );
+
+    let before = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group_id,"actor_id":"lead1","by":"lead1"}),
+    );
+    assert_eq!(
+        before["actor_autoload_capabilities"],
+        json!(["pack:context-advanced"])
+    );
+    assert_eq!(
+        before["profile_autoload_capabilities"],
+        json!(["pack:space"])
+    );
+    assert_eq!(
+        before["autoload_capabilities"],
+        json!(["pack:space", "pack:context-advanced"])
+    );
+    assert_eq!(
+        before["enabled_capabilities"],
+        json!([SELF_EVOLUTION_CAPABILITY_ID])
+    );
+
+    call(
+        &home,
+        "actor_start",
+        json!({"group_id":group_id,"actor_id":"lead1","by":"user"}),
+    );
+    let after = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group_id,"actor_id":"lead1","by":"lead1"}),
+    );
+    let enabled = after["enabled_capabilities"]
+        .as_array()
+        .expect("enabled capabilities");
+    for capability_id in [
+        "pack:group-runtime",
+        "pack:diagnostics",
+        "pack:space",
+        "pack:context-advanced",
+    ] {
+        assert!(
+            enabled.contains(&json!(capability_id)),
+            "missing {capability_id}"
+        );
+    }
+}
+
+#[test]
+fn failed_actor_start_keeps_the_durable_autoload_baseline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("failed startup capability baseline", "")
+        .expect("group");
+    let group_id = group.group_id;
+    call(
+        &home,
+        "group_stop",
+        json!({"group_id":group_id,"by":"user"}),
+    );
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"lead1",
+            "runtime":"custom",
+            "runner":"pty",
+            "command":["cccc-audit-command-that-does-not-exist"],
+            "capability_autoload":["pack:space"],
+            "by":"user"
+        }),
+    );
+    let scope = temp.path().join("missing-after-attach");
+    std::fs::create_dir(&scope).expect("scope");
+    call(
+        &home,
+        "attach",
+        json!({"group_id":group_id,"path":scope,"by":"user"}),
+    );
+    std::fs::remove_dir(&scope).expect("remove scope");
+
+    let started = response(
+        &home,
+        "actor_start",
+        json!({"group_id":group_id,"actor_id":"lead1","by":"user"}),
+    );
+    assert!(!started.ok);
+    assert_eq!(
+        started.error.expect("start failure").code,
+        "invalid_project_root"
+    );
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group_id,"actor_id":"lead1","by":"lead1"}),
+    );
+    let enabled = state["enabled_capabilities"]
+        .as_array()
+        .expect("enabled capabilities");
+    assert!(enabled.contains(&json!("pack:space")));
+    assert_eq!(state["actor_autoload_capabilities"], json!(["pack:space"]));
+}
+
+#[test]
+fn actor_configured_hidden_skill_is_projected_without_being_disabled() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("actor capability visibility", "")
+        .expect("group");
+    let group_id = group.group_id;
+    let capability_id = "skill:manual:visibility-audit";
+    call(
+        &home,
+        "group_stop",
+        json!({"group_id":group_id,"by":"user"}),
+    );
+    call(
+        &home,
+        "capability_import",
+        json!({
+            "group_id":group_id,
+            "by":"user",
+            "probe":false,
+            "record":{
+                "capability_id":capability_id,
+                "kind":"skill",
+                "source_id":"manual_import",
+                "name":"Visibility audit",
+                "capsule_text":"When to use: audit menus.\nAvoid when: no actor exists.\nProcedure: inspect visibility.\nPitfalls: hiding is not disabling.\nVerification: compare projections."
+            }
+        }),
+    );
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"peer1",
+            "runtime":"custom",
+            "runner":"pty",
+            "command":["sh","-c","exit 0"],
+            "capability_hidden":[capability_id],
+            "by":"user"
+        }),
+    );
+    call(
+        &home,
+        "capability_enable",
+        json!({
+            "group_id":group_id,
+            "actor_id":"peer1",
+            "by":"peer1",
+            "capability_id":capability_id,
+            "scope":"actor",
+            "enabled":true
+        }),
+    );
+
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1"}),
+    );
+    assert!(
+        state["enabled_capabilities"]
+            .as_array()
+            .expect("enabled")
+            .contains(&json!(capability_id))
+    );
+    assert!(
+        state["actor_hidden_capabilities"]
+            .as_array()
+            .expect("hidden")
+            .contains(&json!(capability_id))
+    );
+    assert!(
+        !state["active_capsule_skills"]
+            .as_array()
+            .expect("active capsules")
+            .iter()
+            .any(|row| row["capability_id"] == capability_id)
+    );
+    assert!(
+        state["hidden_capabilities"]
+            .as_array()
+            .expect("hidden reasons")
+            .iter()
+            .any(|row| {
+                row["capability_id"] == capability_id && row["reason"] == "actor_hidden"
+            })
+    );
 }
 
 fn capability(id: &str) -> Value {

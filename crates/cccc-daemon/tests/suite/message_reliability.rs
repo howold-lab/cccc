@@ -3,7 +3,7 @@
 // Included by the crate-level integration test harness.
 
 use cccc_contracts::{DaemonRequest, DaemonResponse};
-use cccc_core::HomeLayout;
+use cccc_core::{GroupStore, HomeLayout, ledger};
 use serde_json::{Map, Value, json};
 
 #[test]
@@ -24,6 +24,7 @@ fn duplicate_client_id_returns_the_original_event() {
         "by":"user",
         "to":["lead"],
         "text":"only once",
+        "message_mode":"send",
         "client_id":"client-1"
     });
 
@@ -41,13 +42,20 @@ fn duplicate_client_id_returns_the_original_event() {
 }
 
 #[test]
-fn directed_message_auto_wakes_an_offline_actor_exactly_once() {
+fn directed_message_wakes_an_explicitly_stopped_actor_and_delivers_once() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     let group = call(&home, "group_create", json!({"title":"offline replay"}));
     let group_id = group.result["group"]["group_id"]
         .as_str()
         .expect("group id");
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).expect("project");
+    call(
+        &home,
+        "attach",
+        json!({"group_id":group_id,"path":project,"by":"user"}),
+    );
     call(
         &home,
         "actor_add",
@@ -65,20 +73,19 @@ fn directed_message_auto_wakes_an_offline_actor_exactly_once() {
     let sent = call(
         &home,
         "send",
-        json!({"group_id":group_id,"by":"user","to":["peer1"],"text":"wake delivery"}),
+        json!({"group_id":group_id,"by":"user","to":["peer1"],"text":"wake delivery","message_mode":"send"}),
     );
-    assert_eq!(sent.result["delivery"]["state"], "queued");
-    assert_eq!(sent.result["delivery"]["online"], 0);
-
-    let output = wait_for_terminal(
+    assert_eq!(sent.result["message_mode"], "send");
+    let sent_event_id = sent.result["event"]["id"].as_str().expect("sent event id");
+    let actors = call(
         &home,
-        group_id,
-        "RECEIVED:[cccc] user → peer1: wake delivery",
+        "actor_list",
+        json!({"group_id":group_id,"by":"user"}),
     );
+    assert_eq!(actors.result["actors"][0]["enabled"], true);
+
     assert_eq!(
-        output
-            .matches("RECEIVED:[cccc] user → peer1: wake delivery")
-            .count(),
+        wait_for_accepted_delivery(&home, group_id, sent_event_id),
         1
     );
     let actors = call(
@@ -95,31 +102,29 @@ fn directed_message_auto_wakes_an_offline_actor_exactly_once() {
     );
 }
 
-fn wait_for_terminal(home: &HomeLayout, group_id: &str, expected: &str) -> String {
+fn wait_for_accepted_delivery(home: &HomeLayout, group_id: &str, source_event_id: &str) -> usize {
+    let ledger_path = GroupStore::new(home.clone())
+        .expect("store")
+        .ledger_path(group_id)
+        .expect("ledger path");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
     loop {
-        let response = cccc_daemon::handle_request(
-            home,
-            &DaemonRequest {
-                v: 1,
-                op: "terminal_tail".into(),
-                args: json!({"group_id":group_id,"actor_id":"peer1","max_chars":4000,"by":"user"})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_else(Map::new),
-            },
-        );
-        let output = response
-            .result
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if response.ok && output.contains(expected) {
-            return output.to_owned();
+        let accepted = ledger::read_all(&ledger_path)
+            .expect("ledger")
+            .iter()
+            .filter(|event| {
+                event.kind == "runtime.delivery"
+                    && event.data["source_event_id"] == source_event_id
+                    && event.data["actor_id"] == "peer1"
+                    && event.data["state"] == "accepted"
+            })
+            .count();
+        if accepted > 0 {
+            return accepted;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "PTY did not receive {expected:?}; response={response:?}"
+            "runtime did not accept delivery for {source_event_id}"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }

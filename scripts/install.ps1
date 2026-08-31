@@ -25,8 +25,10 @@ $releaseBaseUrl = if ($env:CCCC_RELEASE_BASE_URL) {
 }
 $NoModifyPath = $NoModifyPath -or $env:CCCC_NO_MODIFY_PATH -eq "1"
 $allowReplaceExisting = $env:CCCC_ALLOW_REPLACE_EXISTING -eq "1"
+$trustedExistingCli = $env:CCCC_TRUSTED_EXISTING_CLI
 $installMarker = ".cccc-standalone"
 $installMarkerVersion = "standalone-v1"
+$pipInstallMarkerVersion = "pip-v1"
 if (-not $InstallDir) {
   $InstallDir = Join-Path $env:LOCALAPPDATA "CCCC\bin"
 }
@@ -118,6 +120,60 @@ function Move-CcccItemWithRetry([string]$Source, [string]$Destination) {
   }
 }
 
+function Invoke-CcccCommand(
+  [string]$CommandPath,
+  [string[]]$Arguments,
+  [int]$TimeoutMilliseconds = 35000
+) {
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $CommandPath
+  $startInfo.Arguments = $Arguments -join " "
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $startInfo
+  try {
+    if (-not $process.Start()) {
+      throw "failed to start $CommandPath"
+    }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+      $process.WaitForExit()
+      throw "$CommandPath $($Arguments -join ' ') timed out"
+    }
+    $process.WaitForExit()
+    # A successfully detached daemon can inherit these pipe handles after the
+    # launcher exits. Do not wait forever for EOF from that child process.
+    $stdout = if ($stdoutTask.Wait(1000)) { [string]$stdoutTask.Result } else { "" }
+    $stderr = if ($stderrTask.Wait(1000)) { [string]$stderrTask.Result } else { "" }
+    return [PSCustomObject]@{
+      ExitCode = $process.ExitCode
+      Stdout = $stdout
+      Stderr = $stderr
+    }
+  } finally {
+    $process.Dispose()
+  }
+}
+
+function Get-CcccCommandFailure([object]$Result) {
+  $detail = ([string]$Result.Stderr).Trim()
+  if (-not $detail) { $detail = ([string]$Result.Stdout).Trim() }
+  if (-not $detail) { $detail = "exit code $($Result.ExitCode)" }
+  return $detail
+}
+
+function Invoke-CcccDaemonStart([string]$CommandPath) {
+  $result = Invoke-CcccCommand $CommandPath @("daemon", "start")
+  if ($result.ExitCode -ne 0) {
+    throw "daemon start failed: $(Get-CcccCommandFailure $result)"
+  }
+}
+
 function Join-PersistedWindowsPath([string]$MachinePath, [string]$UserPath) {
   $parts = @()
   if (-not [string]::IsNullOrWhiteSpace($MachinePath)) { $parts += $MachinePath }
@@ -203,6 +259,11 @@ if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*
 $target = "x86_64-pc-windows-msvc"
 $package = "cccc-v$Version-$target"
 $archive = "$package.zip"
+$wheelVersion = $Version `
+  -replace '-alpha([0-9]+)$', 'a$1' `
+  -replace '-beta([0-9]+)$', 'b$1' `
+  -replace '-rc([0-9]+)$', 'rc$1' `
+  -replace '-', ''
 $downloadUrl = "$releaseBaseUrl/download/$releaseTagPrefix$Version"
 $tempDir = Join-Path ([IO.Path]::GetTempPath()) ("cccc-install-" + [Guid]::NewGuid().ToString("N"))
 $binaries = @("cccc.exe")
@@ -237,20 +298,31 @@ try {
     "cccc-v$Version-aarch64-apple-darwin.tar.gz",
     "cccc-v$Version-x86_64-pc-windows-msvc.zip"
   )
+  $expectedWheels = @(
+    "cccc_pair-$wheelVersion-py3-none-manylinux_2_28_x86_64.whl",
+    "cccc_pair-$wheelVersion-py3-none-macosx_11_0_x86_64.whl",
+    "cccc_pair-$wheelVersion-py3-none-macosx_11_0_arm64.whl",
+    "cccc_pair-$wheelVersion-py3-none-win_amd64.whl"
+  )
+  $expectedPayloads = @($expectedArchives) + @($expectedWheels)
   $checksumEntries = @{}
   foreach ($line in Get-Content -LiteralPath $checksumsPath) {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     if ($line -notmatch '^([0-9A-Fa-f]{64})[ \t]+\*?([^/\\]+)$') {
-      throw "SHA256SUMS must contain four unique, well-formed archive entries"
+      throw "SHA256SUMS must contain four release archives, optionally plus the four native wheels"
     }
     $name = $Matches[2]
-    if ($expectedArchives -notcontains $name -or $checksumEntries.ContainsKey($name)) {
-      throw "SHA256SUMS must contain four unique, well-formed archive entries"
+    if ($expectedPayloads -notcontains $name -or $checksumEntries.ContainsKey($name)) {
+      throw "SHA256SUMS must contain four release archives, optionally plus the four native wheels"
     }
     $checksumEntries[$name] = $Matches[1].ToLowerInvariant()
   }
-  if ($checksumEntries.Count -ne 4 -or -not $checksumEntries.ContainsKey($archive)) {
-    throw "SHA256SUMS must contain exactly one entry for $archive and four entries total"
+  $hasAllArchives = @($expectedArchives.Where({ $checksumEntries.ContainsKey($_) })).Count -eq 4
+  $hasAllWheels = @($expectedWheels.Where({ $checksumEntries.ContainsKey($_) })).Count -eq 4
+  if (-not $hasAllArchives -or
+      ($checksumEntries.Count -ne 4 -and $checksumEntries.Count -ne 8) -or
+      ($checksumEntries.Count -eq 8 -and -not $hasAllWheels)) {
+    throw "SHA256SUMS must contain four release archives, optionally plus the four native wheels"
   }
 
   Receive-File "$downloadUrl/$archive" $archivePath
@@ -313,7 +385,9 @@ try {
 
   $existingCli = Join-Path $InstallDir "cccc.exe"
   $ownedByStandaloneInstaller = $false
+  $markerPresent = $false
   if (Test-Path -LiteralPath $markerPath) {
+    $markerPresent = $true
     $markerItem = Get-Item -LiteralPath $markerPath -Force
     $markerIsRegularFile = -not $markerItem.PSIsContainer -and
       ($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
@@ -321,15 +395,30 @@ try {
       throw "Existing standalone ownership marker is not a regular file: $markerPath"
     }
     try {
-      $ownedByStandaloneInstaller =
-        (Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop).Trim() -eq $installMarkerVersion
+      $markerValue = (Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop).Trim()
     } catch {
-      $ownedByStandaloneInstaller = $false
+      $markerValue = ""
+    }
+    if ($markerValue -eq $pipInstallMarkerVersion) {
+      throw "Existing $existingCli is managed by pip; run python -m pip uninstall cccc-pair before installing the standalone release"
+    }
+    $ownedByStandaloneInstaller = $markerValue -eq $installMarkerVersion
+  }
+  $trustedExisting = $false
+  if (-not $markerPresent -and $trustedExistingCli -and
+      (Test-Path -LiteralPath $existingCli -PathType Leaf)) {
+    $existingItem = Get-Item -LiteralPath $existingCli -Force
+    if (($existingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+      $trustedExisting = Test-SameCommandPath $trustedExistingCli $existingCli
     }
   }
   if ((Test-Path -LiteralPath $existingCli) -and
-      -not $ownedByStandaloneInstaller -and -not $allowReplaceExisting) {
+      -not $ownedByStandaloneInstaller -and -not $trustedExisting -and
+      -not $allowReplaceExisting) {
     throw "Existing $existingCli is managed by another installation; refusing to replace it. Remove it, choose a different CCCC_INSTALL_DIR, or set CCCC_ALLOW_REPLACE_EXISTING=1 to replace it deliberately"
+  }
+  if (-not $ownedByStandaloneInstaller -and $trustedExisting) {
+    Write-Host "Adopting existing CCCC command at $existingCli into the standalone installation."
   }
 
   foreach ($binary in $binaries) {
@@ -341,14 +430,16 @@ try {
   $transactionStarted = $true
   $oldCli = Join-Path $InstallDir "cccc.exe"
   if (Test-Path -LiteralPath $oldCli -PathType Leaf) {
-    & $oldCli daemon status *> $null
-    $daemonWasRunning = $LASTEXITCODE -eq 0
+    $daemonStatus = Invoke-CcccCommand $oldCli @("daemon", "status")
+    $daemonWasRunning = $daemonStatus.ExitCode -eq 0
     if ($daemonWasRunning) {
-      & $oldCli daemon stop *> $null
-      if ($LASTEXITCODE -ne 0) { throw "Could not stop the running CCCC daemon" }
+      $daemonStop = Invoke-CcccCommand $oldCli @("daemon", "stop")
+      if ($daemonStop.ExitCode -ne 0) {
+        throw "Could not stop the running CCCC daemon: $(Get-CcccCommandFailure $daemonStop)"
+      }
       for ($attempt = 0; $attempt -lt 40; $attempt++) {
-        & $oldCli daemon status *> $null
-        if ($LASTEXITCODE -ne 0) { break }
+        $daemonStatus = Invoke-CcccCommand $oldCli @("daemon", "status")
+        if ($daemonStatus.ExitCode -ne 0) { break }
         Start-Sleep -Milliseconds 250
       }
       if ($attempt -eq 40) { throw "The running CCCC daemon did not stop in time" }
@@ -422,12 +513,19 @@ try {
     Write-Host "Verified persistent Machine + User PATH resolves cccc to $installedCommand."
   }
 
-  if ($daemonWasRunning) {
-    & (Join-Path $InstallDir "cccc.exe") daemon start *> $null
-    if ($LASTEXITCODE -ne 0) { throw "The updated CCCC daemon could not restart" }
-  }
+  # The downloaded binary, ownership marker, and PATH have passed validation.
+  # Commit the update before runtime restart: a project/runtime recovery issue
+  # affects the old binary too and must not roll back a valid installation.
   $transactionCommitted = $true
   Remove-Item -LiteralPath $backupDir -Recurse -Force
+
+  if ($daemonWasRunning) {
+    try {
+      Invoke-CcccDaemonStart (Join-Path $InstallDir "cccc.exe")
+    } catch {
+      throw "CCCC v$Version was installed, but its daemon could not restart: $_"
+    }
+  }
 
   Write-Host "Installed CCCC v$Version in $InstallDir"
   Write-Host "Verify installed command directly: `"$installedCommand`" doctor"
@@ -479,10 +577,7 @@ try {
     }
     if ($daemonWasRunning -and (Test-Path -LiteralPath (Join-Path $InstallDir "cccc.exe"))) {
       try {
-        & (Join-Path $InstallDir "cccc.exe") daemon start *> $null
-        if ($LASTEXITCODE -ne 0) {
-          Write-Error "Rollback restored the previous binary but failed to restart its daemon" -ErrorAction Continue
-        }
+        Invoke-CcccDaemonStart (Join-Path $InstallDir "cccc.exe")
       } catch {
         Write-Error "Rollback restored the previous binary but failed to restart its daemon: $_" -ErrorAction Continue
       }

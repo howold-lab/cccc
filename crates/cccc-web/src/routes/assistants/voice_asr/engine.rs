@@ -72,11 +72,24 @@ pub fn transcribe_pcm16_ranges(
     language: &str,
     ranges_ms: &[(i64, i64)],
 ) -> Result<Vec<Value>, VoiceError> {
+    transcribe_pcm16_ranges_partial(home, model_id, path, sample_rate, language, ranges_ms)?
+        .into_iter()
+        .collect()
+}
+
+pub fn transcribe_pcm16_ranges_partial(
+    home: &HomeLayout,
+    model_id: &str,
+    path: &Path,
+    sample_rate: i32,
+    language: &str,
+    ranges_ms: &[(i64, i64)],
+) -> Result<Vec<Result<Value, VoiceError>>, VoiceError> {
     if ranges_ms.is_empty() {
         return Ok(Vec::new());
     }
     if let Some(result) = mock_transcript() {
-        return Ok(ranges_ms.iter().map(|_| result.clone()).collect());
+        return Ok(ranges_ms.iter().map(|_| Ok(result.clone())).collect());
     }
     let bytes = validate_audio_file(path)?;
     if bytes % 2 != 0 {
@@ -99,39 +112,61 @@ pub fn transcribe_pcm16_ranges(
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut results = Vec::with_capacity(ranges_ms.len());
     for &(start_ms, end_ms) in ranges_ms {
-        let (start_byte, end_byte) = pcm16_byte_range(bytes, sample_rate, start_ms, end_ms);
-        let range_bytes = end_byte.saturating_sub(start_byte);
-        if range_bytes == 0 {
-            results.push(json!({
-                "text":"","bytes":0,"model_id":model.model_id,"sample_rate":sample_rate
-            }));
-            continue;
-        }
-        reader
-            .seek(SeekFrom::Start(start_byte as u64))
-            .map_err(|error| VoiceError::new("audio_read_failed", error.to_string()))?;
-        let stream = recognizer.create_stream();
-        let mut remaining = range_bytes;
-        while remaining > 0 {
-            let chunk_bytes = remaining.min(buffer.len());
-            reader
-                .read_exact(&mut buffer[..chunk_bytes])
-                .map_err(|error| VoiceError::new("audio_read_failed", error.to_string()))?;
-            stream.accept_waveform(sample_rate, &pcm16_samples(&buffer[..chunk_bytes]));
-            remaining -= chunk_bytes;
-        }
-        recognizer.decode(&stream);
-        let result = stream
-            .get_result()
-            .ok_or_else(|| VoiceError::new("asr_failed", "sherpa-onnx returned no result"))?;
-        results.push(json!({
-            "text":clean_transcript(&result.text),
-            "bytes":range_bytes,
-            "model_id":model.model_id,
-            "sample_rate":sample_rate
-        }));
+        results.push(transcribe_pcm16_range(
+            &mut reader,
+            &mut buffer,
+            &recognizer,
+            &model.model_id,
+            bytes,
+            sample_rate,
+            start_ms,
+            end_ms,
+        ));
     }
     Ok(results)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transcribe_pcm16_range(
+    reader: &mut BufReader<std::fs::File>,
+    buffer: &mut [u8],
+    recognizer: &OfflineRecognizer,
+    model_id: &str,
+    total_bytes: usize,
+    sample_rate: i32,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Value, VoiceError> {
+    let (start_byte, end_byte) = pcm16_byte_range(total_bytes, sample_rate, start_ms, end_ms);
+    let range_bytes = end_byte.saturating_sub(start_byte);
+    if range_bytes == 0 {
+        return Ok(json!({
+            "text":"","bytes":0,"model_id":model_id,"sample_rate":sample_rate
+        }));
+    }
+    reader
+        .seek(SeekFrom::Start(start_byte as u64))
+        .map_err(|error| VoiceError::new("audio_read_failed", error.to_string()))?;
+    let stream = recognizer.create_stream();
+    let mut remaining = range_bytes;
+    while remaining > 0 {
+        let chunk_bytes = remaining.min(buffer.len());
+        reader
+            .read_exact(&mut buffer[..chunk_bytes])
+            .map_err(|error| VoiceError::new("audio_read_failed", error.to_string()))?;
+        stream.accept_waveform(sample_rate, &pcm16_samples(&buffer[..chunk_bytes]));
+        remaining -= chunk_bytes;
+    }
+    recognizer.decode(&stream);
+    let result = stream
+        .get_result()
+        .ok_or_else(|| VoiceError::new("asr_failed", "sherpa-onnx returned no result"))?;
+    Ok(json!({
+        "text":clean_transcript(&result.text),
+        "bytes":range_bytes,
+        "model_id":model_id,
+        "sample_rate":sample_rate
+    }))
 }
 
 fn pcm16_byte_range(
@@ -284,16 +319,22 @@ fn file_starts_with_riff(path: &Path) -> Result<bool, VoiceError> {
 }
 
 fn mock_transcript() -> Option<Value> {
-    std::env::var("CCCC_VOICE_SECRETARY_ASR_MOCK_TEXT")
-        .ok()
+    mock_transcript_text()
         .map(|text| json!({"text":text,"bytes":0,"model_id":"mock","sample_rate":16000}))
 }
 
+fn mock_transcript_text() -> Option<String> {
+    std::env::var("CCCC_VOICE_SECRETARY_ASR_MOCK_TEXT").ok()
+}
+
 pub struct StreamingSession {
-    recognizer: OnlineRecognizer,
-    stream: OnlineStream,
+    recognizer: Option<OnlineRecognizer>,
+    stream: Option<OnlineStream>,
     pub model_id: String,
     last_text: String,
+    mock_text: Option<String>,
+    mock_received_audio: bool,
+    mock_partial_emitted: bool,
 }
 
 pub fn diarize_pcm16_file(
@@ -431,6 +472,17 @@ fn diarize_samples(
 
 impl StreamingSession {
     pub fn open(home: &HomeLayout, model_id: &str) -> Result<Self, VoiceError> {
+        if let Some(text) = mock_transcript_text() {
+            return Ok(Self {
+                recognizer: None,
+                stream: None,
+                model_id: "mock".into(),
+                last_text: String::new(),
+                mock_text: Some(text),
+                mock_received_audio: false,
+                mock_partial_emitted: false,
+            });
+        }
         let model = streaming_model(home, model_id)?;
         let config = online_recognizer_config(home, &model)?;
         let recognizer = OnlineRecognizer::create(&config).ok_or_else(|| {
@@ -441,10 +493,13 @@ impl StreamingSession {
         })?;
         let stream = recognizer.create_stream();
         Ok(Self {
-            recognizer,
-            stream,
+            recognizer: Some(recognizer),
+            stream: Some(stream),
             model_id: model.model_id,
             last_text: String::new(),
+            mock_text: None,
+            mock_received_audio: false,
+            mock_partial_emitted: false,
         })
     }
 
@@ -465,40 +520,109 @@ impl StreamingSession {
                 "PCM16 byte length must be even",
             ));
         }
+        if let Some(text) = self.mock_text.as_deref() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            self.mock_received_audio = true;
+            if self.mock_partial_emitted {
+                return Ok(None);
+            }
+            self.mock_partial_emitted = true;
+            return Ok(Some(json!({
+                "type":"partial","ok":true,"text":text,"is_final":false,
+                "model_id":self.model_id
+            })));
+        }
+        let recognizer = self.recognizer.as_ref().ok_or_else(|| {
+            VoiceError::new(
+                "asr_runtime_not_ready",
+                "streaming recognizer is not initialized",
+            )
+        })?;
+        let stream = self.stream.as_ref().ok_or_else(|| {
+            VoiceError::new(
+                "asr_runtime_not_ready",
+                "streaming recognizer is not initialized",
+            )
+        })?;
         let samples = pcm16_samples(bytes);
-        self.stream.accept_waveform(sample_rate, &samples);
-        while self.recognizer.is_ready(&self.stream) {
-            self.recognizer.decode(&self.stream);
+        stream.accept_waveform(sample_rate, &samples);
+        while recognizer.is_ready(stream) {
+            recognizer.decode(stream);
         }
         self.current_event(false)
     }
 
     pub fn finish(&mut self) -> Option<Value> {
-        self.stream.input_finished();
-        while self.recognizer.is_ready(&self.stream) {
-            self.recognizer.decode(&self.stream);
+        if let Some(text) = self.mock_text.as_deref() {
+            if !self.mock_received_audio {
+                return None;
+            }
+            self.mock_received_audio = false;
+            self.mock_partial_emitted = false;
+            return Some(json!({
+                "type":"final","ok":true,"text":text,"is_final":true,
+                "model_id":self.model_id
+            }));
+        }
+        let recognizer = self.recognizer.as_ref()?;
+        let stream = self.stream.as_ref()?;
+        stream.input_finished();
+        while recognizer.is_ready(stream) {
+            recognizer.decode(stream);
         }
         self.current_event(true).ok().flatten()
     }
 
     fn current_event(&mut self, force_final: bool) -> Result<Option<Value>, VoiceError> {
-        let Some(result) = self.recognizer.get_result(&self.stream) else {
-            return Ok(None);
-        };
-        let text = clean_transcript(&result.text);
-        if text.is_empty() || (!force_final && text == self.last_text) {
-            return Ok(None);
-        }
-        self.last_text.clone_from(&text);
-        let is_final = force_final || result.is_final || self.recognizer.is_endpoint(&self.stream);
-        if is_final {
-            self.recognizer.reset(&self.stream);
+        let recognizer = self.recognizer.as_ref().ok_or_else(|| {
+            VoiceError::new(
+                "asr_runtime_not_ready",
+                "streaming recognizer is not initialized",
+            )
+        })?;
+        let stream = self.stream.as_ref().ok_or_else(|| {
+            VoiceError::new(
+                "asr_runtime_not_ready",
+                "streaming recognizer is not initialized",
+            )
+        })?;
+        let endpoint = recognizer.is_endpoint(stream);
+        let result = recognizer.get_result(stream);
+        let text = result
+            .as_ref()
+            .map(|result| clean_transcript(&result.text))
+            .unwrap_or_default();
+        let is_final =
+            force_final || endpoint || result.as_ref().is_some_and(|result| result.is_final);
+        let (emit, reset) =
+            streaming_result_decision(&text, &self.last_text, force_final, is_final);
+        if reset {
+            recognizer.reset(stream);
             self.last_text.clear();
+        } else if emit {
+            self.last_text.clone_from(&text);
+        }
+        if !emit {
+            return Ok(None);
         }
         Ok(Some(
             json!({"type":if is_final{"final"}else{"partial"},"ok":true,"text":text,"is_final":is_final,"model_id":self.model_id}),
         ))
     }
+}
+
+fn streaming_result_decision(
+    text: &str,
+    last_text: &str,
+    force_final: bool,
+    is_final: bool,
+) -> (bool, bool) {
+    (
+        !text.is_empty() && (force_final || is_final || text != last_text),
+        is_final,
+    )
 }
 
 fn offline_recognizer_config(
@@ -666,3 +790,24 @@ use sherpa_onnx::{
 };
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+
+#[cfg(test)]
+mod streaming_result_tests {
+    use super::streaming_result_decision;
+
+    #[test]
+    fn empty_or_duplicate_results_do_not_block_terminal_stream_reset() {
+        assert_eq!(
+            streaming_result_decision("", "", false, true),
+            (false, true)
+        );
+        assert_eq!(
+            streaming_result_decision("same", "same", false, true),
+            (true, true)
+        );
+        assert_eq!(
+            streaming_result_decision("same", "same", false, false),
+            (false, false)
+        );
+    }
+}

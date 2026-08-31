@@ -38,7 +38,7 @@ Default: `CCCC_HOME=~/.cccc`
 └── groups/<group_id>/
     ├── group.yaml               # Metadata
     ├── ledger.jsonl             # Event stream (append-only)
-    ├── context/                 # Shared Python/Rust coordination store
+    ├── context/                 # Durable coordination store
     │   ├── context.yaml         # Brief, decisions, handoffs, metadata
     │   ├── tasks/T*.yaml        # One durable task per file
     │   ├── agents.yaml          # Per-actor hot/warm context
@@ -47,11 +47,11 @@ Default: `CCCC_HOME=~/.cccc`
         └── blobs/               # Large text/attachments (referenced in ledger)
 ```
 
-Python and Rust use the same `context/` files as one authoritative store. Older Rust
-`state/context.json` files are imported once without deleting the source; new context
-writes must never create a second runtime-specific task store.
+The `context/` files are the one authoritative coordination store. Older preview
+`state/context.json` files are imported once without deleting the source; new
+writes never create a second implementation-specific task store.
 
-The replacement Rust daemon also uses the Python control-plane paths and schemas:
+The native daemon retains the final 0.4.35 control-plane paths and schemas:
 
 | State | Authoritative path |
 |---|---|
@@ -59,17 +59,17 @@ The replacement Rust daemon also uses the Python control-plane paths and schemas
 | Actor profiles | `state/actor_profiles/profiles.json` |
 | Profile private environment | `state/secrets/actor_profiles/*.json` |
 | Actor private environment | `state/secrets/actors/<group_id>/*.json` |
-| Inbox cursors | `groups/<group_id>/state/read_cursors.json` |
+| Mail Inbox cursors | `groups/<group_id>/state/read_cursors.json` |
 | Automation runtime state | `groups/<group_id>/state/automation.json` |
 | Capability catalog and bindings | `state/capabilities/catalog.json`, `state/capabilities/state.json` |
 | Capability allowlist overlay | `config/capability-allowlist.user.yaml` |
 | Group Space providers, bindings, and jobs | `state/space/providers.json`, `bindings.json`, `jobs.json` |
 | Group Space credentials | `state/secrets/space_providers/*.json` |
 
-Files from the earlier Rust-only layout are migration inputs, not parallel runtime
+Files from the earlier preview layout are migration inputs, not parallel runtime
 stores. Canonical data wins on conflicts, migration is idempotent, and subsequent
-writes go only to the Python path. Rust/Python interoperability tests exercise both
-write directions, including group-copy packages.
+writes go only to the canonical path. Frozen 0.4.35 homes and native tests cover
+the supported migration boundary, including group-copy packages.
 
 ## Architecture Layers
 
@@ -78,7 +78,7 @@ write directions, including group-copy packages.
 │                      Ports (Entry)                       │
 │   Web UI (React)  │  CLI  │  IM Bridge  │  MCP Server   │
 ├─────────────────────────────────────────────────────────┤
-│                    Daemon (ccccd)                        │
+│                    Native Daemon                         │
 │   IPC Server  │  Delivery  │  Automation  │  Runners    │
 │               │            │              │  Browser    │
 ├─────────────────────────────────────────────────────────┤
@@ -92,8 +92,8 @@ write directions, including group-copy packages.
 
 ### Contracts Layer
 
-- Pydantic models define all data structures
-- Versioned: `src/cccc/contracts/v1/`
+- Rust contract types define wire structures
+- Versioned standards: `docs/standards/`; implementation: `crates/cccc-contracts/`
 - Stable boundary, no business implementation
 
 ### Kernel
@@ -150,15 +150,18 @@ write directions, including group-copy packages.
 | `actor.start` | Start an actor runtime |
 | `actor.stop` | Stop an actor runtime |
 | `actor.restart` | Restart an actor runtime |
+| `actor.new_session` | Start a fresh provider session for an actor |
 | `actor.remove` | Remove an actor |
 | `actor.activity` | Runtime activity/status snapshot |
 | `context.sync` | Context/control-plane sync event |
 | `chat.message` | Chat message |
 | `chat.cross_group_receipt` | Source-group receipt that links a cross-group send to its destination event |
 | `chat.stream` | Progressive stream chunk/update |
-| `chat.read` / `chat.ack` | Read and acknowledgement events |
+| `mail.read` | Consuming Mail cursor boundary |
+| `chat.reply_request.cancelled` | Cancels remaining reply obligations |
+| `runtime.delivery` | Per-recipient runtime handoff evidence |
 | `chat.reaction` | Chat reaction |
-| `system.notify` / `system.notify_ack` | System notifications and acknowledgement |
+| `system.notify` | System notifications, including bounded Mail/reply notices |
 | `assistant.settings_update` | Update built-in assistant settings |
 | `assistant.status_update` | Update built-in assistant lifecycle/health |
 | `assistant.voice.document` | Voice Secretary working document save/update/archive marker |
@@ -169,28 +172,38 @@ write directions, including group-copy packages.
 | `presentation.publish` | Publish a presentation rail card |
 | `presentation.clear` | Clear presentation rail card(s) |
 
-### chat.message Data
+### `chat.message` Data
 
-```python
-class ChatMessageData:
-    text: str
-    format: "plain" | "markdown"
-    to: list[str]           # Recipients (empty = broadcast)
-    reply_to: str | None    # Reply to which message
-    quote_text: str | None  # Quoted text
-    attachments: list[dict] # Attachment metadata (content stored in CCCC_HOME blobs)
+```ts
+data: {
+  text: string
+  format?: "plain" | "markdown"
+  insight?: string | null
+  message_mode: "send" | "request_reply" | "mail"
+  to?: string[]
+  reply_to?: string | null
+  quote_text?: string | null
+  attachments?: AttachmentRefV1[]
+  refs?: ReferenceV1[]
+}
 ```
 
-### Recipient Semantics (to field)
+The authoritative shape and validation rules live in
+[CCCS v1](../standards/CCCS_V1.md#61-chatmessage).
+
+### Recipient Semantics (`to` field)
 
 | Token | Semantics |
 |-------|-----------|
-| `[]` (empty) | Broadcast |
-| `user` | The user |
+| omitted / `[]` | Materialize the group's `default_send_to` as `@foreman` or `@all` before append |
+| `user` / `@user` | The human user |
 | `@all` | All actors |
 | `@peers` | All peers |
 | `@foreman` | Foreman |
 | `<actor_id>` | Specific actor |
+
+A message addresses either the human user or one or more actors, never both.
+`request_reply` requires concrete actor recipients, and `mail` is actor-only.
 
 ## Files and Attachments
 
@@ -233,7 +246,7 @@ The surface is best understood as capability groups instead of a fixed namespace
 ### Core Collaboration Capability Groups
 
 - Session and guidance: `cccc_bootstrap`, `cccc_help`, `cccc_project_info`
-- Messaging and files: `cccc_inbox_list`, `cccc_inbox_mark_read`, `cccc_message_send`, `cccc_message_reply`, `cccc_file`
+- Messaging and files: `cccc_inbox_read`, `cccc_message_history`, `cccc_message_send`, `cccc_message_reply`, `cccc_file`
 - Group and actor control: `cccc_group`, `cccc_actor`
 - Coordination and state: `cccc_context_get`, `cccc_coordination`, `cccc_task`, `cccc_agent_state`, `cccc_context_sync`
 - Automation and memory: `cccc_automation`, `cccc_automation_manage`, `cccc_memory`, `cccc_memory_admin`
@@ -249,22 +262,20 @@ The surface is best understood as capability groups instead of a fixed namespace
 
 | Layer | Technology |
 |-------|------------|
-| Kernel/Daemon | Python + Pydantic |
-| Web Port | FastAPI + Uvicorn |
+| Kernel/Daemon | Rust |
+| Web Port | Rust + Axum |
 | Web UI | React + TypeScript + Vite + Tailwind + xterm.js |
 | MCP | stdio mode, JSON-RPC |
 
 ## Source Structure
 
 ```
-src/cccc/
-├── contracts/v1/          # Contracts layer
-├── kernel/                # Kernel
-├── daemon/                # Daemon process
-├── runners/               # PTY/Headless runner
-├── ports/
-│   ├── web/              # Web port
-│   ├── im/               # IM Bridge
-│   └── mcp/              # MCP Server
-└── resources/            # Built-in resources
+crates/
+├── cccc-contracts/        # Versioned wire types
+├── cccc-core/             # Durable state and kernel
+├── cccc-daemon/           # Single-writer daemon and delivery
+├── cccc-runtime/          # PTY/headless provider runtimes
+├── cccc-web/              # Native Web API and embedded UI
+├── cccc-mcp/              # MCP server
+└── cccc-cli/              # Public cccc executable
 ```

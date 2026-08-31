@@ -1,5 +1,7 @@
 mod args;
 mod commands;
+#[cfg(any(windows, test))]
+mod detached_daemon_owner;
 mod hook_receiver;
 mod shutdown;
 mod web_instance;
@@ -8,13 +10,18 @@ mod web_launch;
 use anyhow::{Result, bail};
 use args::{Cli, CommandKind, DaemonAction, HermesAction, RuntimeAction, WebModeArg};
 use cccc_client::DaemonClient;
-use cccc_core::{HomeLayout, active};
+use cccc_core::{GroupStore, HomeLayout, active};
 use cccc_daemon::{DetachedDaemon, StartOutcome};
 use clap::Parser;
 use commands::common::{call, print};
+use fs2::FileExt;
 use serde_json::json;
+use std::fs::OpenOptions;
 
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const DAEMON_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+#[cfg(any(not(windows), test))]
+const DAEMON_OWNER_HANDOFF_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,7 +53,7 @@ async fn main() -> Result<()> {
         }
         Some(CommandKind::Mcp) => cccc_mcp::run_stdio(home).await,
         Some(CommandKind::Version) => {
-            println!("cccc {PRODUCT_VERSION} (rust)");
+            println!("cccc {PRODUCT_VERSION}");
             Ok(())
         }
         Some(CommandKind::Home) => {
@@ -65,7 +72,8 @@ async fn main() -> Result<()> {
         Some(CommandKind::Group(args)) => commands::group::run(&client, &home, args).await,
         Some(CommandKind::Groups) => print(call(&client, "group_list", json!({})).await?),
         Some(CommandKind::Use { group_id }) => {
-            print(call(&client, "group_use", json!({"group_id":group_id})).await?)
+            select_active_group(&home, &group_id)?;
+            show_active(&client, &home).await
         }
         Some(CommandKind::Active) => show_active(&client, &home).await,
         Some(CommandKind::Actor(args)) => commands::actor::run(&client, &home, args).await,
@@ -87,12 +95,20 @@ async fn main() -> Result<()> {
             commands::messaging::tracked(&client, &home, args).await
         }
         Some(CommandKind::Reply(args)) => commands::messaging::reply(&client, &home, args).await,
+        Some(CommandKind::Deliver(args)) => {
+            commands::messaging::deliver(&client, &home, args).await
+        }
+        Some(CommandKind::CancelReply(args)) => {
+            commands::messaging::cancel_reply(&client, &home, args).await
+        }
         Some(CommandKind::Tail(args)) => commands::messaging::tail(&client, &home, args).await,
         Some(CommandKind::Inbox(args)) => commands::messaging::inbox(&client, &home, args).await,
-        Some(CommandKind::Read(args)) => commands::messaging::read(&client, &home, args).await,
         Some(CommandKind::Ledger(args)) => commands::messaging::ledger(&client, &home, args).await,
         Some(CommandKind::Daemon { action }) => daemon(action, home, &client).await,
         Some(CommandKind::Runtime { action }) => runtime(&client, action).await,
+        Some(CommandKind::Login) => commands::membership::login(&client).await,
+        Some(CommandKind::Logout) => commands::membership::logout(&client).await,
+        Some(CommandKind::Reach { action }) => commands::membership::reach(&client, action).await,
         Some(CommandKind::Status) => commands::status::run(&home, PRODUCT_VERSION).await,
         Some(CommandKind::Doctor(args)) => {
             commands::doctor::run(&home, PRODUCT_VERSION, args.all).await
@@ -127,19 +143,55 @@ async fn launch(
     let mut binding = web_launch::resolve(&home, host_override.as_deref(), port_override)?;
     let client =
         DaemonClient::new(home.clone()).with_timeout(std::time::Duration::from_millis(250));
-    let _instance = claim_web_instance(&home, &client).await?;
-    replace_incompatible_daemon(&client).await?;
+    let instance = claim_web_instance(&home, &client).await?;
+    instance.hold_until_process_exit();
+    replace_incompatible_daemon(&home, &client).await?;
     let mut embedded_daemon = None;
-    if !ping(&client).await {
+    // Event-driven loss detection for the embedded daemon: polling in
+    // `wait_for_daemon_loss` stays as the fallback for an external daemon.
+    #[cfg(windows)]
+    let (_daemon_exit_tx, daemon_exit_rx) = tokio::sync::watch::channel(false);
+    #[cfg(not(windows))]
+    let (daemon_exit_tx, mut daemon_exit_rx) = tokio::sync::watch::channel(false);
+    let daemon_missing = !ping(&client).await;
+    #[cfg(windows)]
+    let mut detached_daemon = if daemon_missing {
+        // Running the daemon as a task inside the Web host is unreliable on
+        // Windows once the daemon installs its kill-on-close Job object. In
+        // particular, hosts launched through `cargo run` can fail to publish a
+        // ready daemon and then hang while the task is cancelled. The existing
+        // detached launcher gives the daemon its own process and Job lifetime.
+        detached_daemon_owner::OwnedDetachedDaemon::start(&home, &client).await?
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    if daemon_missing {
         let daemon_home = home.clone();
-        embedded_daemon = Some(tokio::spawn(
-            async move { cccc_daemon::run(daemon_home).await },
-        ));
-        wait_for_daemon(&client, std::time::Duration::from_secs(30)).await;
+        embedded_daemon = Some(tokio::spawn(async move {
+            let result = cccc_daemon::run(daemon_home).await;
+            let _ = daemon_exit_tx.send(true);
+            result
+        }));
+        let _ = wait_for_daemon(
+            &client,
+            &mut daemon_exit_rx,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
     }
     if !ping(&client).await {
+        #[cfg(windows)]
+        if let Some(owner) = detached_daemon.as_mut()
+            && let Err(error) = owner.stop(&client).await
+        {
+            eprintln!("failed to stop Web-owned daemon after startup failure: {error}");
+        }
         finish_embedded_daemon(&client, embedded_daemon.take()).await;
-        bail!("embedded Rust daemon failed to start");
+        bail!(
+            "Rust daemon failed to become ready; see {}",
+            home.daemon_dir().join("ccccd.log").display()
+        );
     }
     let shutdown_watchdog = tokio::spawn(shutdown::watch_for_interrupt());
     let mode = web_mode.unwrap_or_else(cccc_web::WebMode::from_env);
@@ -147,8 +199,12 @@ async fn launch(
         let monitor =
             DaemonClient::new(home.clone()).with_timeout(std::time::Duration::from_secs(2));
         let daemon_address = home.daemon_dir().join("ccccd.addr.json");
+        let mut daemon_exited = daemon_exit_rx.clone();
         let shutdown = async move {
-            wait_for_daemon_loss(&monitor, &daemon_address).await;
+            tokio::select! {
+                () = wait_for_daemon_loss(&monitor, &daemon_address) => {}
+                _ = daemon_exited.wait_for(|exited| *exited) => {}
+            }
             eprintln!("CCCC daemon stopped; Web server closed");
         };
         match cccc_web::serve_until_mode_supervised(
@@ -175,6 +231,12 @@ async fn launch(
         }
     };
     cccc_mcp::shutdown(&home).await;
+    #[cfg(windows)]
+    if let Some(owner) = detached_daemon.as_mut()
+        && let Err(error) = owner.stop(&client).await
+    {
+        eprintln!("failed to stop Web-owned daemon: {error}");
+    }
     finish_embedded_daemon(&client, embedded_daemon.take()).await;
     shutdown_watchdog.abort();
     result
@@ -206,11 +268,10 @@ async fn confirm_and_stop_existing(
         );
     }
     if running_daemon_pid(client).await.is_some() {
-        let response = call(client, "shutdown", json!({})).await?;
+        let response = stop_daemon(client, home).await?;
         if !response.ok {
             bail!("failed to stop the existing CCCC process");
         }
-        wait_for_daemon_loss(client, &home.daemon_dir().join("ccccd.addr.json")).await;
     }
     Ok(())
 }
@@ -268,19 +329,28 @@ async fn finish_embedded_daemon(
 async fn daemon(action: DaemonAction, home: HomeLayout, client: &DaemonClient) -> Result<()> {
     match action {
         DaemonAction::Run => cccc_daemon::run(home).await,
-        DaemonAction::Stop => print(call(client, "shutdown", json!({})).await?),
+        DaemonAction::Stop => {
+            let response = stop_daemon(client, &home).await?;
+            if response.ok {
+                // A combined `cccc` process owns both Web and daemon. Do not
+                // report process-wide shutdown while that executable is still
+                // serving Web (or still locked against a Windows update).
+                drop(wait_for_web_instance_exit(&home, DAEMON_SHUTDOWN_TIMEOUT).await?);
+            }
+            print(response)
+        }
         DaemonAction::Status => {
             if ping(client).await {
-                println!("ccccd: running");
+                println!("CCCC daemon: running");
                 Ok(())
             } else {
-                bail!("ccccd: not running")
+                bail!("CCCC daemon: not running")
             }
         }
         DaemonAction::Start => {
-            replace_incompatible_daemon(client).await?;
+            replace_incompatible_daemon(&home, client).await?;
             if ping(client).await {
-                println!("ccccd: already running");
+                println!("CCCC daemon: already running");
                 return Ok(());
             }
             let executable = std::env::current_exe()?;
@@ -288,8 +358,8 @@ async fn daemon(action: DaemonAction, home: HomeLayout, client: &DaemonClient) -
                 .start(&home)
                 .await?
             {
-                StartOutcome::AlreadyRunning => println!("ccccd: already running"),
-                StartOutcome::Started(pid) => println!("ccccd: started pid={pid}"),
+                StartOutcome::AlreadyRunning => println!("CCCC daemon: already running"),
+                StartOutcome::Started(pid) => println!("CCCC daemon: started pid={pid}"),
             }
             Ok(())
         }
@@ -299,6 +369,14 @@ async fn daemon(action: DaemonAction, home: HomeLayout, client: &DaemonClient) -
 async fn show_active(client: &DaemonClient, home: &HomeLayout) -> Result<()> {
     let group_id = active::get(home)?.ok_or_else(|| anyhow::anyhow!("no active group"))?;
     print(call(client, "group_show", json!({"group_id":group_id})).await?)
+}
+
+fn select_active_group(home: &HomeLayout, group_id: &str) -> Result<()> {
+    GroupStore::new(home.clone())?
+        .load(group_id)
+        .map_err(|_| anyhow::anyhow!("group not found: {group_id}"))?;
+    active::set(home, group_id)?;
+    Ok(())
 }
 
 async fn runtime(client: &DaemonClient, action: RuntimeAction) -> Result<()> {
@@ -338,8 +416,8 @@ async fn ping(client: &DaemonClient) -> bool {
         .is_ok_and(|response| is_compatible_daemon(&response))
 }
 
-async fn wait_for_daemon(client: &DaemonClient, timeout: std::time::Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+#[cfg(windows)]
+async fn wait_for_compatible_daemon(client: &DaemonClient, deadline: tokio::time::Instant) -> bool {
     loop {
         if ping(client).await {
             return true;
@@ -348,6 +426,43 @@ async fn wait_for_daemon(client: &DaemonClient, timeout: std::time::Duration) ->
             return false;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(any(not(windows), test))]
+async fn wait_for_daemon(
+    client: &DaemonClient,
+    daemon_exited: &mut tokio::sync::watch::Receiver<bool>,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut owner_handoff_deadline = None;
+    loop {
+        if ping(client).await {
+            return true;
+        }
+        if *daemon_exited.borrow() {
+            owner_handoff_deadline
+                .get_or_insert_with(|| tokio::time::Instant::now() + DAEMON_OWNER_HANDOFF_GRACE);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline || owner_handoff_deadline.is_some_and(|handoff| now >= handoff) {
+            return false;
+        }
+        if owner_handoff_deadline.is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+            changed = daemon_exited.changed() => {
+                if changed.is_err() || *daemon_exited.borrow() {
+                    owner_handoff_deadline.get_or_insert_with(
+                        || tokio::time::Instant::now() + DAEMON_OWNER_HANDOFF_GRACE,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -369,28 +484,78 @@ async fn wait_for_daemon_loss(client: &DaemonClient, address: &std::path::Path) 
     }
 }
 
-async fn replace_incompatible_daemon(client: &DaemonClient) -> Result<()> {
+async fn stop_daemon(
+    client: &DaemonClient,
+    home: &HomeLayout,
+) -> Result<cccc_contracts::DaemonResponse> {
+    let response = call(client, "shutdown", json!({})).await?;
+    if response.ok {
+        wait_for_daemon_lock_release(home, DAEMON_SHUTDOWN_TIMEOUT).await?;
+    }
+    Ok(response)
+}
+
+async fn wait_for_daemon_lock_release(
+    home: &HomeLayout,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let lock_path = home.daemon_dir().join("ccccd.lock");
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "could not open daemon lock {}: {error}",
+                    lock_path.display()
+                )
+            })?;
+        match lock.try_lock_exclusive() {
+            Ok(()) => {
+                FileExt::unlock(&lock).map_err(|error| {
+                    anyhow::anyhow!(
+                        "could not release daemon lock probe {}: {error}",
+                        lock_path.display()
+                    )
+                })?;
+                return Ok(());
+            }
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {}
+            Err(error) => {
+                bail!(
+                    "could not probe daemon lock {}: {error}",
+                    lock_path.display()
+                )
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "CCCC daemon did not release {} within {} seconds",
+                lock_path.display(),
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+async fn replace_incompatible_daemon(home: &HomeLayout, client: &DaemonClient) -> Result<()> {
     let Ok(response) = call(client, "ping", json!({})).await else {
         return Ok(());
     };
     if is_compatible_daemon(&response) {
         return Ok(());
     }
-    eprintln!("Switching CCCC daemon from legacy or incompatible implementation to Rust...");
-    let shutdown = call(client, "shutdown", json!({})).await?;
+    eprintln!("Replacing a legacy or incompatible CCCC daemon...");
+    let shutdown = stop_daemon(client, home).await?;
     if !shutdown.ok {
         bail!("failed to stop incompatible CCCC daemon");
     }
-    for _ in 0..40 {
-        if call(client, "ping", json!({})).await.is_err() {
-            // The legacy daemon can remove its socket just before releasing the
-            // shared process lock. Give shutdown cleanup a brief grace period.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    bail!("incompatible CCCC daemon did not stop")
+    Ok(())
 }
 
 fn is_compatible_daemon(response: &cccc_contracts::DaemonResponse) -> bool {
@@ -409,9 +574,17 @@ fn is_compatible_daemon(response: &cccc_contracts::DaemonResponse) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PRODUCT_VERSION, is_compatible_daemon, web_endpoint};
+    use super::{
+        PRODUCT_VERSION, is_compatible_daemon, select_active_group, wait_for_daemon,
+        wait_for_daemon_lock_release, web_endpoint,
+    };
+    use cccc_client::DaemonClient;
     use cccc_contracts::DaemonResponse;
+    use cccc_core::{GroupStore, HomeLayout, active};
+    use fs2::FileExt;
     use serde_json::json;
+    use std::fs::OpenOptions;
+    use std::time::Duration;
 
     #[test]
     fn distinguishes_rust_from_legacy_daemon_ping() {
@@ -461,5 +634,105 @@ mod tests {
             "http://[2001:db8::1]:9000"
         );
         assert_eq!(web_endpoint("127.0.0.1", 8848), "http://127.0.0.1:8848");
+    }
+
+    #[test]
+    fn top_level_use_selects_a_group_without_overloading_scope_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let group = GroupStore::new(home.clone())
+            .expect("store")
+            .create("active", "")
+            .expect("group");
+
+        select_active_group(&home, &group.group_id).expect("select group");
+
+        assert_eq!(
+            active::get(&home).expect("active").as_deref(),
+            Some(group.group_id.as_str())
+        );
+        assert!(select_active_group(&home, "g_missing").is_err());
+    }
+
+    #[tokio::test]
+    async fn daemon_shutdown_boundary_waits_for_the_process_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize home");
+        let lock_path = home.daemon_dir().join("ccccd.lock");
+        let held_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .expect("open held daemon lock");
+        held_lock
+            .try_lock_exclusive()
+            .expect("hold daemon process lock");
+
+        let waiter_home = home.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_daemon_lock_release(&waiter_home, Duration::from_secs(2)).await
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !waiter.is_finished(),
+            "shutdown boundary returned while the daemon lock was still held"
+        );
+
+        FileExt::unlock(&held_lock).expect("release held daemon lock");
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter timeout")
+            .expect("waiter task")
+            .expect("lock release detected");
+    }
+
+    #[tokio::test]
+    async fn daemon_startup_wait_stops_when_the_embedded_daemon_exits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize home");
+        let client = DaemonClient::new(home).with_timeout(Duration::from_millis(20));
+        let (exit_tx, mut exit_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            exit_tx.send(true).expect("publish embedded daemon exit");
+        });
+
+        let ready = tokio::time::timeout(
+            Duration::from_secs(3),
+            wait_for_daemon(&client, &mut exit_rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("startup wait ignored the embedded daemon exit signal");
+        assert!(!ready, "an exited embedded daemon cannot become ready");
+    }
+
+    #[tokio::test]
+    async fn daemon_startup_wait_adopts_a_competing_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize home");
+        let client = DaemonClient::new(home.clone()).with_timeout(Duration::from_millis(50));
+        let (exit_tx, mut exit_rx) = tokio::sync::watch::channel(false);
+        let daemon_home = home.clone();
+        let external = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            cccc_daemon::run(daemon_home).await
+        });
+        exit_tx.send(true).expect("publish losing embedded owner");
+
+        let ready = tokio::time::timeout(
+            Duration::from_secs(3),
+            wait_for_daemon(&client, &mut exit_rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("startup handoff timed out");
+
+        external.abort();
+        let _ = external.await;
+        assert!(ready, "a ready competing daemon should be adopted");
     }
 }

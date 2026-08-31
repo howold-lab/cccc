@@ -88,45 +88,48 @@ impl ImWorkerRegistry {
         if let Ok(mut restoring) = self.restoring.lock() {
             restoring.extend(candidates.iter().map(|(group_id, _)| group_id.clone()));
         }
-        for (group_id, config) in candidates {
+        for (group_id, _snapshot_config) in candidates {
             let registry = Arc::clone(self);
             let home = home.clone();
             let client = client.clone();
             let task = runtime.spawn(async move {
+                let Some(config) = restore_config(&home, &group_id) else {
+                    registry
+                        .restoring
+                        .lock()
+                        .expect("IM restore registry poisoned")
+                        .remove(&group_id);
+                    return;
+                };
                 let result = registry
                     .start(home.clone(), client, &group_id, &config)
                     .await;
                 if let Ok(store) = GroupStore::new(home)
-                    && let Err(error) = cccc_core::integration_state::group_update(
-                        &store,
-                        &group_id,
-                        "im_bridge",
-                        |value| {
-                            if !value.is_object() {
-                                *value = json!({});
-                            }
-                            let state = value.as_object_mut().expect("IM state initialized");
-                            state.insert("running".into(), Value::Bool(result.is_ok()));
-                            state.insert("adapter_available".into(), Value::Bool(result.is_ok()));
-                            state.insert(
-                                "pid".into(),
-                                if result.is_ok() {
-                                    json!(std::process::id())
-                                } else {
-                                    Value::Null
-                                },
-                            );
-                            state.insert(
-                                "last_error".into(),
-                                result
-                                    .as_ref()
-                                    .err()
-                                    .map_or(Value::Null, |error| json!(error)),
-                            );
-                            state.insert("updated_at".into(), json!(cccc_contracts::utc_now()));
-                            Ok(())
-                        },
-                    )
+                    && let Err(error) = cccc_core::im_state::update(&store, &group_id, |value| {
+                        if !value.is_object() {
+                            *value = json!({});
+                        }
+                        let state = value.as_object_mut().expect("IM state initialized");
+                        state.insert("running".into(), Value::Bool(result.is_ok()));
+                        state.insert("adapter_available".into(), Value::Bool(result.is_ok()));
+                        state.insert(
+                            "pid".into(),
+                            if result.is_ok() {
+                                json!(std::process::id())
+                            } else {
+                                Value::Null
+                            },
+                        );
+                        state.insert(
+                            "last_error".into(),
+                            result
+                                .as_ref()
+                                .err()
+                                .map_or(Value::Null, |error| json!(error)),
+                        );
+                        state.insert("updated_at".into(), json!(cccc_contracts::utc_now()));
+                        Ok(())
+                    })
                 {
                     tracing::warn!(%error, %group_id, "failed to persist restored IM worker state");
                 }
@@ -177,9 +180,8 @@ impl ImWorkerRegistry {
         group_id: &str,
     ) -> Result<Value, String> {
         self.stop(group_id).await;
-        self.weixin_logins.clear(group_id);
         let store = GroupStore::new(home.clone()).map_err(|error| error.to_string())?;
-        cccc_core::integration_state::group_update(&store, group_id, "im_bridge", |value| {
+        cccc_core::im_state::update(&store, group_id, |value| {
             if !value.is_object() {
                 *value = json!({});
             }
@@ -352,7 +354,8 @@ impl ImWorkerRegistry {
         if let Some(worker) = worker {
             worker.shutdown().await;
         }
-        was_starting || was_running
+        let had_weixin_login = self.weixin_logins.clear(group_id);
+        was_starting || was_running || had_weixin_login
     }
 
     async fn begin_start(&self, group_id: &str) -> (u64, Option<WorkerHandles>) {
@@ -422,17 +425,24 @@ impl ImWorkerRegistry {
             .lock()
             .expect("IM generation registry poisoned")
             .clear();
+        self.weixin_logins.clear_all();
     }
 
     pub(crate) async fn stop_missing(&self, active_groups: &HashSet<String>) -> usize {
-        let stale = self
+        let mut stale = self
             .workers
             .lock()
             .expect("IM worker registry poisoned")
             .keys()
             .filter(|group_id| !active_groups.contains(*group_id))
             .cloned()
-            .collect::<Vec<_>>();
+            .collect::<HashSet<_>>();
+        stale.extend(
+            self.weixin_logins
+                .group_ids()
+                .into_iter()
+                .filter(|group_id| !active_groups.contains(group_id)),
+        );
         let mut stopped = 0;
         for group_id in stale {
             stopped += usize::from(self.stop(&group_id).await);
@@ -474,15 +484,22 @@ fn restore_candidates(home: &HomeLayout) -> Vec<(String, Map<String, Value>)> {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|meta| {
-            let state =
-                cccc_core::integration_state::group_get(&store, &meta.group_id, "im_bridge")
-                    .ok()?;
+            let state = cccc_core::im_state::load(&store, &meta.group_id).ok()?;
             if !state["enabled"].as_bool().unwrap_or(false) {
                 return None;
             }
             Some((meta.group_id, state.get("config")?.as_object()?.clone()))
         })
         .collect()
+}
+
+fn restore_config(home: &HomeLayout, group_id: &str) -> Option<Map<String, Value>> {
+    let store = GroupStore::new(home.clone()).ok()?;
+    let state = cccc_core::im_state::load(&store, group_id).ok()?;
+    if !state["enabled"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    state.get("config")?.as_object().cloned()
 }
 
 fn worker(tasks: Vec<JoinHandle<()>>, stopper: Stopper) -> WorkerHandles {
@@ -777,6 +794,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_retires_group_owned_weixin_login_attempt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let registry = ImWorkerRegistry::new(crate::ledger_event_hub::LedgerEventHub::new(home));
+        registry
+            .weixin_logins
+            .insert_test_attempt("g_deleted_login");
+        assert!(registry.weixin_logins.contains("g_deleted_login"));
+
+        registry.stop("g_deleted_login").await;
+
+        assert!(!registry.weixin_logins.contains("g_deleted_login"));
+    }
+
+    #[tokio::test]
+    async fn reaper_retires_login_attempt_without_network_worker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let registry = ImWorkerRegistry::new(crate::ledger_event_hub::LedgerEventHub::new(home));
+        registry.weixin_logins.insert_test_attempt("g_missing");
+
+        assert_eq!(registry.stop_missing(&HashSet::new()).await, 1);
+        assert!(!registry.weixin_logins.contains("g_missing"));
+    }
+
+    #[tokio::test]
     async fn stop_invalidates_a_pending_start_before_late_install() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
@@ -810,7 +853,7 @@ mod tests {
         let enabled = store.create("enabled", "").expect("enabled");
         let disabled = store.create("disabled", "").expect("disabled");
         for (group_id, active) in [(&enabled.group_id, true), (&disabled.group_id, false)] {
-            cccc_core::integration_state::group_update(&store, group_id, "im_bridge", |state| {
+            cccc_core::im_state::update(&store, group_id, |state| {
                 *state = json!({
                     "enabled":active,
                     "config":{"platform":"telegram","bot_token_env":"TOKEN"}
@@ -822,6 +865,51 @@ mod tests {
         let candidates = restore_candidates(&home);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, enabled.group_id);
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_does_not_reverse_a_newer_disable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("restore race", "").expect("group");
+        cccc_core::im_state::update(&store, &group.group_id, |state| {
+            *state = json!({
+                "enabled":true,
+                "config":{
+                    "platform":"telegram",
+                    "bot_token_env":"CCCC_IM_RESTORE_TEST_TOKEN_THAT_DOES_NOT_EXIST"
+                }
+            });
+            Ok(())
+        })
+        .expect("enabled state");
+        let registry = Arc::new(ImWorkerRegistry::new(
+            crate::ledger_event_hub::LedgerEventHub::new(home.clone()),
+        ));
+
+        registry.restore_enabled(home.clone(), DaemonClient::new(home.clone()));
+        cccc_core::im_state::update(&store, &group.group_id, |state| {
+            state["enabled"] = Value::Bool(false);
+            Ok(())
+        })
+        .expect("disable after restore snapshot");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while registry
+                .restoring
+                .lock()
+                .expect("restoring")
+                .contains(&group.group_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restore task settled");
+
+        let state = cccc_core::im_state::load(&store, &group.group_id).expect("state");
+        assert!(state.get("last_error").is_none_or(Value::is_null));
+        assert!(!registry.is_running(&group.group_id));
     }
 
     #[test]
@@ -993,8 +1081,7 @@ mod tests {
         assert!(body.contains("CCCC group \"test\""));
         assert!(!body.contains(&group.group_id));
         assert!(body.contains("direct messages work as plain text"));
-        let state = cccc_core::integration_state::group_get(&store, &group.group_id, "im_bridge")
-            .expect("state");
+        let state = cccc_core::im_state::load(&store, &group.group_id).expect("state");
         let pending = state["pending"].as_array().expect("pending");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0]["chat_id"], "chat-1");

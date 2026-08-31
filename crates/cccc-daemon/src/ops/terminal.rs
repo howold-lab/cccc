@@ -1,21 +1,27 @@
-use cccc_contracts::{ActorRole, DaemonRequest};
+use cccc_contracts::{ActorRole, DaemonRequest, RunnerKind};
 use cccc_core::{GroupDoc, GroupStore, HomeLayout};
 use serde_json::{Value, json};
 
 use crate::dispatch::{OpError, OpResult, bool_arg, object, required_arg, string_arg};
 use crate::ops::terminal_text;
 
+mod session_control;
+
+#[cfg(all(test, unix))]
+use session_control::write;
+
 pub fn handle(home: &HomeLayout, request: &DaemonRequest) -> Option<OpResult> {
     Some(match request.op.as_str() {
-        "terminal_status" => status(request),
+        "terminal_status" => session_control::status(request),
+        "term_attachment_status" => session_control::attachment_status(request),
         "terminal_tail" => tail(home, request),
         "terminal_snapshot" => snapshot(home, request),
         "terminal_replay" => replay(home, request),
         "terminal_history" => history(home, request),
         "terminal_since" => since(home, request),
-        "terminal_write" => write(home, request),
-        "terminal_resize" => resize(request),
-        "terminal_clear" => clear(home, request),
+        "terminal_write" => session_control::write(home, request),
+        "term_resize" | "terminal_resize" => session_control::resize(home, request),
+        "terminal_clear" => session_control::clear(home, request),
         _ => return None,
     })
 }
@@ -25,12 +31,6 @@ fn ids(request: &DaemonRequest) -> Result<(String, String), OpError> {
         required_arg(request, "group_id")?,
         required_arg(request, "actor_id")?,
     ))
-}
-
-fn status(request: &DaemonRequest) -> OpResult {
-    let (group_id, actor_id) = ids(request)?;
-    let status = cccc_runtime::status(&group_id, &actor_id).map_err(runtime_error)?;
-    object(json!({"session": status}))
 }
 
 fn tail(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
@@ -73,6 +73,7 @@ fn snapshot(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 fn replay(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group_id, actor_id) = ids(request)?;
     authorize_transcript(home, request, &group_id, &actor_id)?;
+    require_active_session(&group_id, &actor_id)?;
     let after = request
         .args
         .get("after")
@@ -82,7 +83,7 @@ fn replay(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let limit = integer(request, "limit_bytes", 512 * 1024).clamp(1, 2_000_000);
     let (page, replay_end_cursor) =
         cccc_runtime::active_history_replay(&group_id, &actor_id, after, end_cursor, limit)
-            .map_err(runtime_error)?;
+            .map_err(active_session_error)?;
     object(json!({"history": page, "replay_end_cursor": replay_end_cursor}))
 }
 
@@ -143,41 +144,21 @@ fn since(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         .args
         .get("after")
         .and_then(Value::as_u64)
-        .unwrap_or(u64::MAX);
+        .ok_or_else(|| {
+            OpError::new(
+                "invalid_args",
+                "after is required and must be a non-negative integer",
+            )
+        })?;
     let limit = integer(request, "limit_bytes", 64_000).clamp(1, 2_000_000);
     let page = super::terminal_history_source::since(home, &group_id, &actor_id, after, limit)
         .map_err(runtime_error)?;
     object(json!({"history": page}))
 }
 
-fn write(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
-    let (group_id, actor_id) = ids(request)?;
-    let data = string_arg(request, "data")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| OpError::new("invalid_args", "data is required"))?;
-    cccc_runtime::write(&group_id, &actor_id, data.as_bytes()).map_err(runtime_error)?;
-    super::runtime_hook_input::observe(home, &group_id, &actor_id, data.as_bytes());
-    object(json!({"written": data.len()}))
-}
-
 #[cfg(test)]
 fn is_interrupt_input(data: &str) -> bool {
     data.as_bytes().contains(&0x03) || data == "\u{1b}"
-}
-
-fn resize(request: &DaemonRequest) -> OpResult {
-    let (group_id, actor_id) = ids(request)?;
-    let cols = integer(request, "cols", 120).clamp(1, u16::MAX as usize) as u16;
-    let rows = integer(request, "rows", 40).clamp(1, u16::MAX as usize) as u16;
-    cccc_runtime::resize(&group_id, &actor_id, cols, rows).map_err(runtime_error)?;
-    object(json!({"resized": true, "cols": cols, "rows": rows}))
-}
-
-fn clear(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
-    let (group_id, actor_id) = ids(request)?;
-    authorize_transcript(home, request, &group_id, &actor_id)?;
-    cccc_runtime::clear(&group_id, &actor_id).map_err(runtime_error)?;
-    object(json!({"group_id": group_id, "actor_id": actor_id, "cleared": true}))
 }
 
 fn authorize_transcript(
@@ -186,19 +167,10 @@ fn authorize_transcript(
     group_id: &str,
     target_actor_id: &str,
 ) -> Result<(), OpError> {
+    let group = load_pty_target(home, group_id, target_actor_id)?;
     let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
     if by.is_empty() || by == "user" {
         return Ok(());
-    }
-    let group = GroupStore::new(home.clone())
-        .map_err(OpError::io)?
-        .load(group_id)
-        .map_err(OpError::not_found)?;
-    if cccc_core::actors::find(&group, target_actor_id).is_none() {
-        return Err(OpError::new(
-            "actor_not_found",
-            format!("actor not found: {target_actor_id}"),
-        ));
     }
     if by == target_actor_id {
         return Ok(());
@@ -223,25 +195,53 @@ fn authorize_transcript(
     Err(error)
 }
 
+fn load_pty_target(home: &HomeLayout, group_id: &str, actor_id: &str) -> Result<GroupDoc, OpError> {
+    let group = GroupStore::new(home.clone())
+        .map_err(OpError::io)?
+        .load(group_id)
+        .map_err(|_| OpError::new("group_not_found", format!("group not found: {group_id}")))?;
+    let actor = cccc_core::actors::find(&group, actor_id)
+        .ok_or_else(|| OpError::new("actor_not_found", format!("actor not found: {actor_id}")))?;
+    if actor.runner != RunnerKind::Pty {
+        let mut error = OpError::new(
+            "not_pty_actor",
+            "terminal operation is only available for PTY actors",
+        );
+        error.details.insert("runner".into(), json!(actor.runner));
+        return Err(error);
+    }
+    Ok(group)
+}
+
+fn require_active_session(group_id: &str, actor_id: &str) -> Result<(), OpError> {
+    match cccc_runtime::status(group_id, actor_id) {
+        Ok(status) if status.running => Ok(()),
+        Ok(_) | Err(cccc_runtime::RuntimeError::NotFound(_, _)) => {
+            Err(OpError::new("actor_not_running", "actor is not running"))
+        }
+        Err(error) => Err(runtime_error(error)),
+    }
+}
+
 fn transcript_visibility(group: &GroupDoc) -> &str {
     let configured = group
         .extra
-        .get("settings")
+        .get("terminal_transcript")
         .and_then(Value::as_object)
-        .and_then(|settings| {
-            settings.get("terminal_transcript_visibility").or_else(|| {
-                settings
-                    .get("terminal_transcript")
-                    .and_then(Value::as_object)
-                    .and_then(|value| value.get("visibility"))
-            })
-        })
+        .and_then(|value| value.get("visibility"))
         .or_else(|| {
             group
                 .extra
-                .get("terminal_transcript")
+                .get("settings")
                 .and_then(Value::as_object)
-                .and_then(|value| value.get("visibility"))
+                .and_then(|settings| {
+                    settings.get("terminal_transcript_visibility").or_else(|| {
+                        settings
+                            .get("terminal_transcript")
+                            .and_then(Value::as_object)
+                            .and_then(|value| value.get("visibility"))
+                    })
+                })
         })
         .and_then(Value::as_str);
     match configured {
@@ -259,6 +259,17 @@ fn integer(request: &DaemonRequest, name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn terminal_size_arg(request: &DaemonRequest, name: &str) -> usize {
+    request.args.get(name).map_or(0, |value| match value {
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0),
+        Value::String(text) => text.parse().unwrap_or(0),
+        _ => 0,
+    })
+}
+
 fn tail_render_options(request: &DaemonRequest) -> (bool, bool) {
     (
         bool_arg(request, "strip_ansi", true),
@@ -268,6 +279,15 @@ fn tail_render_options(request: &DaemonRequest) -> (bool, bool) {
 
 fn runtime_error(error: cccc_runtime::RuntimeError) -> OpError {
     OpError::new("runtime_error", error.to_string())
+}
+
+fn active_session_error(error: cccc_runtime::RuntimeError) -> OpError {
+    match error {
+        cccc_runtime::RuntimeError::NotFound(_, _) => {
+            OpError::new("actor_not_running", "actor is not running")
+        }
+        error => runtime_error(error),
+    }
 }
 
 #[cfg(all(test, unix))]

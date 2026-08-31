@@ -29,11 +29,20 @@ if ($lockSnapshot -lt 0 -or $originalSnapshot -lt 0 -or $lockSnapshot -gt $origi
 }
 
 function Write-ChecksumManifest([string]$ReleaseDir, [string]$Version, [string]$ArchiveChecksum) {
+  $wheelVersion = $Version `
+    -replace '-alpha([0-9]+)$', 'a$1' `
+    -replace '-beta([0-9]+)$', 'b$1' `
+    -replace '-rc([0-9]+)$', 'rc$1' `
+    -replace '-', ''
   $entries = @(
     "$("0" * 64)  cccc-v$Version-x86_64-unknown-linux-gnu.tar.gz",
     "$("0" * 64)  cccc-v$Version-x86_64-apple-darwin.tar.gz",
     "$("0" * 64)  cccc-v$Version-aarch64-apple-darwin.tar.gz",
-    "$ArchiveChecksum  cccc-v$Version-$target.zip"
+    "$ArchiveChecksum  cccc-v$Version-$target.zip",
+    "$("0" * 64)  cccc_pair-$wheelVersion-py3-none-manylinux_2_28_x86_64.whl",
+    "$("0" * 64)  cccc_pair-$wheelVersion-py3-none-macosx_11_0_x86_64.whl",
+    "$("0" * 64)  cccc_pair-$wheelVersion-py3-none-macosx_11_0_arm64.whl",
+    "$("0" * 64)  cccc_pair-$wheelVersion-py3-none-win_amd64.whl"
   )
   Set-Content -LiteralPath (Join-Path $ReleaseDir "SHA256SUMS") -Value $entries
 }
@@ -100,6 +109,41 @@ function New-UnsafeFixtureRelease([string]$Version, [string]$UnsafeKind) {
   Write-ChecksumManifest $releaseDir $Version ((Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant())
 }
 
+function Invoke-WindowsPowerShellInstaller(
+  [string]$Installer,
+  [string]$Version,
+  [string]$InstallDir,
+  [string]$StdoutPath,
+  [string]$StderrPath
+) {
+  $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+  $arguments = @(
+    "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Installer,
+    "-Version", $Version, "-InstallDir", $InstallDir, "-NoModifyPath"
+  )
+  # A pwsh parent exports its PowerShell 7 module path. Do not pass that
+  # incompatible path into Windows PowerShell 5.1; without the override it
+  # reconstructs the native system module path containing Get-FileHash.
+  $parentModulePath = $env:PSModulePath
+  $process = $null
+  try {
+    Remove-Item Env:PSModulePath -ErrorAction SilentlyContinue
+    $process = Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments -PassThru -NoNewWindow `
+      -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+  } finally {
+    if ($null -eq $parentModulePath) {
+      Remove-Item Env:PSModulePath -ErrorAction SilentlyContinue
+    } else {
+      $env:PSModulePath = $parentModulePath
+    }
+  }
+  if ($null -eq $process) { throw "failed to start Windows PowerShell 5.1" }
+  $process.WaitForExit()
+  $exitCode = $process.ExitCode
+  $process.Dispose()
+  return $exitCode
+}
+
 try {
   New-Item -ItemType Directory -Path $tempRoot | Out-Null
   $env:CCCC_HOME = Join-Path $tempRoot "home"
@@ -164,6 +208,102 @@ try {
   $env:Path = "$olderCommandDir;$env:Path"
   $testUserPath = if ($originalUserPath) { "$olderCommandDir;$originalUserPath" } else { $olderCommandDir }
   [Environment]::SetEnvironmentVariable("Path", $testUserPath, "User")
+
+  $versionShapedSource = Join-Path $tempRoot "version-shaped-foreign.rs"
+  $versionShapedBinary = Join-Path $tempRoot "version-shaped-foreign.exe"
+  Set-Content -LiteralPath $versionShapedSource -Encoding Ascii -Value @'
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() == 1 && args[0] == "--version" {
+        println!("cccc 1.2.3");
+        return;
+    }
+    if args.len() == 1 && args[0] == "version" {
+        println!("1.2.3");
+        return;
+    }
+    std::process::exit(1);
+}
+'@
+  & rustc $versionShapedSource -O -o $versionShapedBinary
+  if ($LASTEXITCODE -ne 0) { throw "failed to build version-shaped foreign fixture" }
+  $versionShapedInstallDir = Join-Path $tempRoot "version-shaped-foreign-installed"
+  New-Item -ItemType Directory -Force -Path $versionShapedInstallDir | Out-Null
+  $versionShapedCli = Join-Path $versionShapedInstallDir "cccc.exe"
+  Copy-Item -LiteralPath $versionShapedBinary -Destination $versionShapedCli
+  $versionShapedHash = (Get-FileHash -LiteralPath $versionShapedCli).Hash
+  $failed = $false
+  try {
+    & (Join-Path $rootDir "scripts\install.ps1") -Version $realVersion -InstallDir $versionShapedInstallDir -NoModifyPath
+  } catch {
+    $failed = $_.Exception.Message -like "*managed by another installation; refusing to replace it*"
+  }
+  if (-not $failed) { throw "installer inferred ownership from generic version output" }
+  if ((Get-FileHash -LiteralPath $versionShapedCli).Hash -ne $versionShapedHash) {
+    throw "installer modified a version-shaped foreign command"
+  }
+  $allowReplaceBeforeVersionShaped = $env:CCCC_ALLOW_REPLACE_EXISTING
+  try {
+    $env:CCCC_ALLOW_REPLACE_EXISTING = "1"
+    & (Join-Path $rootDir "scripts\install.ps1") -Version $realVersion -InstallDir $versionShapedInstallDir -NoModifyPath
+  } finally {
+    if ($null -eq $allowReplaceBeforeVersionShaped) {
+      Remove-Item Env:CCCC_ALLOW_REPLACE_EXISTING -ErrorAction SilentlyContinue
+    } else {
+      $env:CCCC_ALLOW_REPLACE_EXISTING = $allowReplaceBeforeVersionShaped
+    }
+  }
+  if ((& $versionShapedCli --version | Out-String).Trim() -ne "cccc $realVersion") {
+    throw "explicit markerless replacement did not install CCCC"
+  }
+  if ((Get-Content -LiteralPath (Join-Path $versionShapedInstallDir ".cccc-standalone") -Raw).Trim() -ne "standalone-v1") {
+    throw "explicit markerless replacement did not write the ownership marker"
+  }
+
+  $markerlessForeignInstallDir = Join-Path $tempRoot "markerless-foreign-installed"
+  New-Item -ItemType Directory -Force -Path $markerlessForeignInstallDir | Out-Null
+  $markerlessForeignCli = Join-Path $markerlessForeignInstallDir "cccc.exe"
+  Set-Content -LiteralPath $markerlessForeignCli -Value "foreign binary" -Encoding Ascii
+  $markerlessForeignHash = (Get-FileHash -LiteralPath $markerlessForeignCli).Hash
+  $failed = $false
+  try {
+    & (Join-Path $rootDir "scripts\install.ps1") -Version $realVersion -InstallDir $markerlessForeignInstallDir -NoModifyPath
+  } catch {
+    $failed = $_.Exception.Message -like "*managed by another installation; refusing to replace it*"
+  }
+  if (-not $failed) { throw "installer replaced an unrecognized markerless command" }
+  if ((Get-FileHash -LiteralPath $markerlessForeignCli).Hash -ne $markerlessForeignHash) {
+    throw "installer modified an unrecognized markerless command"
+  }
+
+  $pipInstallDir = Join-Path $tempRoot "pip-owned-installed"
+  New-Item -ItemType Directory -Force -Path $pipInstallDir | Out-Null
+  $pipCli = Join-Path $pipInstallDir "cccc.exe"
+  Set-Content -LiteralPath $pipCli -Value "pip binary" -Encoding Ascii
+  $pipMarker = Join-Path $pipInstallDir ".cccc-standalone"
+  Set-Content -LiteralPath $pipMarker -Value "pip-v1" -Encoding Ascii
+  $pipHash = (Get-FileHash -LiteralPath $pipCli).Hash
+  $allowReplaceBeforePip = $env:CCCC_ALLOW_REPLACE_EXISTING
+  $failed = $false
+  try {
+    $env:CCCC_ALLOW_REPLACE_EXISTING = "1"
+    & (Join-Path $rootDir "scripts\install.ps1") -Version $realVersion -InstallDir $pipInstallDir -NoModifyPath
+  } catch {
+    $failed = $_.Exception.Message -like "*managed by pip; run python -m pip uninstall cccc-pair*"
+  } finally {
+    if ($null -eq $allowReplaceBeforePip) {
+      Remove-Item Env:CCCC_ALLOW_REPLACE_EXISTING -ErrorAction SilentlyContinue
+    } else {
+      $env:CCCC_ALLOW_REPLACE_EXISTING = $allowReplaceBeforePip
+    }
+  }
+  if (-not $failed) { throw "installer replaced a pip-owned command" }
+  if ((Get-FileHash -LiteralPath $pipCli).Hash -ne $pipHash) {
+    throw "installer modified a pip-owned command"
+  }
+  if ((Get-Content -LiteralPath $pipMarker -Raw).Trim() -ne "pip-v1") {
+    throw "installer modified pip ownership"
+  }
 
   $foreignInstallDir = Join-Path $tempRoot "foreign-installed"
   New-Item -ItemType Directory -Force -Path $foreignInstallDir | Out-Null
@@ -278,6 +418,128 @@ try {
     Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
   }
 
+  # Windows PowerShell 5.1 promotes native stderr to NativeCommandError under
+  # ErrorActionPreference=Stop. A stopped daemon writes its expected status to
+  # stderr, so upgrades must inspect the native exit code out-of-process.
+  $legacyOldSource = Join-Path $tempRoot "legacy-powershell-old.rs"
+  $legacyOldBinary = Join-Path $tempRoot "legacy-powershell-old.exe"
+  $legacyNewSource = Join-Path $tempRoot "legacy-powershell-new.rs"
+  $legacyNewBinary = Join-Path $tempRoot "legacy-powershell-new.exe"
+  $restartFailureSource = Join-Path $tempRoot "restart-failure.rs"
+  $restartFailureBinary = Join-Path $tempRoot "restart-failure.exe"
+  Set-Content -LiteralPath $legacyOldSource -Encoding utf8 -Value @'
+use std::{env, fs, process};
+fn main() {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let state = env::var("CCCC_TEST_DAEMON_STATE").unwrap_or_default();
+    if args == ["--version"] { println!("cccc 9.9.3"); return; }
+    if args == ["daemon", "status"] {
+        if !state.is_empty() && std::path::Path::new(&state).exists() { return; }
+        eprintln!("Error: ccccd: not running");
+        process::exit(1);
+    }
+    if args == ["daemon", "stop"] {
+        let _ = fs::remove_file(state);
+        return;
+    }
+    process::exit(2);
+}
+'@
+  Set-Content -LiteralPath $legacyNewSource -Encoding utf8 -Value @'
+use std::{env, fs, process};
+fn main() {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let state = env::var("CCCC_TEST_DAEMON_STATE").unwrap_or_default();
+    if args == ["--version"] { println!("cccc 9.9.4"); return; }
+    if args == ["daemon", "status"] {
+        if !state.is_empty() && std::path::Path::new(&state).exists() { return; }
+        eprintln!("Error: ccccd: not running");
+        process::exit(1);
+    }
+    if args == ["daemon", "start"] {
+        fs::write(state, b"running").unwrap();
+        return;
+    }
+    process::exit(2);
+}
+'@
+  Set-Content -LiteralPath $restartFailureSource -Encoding utf8 -Value @'
+use std::{env, process};
+fn main() {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let state = env::var("CCCC_TEST_DAEMON_STATE").unwrap_or_default();
+    if args == ["--version"] { println!("cccc 9.9.2"); return; }
+    if args == ["daemon", "status"] {
+        if !state.is_empty() && std::path::Path::new(&state).exists() { return; }
+        eprintln!("Error: ccccd: not running");
+        process::exit(1);
+    }
+    if args == ["daemon", "start"] { process::exit(1); }
+    process::exit(2);
+}
+'@
+  & rustc $legacyOldSource -O -o $legacyOldBinary
+  if ($LASTEXITCODE -ne 0) { throw "failed to build legacy PowerShell old fixture" }
+  & rustc $legacyNewSource -O -o $legacyNewBinary
+  if ($LASTEXITCODE -ne 0) { throw "failed to build legacy PowerShell new fixture" }
+  & rustc $restartFailureSource -O -o $restartFailureBinary
+  if ($LASTEXITCODE -ne 0) { throw "failed to build daemon restart failure fixture" }
+  $legacyVersion = "9.9.4"
+  New-FixtureRelease $legacyVersion $true $legacyNewBinary
+
+  $legacyInstallDir = Join-Path $tempRoot "legacy-powershell-installed"
+  New-Item -ItemType Directory -Force -Path $legacyInstallDir | Out-Null
+  Copy-Item -LiteralPath $legacyOldBinary -Destination (Join-Path $legacyInstallDir "cccc.exe")
+  Set-Content -LiteralPath (Join-Path $legacyInstallDir ".cccc-standalone") -Value "standalone-v1" -Encoding Ascii
+  $env:CCCC_TEST_DAEMON_STATE = Join-Path $tempRoot "legacy-powershell-daemon.running"
+  Set-Content -LiteralPath $env:CCCC_TEST_DAEMON_STATE -Value "running" -Encoding Ascii
+  $legacyOut = Join-Path $tempRoot "legacy-powershell.out"
+  $legacyErr = Join-Path $tempRoot "legacy-powershell.err"
+  $legacyExit = Invoke-WindowsPowerShellInstaller `
+    (Join-Path $rootDir "scripts\install.ps1") $legacyVersion $legacyInstallDir $legacyOut $legacyErr
+  if ($legacyExit -ne 0) {
+    throw "Windows PowerShell 5.1 upgrade failed:`n$(Get-Content -LiteralPath $legacyErr -Raw)"
+  }
+  if ((& (Join-Path $legacyInstallDir "cccc.exe") --version | Out-String).Trim() -ne "cccc $legacyVersion") {
+    throw "Windows PowerShell 5.1 upgrade installed the wrong binary"
+  }
+  if (-not (Test-Path -LiteralPath $env:CCCC_TEST_DAEMON_STATE -PathType Leaf)) {
+    throw "Windows PowerShell 5.1 upgrade did not restart the daemon"
+  }
+
+  # A runtime-state restart failure occurs after the downloaded binary has
+  # passed validation. Keep that valid update instead of futilely restoring a
+  # binary which faces the same runtime state, and preserve a useful message
+  # even when the failed daemon emits no stderr.
+  $restartFailureVersion = "9.9.2"
+  New-FixtureRelease $restartFailureVersion $true $restartFailureBinary
+  $restartFailureInstallDir = Join-Path $tempRoot "restart-failure-installed"
+  New-Item -ItemType Directory -Force -Path $restartFailureInstallDir | Out-Null
+  Copy-Item -LiteralPath $legacyOldBinary -Destination (Join-Path $restartFailureInstallDir "cccc.exe")
+  Set-Content -LiteralPath (Join-Path $restartFailureInstallDir ".cccc-standalone") -Value "standalone-v1" -Encoding Ascii
+  $env:CCCC_TEST_DAEMON_STATE = Join-Path $tempRoot "restart-failure-daemon.running"
+  Set-Content -LiteralPath $env:CCCC_TEST_DAEMON_STATE -Value "running" -Encoding Ascii
+  $restartOut = Join-Path $tempRoot "restart-failure.out"
+  $restartErr = Join-Path $tempRoot "restart-failure.err"
+  $restartExit = Invoke-WindowsPowerShellInstaller `
+    (Join-Path $rootDir "scripts\install.ps1") $restartFailureVersion $restartFailureInstallDir $restartOut $restartErr
+  if ($restartExit -eq 0) {
+    $restartStateExists = Test-Path -LiteralPath $env:CCCC_TEST_DAEMON_STATE -PathType Leaf
+    $restartInstalledVersion = (& (Join-Path $restartFailureInstallDir "cccc.exe") --version | Out-String).Trim()
+    $restartOutput = Get-Content -LiteralPath $restartOut -Raw -ErrorAction SilentlyContinue
+    $restartError = Get-Content -LiteralPath $restartErr -Raw -ErrorAction SilentlyContinue
+    throw "daemon restart failure unexpectedly reported success; state_exists=$restartStateExists; installed=$restartInstalledVersion; stdout=$restartOutput; stderr=$restartError"
+  }
+  $restartDiagnostic = Get-Content -LiteralPath $restartErr -Raw
+  if ($restartDiagnostic -notlike "*CCCC v$restartFailureVersion was installed, but its daemon could not restart*" -or
+      $restartDiagnostic -notlike "*exit code 1*") {
+    throw "daemon restart failure lost its null-safe diagnostic: $restartDiagnostic"
+  }
+  if ((& (Join-Path $restartFailureInstallDir "cccc.exe") --version | Out-String).Trim() -ne "cccc $restartFailureVersion") {
+    throw "daemon restart failure rolled back a validated binary"
+  }
+  Remove-Item Env:CCCC_TEST_DAEMON_STATE -ErrorAction SilentlyContinue
+
   foreach ($invalidInstallDir in @("relative-path", "C:\valid;C:\injected")) {
     $failed = $false
     try {
@@ -387,9 +649,12 @@ fn main() {
   $slowSource = Join-Path $tempRoot "slow-version.rs"
   $slowBinary = Join-Path $tempRoot "slow-version.exe"
   Set-Content -LiteralPath $slowSource -Encoding utf8 -Value @'
-use std::{env, thread, time::Duration};
+use std::{env, fs, thread, time::Duration};
 fn main() {
     if env::args().any(|arg| arg == "--version") {
+        if let Ok(path) = env::var("CCCC_TEST_VERSION_SIGNAL") {
+            fs::write(path, b"ready").expect("write version signal");
+        }
         println!("cccc 9.9.8");
         thread::sleep(Duration::from_secs(5));
     }
@@ -402,28 +667,33 @@ fn main() {
   $oldHash = (Get-FileHash (Join-Path $installDir "cccc.exe")).Hash
   $childOut = Join-Path $tempRoot "locked-rollback.out"
   $childErr = Join-Path $tempRoot "locked-rollback.err"
+  $versionSignal = Join-Path $tempRoot "locked-rollback-version-probe"
   $hostExecutable = (Get-Process -Id $PID).Path
   $childArguments = @(
     "-NoProfile", "-File", (Join-Path $rootDir "scripts\install.ps1"),
     "-Version", $lockedVersion, "-InstallDir", $installDir, "-NoModifyPath"
   )
-  $child = Start-Process -FilePath $hostExecutable -PassThru -NoNewWindow -ArgumentList $childArguments -RedirectStandardOutput $childOut -RedirectStandardError $childErr
+  $env:CCCC_TEST_VERSION_SIGNAL = $versionSignal
+  try {
+    $child = Start-Process -FilePath $hostExecutable -PassThru -NoNewWindow -ArgumentList $childArguments -RedirectStandardOutput $childOut -RedirectStandardError $childErr
+  } finally {
+    Remove-Item Env:CCCC_TEST_VERSION_SIGNAL -ErrorAction SilentlyContinue
+  }
   $heldBinary = $null
   $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  # The replacement signals from inside its --version probe. Waiting on that
+  # side channel avoids opening the old executable and starving its rename.
   while (-not $child.HasExited -and [DateTime]::UtcNow -lt $deadline -and $null -eq $heldBinary) {
-    try {
-      $currentHash = (Get-FileHash (Join-Path $installDir "cccc.exe") -ErrorAction Stop).Hash
-      if ($currentHash -ne $oldHash) {
+    if (Test-Path -LiteralPath $versionSignal -PathType Leaf) {
+      try {
         $heldBinary = [IO.File]::Open(
           (Join-Path $installDir "cccc.exe"),
           [IO.FileMode]::Open,
           [IO.FileAccess]::Read,
           [IO.FileShare]::Read
         )
-      }
-    } catch {}
-    # Get-FileHash does not share the file for deletion on Windows. Leave a
-    # window for the installer to rename the old executable between probes.
+      } catch {}
+    }
     if ($null -eq $heldBinary) { Start-Sleep -Milliseconds 10 }
   }
   if ($null -eq $heldBinary) {

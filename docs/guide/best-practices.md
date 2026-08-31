@@ -34,12 +34,12 @@ The help protocol reference is the group-specific CCCC collaboration contract. Y
 
 #### File Priority
 
-CCCC loads help content with the following priority:
+CCCC composes help from two layers:
 
-1. **Group override (CCCC_HOME)**: `CCCC_HOME/groups/<group_id>/prompts/CCCC_HELP.md` (highest priority)
-2. **Built-in default**: `cccc.resources/cccc-help.md` (fallback)
+1. **Built-in contract**: the canonical message-delivery section always comes from `resources/cccc-help.md`.
+2. **Group overlay (CCCC_HOME)**: `CCCC_HOME/groups/<group_id>/prompts/CCCC_HELP.md` adds common, role, and actor guidance without replacing that canonical section.
 
-To customize, edit the group prompt override (recommended: Web UI → Settings → Guidance).
+To customize local guidance, edit the group overlay (recommended: Web UI → Settings → Guidance).
 
 You can also locate the file path from the Web UI (it shows the exact override path per group).
 
@@ -88,7 +88,7 @@ The on-demand help payload is returned as:
 ```json
 {
   "markdown": "<filtered content based on role/actor>",
-  "source": "CCCC_HOME/.../prompts/CCCC_HELP.md or cccc.resources/cccc-help.md"
+  "source": "CCCC_HOME/.../prompts/CCCC_HELP.md or resources/cccc-help.md"
 }
 ```
 
@@ -240,7 +240,8 @@ If an agent keeps repeating:
 
 ### Remote Access
 
-- Create an **Admin Access Token** before any remote exposure
+- Create the first **Admin Access Token** with the one-time host-local code in `~/.cccc/web_bootstrap_token`; protected APIs remain locked while no administrator exists
+- Keep public Web access behind HTTPS; plain HTTP manual LAN exposure requires the explicit `CCCC_REMOTE_ALLOW_INSECURE=1` override
 - Prefer Cloudflare Access or Tailscale over raw exposure
 - Don't expose port 8848 directly to the internet
 

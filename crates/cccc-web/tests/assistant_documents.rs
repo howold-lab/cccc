@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod auth_support;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -52,7 +53,7 @@ async fn document_get_reconciles_repository_edits_through_daemon() {
     let daemon_home = home.clone();
     let daemon = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
     wait_for_address(&home).await;
-    let response = cccc_web::app(home.clone())
+    let response = auth_support::authenticated_app(home.clone())
         .oneshot(
             Request::get(format!(
                 "/api/v1/groups/{}/assistants/voice_secretary/documents?document_path=docs%2Fvoice-secretary%2Fmeeting.md",
@@ -76,6 +77,38 @@ async fn document_get_reconciles_repository_edits_through_daemon() {
         "# Meeting\n\nUpdated by Voice Secretary.\n"
     );
     assert_eq!(payload["result"]["documents"][0]["revision_count"], 2);
+
+    let response = auth_support::authenticated_app(home.clone())
+        .oneshot(
+            Request::get(format!(
+                "/api/v1/groups/{}/assistants/voice_secretary?view=voice_workspace",
+                group.group_id
+            ))
+            .body(Body::empty())
+            .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        payload["result"]["documents"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        payload["result"]["documents"][0]["document_path"],
+        "docs/voice-secretary/meeting.md"
+    );
+    assert_eq!(
+        payload["result"]["active_document_id"],
+        saved.result["document"]["document_id"]
+    );
 
     let _ = cccc_client::DaemonClient::new(home)
         .call(&DaemonRequest {

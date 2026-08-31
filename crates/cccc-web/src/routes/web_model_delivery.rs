@@ -14,7 +14,9 @@ use crate::browser_surface::{
 };
 
 use super::web_model_browser::key;
-use super::web_model_delivery_completion::{args, call as daemon_call, complete_args, reconcile};
+use super::web_model_delivery_completion::{
+    args, call as daemon_call, complete_args, reconcile, record_delivery,
+};
 use super::web_model_delivery_state::{record_connector, target as load_target, update_target};
 
 static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -137,6 +139,33 @@ fn spawn_worker(state: AppState, group_id: String, actor_id: String) {
         let Some(exhausted_turn_id) = exhausted_turn_id else {
             return;
         };
+        if let Ok(target) = load_target(&state, &group_id, &actor_id) {
+            let message =
+                "browser model remained unavailable after the bounded automatic retry budget";
+            let _ = update_target(
+                &state,
+                &group_id,
+                &actor_id,
+                json!({"last_delivery_status":"failed","last_error":message}),
+            );
+            if let (Some(delivery_id), Some(event_ids)) = (
+                target["last_delivery_id"].as_str(),
+                target["last_delivery_event_ids"].as_array(),
+            ) {
+                record_delivery(
+                    &state,
+                    &group_id,
+                    &actor_id,
+                    &exhausted_turn_id,
+                    Value::Array(event_ids.clone()),
+                    delivery_id,
+                    "failed",
+                    message,
+                    json!({"target_url":target["url"]}),
+                )
+                .await;
+            }
+        }
         match fresh_turn_after_exhaustion(&state, &group_id, &actor_id, &exhausted_turn_id).await {
             Ok(Some(fresh_turn_id)) => {
                 tracing::debug!(
@@ -144,7 +173,7 @@ fn spawn_worker(state: AppState, group_id: String, actor_id: String) {
                     actor_id,
                     exhausted_turn_id,
                     fresh_turn_id,
-                    "Rescheduling Web-model browser delivery for fresh unread work"
+                    "Rescheduling Web-model browser delivery for fresh direct work"
                 );
                 spawn_worker(state, group_id, actor_id);
             }
@@ -172,8 +201,8 @@ async fn fresh_turn_after_exhaustion(
     }
     let wait = daemon_call(
         state,
-        "web_model_runtime_wait_next_turn",
-        args(group_id, actor_id),
+        "runtime_wait_next_turn",
+        browser_wait_args(group_id, actor_id),
     )
     .await?;
     Ok(replacement_turn_id(exhausted_turn_id, &wait))
@@ -406,8 +435,8 @@ async fn deliver_once(
     }
     let wait = daemon_call(
         state,
-        "web_model_runtime_wait_next_turn",
-        args(group_id, actor_id),
+        "runtime_wait_next_turn",
+        browser_wait_args(group_id, actor_id),
     )
     .await?;
     if wait["status"] != "work_available" {
@@ -438,6 +467,18 @@ async fn deliver_once(
         actor_id,
         json!({"last_delivery_id":delivery_id,"last_delivery_turn_id":turn_id,"last_delivery_event_ids":turn["event_ids"],"last_delivery_status":"submitting","last_delivery_started_at":cccc_contracts::utc_now(),"last_error":""}),
     )?;
+    record_delivery(
+        state,
+        group_id,
+        actor_id,
+        turn_id,
+        turn["event_ids"].clone(),
+        &delivery_id,
+        "submitting",
+        "",
+        json!({"target_url":target_url,"auto_bind_new_chat":target["kind"] == "new_chat"}),
+    )
+    .await;
     let submitted = state
         .browser_surfaces
         .submit_prompt_with_attachment(
@@ -494,6 +535,18 @@ async fn deliver_once(
                 }),
             )?;
             record_connector(state, group_id, actor_id, "failed", turn_id, &message)?;
+            record_delivery(
+                state,
+                group_id,
+                actor_id,
+                turn_id,
+                turn["event_ids"].clone(),
+                &delivery_id,
+                "failed",
+                &message,
+                json!({"target_url":target_url}),
+            )
+            .await;
             return Ok(DeliveryOutcome::Stopped);
         }
         Err(error) => {
@@ -532,6 +585,28 @@ async fn deliver_once(
             target_url,
         ),
     )?;
+    let submission_evidence = browser["submission_evidence"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    // A verified browser handoff is the terminal delivery fact. Persist it
+    // before completing the structured turn so the daemon can validate that
+    // every source event actually crossed the runtime boundary.
+    record_delivery(
+        state,
+        group_id,
+        actor_id,
+        turn_id,
+        turn["event_ids"].clone(),
+        &delivery_id,
+        "submitted",
+        &submission_evidence,
+        json!({
+            "target_url":target_url,
+            "auto_bind_new_chat":target["kind"] == "new_chat"
+        }),
+    )
+    .await;
     let complete = complete_args(
         group_id,
         actor_id,
@@ -539,7 +614,7 @@ async fn deliver_once(
         turn["event_ids"].clone(),
         &delivery_id,
     );
-    if let Err(error) = daemon_call(state, "web_model_runtime_complete_turn", complete).await {
+    if let Err(error) = daemon_call(state, "runtime_complete_turn", complete).await {
         update_target(
             state,
             group_id,
@@ -557,6 +632,7 @@ async fn deliver_once(
     }
     let mut pending_new_chat_bind = target["kind"] == "new_chat";
     let mut bind_error = String::new();
+    let mut bound_conversation_url = String::new();
     if pending_new_chat_bind {
         match state
             .browser_surfaces
@@ -569,6 +645,7 @@ async fn deliver_once(
                 {
                     bind_error = error.to_string();
                 } else {
+                    bound_conversation_url = conversation_url;
                     pending_new_chat_bind = false;
                 }
             }
@@ -609,7 +686,48 @@ async fn deliver_once(
         );
     }
     update_target(state, group_id, actor_id, final_patch)?;
+    // Keep the existing connector-facing status coherent with the target
+    // before the best-effort ledger receipt performs an async daemon call.
+    // Otherwise observers can see a submitted target while the connector
+    // still exposes the preceding MCP probe status.
     record_connector(state, group_id, actor_id, "submitted", turn_id, "")?;
+    if !bound_conversation_url.is_empty() {
+        record_delivery(
+            state,
+            group_id,
+            actor_id,
+            turn_id,
+            turn["event_ids"].clone(),
+            &delivery_id,
+            "bound",
+            &submission_evidence,
+            json!({
+                "target_url":target_url,
+                "bound_conversation_url":bound_conversation_url,
+                "pending_conversation_url":false,
+                "auto_bind_new_chat":true
+            }),
+        )
+        .await;
+    }
+    if pending_new_chat_bind {
+        record_delivery(
+            state,
+            group_id,
+            actor_id,
+            turn_id,
+            turn["event_ids"].clone(),
+            &delivery_id,
+            "pending",
+            final_error,
+            json!({
+                "target_url":target_url,
+                "pending_conversation_url":true,
+                "auto_bind_new_chat":true
+            }),
+        )
+        .await;
+    }
     Ok(DeliveryOutcome::Submitted)
 }
 
@@ -639,10 +757,22 @@ async fn complete_ambiguous_attempt(
         group_id,
         actor_id,
         attempt.turn_id,
-        attempt.event_ids,
+        attempt.event_ids.clone(),
         attempt.delivery_id,
     );
-    let completion = daemon_call(state, "web_model_runtime_complete_turn", complete).await;
+    record_delivery(
+        state,
+        group_id,
+        actor_id,
+        attempt.turn_id,
+        attempt.event_ids.clone(),
+        attempt.delivery_id,
+        "ambiguous",
+        message,
+        json!({}),
+    )
+    .await;
+    let completion = daemon_call(state, "runtime_complete_turn", complete).await;
     let completion_status = if completion.is_ok() {
         "submission_ambiguous"
     } else {
@@ -676,7 +806,7 @@ async fn complete_ambiguous_attempt(
         group_id,
         actor_id,
         turn_id = attempt.turn_id,
-        cursor_committed = completion.is_ok(),
+        completion_recorded = completion.is_ok(),
         "Web-model browser submission could not be verified; the attempted message will not be redelivered automatically"
     );
     Ok(DeliveryOutcome::Ambiguous)
@@ -961,6 +1091,12 @@ fn browser_delivery_id(actor_id: &str, turn_id: &str) -> String {
     format!("webdelivery:{actor_id}:{turn_key}")
 }
 
+fn browser_wait_args(group_id: &str, actor_id: &str) -> serde_json::Map<String, Value> {
+    let mut request = args(group_id, actor_id);
+    request.insert("transport".into(), json!("web_model_browser"));
+    request
+}
+
 fn build_browser_prompt(
     turn: &Value,
     target: &Value,
@@ -1074,7 +1210,7 @@ fn completion_pending_patch(
         "last_delivery_reconcile_attempts":0,
         "last_delivery_at":cccc_contracts::utc_now(),
         "last_submission_evidence":browser,
-        "last_error":"cursor_completion_pending"
+        "last_error":"delivery_completion_pending"
     });
     if let Some(seed) = bootstrap_seed {
         patch["bootstrap_seed_delivered_at"] = json!(cccc_contracts::utc_now());
@@ -1136,6 +1272,28 @@ async fn resolve_pending_new_chat(
         actor_id,
         json!({"last_delivery_status":"submitted","last_error":""}),
     )?;
+    if let (Some(turn_id), Some(delivery_id), Some(event_ids)) = (
+        target["last_delivery_turn_id"].as_str(),
+        target["last_delivery_id"].as_str(),
+        target["last_delivery_event_ids"].as_array(),
+    ) {
+        record_delivery(
+            state,
+            group_id,
+            actor_id,
+            turn_id,
+            Value::Array(event_ids.clone()),
+            delivery_id,
+            "bound",
+            "conversation_url_bound",
+            json!({
+                "target_url":target_url,
+                "bound_conversation_url":conversation_url,
+                "resolved_pending_new_chat":true
+            }),
+        )
+        .await;
+    }
     Ok(DeliveryOutcome::Submitted)
 }
 
@@ -1167,203 +1325,4 @@ fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str, ApiError> {
         .as_str()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::bad(format!("runtime turn missing {key}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{
-        BOOTSTRAP_SEED_VERSION, bootstrap_seed_digest, browser_delivery_id, build_browser_prompt,
-        compatibility_image_for_delivery, completion_pending_patch, deferred_retry_delay,
-        replacement_turn_id,
-    };
-
-    #[test]
-    fn browser_delivery_id_is_stable_per_turn_and_distinct_across_turns() {
-        assert_eq!(
-            browser_delivery_id("web1", "webturn:web1:abc123"),
-            "webdelivery:web1:abc123"
-        );
-        assert_ne!(
-            browser_delivery_id("web1", "webturn:web1:abc123"),
-            browser_delivery_id("web1", "webturn:web1:def456")
-        );
-    }
-
-    #[test]
-    fn deferred_delivery_uses_three_bounded_automatic_retries() {
-        assert_eq!(
-            deferred_retry_delay(0).map(|value| value.as_secs()),
-            Some(3)
-        );
-        assert_eq!(
-            deferred_retry_delay(1).map(|value| value.as_secs()),
-            Some(6)
-        );
-        assert_eq!(
-            deferred_retry_delay(2).map(|value| value.as_secs()),
-            Some(12)
-        );
-        assert_eq!(deferred_retry_delay(3), None);
-    }
-
-    #[test]
-    fn deferred_exhaustion_reschedules_only_fresh_unread_work() {
-        let same_turn = json!({
-            "status":"work_available",
-            "turn":{"turn_id":"webturn:web1:old"}
-        });
-        let fresh_turn = json!({
-            "status":"work_available",
-            "turn":{"turn_id":"webturn:web1:fresh"}
-        });
-        let idle = json!({"status":"idle","turn":null});
-
-        assert_eq!(replacement_turn_id("webturn:web1:old", &same_turn), None);
-        assert_eq!(
-            replacement_turn_id("webturn:web1:old", &fresh_turn).as_deref(),
-            Some("webturn:web1:fresh")
-        );
-        assert_eq!(replacement_turn_id("webturn:web1:old", &idle), None);
-    }
-
-    #[test]
-    fn compatibility_images_are_visually_identical_but_unique_per_delivery() {
-        let (first_name, first) = compatibility_image_for_delivery("webdelivery:web1:first")
-            .expect("first compatibility image");
-        let (same_name, same) = compatibility_image_for_delivery("webdelivery:web1:first")
-            .expect("same compatibility image");
-        let (second_name, second) = compatibility_image_for_delivery("webdelivery:web1:second")
-            .expect("second compatibility image");
-
-        assert_eq!(first_name, same_name);
-        assert_eq!(first, same);
-        assert_ne!(first_name, second_name);
-        assert_ne!(first, second);
-        assert!(first.starts_with(b"\x89PNG\r\n\x1a\n"));
-        assert!(second.starts_with(b"\x89PNG\r\n\x1a\n"));
-        assert_eq!(&first[first.len() - 8..first.len() - 4], b"IEND");
-        assert_eq!(&second[second.len() - 8..second.len() - 4], b"IEND");
-        assert!(
-            first
-                .windows(b"CCCC-Delivery\0".len())
-                .any(|value| value == b"CCCC-Delivery\0")
-        );
-        assert!(
-            second
-                .windows(b"CCCC-Delivery\0".len())
-                .any(|value| value == b"CCCC-Delivery\0")
-        );
-    }
-
-    #[test]
-    fn browser_prompt_bootstraps_once_per_bound_conversation_and_prompt_revision() {
-        let turn = json!({
-            "coalesced_text":"[cccc] message hello",
-            "system_prompt":"[CCCC] You are web1 in group test"
-        });
-        let url = "https://chatgpt.com/c/test";
-        let (first, seed) = build_browser_prompt(
-            &turn,
-            &json!({}),
-            url,
-            "web1",
-            "webdelivery:web1:one",
-            "event-one",
-        )
-        .expect("first prompt");
-        let seed = seed.expect("bootstrap seed");
-        assert!(first.contains("[CCCC] Session bootstrap for this browser chat:"));
-        assert!(first.contains("[CCCC] You are web1 in group test"));
-        assert!(first.contains("[CCCC] Web transport:"));
-        assert!(first.contains("[cccc] Browser batch webdelivery:web1:one"));
-        assert_eq!(seed.digest, bootstrap_seed_digest(&seed.text));
-
-        let seeded_target = json!({
-            "bootstrap_seed_delivered_at":"2026-08-07T00:00:00Z",
-            "bootstrap_seed_version":BOOTSTRAP_SEED_VERSION,
-            "bootstrap_seed_digest":seed.digest,
-            "bootstrap_seed_conversation_url":url
-        });
-        let (next, next_seed) = build_browser_prompt(
-            &turn,
-            &seeded_target,
-            url,
-            "web1",
-            "webdelivery:web1:two",
-            "event-two",
-        )
-        .expect("next prompt");
-        assert!(next_seed.is_none());
-        assert!(!next.contains("Session bootstrap"));
-        assert!(next.contains("[cccc] Browser batch webdelivery:web1:two"));
-
-        let (_, rebound_seed) = build_browser_prompt(
-            &turn,
-            &seeded_target,
-            "https://chatgpt.com/c/other",
-            "web1",
-            "webdelivery:web1:three",
-            "event-three",
-        )
-        .expect("rebound prompt");
-        assert!(rebound_seed.is_some());
-    }
-
-    #[test]
-    fn completion_evidence_persists_bootstrap_before_cursor_reconciliation() {
-        let turn = json!({
-            "coalesced_text":"[cccc] message hello",
-            "system_prompt":"[CCCC] You are web1 in group test"
-        });
-        let url = "https://chatgpt.com/c/test";
-        let (_, seed) = build_browser_prompt(
-            &turn,
-            &json!({}),
-            url,
-            "web1",
-            "webdelivery:web1:one",
-            "event-one",
-        )
-        .expect("browser prompt");
-        let seed = seed.expect("bootstrap seed");
-        let patch = completion_pending_patch(
-            "webturn:web1:one",
-            json!(["event-one"]),
-            json!({"submitted":true}),
-            Some(&seed),
-            url,
-        );
-
-        assert_eq!(patch["last_delivery_status"], "completion_ambiguous");
-        assert_eq!(patch["bootstrap_seed_version"], BOOTSTRAP_SEED_VERSION);
-        assert_eq!(patch["bootstrap_seed_digest"], seed.digest);
-        assert_eq!(patch["bootstrap_seed_conversation_url"], url);
-        assert!(
-            patch["bootstrap_seed_delivered_at"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-        );
-    }
-
-    #[test]
-    fn image_compat_prompt_explains_that_the_blank_image_has_no_task_context() {
-        let turn = json!({
-            "coalesced_text":"[user -> web1] hello",
-            "system_prompt":"[CCCC] You are web1",
-            "delivery":{"web_model_mode":"image_compat"}
-        });
-        let (prompt, _) = build_browser_prompt(
-            &turn,
-            &json!({}),
-            "https://chatgpt.com/",
-            "web1",
-            "webdelivery:web1:image",
-            "event-one",
-        )
-        .expect("image compatibility prompt");
-        assert!(prompt.contains("blank image is transport-only"));
-        assert!(prompt.contains("carries no task context"));
-    }
 }

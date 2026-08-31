@@ -208,7 +208,7 @@ Or use the explicit `/send` command for specifying recipients:
 When you @mention the bot (in groups) or send a direct message, plain text is automatically treated as `/send` to the foreman. You only need the explicit `/send` command when targeting specific agents like `@all` or `@peers`.
 :::
 
-Even if the app is granted the broader `im:message.group_msg` event scope, CCCC ignores ambient group traffic. A recognized CCCC slash command is an explicit bot address and can be sent without an @mention; ordinary group text or attachments must explicitly mention the current bot. Direct chats continue to accept plain text. Rust and Python workers enforce the same rule.
+Even if the app is granted the broader `im:message.group_msg` event scope, CCCC ignores ambient group traffic. A recognized CCCC slash command is an explicit bot address and can be sent without an @mention; ordinary group text or attachments must explicitly mention the current bot. Direct chats continue to accept plain text. The native worker enforces the same rule across providers.
 
 ### Targeting Specific Agents
 
@@ -246,8 +246,8 @@ Attach files to your message. Feishu files are downloaded and stored in CCCC's b
 | `/send @all <message>` | Send to all agents |
 | `/send @peers <message>` | Send to non-foreman agents |
 | `/status` | Show group and agent status |
-| `/pause` | Pause message delivery |
-| `/resume` | Resume message delivery |
+| `/pause` | Pause delivery for this chat or thread |
+| `/resume` | Resume delivery for this chat or thread |
 | `/verbose [on\|off]` | Enable verbose delivery, or disable it with `off` |
 | `/help` | Show available commands |
 
@@ -290,7 +290,7 @@ cccc im start
 CCCC currently supports:
 
 - Outbound messages via REST APIs
-- Inbound messages via persistent connection (Python `lark-oapi`)
+- Inbound messages via the native persistent-connection worker
 
 Webhook callbacks (developer server URL), message cards, and encryption settings are not configured through CCCC at the moment.
 

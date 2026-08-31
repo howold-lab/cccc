@@ -8,8 +8,6 @@ mod proxy;
 mod system_browser;
 
 pub use interaction::{serve_socket, serve_vnc_socket};
-#[cfg(test)]
-pub(crate) use prompt_submission::SUBMISSION_EVIDENCE_TIMEOUT;
 pub(crate) use prompt_submission::{
     BOUND_CONVERSATION_ERROR_MARKER, PromptSubmissionOutcome, conversation_target_matches,
     conversation_url_for_target, is_chatgpt_url, normalized_chatgpt_conversation_url,
@@ -84,6 +82,14 @@ struct OpenRequest<'a> {
     storage_state: Option<&'a Value>,
     reuse_existing: bool,
     mode: BrowserMode,
+}
+
+pub(super) fn validate_browser_surface_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value).context("invalid browser surface URL")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        bail!("browser surface URL must use http or https");
+    }
+    Ok(())
 }
 
 impl BrowserSurfaces {
@@ -264,9 +270,7 @@ impl BrowserSurfaces {
             reuse_existing,
             mode,
         } = request;
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            bail!("browser surface URL must use http or https");
-        }
+        validate_browser_surface_url(url)?;
         if self.shutting_down.load(Ordering::Acquire) {
             bail!("browser surfaces are shutting down");
         }

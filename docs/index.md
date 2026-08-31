@@ -4,7 +4,7 @@ layout: home
 hero:
   name: CCCC
   text: Coordinate coding agents like a group chat
-  tagline: Read receipts, delivery tracking, and phone-side ops across 17 first-class runtimes, including Claude Code, Cline, Codex, and ChatGPT Web — local-first, one stable pip install
+  tagline: Read receipts, delivery tracking, and phone-side ops across 17 first-class runtimes, including Claude Code, Cline, Codex, and ChatGPT Web — local-first, one native product
   image:
     src: /logo.svg
     alt: CCCC
@@ -31,7 +31,7 @@ features:
     details: Web UI, CLI, MCP, and IM bridge all map to one daemon truth model.
   - icon: 💬
     title: IM-Grade Collaboration Semantics
-    details: Use @routing, reply context, read status, attention ACK, and reply-required obligations for reliable coordination.
+    details: Use @routing, explicit Mail or Send delivery, read status, and concrete reply obligations for reliable coordination.
   - icon: 🔧
     title: Automation + Operations
     details: Combine reminders, one-time operational actions, and policy guardrails to keep groups moving.

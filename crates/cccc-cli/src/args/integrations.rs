@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 #[derive(Debug, Args)]
 pub struct PromptArgs {
-    /// Legacy positional spelling retained for Rust preview users.
+    /// Legacy positional spelling retained for 0.4.35 command compatibility.
     #[arg(value_name = "ACTOR_ID")]
     pub legacy_actor_id: Option<String>,
     #[arg(long = "actor-id")]
@@ -142,18 +142,6 @@ pub enum SpaceAction {
         lane: String,
         #[arg(long, default_value = "notebooklm")]
         provider: String,
-        #[arg(long, default_value = "user")]
-        by: String,
-    },
-    Sync {
-        #[arg(long = "group")]
-        group_id: Option<String>,
-        #[arg(long)]
-        lane: String,
-        #[arg(long, default_value = "notebooklm")]
-        provider: String,
-        #[arg(long)]
-        force: bool,
         #[arg(long, default_value = "user")]
         by: String,
     },

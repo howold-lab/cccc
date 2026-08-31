@@ -15,6 +15,7 @@ import {
   SearchIcon,
   ClipboardIcon,
   SettingsIcon,
+  AccountIcon,
   MonitorIcon,
   SunIcon,
   MoonIcon,
@@ -24,6 +25,7 @@ import {
   PauseIcon,
   CloseIcon,
 } from "../Icons";
+import { GroupStatusIndicator } from "./GroupStatusIndicator";
 
 export interface MobileMenuSheetProps {
   isOpen: boolean;
@@ -41,6 +43,8 @@ export interface MobileMenuSheetProps {
   onOpenSearch: () => void;
   onOpenContext: () => void;
   onOpenSettings: () => void;
+  canAccessAccount: boolean;
+  onOpenAccount: () => void;
   onOpenGroupEdit?: () => void;
   onStartGroup: () => void;
   onStopGroup: () => void;
@@ -63,6 +67,8 @@ export function MobileMenuSheet({
   onOpenSearch,
   onOpenContext,
   onOpenSettings,
+  canAccessAccount,
+  onOpenAccount,
   onOpenGroupEdit,
   onStartGroup,
   onStopGroup,
@@ -229,14 +235,7 @@ export function MobileMenuSheet({
             </div>
             {selectedStatus && (
               <div className="flex items-center gap-2 mt-1">
-                <span
-                  className={classNames(
-                    "text-xs px-2 py-0.5 rounded-full font-medium",
-                    selectedStatus.pillClass,
-                  )}
-                >
-                  {selectedStatus.label}
-                </span>
+                <GroupStatusIndicator status={selectedStatus} variant="badge" />
               </div>
             )}
           </div>
@@ -278,6 +277,20 @@ export function MobileMenuSheet({
 
           <section className={sectionCardClass}>
             <div className={sectionTitleClass}>{t("workspaceSection")}</div>
+            {canAccessAccount ? (
+              <button
+                className={rowButtonClass}
+                onClick={() => {
+                  onClose();
+                  onOpenAccount();
+                }}
+              >
+                <div className="flex items-center gap-3">
+                  <AccountIcon size={18} />
+                  <span>{t("account")}</span>
+                </div>
+              </button>
+            ) : null}
             <button
               className={rowButtonClass}
               onClick={() => {
@@ -297,7 +310,7 @@ export function MobileMenuSheet({
                 onClose();
                 onOpenSettings();
               }}
-              disabled={!selectedGroupId}
+              disabled={!selectedGroupId && !canAccessAccount}
             >
               <div className="flex items-center gap-3">
                 <SettingsIcon size={18} />

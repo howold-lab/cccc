@@ -3,17 +3,21 @@ mod auth;
 mod browser_surface;
 mod im_runtime;
 mod ledger_event_hub;
+mod local_browser_auth;
 mod network;
 mod notebooklm_auth;
 mod readonly;
+mod request_origin;
 mod routes;
+mod security_headers;
 mod shutdown;
 mod web_banner;
+mod web_runtime_state;
 
 use anyhow::Result;
 use axum::Router;
 use axum::body::Body;
-use axum::http::{StatusCode, Uri, header};
+use axum::http::{Request, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use cccc_client::DaemonClient;
 use cccc_core::HomeLayout;
@@ -25,7 +29,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
+use tower_http::compression::CompressionLayer;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 pub use readonly::WebMode;
@@ -87,6 +92,8 @@ pub(crate) struct AppState {
     shutdown: broadcast::Sender<()>,
     restart: Option<Arc<RestartHandle>>,
     live_binding: LiveBinding,
+    runtime_id: String,
+    runtime_proof_key: String,
     web_mode: WebMode,
     exhibit_allow_terminal: bool,
 }
@@ -120,7 +127,27 @@ pub fn app(home: HomeLayout) -> Router {
 
 pub fn app_with_mode(home: HomeLayout, web_mode: WebMode) -> Router {
     let (shutdown, _) = broadcast::channel(1);
-    app_with_shutdown(home, shutdown, web_mode, None, LiveBinding::from_env()).0
+    app_with_shutdown(
+        home,
+        shutdown,
+        web_mode,
+        None,
+        LiveBinding::from_env(),
+        new_web_runtime_id(),
+    )
+    .0
+}
+
+fn new_web_runtime_id() -> String {
+    format!("web_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn new_web_runtime_proof_key() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 fn app_with_shutdown(
@@ -129,6 +156,7 @@ fn app_with_shutdown(
     web_mode: WebMode,
     restart: Option<Arc<RestartHandle>>,
     live_binding: LiveBinding,
+    runtime_id: String,
 ) -> (
     Router,
     Arc<im_runtime::ImWorkerRegistry>,
@@ -162,14 +190,24 @@ fn app_with_shutdown(
         shutdown,
         restart,
         live_binding,
+        runtime_id,
+        runtime_proof_key: new_web_runtime_proof_key(),
         web_mode,
         exhibit_allow_terminal: readonly::exhibit_allow_terminal_from_env(),
     };
     let app_state = state.clone();
-    let app = routes::router()
+    let mut app = routes::router()
         .fallback(static_asset)
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    path = %request.uri().path()
+                )
+            }),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             readonly::guard,
@@ -178,7 +216,14 @@ fn app_with_shutdown(
             state.clone(),
             auth::authorize,
         ))
-        .with_state(state);
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            security_headers::apply,
+        ));
+    if let Some(cors) = configured_cors_layer() {
+        app = app.layer(cors);
+    }
+    let app = app.with_state(state);
     (app, im_workers, browser_surfaces, app_state)
 }
 
@@ -266,18 +311,18 @@ async fn static_asset(uri: Uri) -> Response {
     } else {
         path
     };
-    let asset = WebAssets::get(path).or_else(|| {
+    let asset = WebAssets::get(path).map(|asset| (asset, path)).or_else(|| {
         (!path
             .rsplit('/')
             .next()
             .is_some_and(|name| name.contains('.')))
-        .then(|| WebAssets::get("index.html"))
+        .then(|| WebAssets::get("index.html").map(|asset| (asset, "index.html")))
         .flatten()
     });
-    let Some(asset) = asset else {
+    let Some((asset, served_path)) = asset else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let mime = mime_guess::from_path(served_path).first_or_octet_stream();
     (
         [
             (header::CONTENT_TYPE, mime.as_ref()),
@@ -367,9 +412,17 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     home.initialize()?;
+    if let Some(path) = cccc_core::web_bootstrap::ensure_web_bootstrap_token(&home)? {
+        tracing::warn!(
+            path = %path.display(),
+            "Web access is locked until the first administrator token is created with the local bootstrap code"
+        );
+    }
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let address = listener.local_addr()?;
     ensure_listener_auth(&home, address)?;
+    let runtime_id = new_web_runtime_id();
+    let runtime_home = home.clone();
     web_banner::print(host, address.port());
     tracing::info!(%address, "CCCC Rust Web listening");
     let (web_shutdown, _) = broadcast::channel(1);
@@ -386,20 +439,35 @@ where
             host: host.to_owned(),
             port: address.port(),
         },
+        runtime_id,
     );
+    if let Err(error) = web_runtime_state::write(
+        &app_state.home,
+        host,
+        address.port(),
+        web_mode.as_str(),
+        !matches!(restart_behavior, RestartBehavior::Disabled),
+        &app_state.runtime_id,
+        &app_state.runtime_proof_key,
+    ) {
+        tracing::warn!(%error, "failed to record live Web binding");
+    }
     routes::spawn_web_model_supervisor(app_state);
     let server = async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                tokio::select! {
-                    _ = shutdown => {},
-                    _ = shutdown_signal() => {},
-                    _ = restart_rx.recv() => {},
-                }
-                let _ = web_shutdown.send(());
-                let _ = shutdown_started.send(());
-            })
-            .await
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = shutdown => {},
+                _ = shutdown_signal() => {},
+                _ = restart_rx.recv() => {},
+            }
+            let _ = web_shutdown.send(());
+            let _ = shutdown_started.send(());
+        })
+        .await
     };
     tokio::pin!(server);
     let server_result = tokio::select! {
@@ -422,6 +490,9 @@ where
         tracing::warn!("Web component shutdown timed out; cancelling remaining IM workers");
     }
     shutdown::browser_surfaces(&browser_surfaces).await;
+    if let Err(error) = web_runtime_state::clear_if_owner(&runtime_home) {
+        tracing::warn!(%error, "failed to clear live Web binding");
+    }
     server_result?;
     if restart.as_ref().is_some_and(|handle| handle.requested()) {
         match restart_behavior {
@@ -439,6 +510,23 @@ fn environment_flag(name: &str) -> bool {
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
         )
+    })
+}
+
+fn configured_cors_layer() -> Option<CorsLayer> {
+    let origins = std::env::var("CCCC_WEB_CORS_ORIGINS")
+        .ok()?
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty() && *origin != "*")
+        .filter_map(|origin| origin.parse().ok())
+        .collect::<Vec<_>>();
+    (!origins.is_empty()).then(|| {
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(Any)
+            .allow_headers(Any)
+            .allow_credentials(true)
     })
 }
 
@@ -477,118 +565,9 @@ async fn shutdown_signal() {
 }
 
 #[cfg(test)]
-mod lifecycle_tests {
-    use super::*;
-    use futures_util::StreamExt;
-    use tower::ServiceExt;
+#[path = "lib_static_asset_tests.rs"]
+mod static_asset_tests;
 
-    #[tokio::test]
-    async fn explicit_shutdown_stops_web_server() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            serve_until(home, "127.0.0.1", 0, async {}),
-        )
-        .await
-        .expect("Web shutdown timeout")
-        .expect("Web result");
-        assert!(result.port() > 0);
-    }
-
-    #[test]
-    fn remote_listener_requires_an_administrator_access_token() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-        assert!(ensure_listener_auth(&home, "0.0.0.0:8848".parse().expect("address")).is_err());
-        assert!(ensure_listener_auth(&home, "127.0.0.1:8848".parse().expect("address")).is_ok());
-        AccessTokenStore::new(home.clone())
-            .expect("tokens")
-            .create("scoped", vec!["g_test".into()], false, None)
-            .expect("scoped token");
-        assert!(ensure_listener_auth(&home, "0.0.0.0:8848".parse().expect("address")).is_err());
-        AccessTokenStore::new(home.clone())
-            .expect("tokens")
-            .create("admin", Vec::new(), true, None)
-            .expect("admin token");
-        assert!(ensure_listener_auth(&home, "0.0.0.0:8848".parse().expect("address")).is_ok());
-    }
-    #[tokio::test]
-    async fn shutdown_closes_active_sse_response() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-        home.initialize().expect("initialize");
-        let (shutdown, _) = broadcast::channel(1);
-        let response = app_with_shutdown(
-            home,
-            shutdown.clone(),
-            WebMode::Normal,
-            None,
-            LiveBinding::from_env(),
-        )
-        .0
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/api/v1/events/stream")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("SSE response");
-        let mut body = response.into_body().into_data_stream();
-        tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
-            .await
-            .expect("connected event timeout")
-            .expect("connected event missing")
-            .expect("connected event");
-        shutdown.send(()).expect("active SSE subscriber");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
-                .await
-                .expect("SSE shutdown timeout")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn shutdown_closes_headless_sse_response() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
-        let group = store.create("headless shutdown", "").expect("group");
-        let events = store
-            .state_dir(&group.group_id)
-            .expect("state")
-            .join("headless/events.jsonl");
-        std::fs::create_dir_all(events.parent().expect("events parent")).expect("headless dir");
-        std::fs::write(&events, "").expect("events file");
-        let (shutdown, _) = broadcast::channel(1);
-        let response = app_with_shutdown(
-            home,
-            shutdown.clone(),
-            WebMode::Normal,
-            None,
-            LiveBinding::from_env(),
-        )
-        .0
-        .oneshot(
-            axum::http::Request::builder()
-                .uri(format!(
-                    "/api/v1/groups/{}/headless/stream?replay=false",
-                    group.group_id
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("headless SSE response");
-        let mut body = response.into_body().into_data_stream();
-        shutdown.send(()).expect("active headless SSE subscriber");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
-                .await
-                .expect("headless SSE shutdown timeout")
-                .is_none()
-        );
-    }
-}
+#[cfg(test)]
+#[path = "lib_lifecycle_tests.rs"]
+mod lifecycle_tests;

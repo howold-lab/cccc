@@ -43,6 +43,16 @@ and Google; Presentation may use its own Chromium runtime. Browser-native UI tha
 page is only visible through **Browser** (or through the physical browser window on platforms that
 expose it).
 
+## Performance behavior
+
+- Hidden tabs release their group event streams immediately. Returning to the tab reconnects and
+  catches up from the last event cursor, so several open tabs do not exhaust the browser's
+  per-origin connection pool.
+- Hover-prefetched group data is reused when that group is selected; group bootstrap does not issue
+  a second actors read for the same transition.
+- Production Web responses negotiate Brotli or gzip compression. Voice Secretary code and locale
+  resources are loaded on demand instead of being part of every initial page load.
+
 ## Managing Groups
 
 ### Creating a Group
@@ -89,6 +99,16 @@ Click on an agent's tab to see its terminal output.
 
 1. Type in the message input at the bottom
 2. Press `Ctrl+Enter` / `Cmd+Enter`, or click Send
+
+Recipient chips are one-shot: a successful send clears the selection, and switching Groups does not
+restore a previous manual recipient. Unsent message text and attachments still remain as per-Group
+drafts.
+
+Messages larger than 64 KiB after UTF-8 encoding are sent as UTF-8 text attachments for
+same-group and remote Group Bridge targets. Local cross-group text remains inline because its two
+local ledgers cannot share one attachment path; the bounded daemon IPC limit covers that JSON route.
+This applies to typed, pasted, dictated, suggested, and restored drafts. Slash commands still require
+inline text and therefore reject an automatically attached oversized body.
 
 With an empty message input, press `Up` to recall your most recent message in the current Group.
 Continue with `Up` / `Down` to browse the already loaded message history. Editing or repositioning
@@ -156,7 +176,7 @@ Use **Copy Groups** when you need to duplicate, migrate, or back up a working gr
 
 ### Automation
 
-- **Built-in Automation**: Configure system-managed follow-ups and collaboration health loops such as unread / reply-required / ACK follow-ups, actor idle alerts, keepalive, silence checks, and help nudges.
+- **Built-in Automation**: Configure bounded Mail/reply notices and collaboration health loops such as actor idle alerts, keepalive, silence checks, and help nudges.
 - **Rules**: Create scheduled reminders with interval / recurring schedule / one-time schedule.
 - **Actions**:
   - `Send Reminder` (normal reminder delivery)
@@ -207,7 +227,7 @@ CCCC_WEB_HOST=0.0.0.0 cccc
 ```
 
 This keeps localhost access working while also letting other devices on the same network open `http://YOUR_LAN_IP:8848/ui/`.
-The Rust launcher also honors the binding saved in **Settings > Web Access**, including the legacy Python `settings.yaml` during migration. Explicit `--host` / `--port` flags still take precedence.
+The native launcher also honors the binding saved in **Settings > Web Access**, including the 0.4.35 `settings.yaml` during migration. Explicit `--host` / `--port` flags still take precedence.
 
 If CCCC is running inside WSL2's default NAT networking, this is the exception: `0.0.0.0` only opens the port inside the Linux VM. For true LAN access from other devices, enable WSL mirrored networking or add a Windows `netsh interface portproxy` rule plus matching firewall allow.
 
@@ -225,9 +245,15 @@ CCCC_WEB_HOST=$(tailscale ip -4) cccc
 
 ### Security
 
-Before exposing the Web UI beyond localhost, first create an **Admin Access Token** in **Settings > Web Access**.
+Direct browser access through `localhost`, `127.0.0.1`, or `::1` is passwordless and does not
+create an Access Token. CCCC grants that request an in-memory local administrator principal only
+when the reconstructed browser-facing origin is loopback. Unsafe writes and WebSockets must also
+carry the exact same loopback Origin; non-local proxy client addresses are rejected. This local
+principal is never persisted and is not valid through LAN, Reach, a public URL, or a reverse proxy.
 
-The Web Access panel keeps LAN/public `Save`, `Apply now`, and remote-endpoint copying disabled until an Admin Access Token exists. Python and Rust also enforce the same rule at remote start, apply, and listener boundaries, so direct API calls and stale saved settings cannot bypass the panel. Group-scoped tokens do not satisfy this administrator recovery requirement. Switching back to localhost-only remains available so an incomplete remote setup can be recovered safely.
+Before exposing the Web UI beyond localhost, first create an **Admin Access Token** in **Settings > Web Access**. With no administrator token, CCCC serves the UI shell and health/session guidance but keeps protected APIs and business WebSockets locked. Read the one-time bootstrap code from `~/.cccc/web_bootstrap_token` on the CCCC host and enter it only when creating the first administrator token; the file is mode `0600` on Unix and is deleted after successful use.
+
+The Web Access panel keeps LAN/public `Save`, `Apply now`, and remote-endpoint copying disabled until an Admin Access Token exists. The native daemon and Web boundary enforce the same rule at remote start, apply, and listener boundaries, so direct API calls and stale saved settings cannot bypass the panel. Group-scoped tokens do not satisfy this administrator recovery requirement. Switching back to localhost-only remains available so an incomplete remote setup can be recovered safely.
 
 In **Settings > Web Access**, `127.0.0.1` means local-only and `0.0.0.0` means localhost plus your LAN IP on a normal local host. On WSL2 NAT, it still stays inside the VM until Windows networking forwards it outward.
 
@@ -239,19 +265,55 @@ For the default local app flow, prefer restarting from the owning `cccc` session
 
 CCCC keeps the token policy simple:
 
-- localhost-only: no remote-exposure token prerequisite
+- localhost-only: direct loopback browser requests are passwordless and use a non-persistent local administrator principal
 - LAN/private network and public URL/tunnel/reverse proxy: an Admin Access Token is mandatory before exposure
 
-`CCCC_WEB_ALLOW_UNAUTHENTICATED=1` is an explicit unsafe listener override for deployments that already enforce a trusted network boundary outside CCCC. It is intentionally not offered as a Web UI toggle.
+`CCCC_WEB_ALLOW_UNAUTHENTICATED=1` is only an unsafe listener override; it never grants API authorization or bypasses first-admin bootstrap. Plain HTTP manual LAN exposure also requires `CCCC_REMOTE_ALLOW_INSECURE=1`; prefer an HTTPS reverse proxy, tunnel, or encrypted overlay. Neither override is offered as a Web UI toggle.
 
-Then authenticate once to bootstrap the session cookie:
+CCCC adds `frame-ancestors 'self'`, `SAMEORIGIN`, `nosniff`, `no-referrer`, a restrictive permissions policy, and HSTS on HTTPS responses. Supervised CCCC Web processes trust reverse-proxy forwarding headers automatically only while the effective listener is loopback. A supervised LAN/wildcard listener or externally managed reverse proxy must explicitly set `CCCC_WEB_TRUST_PROXY_HEADERS=1` and must overwrite—not append—client-supplied `Forwarded` and `X-Forwarded-*` headers. Direct public listeners should leave this flag unset.
 
-- Open `http://YOUR_HOST:8848/?token=<access-token>` (or `.../ui/?token=...`) using an Access Token created in Web Access.
+Enter the Access Token in the Web sign-in form. CCCC validates it through the
+`Authorization` header and establishes an HttpOnly, `SameSite=Lax` session
+cookie. The cookie has a rolling 30-day lifetime and is refreshed when the Web
+session is checked, avoiding repeated token entry after mobile browsers reclaim
+a tab. The temporary header token is removed from browser session storage after
+the cookie is established. Access tokens are not accepted in ordinary API, SSE,
+or WebSocket query strings and should never be placed in shared URLs.
 
-After that, you can use the Web UI normally without `?token=...`.
+Reach follows the same rule. Its status payload exposes only a tokenless public
+address. Clicking **Open Web** or **Copy Admin Link** asks the local authenticated
+Rust Web session for a 120-second, one-time exchange code bound to that Reach
+origin. The public endpoint consumes the code once, establishes the HttpOnly
+cookie, and redirects to a clean `/ui/` URL.
 
-The query token is only a session-bootstrap transport; it does not widen the
-token's permissions. A token scoped to selected Groups receives global stream
+Cookie-authenticated Rust Web writes require an exact allowed `Origin`, with a
+same-origin `Referer` accepted only as a fallback. This check is independent of
+CORS and blocks same-site sibling domains from submitting state-changing forms.
+
+#### Reverse proxy headers
+
+When a reverse proxy terminates HTTPS or exposes CCCC under another host, it
+must overwrite the browser-facing host and protocol headers. These values are
+used by every browser WebSocket (terminal, Voice Secretary, projected browser)
+and by Cookie-authenticated write protection:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-Host $host;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+Do not pass through client-supplied `X-Forwarded-*` values. The trusted proxy
+must overwrite them. CCCC also accepts RFC 7239 `Forwarded` with `host` and
+`proto`, and handles comma-separated multi-proxy `X-Forwarded-*` chains by
+using the first browser-facing value. A mismatch is rejected with
+`origin_not_allowed` for WebSockets or `csrf_origin_invalid` for Cookie writes;
+the server log records both the received and reconstructed origins.
+
+A token scoped to selected Groups receives global stream
 metadata only for those Groups, and the global stream never carries message
 content. Full event content remains on the per-Group stream and is subject to
 the same scope check. Administrative capability changes require an Admin token.

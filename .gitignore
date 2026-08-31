@@ -9,6 +9,7 @@
 .mypy_cache/**
 .tox/**
 .coverage
+/.project-harness/pre-commit-gate.ok
 
 # Local virtualenv
 /.venv/
@@ -28,7 +29,6 @@ uv.lock
 **/node_modules/
 /web/.vite/
 /web/dist/
-/src/cccc/ports/web/dist/
 /crates/cccc-web/assets/web-dist/
 /space
 
@@ -66,6 +66,7 @@ graphify-out
 
 # Local agent guide (not committed)
 AGENTS.md
+.graphifyignore
 .claude/skills
 .shared/
 .agents/

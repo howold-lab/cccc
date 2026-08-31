@@ -120,11 +120,14 @@ pub async fn call(state: &AppState, op: &str, args: Map<String, Value>) -> ApiRe
             args,
         })
         .await
-        .map_err(|error| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "daemon_unavailable".into(),
-            message: error.to_string(),
-            details: json!({}),
+        .map_err(|error| {
+            tracing::warn!(%error, op, "CCCC Web could not reach the daemon");
+            ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "daemon_unavailable".into(),
+                message: "CCCC daemon unavailable".into(),
+                details: json!({}),
+            }
         })?;
     if response.ok {
         return Ok(Json(json!({"ok":true,"result":response.result})));
@@ -139,10 +142,17 @@ pub async fn call(state: &AppState, op: &str, args: Map<String, Value>) -> ApiRe
         },
         |error| (error.code, error.message, error.details),
     );
-    let status = if error.0.contains("not_found") {
+    let status = if matches!(error.0.as_str(), "foreman_not_found" | "foreman_not_unique") {
+        StatusCode::BAD_REQUEST
+    } else if error.0.contains("not_found") {
         StatusCode::NOT_FOUND
     } else if error.0.contains("permission") {
         StatusCode::FORBIDDEN
+    } else if error.0.ends_with("_busy")
+        || error.0.ends_with("_conflict")
+        || error.0.ends_with("_lease_lost")
+    {
+        StatusCode::CONFLICT
     } else {
         StatusCode::BAD_REQUEST
     };

@@ -30,6 +30,14 @@ pub fn actor(value: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
+pub fn actor_notes(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "get" => "actor_notes_get",
+        "set" => "actor_notes_set",
+        "clear" => "actor_notes_clear",
+        _ => return None,
+    })
+}
 pub fn memory(value: &str) -> Option<&'static str> {
     Some(match value {
         "layout_get" => "memory_reme_layout_get",
@@ -60,11 +68,7 @@ pub fn automation(value: &str) -> Option<&'static str> {
     })
 }
 pub fn notify(value: &str) -> Option<&'static str> {
-    Some(if value == "ack" {
-        "notify_ack"
-    } else {
-        "system_notify"
-    })
+    (value == "send").then_some("system_notify")
 }
 pub fn presentation(value: &str) -> Option<&'static str> {
     Some(match value {
@@ -84,7 +88,6 @@ pub fn space(value: &str) -> Option<&'static str> {
         "sources" => "group_space_sources",
         "artifact" => "group_space_artifact",
         "jobs" => "group_space_jobs",
-        "sync" => "group_space_sync",
         "provider_auth" | "auth" => "group_space_provider_auth",
         "provider_credential_status" => "group_space_provider_credential_status",
         "provider_credential_update" => "group_space_provider_credential_update",
@@ -95,7 +98,6 @@ pub fn headless(value: &str) -> Option<&'static str> {
     Some(match value {
         "get" | "status" => "headless_status",
         "set" | "set_status" => "headless_set_status",
-        "ack" | "ack_message" => "headless_ack_message",
         _ => return None,
     })
 }
@@ -104,10 +106,11 @@ pub fn terminal(value: &str) -> Option<&'static str> {
         "tail" => "terminal_tail",
         "history" => "terminal_history",
         "clear" => "terminal_clear",
-        "resize" => "terminal_resize",
+        "resize" => "term_resize",
         _ => return None,
     })
 }
+
 pub fn debug(value: &str) -> Option<&'static str> {
     Some(match value {
         "snapshot" => "debug_snapshot",
@@ -140,4 +143,14 @@ pub fn voice_composer(value: &str) -> Option<&'static str> {
         "submit_prompt_draft" => "assistant_voice_prompt_draft_submit",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn notify_accepts_only_the_current_send_action() {
+        assert_eq!(super::notify("send"), Some("system_notify"));
+        assert_eq!(super::notify("ack"), None);
+        assert_eq!(super::notify("unknown"), None);
+    }
 }

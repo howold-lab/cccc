@@ -6,11 +6,8 @@ import { beginContextRequest, isLatestContextRequest } from "../stores/groupStor
 import * as api from "../services/api";
 import type { FetchContextOptions } from "../services/api";
 import type { HeadlessStreamEvent, GroupContext, LedgerEvent, StreamingActivity } from "../types";
-import { runReconnectCatchup, scheduleContextSummaryCatchup } from "./sseCatchup";
-import {
-  getRecipientActorIdsForEvent,
-  getAckRecipientIdsForEvent,
-} from "../utils/ledgerEventHandlers";
+import { runReconnectCatchup, scheduleContextOverviewCatchup } from "./sseCatchup";
+import { getRecipientActorIdsForEvent } from "../utils/ledgerEventHandlers";
 import { replayHeadlessSnapshotEvents } from "../utils/headlessSnapshotReplay";
 import { isHeadlessActorRunner } from "../utils/headlessRuntimeSupport";
 import { createSseConnectionRegistry } from "./sseConnectionRegistry";
@@ -40,16 +37,16 @@ export {
   shouldStartGroupStreams,
 } from "./sse/visibility";
 
-export { getRecipientActorIdsForEvent, getAckRecipientIdsForEvent };
+export { getRecipientActorIdsForEvent };
 
 export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptions) {
   const selectedGroupId = useGroupStore((s) => s.selectedGroupId);
   const appendEvent = useGroupStore((s) => s.appendEvent);
   const appendHeadlessEvent = useGroupStore((s) => s.appendHeadlessEvent);
   const updateReadStatus = useGroupStore((s) => s.updateReadStatus);
-  const updateAckStatus = useGroupStore((s) => s.updateAckStatus);
-  const updateReplyStatus = useGroupStore((s) => s.updateReplyStatus);
+  const updateObligationStatus = useGroupStore((s) => s.updateObligationStatus);
   const incrementActorUnread = useGroupStore((s) => s.incrementActorUnread);
+  const incrementWebModelQueued = useGroupStore((s) => s.incrementWebModelQueued);
   const updateActorActivity = useGroupStore((s) => s.updateActorActivity);
   const upsertStreamingActivity = useGroupStore((s) => s.upsertStreamingActivity);
   const promoteStreamingEventToStream = useGroupStore((s) => s.promoteStreamingEventToStream);
@@ -84,6 +81,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
   const hiddenDisconnectTimerRef = useRef<number | null>(null);
   const hasConnectedOnceRef = useRef<boolean>(false);
   const needsVisibilityCatchupRef = useRef<boolean>(false);
+  const ledgerCursorByGroupRef = useRef(new Map<string, string>());
   const headlessThreadIdByActorRef = useRef(new Map<string, string>());
   const pendingHeadlessMessageFlushRef = useRef<number | null>(null);
   const pendingHeadlessActivityFlushRef = useRef<number | null>(null);
@@ -129,7 +127,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     const contextEpoch = beginContextRequest(groupId);
     const resp = await api.fetchContext(groupId, {
       fresh: opts?.fresh,
-      detail: opts?.detail ?? "summary",
+      detail: opts?.detail ?? "overview",
     });
     if (
       resp.ok &&
@@ -142,13 +140,28 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     }
   }
 
+  async function reconcileGroupLedger(groupId: string) {
+    const startCursor = String(ledgerCursorByGroupRef.current.get(groupId) || "").trim();
+    const nextCursor = await reconcileLedgerTail(
+      groupId,
+      () => selectedGroupIdRef.current === groupId,
+      startCursor,
+    );
+    if (
+      nextCursor &&
+      selectedGroupIdRef.current === groupId &&
+      String(ledgerCursorByGroupRef.current.get(groupId) || "").trim() === startCursor
+    ) {
+      ledgerCursorByGroupRef.current.set(groupId, nextCursor);
+    }
+  }
+
   async function resyncAfterReconnect(groupId: string) {
     await runReconnectCatchup(groupId, {
       invalidateContextRead: api.invalidateContextRead,
-      reconcileLedgerTail: (gid) =>
-        reconcileLedgerTail(gid, () => selectedGroupIdRef.current === gid),
+      reconcileLedgerTail: reconcileGroupLedger,
       refreshActors,
-      fetchContextSummary: fetchContext,
+      fetchContextOverview: fetchContext,
     });
   }
 
@@ -376,7 +389,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       function updateHeadlessActorRuntime(update: ActorActivityUpdate) {
         const storeState = useGroupStore.getState();
         const actorsSnapshot = storeState.actors;
-        updateActorActivity([update]);
+        updateActorActivity([update], groupId);
         updateGroupRuntimeState(
           groupId,
           computeGroupRuntimeFromActorActivityUpdate(
@@ -838,12 +851,15 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       if (!sseRegistryRef.current.isCurrent(ledgerToken)) return;
       setSSEStatus("connected");
       hasConnectedOnceRef.current = true;
+      needsVisibilityCatchupRef.current = false;
 
       // New SSE connections start at EOF, so every reconnect needs a
-      // lightweight catch-up to cover the disconnect window.
+      // cursor-based catch-up to cover the disconnect window. The first
+      // connection also establishes the durable boundary used by later tabs.
       if (isReconnect) {
-        needsVisibilityCatchupRef.current = false;
         void resyncAfterReconnect(groupId);
+      } else {
+        void reconcileGroupLedger(groupId);
       }
     };
 
@@ -858,24 +874,27 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       if (!sseRegistryRef.current.isCurrent(ledgerToken)) return;
       const msg = e as MessageEvent;
       try {
-        processLedgerEvent(groupId, JSON.parse(String(msg.data || "{}")) as LedgerEvent, {
+        const event = JSON.parse(String(msg.data || "{}")) as LedgerEvent;
+        const eventId = String(event.id || "").trim();
+        if (eventId) ledgerCursorByGroupRef.current.set(groupId, eventId);
+        processLedgerEvent(groupId, event, {
           actors: actorsRef.current,
           activeTab: activeTabRef.current,
           chatAtBottom: chatAtBottomRef.current,
           onContextSync: () => {
-            contextRefreshTimerRef.current = scheduleContextSummaryCatchup(groupId, {
+            contextRefreshTimerRef.current = scheduleContextOverviewCatchup(groupId, {
               invalidateContextRead: api.invalidateContextRead,
               existingTimer: contextRefreshTimerRef.current,
               clearTimer: window.clearTimeout,
               setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
-              fetchContextSummary: (gid, options) => void fetchContext(gid, options),
+              fetchContextOverview: (gid, options) => void fetchContext(gid, options),
             });
           },
           appendEvent,
           updateReadStatus,
-          updateAckStatus,
-          updateReplyStatus,
+          updateObligationStatus,
           incrementActorUnread,
+          incrementWebModelQueued,
           updateActorActivity,
           updateGroupRuntimeState,
           promoteStreamingEventsByPrefix,

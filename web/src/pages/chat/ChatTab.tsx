@@ -12,8 +12,14 @@ import {
   type MutableRefObject,
   type RefObject,
 } from "react";
-import { BookmarkIcon, InfoIcon } from "../../components/Icons";
-import { Actor, LedgerEvent, PresentationMessageRef, TaskMessageRef } from "../../types";
+import { InfoIcon } from "../../components/Icons";
+import {
+  Actor,
+  LedgerEvent,
+  PresentationMessageRef,
+  TaskMessageRef,
+  VoiceDocumentMessageRef,
+} from "../../types";
 import { VirtualMessageList } from "../../components/VirtualMessageList";
 import { classNames } from "../../utils/classNames";
 import { ChatComposer } from "./ChatComposer";
@@ -41,6 +47,9 @@ import {
 } from "../../utils/chatGptAppPermissionHint";
 import { useRuntimeDockWorkCards } from "./useRuntimeDockWorkCards";
 import { getGroupRouteDisplayName, type ComposerMentionKind } from "./chatMentionSuggestions";
+import { MobilePresentationTrigger } from "../../components/presentation/MobilePresentationTrigger";
+import { MobilePresentationSurface } from "../../components/presentation/MobilePresentationSurface";
+import { shouldShowMobilePresentationTrigger } from "../../components/presentation/mobilePresentationModel";
 
 const PresentationRail = lazy(() =>
   import("../../components/presentation/PresentationRail").then((module) => ({
@@ -209,7 +218,8 @@ export function ChatTab({
     busy,
     showScrollButton,
     chatUnreadCount,
-    forceStickToBottomToken,
+    sendScrollRequest,
+    consumeSendScrollRequest,
 
     // Setup checklist
     showSetupCard,
@@ -228,17 +238,18 @@ export function ChatTab({
     removeComposerFile,
     replyTarget,
     quotedPresentationRef,
+    quotedVoiceDocumentRef,
     cancelReply,
     clearQuotedPresentationRef,
+    setQuotedVoiceDocumentRef,
+    clearQuotedVoiceDocumentRef,
     toTokens,
     toggleRecipient,
     selectedRemoteGroupIds,
     toggleRemoteGroupRecipient,
     clearRecipients,
-    priority,
-    replyRequired,
-    setPriority,
-    setReplyRequired,
+    messageMode,
+    setMessageMode,
     destGroupId,
     setDestGroupId,
     composerGroupSettled,
@@ -367,9 +378,9 @@ export function ChatTab({
 
   const isHydratingEmptyState = chatMessages.length === 0 && chatEmptyState === "hydrating";
   const isBusinessEmptyState = chatMessages.length === 0 && chatEmptyState === "business_empty";
+  const isFilteredEmptyState = chatMessages.length === 0 && chatEmptyState === "filtered_empty";
   const listIsLoadingHistory = isLoadingHistory || isHydratingEmptyState;
   const listHasMoreHistory = hasMoreHistory || isHydratingEmptyState;
-  const hasPresentationAttention = Object.keys(presentationAttention).length > 0;
   const liveWorkCards = useRuntimeDockWorkCards({
     groupId: selectedGroupId,
     actors: runtimeActors,
@@ -386,6 +397,10 @@ export function ChatTab({
       ? presentationViewer
       : null;
   const showDesktopSplitPresentation = !!splitPresentationViewer;
+  const showMobilePresentationViewer =
+    isSmallScreen &&
+    presentationViewer?.groupId === selectedGroupId &&
+    presentationViewer.surface !== "split";
   const splitLayoutRef = useRef<HTMLDivElement | null>(null);
   const splitResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [isSplitResizing, setIsSplitResizing] = useState(false);
@@ -512,6 +527,15 @@ export function ChatTab({
     [selectedGroupId, setChatPresentationDockOpen],
   );
 
+  const closeMobilePresentation = useCallback(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid) return;
+    setChatMobileSurface(gid, "messages");
+    window.setTimeout(() => {
+      document.querySelector<HTMLButtonElement>("[data-mobile-presentation-trigger]")?.focus();
+    }, 0);
+  }, [selectedGroupId, setChatMobileSurface]);
+
   const handleQuotePresentationReference = useCallback(
     (payload: { slotId: string; ref?: PresentationMessageRef | null }) => {
       const gid = String(selectedGroupId || "").trim();
@@ -541,6 +565,24 @@ export function ChatTab({
       setQuotedPresentationRef,
       showError,
       t,
+    ],
+  );
+
+  const handleQuoteVoiceDocumentReference = useCallback(
+    (ref: VoiceDocumentMessageRef) => {
+      const gid = String(selectedGroupId || "").trim();
+      if (!gid || ref.group_id !== gid || !String(ref.document_path || "").trim()) return;
+      setQuotedVoiceDocumentRef(ref);
+      setComposerDestGroupId(gid);
+      setChatMobileSurface(gid, "messages");
+      window.setTimeout(() => composerRef.current?.focus(), 0);
+    },
+    [
+      composerRef,
+      selectedGroupId,
+      setChatMobileSurface,
+      setComposerDestGroupId,
+      setQuotedVoiceDocumentRef,
     ],
   );
 
@@ -615,19 +657,18 @@ export function ChatTab({
     [effectivePresentationSplitWidth, showDesktopSplitPresentation],
   );
 
-  const filterOptions: Array<["all" | "user" | "attention" | "task", string]> = [
+  const filterOptions: Array<["all" | "user" | "mail" | "request_reply", string]> = [
     ["all", t("filterAll")],
     ["user", t("filterUser")],
-    ["attention", t("filterImportant")],
-    ["task", t("filterNeedReply")],
+    ["mail", t("filterMail")],
+    ["request_reply", t("filterNeedReply")],
   ];
   const showMessageFilters = !readOnly && !chatWindowProps && hasAnyChatMessages;
-  const hasPresentationCards = (groupPresentation?.slots || []).some((slot) => !!slot?.card);
-  const showMobilePresentationAction =
-    isSmallScreen &&
-    !chatWindowProps &&
-    !!selectedGroupId &&
-    (hasPresentationCards || hasPresentationAttention);
+  const showMobilePresentationAction = shouldShowMobilePresentationTrigger({
+    isSmallScreen,
+    hasChatWindow: !!chatWindowProps,
+    groupId: selectedGroupId,
+  });
   const showMobileFloatingControls =
     isSmallScreen && (showMessageFilters || showMobilePresentationAction);
   const mobileMessageTopInsetPx = isSmallScreen
@@ -762,46 +803,14 @@ export function ChatTab({
                     )}
 
                     {showMobilePresentationAction ? (
-                      <button
-                        type="button"
-                        onClick={() =>
+                      <MobilePresentationTrigger
+                        presentation={groupPresentation}
+                        attentionSlots={presentationAttention}
+                        isDark={isDark}
+                        onOpen={() =>
                           selectedGroupId && setChatMobileSurface(selectedGroupId, "presentation")
                         }
-                        className={classNames(
-                          "relative flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full border backdrop-blur-xl transition-all duration-200",
-                          isDark
-                            ? "border-white/10 bg-black/10 text-slate-100"
-                            : "border-black/10 bg-white/35 text-gray-900 shadow-sm",
-                          hasPresentationAttention &&
-                            (isDark
-                              ? "presentation-slot-attention presentation-slot-attention-dark"
-                              : "presentation-slot-attention presentation-slot-attention-light"),
-                        )}
-                        aria-label={t("presentationOpenDockAction", {
-                          defaultValue: "Open presentation",
-                        })}
-                        title={t("presentationOpenDockAction", {
-                          defaultValue: "Open presentation",
-                        })}
-                      >
-                        <BookmarkIcon size={18} />
-                        {hasPresentationAttention ? (
-                          <>
-                            <span
-                              className={classNames(
-                                "pointer-events-none absolute right-2 top-2 h-2 w-2 rounded-full animate-ping",
-                                isDark ? "bg-cyan-300/70" : "bg-cyan-500/45",
-                              )}
-                            />
-                            <span
-                              className={classNames(
-                                "pointer-events-none absolute right-2 top-2 h-2 w-2 rounded-full",
-                                isDark ? "bg-cyan-200" : "bg-cyan-500",
-                              )}
-                            />
-                          </>
-                        ) : null}
-                      </button>
+                      />
                     ) : null}
                   </div>
                 </div>
@@ -902,6 +911,7 @@ export function ChatTab({
                   groupLabelById={messageGroupLabelById}
                   webModelDeliveryStatusByEventId={webModelDeliveryStatusByEventId}
                   viewKey={chatViewKey}
+                  followOnViewChangeKey={chatFilter}
                   initialScrollTargetId={chatInitialScrollTargetId}
                   initialScrollAnchorId={chatInitialScrollAnchorId}
                   initialScrollAnchorOffsetPx={chatInitialScrollAnchorOffsetPx}
@@ -920,11 +930,13 @@ export function ChatTab({
                   showScrollButton={showScrollButton}
                   onScrollButtonClick={handleScrollButtonClick}
                   chatUnreadCount={chatUnreadCount}
-                  forceStickToBottomToken={forceStickToBottomToken}
+                  sendScrollRequest={sendScrollRequest}
+                  onSendScrollRequestConsumed={consumeSendScrollRequest}
                   onScrollChange={handleScrollChange}
                   onScrollSnapshot={handleScrollSnapshot}
                   isLoadingHistory={listIsLoadingHistory}
                   hasMoreHistory={listHasMoreHistory}
+                  isFilteredEmpty={isFilteredEmptyState}
                   onLoadMore={loadMoreHistory}
                 />
               )}
@@ -1028,8 +1040,15 @@ export function ChatTab({
             </Suspense>
           ) : null}
 
-          {isSmallScreen && mobileSurface === "presentation" ? (
-            <div className="flex min-h-0 flex-1 flex-col">
+          <MobilePresentationSurface
+            isOpen={
+              isSmallScreen && mobileSurface === "presentation" && !showMobilePresentationViewer
+            }
+            isDark={isDark}
+            label={t("presentationSectionLabel", { defaultValue: "Presentation" })}
+            onClose={closeMobilePresentation}
+          >
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <Suspense fallback={<ChatLazyFallback className="flex-1" />}>
                 <PresentationRail
                   mode="panel"
@@ -1037,22 +1056,27 @@ export function ChatTab({
                   isDark={isDark}
                   readOnly={readOnly}
                   isOpen={mobileSurface === "presentation"}
-                  onOpenChange={(open) =>
-                    selectedGroupId &&
-                    setChatMobileSurface(selectedGroupId, open ? "presentation" : "messages")
-                  }
+                  onOpenChange={(open) => {
+                    if (open) {
+                      if (selectedGroupId) {
+                        setChatMobileSurface(selectedGroupId, "presentation");
+                      }
+                      return;
+                    }
+                    closeMobilePresentation();
+                  }}
                   attentionSlots={presentationAttention}
                   onOpenSlot={openPresentationSlot}
                   onPinSlot={pinPresentationSlot}
                 />
               </Suspense>
             </div>
-          ) : null}
+          </MobilePresentationSurface>
         </div>
       </main>
 
       {/* 3. Footer Area: Composer */}
-      {!readOnly && (
+      {!readOnly && (!isSmallScreen || mobileSurface === "messages") && (
         <>
           {showAppPermissionNotice ? (
             <ChatGptAppPermissionNotice isDark={isDark} onDismiss={dismissAppPermissionNotice} />
@@ -1076,6 +1100,9 @@ export function ChatTab({
             onCancelReply={cancelReply}
             quotedPresentationRef={quotedPresentationRef}
             onClearQuotedPresentationRef={clearQuotedPresentationRef}
+            quotedVoiceDocumentRef={quotedVoiceDocumentRef}
+            onQuoteVoiceDocumentRef={handleQuoteVoiceDocumentReference}
+            onClearQuotedVoiceDocumentRef={clearQuotedVoiceDocumentRef}
             toTokens={toTokens}
             onToggleRecipient={toggleRecipient}
             remoteGroups={remoteRouteGroups}
@@ -1093,10 +1120,8 @@ export function ChatTab({
             setComposerGroupMentionTokens={setComposerGroupMentionTokens}
             composerAgentMentionTokens={composerAgentMentionTokens}
             setComposerAgentMentionTokens={setComposerAgentMentionTokens}
-            priority={priority}
-            replyRequired={replyRequired}
-            setPriority={setPriority}
-            setReplyRequired={setReplyRequired}
+            messageMode={messageMode}
+            setMessageMode={setMessageMode}
             onSendMessage={sendMessage}
             showMentionMenu={showMentionMenu}
             setShowMentionMenu={setShowMentionMenu}

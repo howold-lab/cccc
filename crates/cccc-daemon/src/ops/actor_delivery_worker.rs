@@ -3,7 +3,7 @@ use cccc_core::GroupStore;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::ops::actor_delivery::{DeliveryCompletion, DeliveryJob, record_completion};
+use crate::ops::actor_delivery::{DeliveryJob, complete_job};
 use crate::ops::actor_runtime;
 
 const SUBMIT_DELAY: Duration = Duration::from_millis(1_500);
@@ -55,6 +55,19 @@ pub fn process_batch(
     else {
         return false;
     };
+    if !current_actor.enabled {
+        return false;
+    }
+    if current_actor.runtime == ActorRuntime::Deepseek {
+        return process_deepseek_batch(
+            jobs,
+            &job.home,
+            &current_group,
+            &current_actor,
+            last_delivery,
+            cancelled,
+        );
+    }
     if crate::ops::local_headless::supports(&current_actor) {
         return process_headless_batch(
             jobs,
@@ -88,21 +101,49 @@ pub fn process_batch(
     }
 
     let events = jobs.iter().map(|job| job.event.clone()).collect::<Vec<_>>();
-    let Some(payload) = super::actor_delivery_render::render_batch(&events) else {
+    let Some(payload) = super::actor_delivery_render::render_batch_with_mail_context(
+        &job.home,
+        &current_group,
+        &current_actor.id,
+        &events,
+    ) else {
         return false;
     };
     if submit_text(&current_group.group_id, &current_actor, &payload, cancelled) {
         *last_delivery = Some(std::time::Instant::now());
-        for job in jobs {
-            record_completion(DeliveryCompletion {
-                group_id: job.group.group_id.clone(),
-                actor_id: job.actor.id.clone(),
-                event_id: job.event.id.clone(),
-            });
-        }
+        finish_jobs(jobs);
         return true;
     }
     false
+}
+
+fn process_deepseek_batch(
+    jobs: &[DeliveryJob],
+    home: &cccc_core::HomeLayout,
+    group: &cccc_core::GroupDoc,
+    actor: &Actor,
+    last_delivery: &mut Option<std::time::Instant>,
+    cancelled: &AtomicBool,
+) -> bool {
+    if !crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) {
+        if crate::ops::deepseek_runtime::manual_restart_required(home, group, actor) {
+            return false;
+        }
+        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
+            Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
+            Ok(_) | Err(_) => return false,
+        }
+    }
+    for job in jobs {
+        if cancelled.load(Ordering::Acquire)
+            || !crate::ops::deepseek_runtime::deliver(home, group, actor, &job.event, cancelled)
+        {
+            return false;
+        }
+        *last_delivery = Some(std::time::Instant::now());
+        complete_job(job);
+    }
+    true
 }
 
 fn process_headless_batch(
@@ -127,33 +168,21 @@ fn process_headless_batch(
             }
         }
     }
-    if !actor.enabled
-        && let Err(error) = actor_runtime::persist_lifecycle(home, group, &actor.id, true, None)
-    {
-        crate::ops::local_headless::stop(&group.group_id, &actor.id);
-        tracing::warn!(
-            group_id = %group.group_id,
-            actor_id = %actor.id,
-            message = %error.message,
-            "failed to persist auto-woken headless actor"
-        );
-        return false;
-    }
     if jobs
         .iter()
         .all(|job| crate::ops::local_headless::submit(home, group, actor, &job.event))
     {
         *last_delivery = Some(std::time::Instant::now());
-        for job in jobs {
-            record_completion(DeliveryCompletion {
-                group_id: job.group.group_id.clone(),
-                actor_id: job.actor.id.clone(),
-                event_id: job.event.id.clone(),
-            });
-        }
+        finish_jobs(jobs);
         return true;
     }
     false
+}
+
+fn finish_jobs(jobs: &[DeliveryJob]) {
+    for job in jobs {
+        complete_job(job);
+    }
 }
 
 fn ensure_running(
@@ -185,19 +214,6 @@ fn ensure_running(
             }
         }
     };
-    if !actor.enabled
-        && let Err(error) =
-            actor_runtime::persist_lifecycle(home, group, &actor.id, true, Some(&status))
-    {
-        let _ = actor_runtime::stop_if_started_at(group, &status);
-        tracing::warn!(
-            group_id = %group.group_id,
-            actor_id = %actor.id,
-            message = %error.message,
-            "failed to persist auto-woken actor"
-        );
-        return None;
-    }
     Some(status)
 }
 
@@ -294,8 +310,8 @@ pub(super) fn interruptible_sleep(duration: Duration, cancelled: &AtomicBool) ->
 
 #[cfg(test)]
 mod tests {
-    use super::submit_sequence;
-    use cccc_contracts::{Actor, ActorRuntime, ActorSubmit};
+    use super::*;
+    use cccc_contracts::{Actor, ActorRuntime, ActorSubmit, Event};
 
     #[test]
     fn repeats_enter_only_for_tuis_that_can_drop_the_first_submit() {
@@ -322,5 +338,39 @@ mod tests {
 
         actor.submit = ActorSubmit::None;
         assert!(submit_sequence(&actor).is_empty());
+    }
+
+    #[test]
+    fn disabled_actor_batch_does_not_start_or_change_its_lifecycle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("disabled delivery", "").expect("group");
+        let mut actor = Actor::new("peer1");
+        actor.enabled = false;
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = serde_json::json!({"to":["peer1"],"text":"do not wake"})
+            .as_object()
+            .cloned()
+            .expect("event data");
+        let job = DeliveryJob {
+            home: home.clone(),
+            group: group.clone(),
+            actor: actor.clone(),
+            event,
+        };
+
+        assert!(!process_batch(
+            &[job],
+            &mut String::new(),
+            &mut None,
+            &AtomicBool::new(false),
+        ));
+        let saved = store.load(&group.group_id).expect("reload group");
+        assert!(!saved.actors[0].enabled);
+        assert!(cccc_runtime::status(&group.group_id, &actor.id).is_err());
     }
 }

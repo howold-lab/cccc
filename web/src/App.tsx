@@ -98,6 +98,7 @@ export default function App() {
   const sseStatus = useUIStore((s) => s.sseStatus);
 
   const openModal = useModalStore((s) => s.openModal);
+  const openSettingsTarget = useModalStore((s) => s.openSettingsTarget);
   const groupEditOpen = useModalStore((s) => s.modals.groupEdit);
   const addActorOpen = useModalStore((s) => s.modals.addActor);
   const editingActor = useModalStore((s) => s.editingActor);
@@ -218,7 +219,8 @@ export default function App() {
     if (!gid) {
       return undefined;
     }
-    void refreshInternalRuntimeActors(gid);
+    // loadGroup already hydrates internal actors for a newly selected group.
+    // Keep this interval as a freshness poll instead of duplicating that initial read.
     const interval = window.setInterval(() => {
       void refreshInternalRuntimeActors(gid);
     }, 60000);
@@ -363,6 +365,7 @@ export default function App() {
       style={{
         height: "var(--app-viewport-height, 100dvh)",
         maxHeight: "var(--app-viewport-height, 100dvh)",
+        top: "var(--app-viewport-offset-top, 0px)",
       }}
     >
       <AppBackground isDark={isDark} />
@@ -445,6 +448,8 @@ export default function App() {
         onStopGroup={handleStopGroup}
         onSetGroupState={handleSetGroupState}
         onOpenSettings={() => openModal("settings")}
+        canAccessAccount={canManageGroups}
+        onOpenAccount={() => openSettingsTarget({ scope: "global", tab: "account" })}
         onOpenMobileMenu={() => openModal("mobileMenu")}
         onTabChange={handleTabChange}
         appendComposerFiles={handleAppendComposerFiles}

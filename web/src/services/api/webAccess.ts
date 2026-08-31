@@ -1,4 +1,9 @@
-import type { RemoteAccessState, WebAccessSession, WebBranding } from "../../types";
+import type {
+  MembershipState,
+  RemoteAccessState,
+  WebAccessSession,
+  WebBranding,
+} from "../../types";
 import {
   apiForm,
   apiJson,
@@ -64,6 +69,47 @@ export async function updateObservability(args: {
 
 export async function fetchRemoteAccessState() {
   return apiJson<{ remote_access: RemoteAccessState }>("/api/v1/remote_access");
+}
+
+export async function fetchMembership() {
+  return apiJson<{ membership: MembershipState }>("/api/v1/membership");
+}
+
+export async function startMembershipLogin() {
+  return apiJson<{ membership: MembershipState }>("/api/v1/membership/login?by=user", {
+    method: "POST",
+  });
+}
+
+export async function pollMembershipLogin() {
+  return apiJson<{ membership: MembershipState }>("/api/v1/membership/login/poll?by=user", {
+    method: "POST",
+  });
+}
+
+export async function logoutMembership() {
+  return apiJson<{ membership: MembershipState }>("/api/v1/membership/logout?by=user", {
+    method: "POST",
+  });
+}
+
+export async function startMembershipReach() {
+  return apiJson<{ membership: MembershipState }>("/api/v1/membership/reach/on?by=user", {
+    method: "POST",
+  });
+}
+
+export async function stopMembershipReach() {
+  return apiJson<{ membership: MembershipState }>("/api/v1/membership/reach/off?by=user", {
+    method: "POST",
+  });
+}
+
+export async function createMembershipReachWebLogin() {
+  return apiJson<{ web_url: string; expires_at_epoch: number }>(
+    "/api/v1/membership/reach/web-login",
+    { method: "POST" },
+  );
 }
 
 export async function fetchWebAccessSession() {
@@ -168,6 +214,7 @@ export async function createAccessToken(
   isAdmin: boolean,
   allowedGroups: string[],
   customToken?: string,
+  bootstrapToken?: string,
 ) {
   clearWebAccessSessionReadRequest();
   const body: Record<string, unknown> = {
@@ -176,6 +223,7 @@ export async function createAccessToken(
     allowed_groups: allowedGroups,
   };
   if (customToken?.trim()) body.custom_token = customToken.trim();
+  if (bootstrapToken?.trim()) body.bootstrap_token = bootstrapToken.trim();
   return apiJson<{ access_token: AccessTokenEntry }>("/api/v1/access-tokens", {
     method: "POST",
     body: JSON.stringify(body),

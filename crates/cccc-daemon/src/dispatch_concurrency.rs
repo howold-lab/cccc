@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 mod operation_access;
-use operation_access::{is_global_write, is_read_only};
+use operation_access::{is_global_write, is_read_only, uses_runtime_lock_only};
 
 #[derive(Clone, Default)]
 pub struct DispatchLocks {
@@ -72,6 +72,17 @@ impl DispatchLocks {
         }
     }
 
+    pub(crate) fn with_group_write_blocking<T>(
+        &self,
+        group_id: &str,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let _global = self.global.blocking_read();
+        let group = self.group(group_id);
+        let _group = group.blocking_write();
+        operation()
+    }
+
     fn group(&self, group_id: &str) -> Arc<RwLock<()>> {
         let mut groups = self
             .groups
@@ -94,6 +105,11 @@ enum Access {
 }
 
 fn access(request: &DaemonRequest) -> Access {
+    if uses_runtime_lock_only(&request.op) {
+        // These calls synchronize through session_runtime's own mutex. A group
+        // lock would deadlock a reply waiting for its matching poll/complete.
+        return Access::GlobalRead;
+    }
     let group_id = request
         .args
         .get("group_id")
@@ -146,6 +162,13 @@ mod tests {
             Access::GroupRead(group_id) if group_id == "g_one"
         ));
         assert!(matches!(
+            access(&request(
+                "term_attachment_status",
+                json!({"group_id":"g_one","actor_id":"peer1","attachment_id":1})
+            )),
+            Access::GlobalRead
+        ));
+        assert!(matches!(
             access(&request("send", json!({"group_id":"g_one"}))),
             Access::GroupWrite(group_id) if group_id == "g_one"
         ));
@@ -160,6 +183,22 @@ mod tests {
             )),
             Access::GlobalWrite
         ));
+        for op in [
+            "group_bridge_session_open",
+            "group_bridge_session_poll",
+            "group_bridge_session_complete",
+            "group_bridge_session_close",
+            "group_bridge_session_ready",
+            "group_bridge_session_deliver",
+        ] {
+            assert!(
+                matches!(
+                    access(&request(op, json!({"group_id":"g_one"}))),
+                    Access::GlobalRead
+                ),
+                "{op} must use only the session runtime lock"
+            );
+        }
         for op in ["capability_install", "capability_install_target"] {
             assert!(
                 matches!(
@@ -169,6 +208,20 @@ mod tests {
                 "{op} mutates the global capability catalog"
             );
         }
+        assert!(matches!(
+            access(&request(
+                "assistant_voice_recording_lease",
+                json!({"group_id":"g_one","action":"acquire"})
+            )),
+            Access::GlobalWrite
+        ));
+        assert!(matches!(
+            access(&request(
+                "assistant_state",
+                json!({"group_id":"g_one"})
+            )),
+            Access::GroupWrite(group_id) if group_id == "g_one"
+        ));
     }
 
     #[test]
@@ -176,15 +229,26 @@ mod tests {
         for op in [
             "group_set_state",
             "headless_set_status",
-            "inbox_mark_read",
-            "inbox_mark_all_read",
+            "inbox_read",
             "ledger_snapshot",
             "runtime_wait_next_turn",
-            "web_model_runtime_wait_next_turn",
             "runtime_complete_turn",
-            "web_model_runtime_complete_turn",
+            "web_model_browser_delivery_record",
             "future_unknown_operation",
         ] {
+            assert!(
+                matches!(
+                    access(&request(op, json!({"group_id":"g_one"}))),
+                    Access::GroupWrite(group_id) if group_id == "g_one"
+                ),
+                "{op} must be serialized as a group write"
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_mutations_are_serialized_as_group_writes() {
+        for op in ["presentation_publish", "presentation_clear"] {
             assert!(
                 matches!(
                     access(&request(op, json!({"group_id":"g_one"}))),

@@ -11,17 +11,17 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
-cccc-client = { package = "cccc-pair-client", version = "=0.4.34-rc2", path = "../cccc-client" }
-cccc-contracts = { package = "cccc-pair-contracts", version = "=0.4.34-rc2", path = "../cccc-contracts" }
-cccc-core = { package = "cccc-pair-core", version = "=0.4.34-rc2", path = "../cccc-core" }
-cccc-notebooklm = { package = "cccc-pair-notebooklm", version = "=0.4.34-rc2", path = "../cccc-notebooklm" }
-cccc-runtime = { package = "cccc-pair-runtime", version = "=0.4.34-rc2", path = "../cccc-runtime" }
+cccc-client = { package = "cccc-pair-client", version = "=0.4.36", path = "../cccc-client" }
+cccc-contracts = { package = "cccc-pair-contracts", version = "=0.4.36", path = "../cccc-contracts" }
+cccc-core = { package = "cccc-pair-core", version = "=0.4.36", path = "../cccc-core" }
+cccc-notebooklm = { package = "cccc-pair-notebooklm", version = "=0.4.36", path = "../cccc-notebooklm" }
+cccc-runtime = { package = "cccc-pair-runtime", version = "=0.4.36", path = "../cccc-runtime" }
 chrono.workspace = true
-clap.workspace = true
 fs2.workspace = true
 futures-util.workspace = true
 mime_guess.workspace = true
 nix.workspace = true
+percent-encoding.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -33,9 +33,12 @@ shell-words.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 unicode-width.workspace = true
+url.workspace = true
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+win32job.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -45,7 +48,3 @@ workspace = true
 
 [lib]
 name = "cccc_daemon"
-
-[[bin]]
-name = "ccccd"
-path = "src/main.rs"

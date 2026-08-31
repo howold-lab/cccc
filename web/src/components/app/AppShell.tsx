@@ -15,10 +15,9 @@ import type {
   GroupRuntimeStatus,
   TextScale,
 } from "../../types";
-import { SIDEBAR_COLLAPSED_WIDTH } from "../../stores/useUIStore";
+import { getSidebarWidthCssValue, SIDEBAR_COLLAPSED_WIDTH } from "../../stores/useUIStore";
 import { resolveRuntimeInspectorActor } from "./appShellRuntimeActors";
 import type { ComposerMentionKind } from "../../pages/chat/chatMentionSuggestions";
-
 type AppShellProps = {
   orderedGroups: GroupMeta[];
   archivedGroupIds: string[];
@@ -81,6 +80,8 @@ type AppShellProps = {
   onStopGroup: () => void;
   onSetGroupState: (state: "active" | "idle" | "paused") => void;
   onOpenSettings: () => void;
+  canAccessAccount: boolean;
+  onOpenAccount: () => void;
   onOpenMobileMenu: () => void;
   onTabChange: (tab: string) => void;
   appendComposerFiles: (files: File[]) => void;
@@ -208,6 +209,8 @@ export function AppShell({
   onStopGroup,
   onSetGroupState,
   onOpenSettings,
+  canAccessAccount,
+  onOpenAccount,
   onOpenMobileMenu,
   onTabChange,
   appendComposerFiles,
@@ -230,7 +233,9 @@ export function AppShell({
 }: AppShellProps) {
   const { t } = useTranslation("chat");
   const shellStyle = {
-    "--sidebar-width": `${sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}px`,
+    "--sidebar-width": sidebarCollapsed
+      ? `${SIDEBAR_COLLAPSED_WIDTH}px`
+      : getSidebarWidthCssValue(sidebarWidth),
   } as CSSProperties;
   const [mountedRuntimeActorsSnapshot, setMountedRuntimeActorsSnapshot] =
     useState<MountedRuntimeActorSnapshot>({ groupId: null, actorsById: {} });
@@ -263,6 +268,7 @@ export function AppShell({
         isCollapsed={sidebarCollapsed}
         sidebarWidth={sidebarWidth}
         isDark={isDark}
+        isSmallScreen={isSmallScreen}
         readOnly={webReadOnly}
         onSelectGroup={onSelectGroup}
         onWarmGroup={onWarmGroup}
@@ -298,6 +304,8 @@ export function AppShell({
           onStopGroup={onStopGroup}
           onSetGroupState={onSetGroupState}
           onOpenSettings={onOpenSettings}
+          canAccessAccount={canAccessAccount}
+          onOpenAccount={onOpenAccount}
           onOpenMobileMenu={onOpenMobileMenu}
         />
 

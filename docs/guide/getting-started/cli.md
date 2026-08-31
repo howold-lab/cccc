@@ -2,21 +2,6 @@
 
 Get started with CCCC using the command line.
 
-## Optional: Select the product implementation
-
-Python is the stable initial default while no implementation choice has been
-saved. A supported platform wheel can explicitly opt into its bundled
-experimental Rust implementation for performance evaluation before the normal
-workflow:
-
-```bash
-cccc status
-cccc rust       # experimental Rust; use cccc python to return to stable Python
-```
-
-The choice persists for later CLI and MCP invocations. Feature and integration
-parity is still in progress, so use Python for reliability-critical workflows.
-
 ## Step 1: Navigate to Your Project
 
 ```bash
@@ -111,6 +96,7 @@ cccc tracked-send "Please implement the feature and reply with validation eviden
 ```bash
 # Find the event ID from cccc tail
 cccc reply evt_abc123 "Thanks, that looks good!"
+cccc reply evt_abc123 "Non-urgent follow-up" --mode mail
 ```
 
 ## Common Commands
@@ -146,7 +132,7 @@ cccc send "msg" --to @foreman      # Ask the coordinator
 cccc send "msg" --to @all          # Explicit broadcast, not default task dispatch
 cccc tracked-send "work" --to assistant --title "Task title" --outcome "Done criterion"
 cccc reply <event_id> "response"   # Reply to message
-cccc inbox --actor-id assistant    # View unread for one actor
+cccc inbox --actor-id assistant    # Read unread Mail for one actor
 cccc tail -n 50                    # Recent events
 cccc tail -f                       # Follow events
 ```

@@ -7,14 +7,53 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
+#[path = "auth/local_passwordless.rs"]
+mod local_passwordless;
+
+#[tokio::test]
+async fn ready_identifies_the_web_instance_without_a_daemon_round_trip() {
+    let (_temp, home) = home();
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::get("/api/v1/ready")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "frame-ancestors 'self'"
+    );
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["result"]["web"], "ready");
+    assert!(payload["result"]["runtime_id"].is_null());
+}
+
 #[tokio::test]
 async fn first_admin_token_bootstraps_login_cookie() {
     let (_temp, home) = home();
+    let bootstrap_path = cccc_core::web_bootstrap::ensure_web_bootstrap_token(&home)
+        .expect("bootstrap")
+        .expect("bootstrap path");
+    let bootstrap_token = std::fs::read_to_string(bootstrap_path).expect("bootstrap token");
     let response = cccc_web::app(home)
         .oneshot(
             Request::post("/api/v1/access-tokens")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"user_id":"admin","is_admin":true}"#))
+                .body(Body::from(format!(
+                    r#"{{"user_id":"admin","is_admin":true,"bootstrap_token":"{}"}}"#,
+                    bootstrap_token.trim()
+                )))
                 .expect("request"),
         )
         .await
@@ -39,6 +78,310 @@ async fn first_admin_token_bootstraps_login_cookie() {
             .as_str()
             .is_some_and(|token| token.starts_with("acc_"))
     );
+}
+
+#[tokio::test]
+async fn empty_token_store_rejects_protected_routes_and_wrong_bootstrap_code() {
+    let (_temp, home) = home();
+    let app = cccc_web::app(home);
+    let protected = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/fs/list?path=~")
+                .header(header::HOST, "cccc.example")
+                .header("x-forwarded-for", "203.0.113.10")
+                .header("x-forwarded-proto", "https")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+
+    let bootstrap = app
+        .oneshot(
+            Request::post("/api/v1/access-tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"user_id":"attacker","is_admin":true,"bootstrap_token":"wrong"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(bootstrap.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn query_token_does_not_authenticate_or_set_a_cookie() {
+    let (_temp, home) = home();
+    let token = AccessTokenStore::new(home.clone())
+        .expect("store")
+        .create("admin", Vec::new(), true, None)
+        .expect("token");
+
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::get(format!("/api/v1/web_access/session?token={}", token.token))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        payload["result"]["web_access_session"]["current_browser_signed_in"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn authorization_header_bootstraps_cookie_without_a_query_secret() {
+    let (_temp, home) = home();
+    let token = AccessTokenStore::new(home.clone())
+        .expect("store")
+        .create("admin", Vec::new(), true, None)
+        .expect("token");
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::get("/api/v1/web_access/session")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token.token))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("cccc_access_token=acc_"))
+    );
+}
+
+#[tokio::test]
+async fn cookie_authenticated_writes_require_an_allowed_origin() {
+    let (_temp, home) = home();
+    let token = AccessTokenStore::new(home.clone())
+        .expect("store")
+        .create("admin", Vec::new(), true, None)
+        .expect("token");
+    let app = cccc_web::app(home);
+
+    for origin in [None, Some("https://evil.example")] {
+        let mut request = Request::post("/api/v1/web_access/logout")
+            .header(header::HOST, "cccc.example")
+            .header(header::COOKIE, format!("cccc_access_token={}", token.token));
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin:?}");
+    }
+
+    let same_origin = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/web_access/logout")
+                .header(header::HOST, "cccc.example")
+                .header(header::ORIGIN, "http://cccc.example")
+                .header(header::COOKIE, format!("cccc_access_token={}", token.token))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(same_origin.status(), StatusCode::OK);
+
+    let bearer_without_origin = app
+        .oneshot(
+            Request::post("/api/v1/web_access/logout")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token.token))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(bearer_without_origin.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn incidental_web_cookie_does_not_block_a_public_connector_request() {
+    let (_temp, home) = home();
+    let token = AccessTokenStore::new(home.clone())
+        .expect("store")
+        .create("admin", Vec::new(), true, None)
+        .expect("token");
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::post("/mcp/web-model/missing")
+                .header(header::COOKIE, format!("cccc_access_token={}", token.token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("connector token required"), "{text}");
+    assert!(!text.contains("csrf_origin_invalid"), "{text}");
+}
+
+#[tokio::test]
+async fn web_login_exchange_is_origin_bound_and_one_time() {
+    let (_temp, home) = home();
+    let token = AccessTokenStore::new(home.clone())
+        .expect("store")
+        .create("admin", Vec::new(), true, None)
+        .expect("token");
+    let grant =
+        cccc_core::web_login_grants::issue(&home, "http://reach.example", &token.token_id(), 120)
+            .expect("grant");
+    let app = cccc_web::app(home);
+    let path = format!("/api/v1/web_access/exchange?code={}", grant.code);
+
+    let wrong_origin = app
+        .clone()
+        .oneshot(
+            Request::get(&path)
+                .header(header::HOST, "other.example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(wrong_origin.status(), StatusCode::UNAUTHORIZED);
+
+    let accepted = app
+        .clone()
+        .oneshot(
+            Request::get(&path)
+                .header(header::HOST, "reach.example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        accepted
+            .headers()
+            .get(header::LOCATION)
+            .expect("redirect location"),
+        "/ui/"
+    );
+    assert_eq!(
+        accepted
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .expect("cache control"),
+        "no-store"
+    );
+    assert!(
+        accepted
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value.contains(&token.token)
+                    && value.contains("HttpOnly")
+                    && value.contains("SameSite=Lax")
+                    && !value.contains("Secure")
+            })
+    );
+
+    let replay = app
+        .oneshot(
+            Request::get(path)
+                .header(header::HOST, "reach.example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn query_token_cannot_replace_a_valid_authentication_cookie() {
+    let (_temp, home) = home();
+    let store = AccessTokenStore::new(home.clone()).expect("store");
+    let stale = store
+        .create("stale-admin", Vec::new(), true, None)
+        .expect("stale token");
+    let current = store
+        .create("current-admin", Vec::new(), true, None)
+        .expect("current token");
+
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::get(format!(
+                "/api/v1/web_access/session?token={}",
+                current.token
+            ))
+            .header(header::COOKIE, format!("cccc_access_token={}", stale.token))
+            .body(Body::empty())
+            .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        payload["result"]["web_access_session"]["user_id"],
+        stale.user_id
+    );
+}
+
+#[tokio::test]
+async fn protected_routes_ignore_legacy_query_tokens_and_use_the_valid_cookie() {
+    let (_temp, home) = home();
+    let token = AccessTokenStore::new(home.clone())
+        .expect("store")
+        .create("admin", Vec::new(), true, None)
+        .expect("token");
+
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::get("/api/v1/groups?token=invalid")
+                .header(header::COOKIE, format!("cccc_access_token={}", token.token))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -132,6 +475,11 @@ async fn scoped_token_cannot_access_global_management_routes() {
     for (method, path) in [
         ("GET", "/api/v1/remote_access"),
         ("POST", "/api/v1/remote_access/start"),
+        ("GET", "/api/v1/membership"),
+        ("POST", "/api/v1/membership/login"),
+        ("POST", "/api/v1/membership/login/poll"),
+        ("POST", "/api/v1/membership/logout"),
+        ("POST", "/api/v1/membership/reach/on"),
         ("GET", "/api/v1/debug/tail_logs"),
         ("POST", "/api/v1/debug/clear_logs"),
         ("GET", "/api/v1/capabilities/allowlist"),
@@ -154,7 +502,7 @@ async fn scoped_token_cannot_access_global_management_routes() {
 }
 
 #[tokio::test]
-async fn scoped_query_token_global_stream_only_exposes_allowed_groups() {
+async fn scoped_cookie_global_stream_only_exposes_allowed_groups() {
     let (_temp, home) = home();
     let groups = GroupStore::new(home.clone()).expect("groups");
     let allowed = groups.create("allowed", "").expect("allowed group");
@@ -166,7 +514,8 @@ async fn scoped_query_token_global_stream_only_exposes_allowed_groups() {
 
     let response = cccc_web::app(home.clone())
         .oneshot(
-            Request::get(format!("/api/v1/events/stream?token={}", token.token))
+            Request::get("/api/v1/events/stream")
+                .header(header::COOKIE, format!("cccc_access_token={}", token.token))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -212,6 +561,24 @@ async fn scoped_query_token_global_stream_only_exposes_allowed_groups() {
     assert!(!received.contains(&denied.group_id));
     assert!(!received.contains("DENIED_GROUP_SECRET"));
     assert!(!received.contains("ALLOWED_GROUP_SECRET"));
+}
+
+#[tokio::test]
+async fn long_lived_query_token_is_rejected_for_event_streams() {
+    let (_temp, home) = home();
+    let token = AccessTokenStore::new(home.clone())
+        .expect("store")
+        .create("admin", Vec::new(), true, None)
+        .expect("token");
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::get(format!("/api/v1/events/stream?token={}", token.token))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -274,7 +641,8 @@ async fn legacy_flat_token_document_keeps_authentication_enabled() {
 
     let session = cccc_web::app(home)
         .oneshot(
-            Request::get("/api/v1/web_access/session?token=legacy-flat-token")
+            Request::get("/api/v1/web_access/session")
+                .header(header::AUTHORIZATION, "Bearer legacy-flat-token")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -294,15 +662,76 @@ async fn legacy_flat_token_document_keeps_authentication_enabled() {
 }
 
 #[tokio::test]
-async fn encoded_custom_token_authenticates_event_source_queries() {
+async fn malformed_token_document_fails_closed_without_leaking_parser_details() {
+    let (_temp, home) = home();
+    std::fs::write(home.root().join("access_tokens.yaml"), "tokens: [").expect("malformed fixture");
+
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::get("/api/v1/access-tokens")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"]["code"], "auth_store_error");
+    assert_eq!(
+        payload["error"]["message"],
+        "access token store is unavailable"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("expected"));
+}
+
+#[tokio::test]
+async fn unavailable_daemon_response_does_not_expose_transport_paths() {
+    let (_temp, home) = home();
+    let home_path = home.root().display().to_string();
+    let token = AccessTokenStore::new(home.clone())
+        .expect("store")
+        .create("admin", Vec::new(), true, None)
+        .expect("token");
+
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::get("/api/v1/groups")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token.token))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"]["code"], "daemon_unavailable");
+    assert_eq!(payload["error"]["message"], "CCCC daemon unavailable");
+    assert!(!String::from_utf8_lossy(&body).contains(&home_path));
+}
+
+#[tokio::test]
+async fn bearer_safe_custom_token_authenticates_with_a_header() {
     let (_temp, home) = home();
     AccessTokenStore::new(home.clone())
         .expect("store")
-        .create("admin", Vec::new(), true, Some("token;+ 含"))
+        .create("admin", Vec::new(), true, Some("token+/_-."))
         .expect("token");
     let response = cccc_web::app(home)
         .oneshot(
-            Request::get("/api/v1/web_access/session?token=token%3B%2B%20%E5%90%AB")
+            Request::get("/api/v1/web_access/session")
+                .header(header::AUTHORIZATION, "Bearer token+/_-.")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -341,6 +770,59 @@ async fn cannot_delete_the_last_admin_while_scoped_tokens_remain() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"]["code"], "last_admin_required");
+    assert!(
+        store
+            .lookup(&admin.token)
+            .expect("lookup")
+            .is_some_and(|token| token.is_admin)
+    );
+}
+
+#[tokio::test]
+async fn cannot_demote_the_last_admin_while_scoped_tokens_remain() {
+    let (_temp, home) = home();
+    let store = AccessTokenStore::new(home.clone()).expect("store");
+    let admin = store
+        .create("admin", Vec::new(), true, None)
+        .expect("admin");
+    store
+        .create("member", vec!["g_allowed".into()], false, None)
+        .expect("member");
+    let response = cccc_web::app(home)
+        .oneshot(
+            Request::patch(format!("/api/v1/access-tokens/{}", admin.token_id()))
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin.token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"is_admin":false,"allowed_groups":["g_allowed"]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"]["code"], "last_admin_required");
+    assert!(
+        store
+            .lookup(&admin.token)
+            .expect("lookup")
+            .is_some_and(|token| token.is_admin)
+    );
 }
 
 fn home() -> (tempfile::TempDir, HomeLayout) {

@@ -1,7 +1,22 @@
-use super::hook_launch;
-use cccc_contracts::{Actor, ActorRuntime, RunnerKind};
+use super::hook_launch::{self, LaunchIntegration, launch_integration};
+use cccc_contracts::{Actor, ActorRuntime, RunnerKind, RuntimeStateSource};
 use cccc_core::{GroupStore, HomeLayout, actors};
 use std::sync::{Arc, Barrier};
+
+#[test]
+fn codex_app_server_uses_lifecycle_hooks_for_working_state() {
+    let mut actor = Actor::new("peer");
+    actor.runtime = ActorRuntime::Codex;
+    actor.runtime_state_source = RuntimeStateSource::AppServer;
+    assert_eq!(launch_integration(&actor), LaunchIntegration::CodexHooks);
+
+    actor.runtime_state_source = RuntimeStateSource::Terminal;
+    assert_eq!(launch_integration(&actor), LaunchIntegration::CodexHooks);
+
+    actor.runtime = ActorRuntime::Claude;
+    actor.runtime_state_source = RuntimeStateSource::AppServer;
+    assert_eq!(launch_integration(&actor), LaunchIntegration::None);
+}
 
 #[test]
 fn concurrent_launches_keep_process_identity_and_hook_token_aligned() {

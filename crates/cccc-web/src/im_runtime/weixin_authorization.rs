@@ -14,7 +14,7 @@ pub(super) fn ensure_login_authorized(
         return Err("Weixin QR login returned an empty user id".into());
     }
     let store = GroupStore::new(home.clone()).map_err(|error| error.to_string())?;
-    cccc_core::integration_state::group_update(&store, group_id, "im_bridge", |value| {
+    cccc_core::im_state::update(&store, group_id, |value| {
         if !value.is_object() {
             *value = json!({});
         }
@@ -31,6 +31,7 @@ pub(super) fn ensure_login_authorized(
             "authorization_source": SOURCE,
         });
         upsert_authorized(state, user_id, entry);
+        upsert_subscriber(state, user_id);
         remove_matching(state.get_mut("pending"), user_id, false);
         Ok(())
     })
@@ -47,11 +48,12 @@ pub(super) fn revoke_login_authorization(
         return Ok(());
     }
     let store = GroupStore::new(home.clone()).map_err(|error| error.to_string())?;
-    cccc_core::integration_state::group_update(&store, group_id, "im_bridge", |value| {
+    cccc_core::im_state::update(&store, group_id, |value| {
         let Some(state) = value.as_object_mut() else {
             return Ok(());
         };
         remove_matching(state.get_mut("authorized"), user_id, true);
+        deactivate_matching(state.get_mut("subscribers"), user_id);
         Ok(())
     })
     .map_err(|error| error.to_string())
@@ -63,14 +65,28 @@ pub(super) fn login_authorization_subscription(
     user_id: &str,
 ) -> Result<Option<bool>, String> {
     let store = GroupStore::new(home.clone()).map_err(|error| error.to_string())?;
-    let state = cccc_core::integration_state::group_get(&store, group_id, "im_bridge")
-        .map_err(|error| error.to_string())?;
-    let matching = match state.get("authorized") {
+    let state = cccc_core::im_state::load(&store, group_id).map_err(|error| error.to_string())?;
+    let authorization = match state.get("authorized") {
         Some(Value::Array(items)) => items.iter().find(|item| matches_user(item, user_id)),
         Some(Value::Object(items)) => items.values().find(|item| matches_user(item, user_id)),
         _ => None,
     };
-    Ok(matching.map(|item| item["subscribed"].as_bool().unwrap_or(true)))
+    let Some(authorization) = authorization else {
+        return Ok(None);
+    };
+    if authorization["subscribed"].as_bool() == Some(false)
+        || authorization["paused"].as_bool() == Some(true)
+    {
+        return Ok(Some(false));
+    }
+    let subscriber = match state.get("subscribers") {
+        Some(Value::Array(items)) => items.iter().find(|item| matches_user(item, user_id)),
+        Some(Value::Object(items)) => items.values().find(|item| matches_user(item, user_id)),
+        _ => None,
+    };
+    Ok(subscriber.map(|item| {
+        item["subscribed"].as_bool().unwrap_or(true) && !item["paused"].as_bool().unwrap_or(false)
+    }))
 }
 
 fn upsert_authorized(state: &mut Map<String, Value>, user_id: &str, entry: Value) {
@@ -102,6 +118,51 @@ fn activate(item: &mut Value) {
     };
     item.insert("paused".into(), Value::Bool(false));
     item.insert("subscribed".into(), Value::Bool(true));
+}
+
+fn upsert_subscriber(state: &mut Map<String, Value>, user_id: &str) {
+    let entry = json!({
+        "chat_id": user_id,
+        "chat_title": user_id,
+        "thread_id": 0,
+        "platform": PLATFORM,
+        "subscribed": true,
+        "verbose": false,
+        "subscribed_at": cccc_contracts::utc_now(),
+    });
+    let subscribers = state
+        .entry("subscribers".to_owned())
+        .or_insert_with(|| json!([]));
+    match subscribers {
+        Value::Array(items) => {
+            if let Some(item) = items.iter_mut().find(|item| matches_user(item, user_id)) {
+                activate(item);
+            } else {
+                items.push(entry);
+            }
+        }
+        Value::Object(items) => {
+            if let Some(item) = items.values_mut().find(|item| matches_user(item, user_id)) {
+                activate(item);
+            } else {
+                items.insert(format!("{PLATFORM}:{user_id}"), entry);
+            }
+        }
+        _ => *subscribers = Value::Array(vec![entry]),
+    }
+}
+
+fn deactivate_matching(value: Option<&mut Value>, user_id: &str) {
+    let deactivate = |item: &mut Value| {
+        if matches_user(item, user_id) {
+            item["subscribed"] = Value::Bool(false);
+        }
+    };
+    match value {
+        Some(Value::Array(items)) => items.iter_mut().for_each(deactivate),
+        Some(Value::Object(items)) => items.values_mut().for_each(deactivate),
+        _ => {}
+    }
 }
 
 fn remove_matching(value: Option<&mut Value>, user_id: &str, auto_only: bool) {
@@ -147,7 +208,7 @@ mod tests {
     fn qr_login_authorization_is_idempotent_and_clears_pending() {
         let (_temp, home, group_id) = setup();
         let store = GroupStore::new(home.clone()).expect("store");
-        cccc_core::integration_state::group_update(&store, &group_id, "im_bridge", |value| {
+        cccc_core::im_state::update(&store, &group_id, |value| {
             *value = json!({"pending":[{"chat_id":"wx-user","platform":"weixin"}]});
             Ok(())
         })
@@ -156,9 +217,14 @@ mod tests {
         ensure_login_authorized(&home, &group_id, "wx-user").expect("authorize");
         ensure_login_authorized(&home, &group_id, "wx-user").expect("idempotent");
 
-        let state =
-            cccc_core::integration_state::group_get(&store, &group_id, "im_bridge").expect("state");
+        let state = cccc_core::im_state::load(&store, &group_id).expect("state");
         assert_eq!(state["authorized"].as_array().expect("authorized").len(), 1);
+        assert_eq!(
+            state["subscribers"].as_array().expect("subscribers").len(),
+            1
+        );
+        assert_eq!(state["subscribers"][0]["chat_id"], "wx-user");
+        assert_eq!(state["subscribers"][0]["subscribed"], true);
         assert_eq!(state["authorized"][0]["authorization_source"], SOURCE);
         assert!(state["pending"].as_array().expect("pending").is_empty());
     }
@@ -167,7 +233,7 @@ mod tests {
     fn qr_login_reactivates_an_existing_authorization() {
         let (_temp, home, group_id) = setup();
         let store = GroupStore::new(home.clone()).expect("store");
-        cccc_core::integration_state::group_update(&store, &group_id, "im_bridge", |value| {
+        cccc_core::im_state::update(&store, &group_id, |value| {
             *value = json!({"authorized":[{
                 "chat_id":"wx-user","platform":"weixin","paused":true,
                 "subscribed":false,"verbose":true,"authorization_source":"weixin_login"
@@ -178,8 +244,7 @@ mod tests {
 
         ensure_login_authorized(&home, &group_id, "wx-user").expect("authorize");
 
-        let state =
-            cccc_core::integration_state::group_get(&store, &group_id, "im_bridge").expect("state");
+        let state = cccc_core::im_state::load(&store, &group_id).expect("state");
         let authorized = state["authorized"].as_array().expect("authorized");
         assert_eq!(authorized.len(), 1);
         assert_eq!(authorized[0]["paused"], false);
@@ -191,7 +256,7 @@ mod tests {
     fn logout_removes_only_qr_login_authorization() {
         let (_temp, home, group_id) = setup();
         let store = GroupStore::new(home.clone()).expect("store");
-        cccc_core::integration_state::group_update(&store, &group_id, "im_bridge", |value| {
+        cccc_core::im_state::update(&store, &group_id, |value| {
             *value = json!({"authorized":[
                 {"chat_id":"auto","platform":"weixin","authorization_source":"weixin_login"},
                 {"chat_id":"manual","platform":"weixin"}
@@ -202,8 +267,7 @@ mod tests {
 
         revoke_login_authorization(&home, &group_id, "auto").expect("revoke");
 
-        let state =
-            cccc_core::integration_state::group_get(&store, &group_id, "im_bridge").expect("state");
+        let state = cccc_core::im_state::load(&store, &group_id).expect("state");
         assert_eq!(state["authorized"].as_array().expect("authorized").len(), 1);
         assert_eq!(state["authorized"][0]["chat_id"], "manual");
     }

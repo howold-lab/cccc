@@ -57,11 +57,187 @@ make_release() {
     [[ "$fixture_name.$fixture_ext" == "$package.tar.gz" ]] && fixture_checksum=$checksum_value
     printf '%s  %s.%s\n' "$fixture_checksum" "$fixture_name" "$fixture_ext" >> "$release_dir/SHA256SUMS"
   done
+  local wheel_version=$version
+  case "$wheel_version" in
+    *-alpha[0-9]*) wheel_version=${wheel_version/-alpha/a} ;;
+    *-beta[0-9]*) wheel_version=${wheel_version/-beta/b} ;;
+    *-rc[0-9]*) wheel_version=${wheel_version/-rc/rc} ;;
+    *) wheel_version=${wheel_version//-/} ;;
+  esac
+  for platform_tag in manylinux_2_28_x86_64 macosx_11_0_x86_64 macosx_11_0_arm64 win_amd64; do
+    printf '%s  cccc_pair-%s-py3-none-%s.whl\n' "$(printf '0%.0s' {1..64})" "$wheel_version" "$platform_tag" >> "$release_dir/SHA256SUMS"
+  done
   rm -rf "$TMP_ROOT/package"
 }
 
 version=0.0.0-test
 make_release "$version"
+
+# Older complete releases used a four-archive manifest without native wheels.
+# Keep that published shape installable while current release sets add four
+# native wheels to the same checksum manifest.
+legacy_manifest_version=0.0.12-test
+make_release "$legacy_manifest_version"
+legacy_manifest="$TMP_ROOT/releases/download/v${legacy_manifest_version}/SHA256SUMS"
+grep -v 'cccc_pair-' "$legacy_manifest" > "$legacy_manifest.legacy"
+mv "$legacy_manifest.legacy" "$legacy_manifest"
+HOME="$TMP_ROOT/legacy-manifest-home" \
+  CCCC_VERSION="$legacy_manifest_version" \
+  CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+  CCCC_NO_MODIFY_PATH=1 \
+  sh "$ROOT_DIR/scripts/install.sh"
+[[ "$("$TMP_ROOT/legacy-manifest-home/.local/bin/cccc" --version)" == "cccc $legacy_manifest_version" ]]
+
+prerelease_version=0.0.13-rc1
+make_release "$prerelease_version"
+HOME="$TMP_ROOT/prerelease-home" \
+  CCCC_VERSION="$prerelease_version" \
+  CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+  CCCC_NO_MODIFY_PATH=1 \
+  sh "$ROOT_DIR/scripts/install.sh"
+[[ "$("$TMP_ROOT/prerelease-home/.local/bin/cccc" --version)" == "cccc $prerelease_version" ]]
+
+version_shaped_install="$TMP_ROOT/version-shaped-foreign-installed"
+mkdir -p "$version_shaped_install"
+cat > "$version_shaped_install/cccc" <<'EOF'
+#!/usr/bin/env sh
+if [ "${1:-}" = --version ]; then
+  printf 'cccc 1.2.3\n'
+  exit 0
+fi
+if [ "${1:-}" = version ]; then
+  printf '1.2.3\n'
+  exit 0
+fi
+exit 1
+EOF
+chmod 755 "$version_shaped_install/cccc"
+version_shaped_hash=$(checksum "$version_shaped_install/cccc")
+if HOME="$TMP_ROOT/version-shaped-home" \
+  CCCC_VERSION="$version" \
+  CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+  CCCC_INSTALL_DIR="$version_shaped_install" \
+  CCCC_NO_MODIFY_PATH=1 \
+  sh "$ROOT_DIR/scripts/install.sh" 2> "$TMP_ROOT/version-shaped-error"; then
+  echo "installer inferred ownership from generic version output" >&2
+  exit 1
+fi
+grep -Fq 'managed by another installation; refusing to replace it' "$TMP_ROOT/version-shaped-error"
+[[ "$(checksum "$version_shaped_install/cccc")" == "$version_shaped_hash" ]]
+test ! -e "$version_shaped_install/.cccc-standalone"
+
+blocking_install="$TMP_ROOT/blocking-markerless-installed"
+mkdir -p "$blocking_install"
+cat > "$blocking_install/cccc" <<'EOF'
+#!/usr/bin/env sh
+if [ "${1:-}" = --version ] || [ "${1:-}" = version ]; then
+  : > "$CCCC_TEST_PROBE_MARKER"
+  sleep 7
+  printf 'cccc 1.2.3\n'
+  exit 0
+fi
+exit 1
+EOF
+chmod 755 "$blocking_install/cccc"
+blocking_hash=$(checksum "$blocking_install/cccc")
+blocking_started=$SECONDS
+if HOME="$TMP_ROOT/blocking-home" \
+  CCCC_VERSION="$version" \
+  CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+  CCCC_INSTALL_DIR="$blocking_install" \
+  CCCC_TEST_PROBE_MARKER="$TMP_ROOT/blocking-probe-invoked" \
+  CCCC_NO_MODIFY_PATH=1 \
+  sh "$ROOT_DIR/scripts/install.sh" 2> "$TMP_ROOT/blocking-error"; then
+  echo "installer replaced a blocking markerless command" >&2
+  exit 1
+fi
+(( SECONDS - blocking_started < 5 ))
+test ! -e "$TMP_ROOT/blocking-probe-invoked"
+grep -Fq 'managed by another installation; refusing to replace it' "$TMP_ROOT/blocking-error"
+[[ "$(checksum "$blocking_install/cccc")" == "$blocking_hash" ]]
+
+HOME="$TMP_ROOT/version-shaped-home" \
+CCCC_VERSION="$version" \
+CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+CCCC_INSTALL_DIR="$version_shaped_install" \
+CCCC_NO_MODIFY_PATH=1 \
+CCCC_ALLOW_REPLACE_EXISTING=1 \
+sh "$ROOT_DIR/scripts/install.sh"
+[[ "$("$version_shaped_install/cccc" --version)" == "cccc $version" ]]
+grep -Fxq 'standalone-v1' "$version_shaped_install/.cccc-standalone"
+
+markerless_foreign_install="$TMP_ROOT/markerless-foreign-installed"
+mkdir -p "$markerless_foreign_install"
+cat > "$markerless_foreign_install/cccc" <<'EOF'
+#!/usr/bin/env sh
+if [ "${1:-}" = --version ] || [ "${1:-}" = version ]; then
+  printf 'not CCCC\n'
+  exit 0
+fi
+exit 1
+EOF
+chmod 755 "$markerless_foreign_install/cccc"
+markerless_foreign_hash=$(checksum "$markerless_foreign_install/cccc")
+if HOME="$TMP_ROOT/markerless-foreign-home" \
+  CCCC_VERSION="$version" \
+  CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+  CCCC_INSTALL_DIR="$markerless_foreign_install" \
+  CCCC_NO_MODIFY_PATH=1 \
+  sh "$ROOT_DIR/scripts/install.sh" 2> "$TMP_ROOT/markerless-foreign-error"; then
+  echo "installer replaced an unrecognized markerless command" >&2
+  exit 1
+fi
+grep -Fq 'managed by another installation; refusing to replace it' "$TMP_ROOT/markerless-foreign-error"
+[[ "$(checksum "$markerless_foreign_install/cccc")" == "$markerless_foreign_hash" ]]
+if HOME="$TMP_ROOT/markerless-foreign-home" \
+  CCCC_VERSION="$version" \
+  CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+  CCCC_INSTALL_DIR="$markerless_foreign_install" \
+  CCCC_TRUSTED_EXISTING_CLI="$TMP_ROOT/not-the-install-target/cccc" \
+  CCCC_NO_MODIFY_PATH=1 \
+  sh "$ROOT_DIR/scripts/install.sh" 2> "$TMP_ROOT/trusted-mismatch-error"; then
+  echo "installer trusted a self-update path that did not match the install target" >&2
+  exit 1
+fi
+grep -Fq 'managed by another installation; refusing to replace it' "$TMP_ROOT/trusted-mismatch-error"
+[[ "$(checksum "$markerless_foreign_install/cccc")" == "$markerless_foreign_hash" ]]
+
+trusted_install="$TMP_ROOT/trusted-self-update"
+mkdir -p "$trusted_install"
+cp "$markerless_foreign_install/cccc" "$trusted_install/cccc"
+trusted_output=$(HOME="$TMP_ROOT/trusted-home" \
+  CCCC_VERSION="$version" \
+  CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+  CCCC_INSTALL_DIR="$trusted_install" \
+  CCCC_TRUSTED_EXISTING_CLI="$trusted_install/cccc" \
+  CCCC_NO_MODIFY_PATH=1 \
+  sh "$ROOT_DIR/scripts/install.sh")
+printf '%s\n' "$trusted_output" | grep -Fq "Adopting existing CCCC command at $trusted_install/cccc"
+[[ "$("$trusted_install/cccc" --version)" == "cccc $version" ]]
+grep -Fxq 'standalone-v1' "$trusted_install/.cccc-standalone"
+
+pip_install="$TMP_ROOT/pip-owned-installed"
+mkdir -p "$pip_install"
+cat > "$pip_install/cccc" <<'EOF'
+#!/usr/bin/env sh
+exit 1
+EOF
+chmod 755 "$pip_install/cccc"
+printf 'pip-v1\n' > "$pip_install/.cccc-standalone"
+pip_hash=$(checksum "$pip_install/cccc")
+if HOME="$TMP_ROOT/pip-owned-home" \
+  CCCC_VERSION="$version" \
+  CCCC_RELEASE_BASE_URL="file://$TMP_ROOT/releases" \
+  CCCC_INSTALL_DIR="$pip_install" \
+  CCCC_NO_MODIFY_PATH=1 \
+  CCCC_ALLOW_REPLACE_EXISTING=1 \
+  sh "$ROOT_DIR/scripts/install.sh" 2> "$TMP_ROOT/pip-owned-error"; then
+  echo "installer replaced a pip-owned command" >&2
+  exit 1
+fi
+grep -Fq 'managed by pip; run python -m pip uninstall cccc-pair' "$TMP_ROOT/pip-owned-error"
+[[ "$(checksum "$pip_install/cccc")" == "$pip_hash" ]]
+grep -Fxq 'pip-v1' "$pip_install/.cccc-standalone"
 
 foreign_install="$TMP_ROOT/foreign-installed"
 mkdir -p "$foreign_install"
@@ -228,8 +404,12 @@ for bash_profile in .profile .bashrc; do
   ! grep -Fq 'case ":$PATH:" in *":$HOME/.local/bin:"*)' "$TMP_ROOT/home with space/$bash_profile"
 done
 test ! -e "$TMP_ROOT/home with space/.bash_profile"
-grep -Fq 'Activate in this shell: source ~/.bashrc' "$TMP_ROOT/bash-install.out"
-grep -Fq 'Verify installed command directly:' "$TMP_ROOT/bash-install.out"
+expected_bash_command="$(cd -P "$TMP_ROOT/home with space/.local/bin" && pwd -P)/cccc"
+grep -Fq "✅ CCCC v$version installed successfully!" "$TMP_ROOT/bash-install.out"
+grep -Fq "📦 Installed to: $expected_bash_command" "$TMP_ROOT/bash-install.out"
+grep -Fq '⚡ Activate now: source ~/.bashrc' "$TMP_ROOT/bash-install.out"
+grep -Fq '🔍 Verify:       cccc doctor' "$TMP_ROOT/bash-install.out"
+grep -Fq '🎉 Open a new terminal and run: cccc' "$TMP_ROOT/bash-install.out"
 grep -Fq 'Other CCCC commands were left unchanged:' "$TMP_ROOT/bash-install.out"
 grep -Fq 'older-cccc/bin/cccc' "$TMP_ROOT/bash-install.out"
 [[ "$(checksum "$shadow_bin/cccc")" == "$shadow_hash" ]]
@@ -262,7 +442,7 @@ sh "$ROOT_DIR/scripts/install.sh" > "$TMP_ROOT/zsh-install.out"
 for zsh_profile in .zprofile .zshrc; do
   test "$(grep -Fc '# CCCC' "$zsh_home/$zsh_profile")" -eq 1
 done
-grep -Fq 'Activate in this shell: source ~/.zshrc' "$TMP_ROOT/zsh-install.out"
+grep -Fq '⚡ Activate now: source ~/.zshrc' "$TMP_ROOT/zsh-install.out"
 
 missing_version=0.0.3-test
 make_release "$missing_version" valid "$missing_version" cccc

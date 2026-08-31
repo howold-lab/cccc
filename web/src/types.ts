@@ -2,7 +2,7 @@
 
 // Theme types
 export type Theme = "light" | "dark" | "system";
-export type TextScale = 90 | 100 | 125;
+export type TextScale = 70 | 90 | 100 | 125;
 
 export type GroupRuntimeStatus = {
   lifecycle_state: "active" | "idle" | "paused" | "stopped" | string;
@@ -92,6 +92,15 @@ export type PresentationMessageRef = MessageRef & {
   snapshot?: PresentationRefSnapshot;
 };
 
+export type VoiceDocumentMessageRef = MessageRef & {
+  kind: "voice_document_ref";
+  v?: number;
+  group_id: string;
+  document_path: string;
+  document_id?: string;
+  title?: string;
+};
+
 export type TaskMessageRef = MessageRef & {
   kind: "task_ref";
   task_id: string;
@@ -160,12 +169,13 @@ export type HeadlessPreviewSession = {
 };
 
 // Chat message payload
+export type MessageMode = "send" | "request_reply" | "mail";
+
 export type ChatMessageData = {
   text?: string;
   insight?: string;
   to?: string[];
-  priority?: "normal" | "attention";
-  reply_required?: boolean;
+  message_mode?: MessageMode;
   sender_title?: string;
   sender_runtime?: string;
   sender_avatar_path?: string;
@@ -184,6 +194,7 @@ export type ChatMessageData = {
   src_event_id?: string;
   dst_group_id?: string;
   dst_to?: string[];
+  dst_message_mode?: MessageMode;
   dst_event_id?: string;
   remote_event_id?: string;
   activities?: StreamingActivity[];
@@ -192,17 +203,17 @@ export type ChatMessageData = {
 };
 
 export type ObligationStatus = {
-  read: boolean;
-  acked: boolean;
   replied: boolean;
-  reply_required: boolean;
+  reply_requested: boolean;
+  cancelled: boolean;
+  delivery_state: "" | "claimed" | "accepted" | "failed" | "ambiguous" | string;
 };
 
-// Chat read receipt payload
-export type ChatReadData = { actor_id?: string; event_id?: string };
+// Mail read receipt payload
+export type MailReadData = { actor_id?: string; event_id?: string };
 
 // Ledger event data union
-export type LedgerEventData = ChatMessageData | ChatReadData | Record<string, unknown>;
+export type LedgerEventData = ChatMessageData | MailReadData | Record<string, unknown>;
 
 export type LedgerEvent = {
   id?: string;
@@ -213,7 +224,6 @@ export type LedgerEvent = {
   data?: LedgerEventData;
   _streaming?: boolean;
   _read_status?: Record<string, boolean>;
-  _ack_status?: Record<string, boolean>;
   _obligation_status?: Record<string, ObligationStatus>;
   _web_model_delivery_status?: WebModelDeliveryStatusPayload;
 };
@@ -247,7 +257,6 @@ export type RuntimeActivityEvent = {
 
 export type LedgerEventStatusPayload = {
   read_status?: Record<string, boolean>;
-  ack_status?: Record<string, boolean>;
   obligation_status?: Record<string, ObligationStatus>;
   web_model_delivery_status?: WebModelDeliveryStatusPayload;
 };
@@ -696,10 +705,10 @@ export type ContextBoard = {
   archived?: TaskBoardEntry[];
 };
 
-export type ContextDetailLevel = "summary" | "full";
-
+export type ContextDetailLevel = "overview" | "summary" | "full";
 export type GroupContext = {
   version?: string;
+  tasks_version?: string;
   coordination?: {
     brief?: CoordinationBrief | null;
     tasks?: Task[];
@@ -723,13 +732,6 @@ export type ProjectMdInfo = {
 
 export type GroupSettings = {
   default_send_to: "foreman" | "broadcast";
-  nudge_after_seconds: number;
-  reply_required_nudge_after_seconds: number;
-  attention_ack_nudge_after_seconds: number;
-  unread_nudge_after_seconds: number;
-  nudge_digest_min_interval_seconds: number;
-  nudge_max_repeats_per_obligation: number;
-  nudge_escalate_after_repeats: number;
   actor_idle_timeout_seconds: number;
   keepalive_delay_seconds: number;
   keepalive_max_per_actor: number;
@@ -737,7 +739,8 @@ export type GroupSettings = {
   help_nudge_interval_seconds: number;
   help_nudge_min_messages: number;
   min_interval_seconds: number;
-  auto_mark_on_delivery: boolean;
+  mail_notice_after_seconds: number;
+  reply_notice_after_seconds: number;
 
   terminal_transcript_visibility: "off" | "foreman" | "all";
   terminal_transcript_notify_tail: boolean;
@@ -809,25 +812,7 @@ export type AssistantServiceRuntime = {
   status?: "not_installed" | "installing" | "ready" | "failed" | string;
   available?: boolean;
   installed?: boolean;
-  managed?: boolean;
-  removable?: boolean;
-  implementation?: string;
-  install_dir?: string;
-  python?: string;
-  packages?: string[];
-  primary_package?: string;
-  package_versions?: Record<string, string>;
   installed_version?: string;
-  latest_version?: string;
-  latest_versions?: Record<string, string>;
-  latest_checked_at?: string;
-  latest_check_error?: Record<string, unknown>;
-  update_available?: boolean;
-  modules?: Record<string, boolean>;
-  missing_modules?: string[];
-  installed_at?: string;
-  updated_at?: string;
-  disk_usage_bytes?: number;
   error?: Record<string, unknown>;
 };
 
@@ -850,8 +835,6 @@ export type AssistantStateResult = {
   service_models?: AssistantServiceModel[];
   service_models_by_id?: Record<string, AssistantServiceModel>;
   service_runtime?: AssistantServiceRuntime;
-  service_runtimes?: AssistantServiceRuntime[];
-  service_runtimes_by_id?: Record<string, AssistantServiceRuntime>;
   recording_lease?: AssistantVoiceRecordingLease;
 };
 
@@ -1037,8 +1020,30 @@ export type AssistantVoicePromptDraftMutationResult = {
   event?: unknown;
 };
 
+export type MembershipState = {
+  logged_in: boolean;
+  device_id?: string | null;
+  hostname?: string | null;
+  web_url?: string | null;
+  online?: boolean;
+  cut?: boolean;
+  disabled?: boolean;
+  in_reach?: boolean;
+  reach_supported?: boolean;
+  account_reachable?: boolean | null;
+  account_origin?: string | null;
+  last_error?: string | null;
+  pending?: {
+    user_code?: string | null;
+    verification_uri?: string | null;
+    verification_uri_complete?: string | null;
+    interval?: number | null;
+    expires_at?: string | null;
+  } | null;
+};
+
 export type RemoteAccessState = {
-  provider: "off" | "manual" | "tailscale" | string;
+  provider: "off" | "manual" | "tailscale" | "reach" | string;
   mode: string;
   require_access_token: boolean;
   enabled: boolean;
@@ -1129,6 +1134,7 @@ export type WebAccessSession = {
   allowed_groups?: string[];
   access_token_count?: number;
   can_access_global_settings?: boolean;
+  bootstrap_required?: boolean;
   runtime_visibility?: {
     peer_runtime?: "hidden" | "visible" | string;
     assistant_runtime?: "hidden" | "visible" | string;
@@ -1326,7 +1332,6 @@ export type AutomationRuleAction =
       snippet_ref?: string | null;
       message?: string;
       priority?: "low" | "normal" | "high" | "urgent";
-      requires_ack?: boolean;
     }
   | { kind: "group_state"; state: "active" | "idle" | "paused" | "stopped" }
   | { kind: "actor_control"; operation: "start" | "stop" | "restart"; targets?: string[] };
@@ -1454,6 +1459,7 @@ export const SUPPORTED_RUNTIMES = [
   "claude",
   "cline",
   "codex",
+  "deepseek",
   "copilot",
   "cursor",
   "devin",
@@ -1479,6 +1485,10 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   claude: { label: "Claude Code", desc: "" },
   cline: { label: "Cline CLI", desc: "Uses Cline CLI MCP setup with the PTY TUI" },
   codex: { label: "Codex CLI", desc: "" },
+  deepseek: {
+    label: "DeepSeek Harness",
+    desc: "Experimental ACP headless runtime; CCCC installs its pinned composition on first start",
+  },
   copilot: { label: "GitHub Copilot CLI", desc: "Uses Copilot CLI MCP setup with the PTY runner" },
   cursor: {
     label: "Cursor CLI",

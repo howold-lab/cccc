@@ -55,7 +55,7 @@ Group Bridge pairing is managed in the Web UI.
 
 2. Make the issuer group's Web UI reachable by the requester for the pairing approval step.
 
-   For local/LAN use, `http://HOST:8848` can be enough. For cross-network use, expose the Web UI through a protected HTTPS URL such as Cloudflare Tunnel, Tailscale Funnel, ngrok, or a reverse proxy.
+   For local/LAN use, plain HTTP is accepted only for loopback or literal private IP addresses. For cross-network use, expose the Web UI through a protected HTTPS URL such as Cloudflare Tunnel, Tailscale Funnel, ngrok, or a reverse proxy. The emergency `CCCC_GROUP_BRIDGE_ALLOW_INSECURE_HTTP=1` override is intentionally not exposed in the UI.
 
 3. In the issuer group, open **Settings > Group Bridge**.
 
@@ -71,13 +71,22 @@ Group Bridge pairing is managed in the Web UI.
 
 After the first bridge setup, restart already-running actor runtimes once if you want them to see newly available remote read/full MCP tools.
 
-### Python/Rust Upgrade Compatibility
+### 0.4.35 Upgrade Compatibility
 
-The Rust service reads the legacy `group_bridge_identity.yaml`, `group_bridge_pairing.yaml`, `group_bridge_registrations.yaml`, and `group_bridge_credentials.yaml` files from the same CCCC home. Imports are idempotent and leave the legacy files unchanged, so switching branches does not require deleting or recreating bridge data. Existing peer identity is retained when legacy identity data is present.
+Native CCCC reads the 0.4.35 `group_bridge_identity.yaml`, `group_bridge_pairing.yaml`, `group_bridge_registrations.yaml`, and `group_bridge_credentials.yaml` files from the same CCCC home. Imports are idempotent and leave the legacy files unchanged, so rollback does not require deleting or recreating bridge data. Existing peer identity is retained when legacy identity data is present.
 
-Pairing and message delivery also support mixed Python/Rust peers. Rust accepts both pairing response shapes used by the two implementations and shares Python's Ed25519 signing identity file. The Rust daemon scans active session trusts, opens the same signed WebSocket used by Python, keeps it alive with heartbeats, and reconnects with bounded exponential backoff. Message delivery prefers this live route and falls back to authenticated HTTP and then the authorized remote MCP route.
+Pairing and message delivery retain the 0.4.35 wire shapes so an upgrade does not
+invalidate existing trusts. Native clients try the challenge-response
+`/api/group-bridge/session/ws/v2` endpoint first and fall back to the legacy v1
+endpoint only when the remote server does not expose v2. Native servers keep v1
+available for 0.4.35 clients until that trust completes one v2 handshake; the
+successful handshake persists `min_session_protocol=2`, after which v1 downgrade
+attempts are rejected. The daemon reuses the established Ed25519 identity, keeps
+the selected WebSocket alive with heartbeats and bounded exponential backoff,
+and prefers the live route before authenticated HTTP and authorized remote MCP
+fallback.
 
-An active pairing is authorization, not proof of reachability. A healthy Rust trust reports `session_connected=true`; `session_connected_at`, `session_last_error`, and `session_last_error_at` provide connection diagnostics. The remote endpoint must still be a non-empty HTTP(S) address reachable from the dialing peer.
+An active pairing is authorization, not proof of reachability. A healthy Rust trust reports `session_connected=true`; `session_connected_at`, `session_last_error`, and `session_last_error_at` provide connection diagnostics. Public endpoints must use HTTPS/WSS. Loopback/private-IP HTTP remains available for controlled LAN setups.
 
 ## Sending Messages
 
@@ -95,7 +104,7 @@ For agent-driven messaging, use the normal CCCC message tools. Discover remote t
 cccc_remote_access(action="list")
 ```
 
-Then send a normal message with `dst_group_id` set to the remote group id and `to` set to `["@foreman"]`. For retryable workflows, reuse one stable `idempotency_key` so a transport retry does not create a duplicate remote message.
+Then send a normal message with `dst_group_id` set to the remote group id and `to` set to `["@foreman"]`. For retryable workflows, reuse one stable `idempotency_key` so a transport retry does not create a duplicate remote message. The daemon owns bounded retry of accepted outbox items, and a signed-session reconnect can accelerate recovery.
 
 Attachments can be sent through Group Bridge when the target is a trusted remote group. Use attachments for evidence, logs, screenshots, or small artifacts that should be visible in the remote conversation.
 
@@ -137,10 +146,13 @@ Group Bridge is trust-based:
 
 - Pair only with CCCC instances you control or explicitly trust.
 - Treat a pairing invitation like a short-lived secret until it expires.
+- Expired invitations fail closed. Approval creates a separate ten-minute credential-claim window; the same request/invite/code proof may safely retry POST within that window, while status polling never returns a secret.
+- Rust v2 sessions authenticate a signed challenge, a fresh client nonce in the signed hello, and a server-signed confirmation of the complete transcript. Captured challenges/readies, server impersonation, and downgrades after the first v2 connection are rejected; both peers persist the protocol pin.
 - Do not grant **Read** access to groups that should not inspect local repo files, context, or git state.
 - Do not grant **Full** access unless the remote group may run commands and modify files in the target workspace.
 - Path guardrails keep operations under the target active scope, but they are not a security sandbox.
 - Before exposing Web UI beyond localhost, configure an Admin Access Token in **Settings > Web Access**.
+- Do not place Group Bridge credentials in URLs. WebSocket query tokens are rejected.
 
 Runtime state, credentials, and browser sessions remain local to each CCCC instance. The bridge does not merge ledgers or actor runtimes.
 
@@ -149,6 +161,7 @@ Runtime state, credentials, and browser sessions remain local to each CCCC insta
 | Symptom | Check |
 |---------|-------|
 | Pairing request cannot be submitted | The requester must paste the full JSON pairing invitation, and the issuer endpoint must be reachable from the requester. |
+| Pairing fails with `timeout`, `dns`, `tls`, `proxy`, or `connect` | Use the reported category to check the requester network path. The native client allows 5 seconds to connect and 15 seconds for the complete request. Generate a fresh invitation after correcting the route because invitations are short-lived. |
 | Pairing code is invalid or expired | Generate a fresh pairing invitation from the issuer group. Raw codes are mainly for same-instance diagnostics. |
 | Outbound remains `submitted` after approval | Refresh or sync the outbound record. Do not delete legacy YAML files; current Rust builds normalize older pairing responses and retain the existing request. |
 | Pairing is active but `session_connected=false` | Verify that `remote_endpoint` is non-empty and reachable. Inspect `session_last_error`; the daemon retries automatically with exponential backoff. |

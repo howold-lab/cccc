@@ -1,18 +1,24 @@
 pub mod access_tokens;
 pub mod active;
 pub mod actors;
+#[cfg(test)]
+mod actors_tests;
+pub mod assistant_state;
 pub mod automation;
 mod automation_render;
 mod automation_schedule;
 pub mod blobs;
 pub mod branding;
+pub mod branding_icon;
 pub mod capabilities;
 mod capability_builtin;
 pub mod capability_legacy;
 #[cfg(test)]
 mod capability_legacy_tests;
+pub mod cloudflared;
 pub mod codex_hook_state;
 pub mod context;
+pub mod deepseek_restart_gate;
 pub mod fs;
 pub mod group;
 pub mod group_bridge_identity;
@@ -22,11 +28,15 @@ mod group_delete;
 pub mod group_prompts;
 pub mod group_scope;
 pub mod home;
+pub mod im_state;
 pub mod inbox;
+#[cfg(test)]
+mod inbox_tests;
 pub mod integration_state;
 pub mod ledger;
 pub mod ledger_archive;
 mod ledger_index;
+pub mod membership;
 pub mod memory;
 pub mod nomcp;
 pub mod path_input;
@@ -42,7 +52,13 @@ pub mod scope;
 pub mod settings;
 pub mod space_credentials;
 pub mod system_prompt;
+pub mod voice_recording_lease;
+pub mod web_bootstrap;
+pub mod web_login_grants;
+pub mod web_model_connectors;
+pub mod web_runtime_proof;
 
+pub use capability_builtin::{WEB_MODEL_CORE_TOOL_NAMES, is_builtin_capability_pack_tool};
 pub use group::{GroupDoc, GroupStore, Scope};
 pub use home::{HomeError, HomeLayout};
 pub use registry::{GroupMeta, Registry};

@@ -1,8 +1,7 @@
 use cccc_contracts::Event;
 use flate2::read::GzDecoder;
 use fs2::FileExt;
-use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -119,22 +118,7 @@ fn append_with(
     event: &Event,
     write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
 ) -> io::Result<()> {
-    let lock_path = ledger_lock_path(path);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
-    if lock.metadata()?.len() == 0 {
-        lock.write_all(&[0])?;
-        lock.flush()?;
-    }
-    lock.seek(SeekFrom::Start(0))?;
-    lock.lock_exclusive()?;
+    let lock = acquire_writer_lock(path)?;
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -144,6 +128,15 @@ fn append_with(
     let original_len = file.metadata()?.len();
     let mut encoded = serde_json::to_vec(event).map_err(io::Error::other)?;
     encoded.push(b'\n');
+    if original_len > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0_u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            encoded.insert(0, b'\n');
+        }
+        file.seek(SeekFrom::End(0))?;
+    }
     let result = write(&mut file, &encoded);
     if let Err(error) = result {
         if matches!(
@@ -170,6 +163,26 @@ fn append_with(
     let _ = FileExt::unlock(&lock);
     crate::ledger_index::note_append(path, event, encoded.len());
     Ok(())
+}
+
+pub(crate) fn acquire_writer_lock(path: &Path) -> io::Result<File> {
+    let lock_path = ledger_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    if lock.metadata()?.len() == 0 {
+        lock.write_all(&[0])?;
+        lock.flush()?;
+    }
+    lock.seek(SeekFrom::Start(0))?;
+    lock.lock_exclusive()?;
+    Ok(lock)
 }
 
 fn ledger_lock_path(path: &Path) -> PathBuf {
@@ -205,6 +218,45 @@ pub(crate) fn read_all_uncached(path: &Path) -> io::Result<Vec<Event>> {
         events.extend(read_source(&source, &group_id)?);
     }
     Ok(events)
+}
+
+pub(crate) fn validate_jsonl(path: &Path) -> io::Result<()> {
+    for source in source_paths(path)? {
+        if is_gzip(&source) {
+            validate_source_json(
+                BufReader::new(GzDecoder::new(File::open(&source)?)),
+                &source,
+            )?;
+        } else {
+            validate_source_json(BufReader::new(File::open(&source)?), &source)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_json(mut reader: impl BufRead, source: &Path) -> io::Result<()> {
+    let mut line = Vec::new();
+    let mut line_no = 0_usize;
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        line_no += 1;
+        let raw = trim_ascii(&line);
+        if !raw.is_empty() {
+            let value: Value = serde_json::from_slice(raw).map_err(|error| {
+                io::Error::other(format!(
+                    "malformed ledger JSON at {}:{line_no}: {error}",
+                    source.display()
+                ))
+            })?;
+            if !value.is_object() {
+                return Err(io::Error::other(format!(
+                    "malformed ledger JSON at {}:{line_no}: event must be an object",
+                    source.display()
+                )));
+            }
+        }
+        line.clear();
+    }
+    Ok(())
 }
 
 fn source_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -326,64 +378,19 @@ fn read_events(mut reader: impl BufRead, source: &Path, group_id: &str) -> io::R
     Ok(events)
 }
 
-fn decode_event_line(raw: &[u8], source: &Path, line_no: usize, group_id: &str) -> Option<Event> {
+fn decode_event_line(raw: &[u8], source: &Path, line_no: usize, _group_id: &str) -> Option<Event> {
     match serde_json::from_slice(raw) {
         Ok(event) => Some(event),
-        Err(error) => match serde_json::from_slice::<Value>(raw) {
-            Ok(value) => normalize_legacy_event(&value, raw, group_id).or_else(|| {
-                tracing::warn!(
-                    source = %source.display(),
-                    line = line_no,
-                    %error,
-                    "skipping unrecognized ledger event"
-                );
-                None
-            }),
-            Err(json_error) => {
-                tracing::warn!(
-                    source = %source.display(),
-                    line = line_no,
-                    error = %json_error,
-                    "skipping malformed ledger line"
-                );
-                None
-            }
-        },
+        Err(error) => {
+            tracing::warn!(
+                source = %source.display(),
+                line = line_no,
+                %error,
+                "skipping invalid ledger event"
+            );
+            None
+        }
     }
-}
-
-fn normalize_legacy_event(value: &Value, raw: &[u8], group_id: &str) -> Option<Event> {
-    let object = value.as_object()?;
-    if object.get("type").and_then(Value::as_str) != Some("chat.ack") {
-        return None;
-    }
-    let target_event_id = nonempty_string(object, "event_id")?;
-    let actor_id = nonempty_string(object, "agent")?;
-    let mut event = Event::new("chat.ack", group_id);
-    event.id = legacy_event_id(raw);
-    if let Some(ts) = object
-        .get("ts")
-        .and_then(Value::as_str)
-        .filter(|ts| !ts.is_empty())
-    {
-        event.ts = ts.to_owned();
-    }
-    event.by = actor_id.to_owned();
-    event.data = Map::from_iter([
-        ("actor_id".into(), json!(actor_id)),
-        ("event_id".into(), json!(target_event_id)),
-    ]);
-    Some(event)
-}
-
-fn nonempty_string<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
-    let value = object.get(key)?.as_str()?.trim();
-    (!value.is_empty()).then_some(value)
-}
-
-fn legacy_event_id(raw: &[u8]) -> String {
-    let digest = Sha256::digest(raw);
-    format!("{digest:x}")[..32].to_owned()
 }
 
 fn ledger_group_id(path: &Path) -> String {
@@ -472,7 +479,6 @@ pub fn inspect_status<T>(
     inspect: impl FnOnce(
         &[Event],
         &std::collections::HashMap<String, usize>,
-        &std::collections::HashMap<String, std::collections::BTreeSet<String>>,
         &std::collections::HashMap<String, std::collections::BTreeSet<String>>,
     ) -> T,
 ) -> io::Result<T> {
@@ -636,6 +642,41 @@ mod tests {
     }
 
     #[test]
+    fn append_separates_an_invalid_unterminated_tail() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let partial = br#"{"v":1,"id":"crash-tail""#;
+        std::fs::write(&path, partial).expect("partial tail");
+        let event = Event::new("chat.message", "g_test");
+
+        append(&path, &event).expect("append after partial tail");
+
+        let raw = std::fs::read(&path).expect("ledger");
+        assert!(raw.starts_with(&[partial.as_slice(), b"\n"].concat()));
+        assert_eq!(
+            read_all_uncached(&path).expect("read separated append"),
+            vec![event]
+        );
+    }
+
+    #[test]
+    fn append_preserves_a_complete_unterminated_event() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let first = Event::new("group.create", "g_test");
+        std::fs::write(&path, serde_json::to_vec(&first).expect("encode first"))
+            .expect("unterminated first event");
+        let second = Event::new("chat.message", "g_test");
+
+        append(&path, &second).expect("append after complete unterminated event");
+
+        assert_eq!(
+            read_all_uncached(&path).expect("read both events"),
+            vec![first, second]
+        );
+    }
+
+    #[test]
     fn failed_retry_rolls_back_partial_bytes_when_the_event_already_exists() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("ledger.jsonl");
@@ -677,63 +718,6 @@ mod tests {
             read_all_uncached(&path).expect("read committed ledger"),
             vec![event]
         );
-    }
-
-    #[test]
-    fn reads_legacy_ack_from_gzip_segment_and_skips_unknown_events() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let group = temp.path().join("g_test");
-        let path = group.join("ledger.jsonl");
-        let segments = group.join("state/ledger/segments");
-        std::fs::create_dir_all(&segments).expect("segments");
-        let archived = segments.join("ledger.0001.jsonl.gz");
-        let file = File::create(&archived).expect("archive");
-        let mut encoder = GzEncoder::new(file, Compression::default());
-        writeln!(encoder, "{{\"type\":\"unknown.v0\",\"value\":1}}").expect("unknown");
-        encoder.write_all(&[0xff, b'\n']).expect("malformed utf-8");
-        writeln!(
-            encoder,
-            "{{\"ts\":\"2026-04-20T10:05:36Z\",\"type\":\"chat.ack\",\"event_id\":\"message-1\",\"agent\":\"reviewer\"}}"
-        )
-        .expect("legacy ack");
-        encoder.finish().expect("finish archive");
-        append(&path, &Event::new("chat.message", "g_test")).expect("active event");
-
-        let first = read_all_uncached(&path).expect("read legacy archive");
-        let second = read_all_uncached(&path).expect("read legacy archive again");
-
-        assert_eq!(first.len(), 2);
-        assert_eq!(
-            first, second,
-            "legacy IDs must be stable across index rebuilds"
-        );
-        let ack = &first[0];
-        assert_eq!(ack.v, 1);
-        assert_eq!(ack.kind, "chat.ack");
-        assert_eq!(ack.group_id, "g_test");
-        assert_eq!(ack.by, "reviewer");
-        assert_eq!(ack.data["actor_id"], "reviewer");
-        assert_eq!(ack.data["event_id"], "message-1");
-        assert_eq!(ack.id.len(), 32);
-    }
-
-    #[test]
-    fn reverse_tail_normalizes_legacy_ack_in_active_ledger() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let group = temp.path().join("g_test");
-        std::fs::create_dir_all(&group).expect("group");
-        let path = group.join("ledger.jsonl");
-        std::fs::write(
-            &path,
-            "{\"ts\":\"2026-04-20T10:05:36Z\",\"type\":\"chat.ack\",\"event_id\":\"message-1\",\"agent\":\"reviewer\"}\n",
-        )
-        .expect("legacy ledger");
-
-        let events = tail_filtered(&path, 1, Some("chat.ack")).expect("tail legacy ack");
-
-        assert_eq!(events.0.len(), 1);
-        assert_eq!(events.0[0].data["actor_id"], "reviewer");
-        assert!(!events.1);
     }
 
     #[test]
@@ -784,7 +768,7 @@ mod tests {
             "chat.message",
             "actor.activity",
             "chat.message",
-            "chat.read",
+            "mail.read",
             "chat.message",
         ] {
             append(&path, &Event::new(kind, "g_test")).expect("append");

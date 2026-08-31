@@ -12,7 +12,6 @@ import {
   RUNTIME_INFO,
 } from "../types";
 import { useActorDisplayState } from "../hooks/useActorDisplayState";
-import { getTerminalTheme } from "../hooks/useTheme";
 import { classNames } from "../utils/classNames";
 import { formatFullTime, formatTime } from "../utils/time";
 import { useGroupStore, useObservabilityStore, useTerminalSignalsStore } from "../stores";
@@ -36,6 +35,8 @@ import { copyTextToClipboard } from "../utils/copy";
 import { getStoppedTerminalOutputText } from "../utils/stoppedTerminalOutput";
 import { fetchTerminalTail } from "../services/api/diagnostics";
 import { useAgentTerminalConnection } from "./agentTerminal/useAgentTerminalConnection";
+import { attachTerminalTouchScroll } from "./agentTerminal/terminalTouchScroll";
+import { getTerminalTheme } from "./agentTerminal/terminalTheme";
 import {
   actorHasRuntimeResumeFailure,
   actorSupportsNewSession,
@@ -184,7 +185,6 @@ export function AgentTab({
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalOptionsSnapshotRef = useRef({
-    isDark,
     canControl,
     scrollbackLines: terminalScrollbackLines,
   });
@@ -382,13 +382,6 @@ export function AgentTab({
     "inline-flex items-center gap-1.5 rounded-xl border border-transparent px-3 py-2.5 text-sm font-medium text-[var(--color-text-tertiary)] transition-colors hover:border-[var(--glass-border-subtle)] hover:bg-[var(--glass-tab-bg-hover)] hover:text-[var(--color-text-primary)] disabled:opacity-50 disabled:cursor-not-allowed";
 
   useEffect(() => {
-    terminalOptionsSnapshotRef.current.isDark = isDark;
-    if (terminalRef.current) {
-      terminalRef.current.options.theme = getTerminalTheme(isDark);
-    }
-  }, [isDark]);
-
-  useEffect(() => {
     terminalOptionsSnapshotRef.current.canControl = canControl;
     if (terminalRef.current) {
       terminalRef.current.options.disableStdin = !canControl;
@@ -414,7 +407,7 @@ export function AgentTab({
       cursorInactiveStyle: "none",
       fontSize: 13,
       fontFamily: '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Monaco, monospace',
-      theme: getTerminalTheme(terminalOptionsSnapshotRef.current.isDark),
+      theme: getTerminalTheme(),
       disableStdin: !terminalOptionsSnapshotRef.current.canControl,
       // Bigger scrollback improves history browsing without going "infinite" and hurting perf.
       // Default is 8k lines; the user can override it in Global → Developer settings.
@@ -427,9 +420,9 @@ export function AgentTab({
     term.loadAddon(fitAddon);
     term.open(termRef.current);
     // Ensure focus works consistently across browsers (and prevents the inactive cursor style).
-    const onPointerDown = () => term.focus();
-    term.element?.addEventListener("mousedown", onPointerDown);
-    term.element?.addEventListener("touchstart", onPointerDown, { passive: true });
+    const onMouseDown = () => term.focus();
+    term.element?.addEventListener("mousedown", onMouseDown);
+    const detachTouchScroll = attachTerminalTouchScroll(term);
 
     const copySelection = async (): Promise<boolean> => {
       try {
@@ -520,9 +513,9 @@ export function AgentTab({
 
     return () => {
       if (fitFrame) cancelAnimationFrame(fitFrame);
+      detachTouchScroll();
       term.element?.removeEventListener("contextmenu", onContextMenu);
-      term.element?.removeEventListener("mousedown", onPointerDown);
-      term.element?.removeEventListener("touchstart", onPointerDown);
+      term.element?.removeEventListener("mousedown", onMouseDown);
       term.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -533,24 +526,30 @@ export function AgentTab({
     fitTerminalToContainer(fitAddonRef.current, termRef.current);
   }, []);
 
-  const { connectionStatus, terminalReady, terminalWritable, requestReconnect, sendInterrupt } =
-    useAgentTerminalConnection({
-      activated,
-      isRunning,
-      isHeadless,
-      groupId,
-      actorId: actor.id,
-      actorRuntime: actor.runtime,
-      canControl,
-      termEpoch,
-      reconnectTrigger,
-      terminalRef,
-      fitBeforeAttach: fitTerminalBeforeAttach,
-      onStatusChange,
-      setTerminalSignal,
-      clearTerminalSignal,
-      setReconnectTrigger,
-    });
+  const {
+    connectionStatus,
+    connectionFailed,
+    terminalReady,
+    terminalWritable,
+    requestReconnect,
+    sendInterrupt,
+  } = useAgentTerminalConnection({
+    activated,
+    isRunning,
+    isHeadless,
+    groupId,
+    actorId: actor.id,
+    actorRuntime: actor.runtime,
+    canControl,
+    termEpoch,
+    reconnectTrigger,
+    terminalRef,
+    fitBeforeAttach: fitTerminalBeforeAttach,
+    onStatusChange,
+    setTerminalSignal,
+    clearTerminalSignal,
+    setReconnectTrigger,
+  });
 
   // Fit terminal on visibility change and resize (with debounce to reduce jitter)
   useEffect(() => {
@@ -864,6 +863,11 @@ export function AgentTab({
                 <div className="text-sm text-center max-w-md mb-4">
                   {t("connectionLostDescription")}
                 </div>
+                {connectionFailed ? (
+                  <div className="mb-4 max-w-md text-center text-xs text-amber-700 dark:text-amber-300">
+                    {t("connectionRejectedHint")}
+                  </div>
+                ) : null}
                 {canControl && (
                   <button
                     onClick={requestReconnect}

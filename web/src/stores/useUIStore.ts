@@ -8,7 +8,8 @@ import {
 export const SIDEBAR_COLLAPSED_WIDTH = 60;
 export const SIDEBAR_DEFAULT_WIDTH = 248;
 export const SIDEBAR_MIN_WIDTH = 248;
-export const SIDEBAR_MAX_WIDTH = 480;
+export const SIDEBAR_MAX_WIDTH = 360;
+export const SIDEBAR_MAX_VIEWPORT_PERCENT = 34;
 
 interface UINotice {
   message: string;
@@ -16,7 +17,7 @@ interface UINotice {
   onAction?: () => void;
 }
 
-export type ChatFilter = "all" | "user" | "attention" | "task";
+export type ChatFilter = "all" | "user" | "mail" | "request_reply";
 export type ChatFollowMode = "follow" | "detached";
 export const CHAT_SCROLL_SNAPSHOT_COORDINATE_VERSION = 1;
 
@@ -116,6 +117,11 @@ export function clampSidebarWidth(value: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(numeric)));
 }
 
+export function getSidebarWidthCssValue(value: number): string {
+  const preferred = clampSidebarWidth(value);
+  return `clamp(${SIDEBAR_MIN_WIDTH}px, ${preferred}px, min(${SIDEBAR_MAX_WIDTH}px, ${SIDEBAR_MAX_VIEWPORT_PERCENT}vw))`;
+}
+
 function loadSidebarCollapsed(): boolean {
   try {
     return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
@@ -184,8 +190,8 @@ function sanitizeChatSessions(value: unknown): Record<string, ChatSessionState> 
       ...DEFAULT_CHAT_SESSION,
       chatFilter:
         session.chatFilter === "user" ||
-        session.chatFilter === "attention" ||
-        session.chatFilter === "task"
+        session.chatFilter === "mail" ||
+        session.chatFilter === "request_reply"
           ? session.chatFilter
           : "all",
       scrollSnapshot: null,

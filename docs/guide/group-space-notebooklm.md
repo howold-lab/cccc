@@ -10,14 +10,10 @@ The Web UI is intentionally minimal:
 
 Actual NotebookLM operations such as query, ingest, source management, artifacts, and job handling are handled by agents through MCP / CLI surfaces, not by the normal user settings page.
 
-## 1. Enable Real Provider Path
+## 1. Provider Activation
 
-Start CCCC with the real NotebookLM adapter enabled:
-
-```bash
-export CCCC_NOTEBOOKLM_REAL=1
-cccc
-```
+Connecting Google in CCCC Web stores the provider credential and activates the
+real NotebookLM path. CCCC does not require an environment toggle.
 
 If you expose Web outside localhost, first create an **Admin Access Token** in **Settings > Web Access** and keep the service behind a network boundary until that token exists.
 
@@ -41,7 +37,8 @@ Notes:
 - The default Web page does not expose manual credential editing anymore.
 - The Web flow uses a projected sign-in browser so Docker / remote deployments do not need a local desktop browser on the daemon host.
 - The projected sign-in browser now runs in headed mode for better Google compatibility. In server/container environments without a native display, CCCC uses `Xvfb` automatically.
-- The Docker image includes the minimal Chromium shared libraries needed for the projected sign-in browser. Playwright / Chromium binaries themselves are still installed lazily on first use.
+- The Docker image installs system Chromium and its display dependencies during
+  the image build; projected sign-in does not perform a lazy browser download.
 
 ## 4. Bind the Work Notebook
 
@@ -106,27 +103,46 @@ NotebookLM usage still exists through agent-facing surfaces:
 
 The Web page is now only for account connection and notebook binding.
 
-## 9. Quick Rollback
+## 9. Disconnect
 
-If NotebookLM is unstable in your environment:
+Use **Disconnect Google** in the Notebook settings when this machine should no
+longer use the stored NotebookLM credential.
 
-```bash
-unset CCCC_NOTEBOOKLM_REAL
-cccc daemon restart
-```
+## 10. Explicit source ingestion and legacy sync state
 
-## 10. Repo Space Sync Notes
-
-When a group has a local scope attached, CCCC still uses repo-local `space/` as the work-lane resource source of truth:
+For 0.4.36, files are added explicitly from the attached project scope. For
+example, a caller can ingest `<scope_root>/space/spec.md`; CCCC validates the
+resolved path and uploads it without turning the entire directory into an
+automatic mirror.
 
 `<scope_root>/space/`
 
-Relevant metadata files remain:
+Homes upgraded from Python 0.4.35 may still contain these legacy status files:
 
 - `<scope_root>/space/.space-index.json`
 - `<scope_root>/space/.space-sync-state.json`
 - `<scope_root>/space/.space-status.json`
 - `<scope_root>/space/.sync/remote-sources/*.json`
 - `<scope_root>/space/artifacts/notebooklm/...`
+
+The native Rust adapter follows the `notebooklm-py` v0.8.1 protocol baseline for
+the current personal-app host, source requests, artifact status values, and
+audio output format. It supports attached-scope local files, pasted text, Web
+URL, YouTube, and Google Drive Docs/Slides/Sheets ingestion.
+
+Each explicit ingest is recorded before the provider write. A normal request
+makes one provider attempt and settles the job; failed jobs are retried only by
+an explicit `space jobs retry`, not by a hidden background loop. A job left
+`running` after a process interruption or an ambiguous provider response
+represents an uncertain provider result. Repeating the same ingest is deduped
+to that durable job, and direct retry is blocked until the user inspects and
+reconciles the remote notebook or cancels the job. Retrying a terminal old job
+is also refused if the Group's current work binding no longer matches the
+notebook saved on that job.
+
+Automatic work- and memory-lane mirroring is retired in 0.4.36. Rust reads the
+same canonical metadata so existing status survives an upgrade, but it never
+resumes the old remote mutation loop. The CLI, Web API, and MCP surface no
+longer advertise a sync action.
 
 These implementation details matter for agent/developer workflows, but they are not part of the normal user-facing binding flow.

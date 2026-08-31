@@ -1,16 +1,20 @@
+pub mod deepseek_setup;
 mod dispatch;
 mod dispatch_concurrency;
 mod group_bridge_sessions;
 mod ops;
 mod paths;
 mod process;
+mod process_tree;
 mod runtime_start_gate;
 mod server;
 mod server_actor_activity;
 mod server_automation;
 mod server_connection;
 mod server_connections;
+mod server_events_stream;
 mod server_lifecycle;
+mod server_terminal_attach;
 
 pub use dispatch::dispatch as handle_request;
 pub use paths::DaemonPaths;

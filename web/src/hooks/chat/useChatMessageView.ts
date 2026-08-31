@@ -3,6 +3,7 @@ import type { OutboxEntry } from "../../stores/chatOutboxStore";
 import type { GroupChatBucket } from "../../stores/groupStoreCore";
 import { getChatSession } from "../../stores/useUIStore";
 import type { Actor, ChatMessageData, GroupDoc, LedgerEvent } from "../../types";
+import { projectMessageMode } from "../../utils/crossGroupRecipients";
 import { isFormalChatMessageEvent } from "../../utils/chatSend";
 import { hasRenderableChatMessageContent } from "../../utils/ledgerEventHandlers";
 import {
@@ -20,8 +21,9 @@ import {
   dedupeStreamingEvents,
   dropOrphanQueuedPlaceholders,
 } from "./chatStreamingProjection";
+import { resolveChatListHistoryState } from "./chatListHistoryState";
 
-type ChatEmptyState = "ready" | "hydrating" | "business_empty";
+type ChatEmptyState = "ready" | "hydrating" | "business_empty" | "filtered_empty";
 
 export function useChatMessageView(input: {
   selectedGroupId: string;
@@ -90,13 +92,15 @@ export function useChatMessageView(input: {
       mergeVisibleChatMessages(canonical, [], pending, orderState),
       new Map(),
     );
-    if (input.chatFilter === "attention") {
+    if (input.chatFilter === "mail") {
       return ordered.filter(
-        (event) => String((event.data as ChatMessageData)?.priority || "normal") === "attention",
+        (event) => projectMessageMode(event.data as ChatMessageData) === "mail",
       );
     }
-    if (input.chatFilter === "task") {
-      return ordered.filter((event) => !!(event.data as ChatMessageData)?.reply_required);
+    if (input.chatFilter === "request_reply") {
+      return ordered.filter(
+        (event) => projectMessageMode(event.data as ChatMessageData) === "request_reply",
+      );
     }
     if (input.chatFilter === "user") {
       return ordered.filter((event) => {
@@ -126,14 +130,19 @@ export function useChatMessageView(input: {
   );
   const restoreSnapshot =
     !inChatWindow && shouldRestoreDetachedScrollSnapshot(input.scrollSnapshot);
-  const effectiveIsLoadingHistory = inChatWindow
-    ? input.isChatWindowLoading
-    : input.isLoadingHistory;
-  const effectiveHasMoreHistory = !input.selectedGroupId
-    ? false
-    : inChatWindow
-      ? false
-      : !input.hasLoadedTail || input.hasMoreHistory;
+  const historyState = resolveChatListHistoryState({
+    selectedGroupId: input.selectedGroupId,
+    chatFilter: input.chatFilter,
+    filteredMessageCount: chatMessages.length,
+    hasAnyChatMessages,
+    inChatWindow,
+    hasLoadedTail: input.hasLoadedTail,
+    hasMoreHistory: input.hasMoreHistory,
+    isLoadingHistory: input.isLoadingHistory,
+    isChatWindowLoading: input.isChatWindowLoading,
+  });
+  const effectiveIsLoadingHistory = historyState.isLoadingHistory;
+  const effectiveHasMoreHistory = historyState.hasMoreHistory;
   const hydratedDoc =
     !!input.groupDoc &&
     input.groupDoc.group_id === input.selectedGroupId &&
@@ -147,12 +156,14 @@ export function useChatMessageView(input: {
       ? "ready"
       : !input.selectedGroupId
         ? "business_empty"
-        : effectiveIsLoadingHistory ||
-            effectiveHasMoreHistory ||
-            !hydratedDoc ||
-            (input.needsActors && !settledActors)
-          ? "hydrating"
-          : "business_empty";
+        : historyState.isFilteredEmpty
+          ? "filtered_empty"
+          : effectiveIsLoadingHistory ||
+              effectiveHasMoreHistory ||
+              !hydratedDoc ||
+              (input.needsActors && !settledActors)
+            ? "hydrating"
+            : "business_empty";
 
   const centerEventId = inChatWindow ? input.chatWindow?.centerEventId : undefined;
   return {

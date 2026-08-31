@@ -1,5 +1,5 @@
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use cccc_core::access_tokens::{AccessToken, AccessTokenStore};
@@ -7,6 +7,7 @@ use percent_encoding::percent_decode_str;
 use serde_json::json;
 
 use crate::AppState;
+use crate::routes::access_token_support::cookie;
 
 #[derive(Debug, Clone)]
 pub struct Principal {
@@ -16,16 +17,15 @@ pub struct Principal {
     pub raw_token: String,
 }
 
-impl Principal {
-    fn local_admin() -> Self {
-        Self {
-            user_id: "local-user".into(),
-            allowed_groups: Vec::new(),
-            is_admin: true,
-            raw_token: String::new(),
-        }
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenSource {
+    None,
+    Bearer,
+    Cookie,
+    Local,
+}
 
+impl Principal {
     fn from_token(token: AccessToken) -> Self {
         Self {
             user_id: token.user_id,
@@ -45,29 +45,85 @@ pub async fn authorize(
     mut request: Request,
     next: Next,
 ) -> Response {
+    if !websocket_origin_allowed(&state, &request) {
+        tracing::warn!(
+            origin = request
+                .headers()
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default(),
+            served_origin = ?crate::request_origin::served_origin(&state, request.headers()),
+            path = request.uri().path(),
+            "rejected WebSocket origin"
+        );
+        return failure_text(
+            StatusCode::FORBIDDEN,
+            "origin_not_allowed",
+            "WebSocket origin is not allowed",
+        );
+    }
     let store = match AccessTokenStore::new(state.home.clone()) {
         Ok(store) => store,
-        Err(error) => return failure(StatusCode::INTERNAL_SERVER_ERROR, "auth_store_error", error),
+        Err(error) => return auth_store_failure(error),
     };
     let tokens = match store.list() {
         Ok(tokens) => tokens,
-        Err(error) => return failure(StatusCode::INTERNAL_SERVER_ERROR, "auth_store_error", error),
+        Err(error) => return auth_store_failure(error),
     };
-    if tokens.is_empty() {
-        request.extensions_mut().insert(Principal::local_admin());
+    let has_admin = tokens.iter().any(|token| token.is_admin);
+    if is_first_admin_bootstrap(request.method(), request.uri().path()) && !has_admin {
         return next.run(request).await;
     }
-    let raw = request_token(&request);
-    let principal = match store.lookup(&raw) {
+    let secure_cookie = crate::request_origin::is_https(&state, request.headers());
+    let (raw, mut token_source) = request_token(&request);
+    let mut principal = match store.lookup(&raw) {
         Ok(Some(token)) => Some(Principal::from_token(token)),
         Ok(None) => None,
-        Err(error) => return failure(StatusCode::INTERNAL_SERVER_ERROR, "auth_store_error", error),
+        Err(error) => return auth_store_failure(error),
     };
+    if principal.is_none()
+        && accepts_local_principal(request.method(), request.uri().path())
+        && crate::local_browser_auth::allowed(&state, &request)
+    {
+        token_source = TokenSource::Local;
+        principal = Some(Principal {
+            user_id: "local".into(),
+            allowed_groups: Vec::new(),
+            is_admin: true,
+            raw_token: String::new(),
+        });
+    }
+    if tokens.is_empty() && principal.is_none() {
+        if is_public(request.method(), request.uri().path()) {
+            return next.run(request).await;
+        }
+        return failure_text(
+            StatusCode::UNAUTHORIZED,
+            "bootstrap_required",
+            "remote Web access requires an administrator access token",
+        );
+    }
+    if principal.is_some()
+        && !is_public(request.method(), request.uri().path())
+        && matches!(token_source, TokenSource::Cookie | TokenSource::Local)
+        && is_unsafe_method(request.method())
+        && !crate::request_origin::cookie_csrf_allowed(&state, request.headers())
+    {
+        return failure_text(
+            StatusCode::FORBIDDEN,
+            "csrf_origin_invalid",
+            "Cookie-authenticated write requests require an allowed Origin or Referer",
+        );
+    }
+    let bootstrap_cookie = principal.as_ref().and_then(|principal| {
+        (request.uri().path() == "/api/v1/web_access/session" && !principal.raw_token.is_empty())
+            .then(|| cookie(&principal.raw_token, secure_cookie))
+    });
     if is_public(request.method(), request.uri().path()) {
         if let Some(principal) = principal {
             request.extensions_mut().insert(principal);
         }
-        return next.run(request).await;
+        return with_bootstrap_cookie(next.run(request).await, bootstrap_cookie.as_deref());
     }
     let Some(principal) = principal else {
         return failure_text(
@@ -109,10 +165,47 @@ pub async fn authorize(
         }
     }
     request.extensions_mut().insert(principal);
-    next.run(request).await
+    with_bootstrap_cookie(next.run(request).await, bootstrap_cookie.as_deref())
 }
 
-fn request_token(request: &Request) -> String {
+fn websocket_origin_allowed(state: &AppState, request: &Request) -> bool {
+    websocket_origin_allowed_with_proxy(
+        request,
+        crate::request_origin::proxy_headers_trusted(state),
+    )
+}
+
+fn websocket_origin_allowed_with_proxy(request: &Request, trust_proxy: bool) -> bool {
+    let websocket = request
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    if !websocket {
+        return true;
+    }
+    let Some(origin) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    crate::request_origin::origin_allowed_with_proxy(request.headers(), origin, trust_proxy)
+}
+
+fn with_bootstrap_cookie(mut response: Response, cookie: Option<&str>) -> Response {
+    if let Some(cookie) = cookie
+        && let Ok(value) = HeaderValue::from_str(cookie)
+    {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+}
+
+fn request_token(request: &Request) -> (String, TokenSource) {
     let bearer = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -125,7 +218,7 @@ fn request_token(request: &Request) -> String {
         .map(str::trim)
         .unwrap_or("");
     if !bearer.is_empty() {
-        return bearer.into();
+        return (bearer.into(), TokenSource::Bearer);
     }
     let cookie = request
         .headers()
@@ -139,14 +232,18 @@ fn request_token(request: &Request) -> String {
                     .map(decode_token)
             })
         });
-    cookie.or_else(|| query_token(request)).unwrap_or_default()
+    cookie.map_or_else(
+        || (String::new(), TokenSource::None),
+        |token| (token, TokenSource::Cookie),
+    )
 }
 
-fn query_token(request: &Request) -> Option<String> {
-    request.uri().query()?.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == "token").then(|| decode_token(value))
-    })
+fn is_unsafe_method(method: &Method) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+fn is_first_admin_bootstrap(method: &Method, path: &str) -> bool {
+    *method == Method::POST && path == "/api/v1/access-tokens"
 }
 
 fn decode_token(value: &str) -> String {
@@ -156,7 +253,11 @@ fn decode_token(value: &str) -> String {
 fn is_public(method: &Method, path: &str) -> bool {
     matches!(
         path,
-        "/api/v1/ping" | "/api/v1/health" | "/api/v1/ready" | "/api/v1/web_access/session"
+        "/api/v1/ping"
+            | "/api/v1/health"
+            | "/api/v1/ready"
+            | "/api/v1/web_access/session"
+            | "/api/v1/web_access/exchange"
     ) || matches!(
         path,
         "/api/group-bridge/pairing/requests/remote"
@@ -164,9 +265,17 @@ fn is_public(method: &Method, path: &str) -> bool {
             | "/api/group-bridge/pairing/requests/remote/claim"
             | "/api/group-bridge/session/send"
             | "/api/group-bridge/session/ws"
-    ) || *method == Method::GET
-        && (path == "/api/v1/branding" || path.starts_with("/api/v1/branding/assets/"))
+            | "/api/group-bridge/session/ws/v2"
+    ) || (*method == Method::GET && path == "/api/v1/branding")
+        || (matches!(*method, Method::GET | Method::HEAD)
+            && path.starts_with("/api/v1/branding/assets/"))
         || !path.starts_with("/api/")
+}
+
+fn accepts_local_principal(method: &Method, path: &str) -> bool {
+    !is_public(method, path)
+        || (matches!(*method, Method::GET | Method::HEAD)
+            && matches!(path, "/api/v1/ping" | "/api/v1/web_access/session"))
 }
 
 fn requires_admin(method: &Method, path: &str) -> bool {
@@ -180,6 +289,7 @@ fn requires_admin(method: &Method, path: &str) -> bool {
         || path.starts_with("/api/v1/branding")
         || path.starts_with("/api/v1/fs/")
         || path.starts_with("/api/v1/registry/")
+        || path.starts_with("/api/v1/membership")
         || path.starts_with("/api/v1/remote_access")
         || path == "/api/v1/debug/tail_logs"
         || path == "/api/v1/debug/clear_logs"
@@ -212,8 +322,13 @@ fn group_from_path(path: &str) -> Option<&str> {
     group_id.starts_with("g_").then_some(group_id)
 }
 
-fn failure(status: StatusCode, code: &str, error: impl std::fmt::Display) -> Response {
-    failure_text(status, code, &error.to_string())
+fn auth_store_failure(error: impl std::fmt::Display) -> Response {
+    tracing::error!(%error, "failed to read CCCC access token store");
+    failure_text(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "auth_store_error",
+        "access token store is unavailable",
+    )
 }
 
 fn failure_text(status: StatusCode, code: &str, message: &str) -> Response {
@@ -225,36 +340,5 @@ fn failure_text(status: StatusCode, code: &str, message: &str) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn legacy_profiles_stay_admin_only_while_scoped_profiles_use_user_policy() {
-        assert!(!requires_admin(&Method::GET, "/api/v1/profiles"));
-        assert!(requires_admin(&Method::POST, "/api/v1/actor_profiles"));
-        assert!(requires_admin(
-            &Method::GET,
-            "/api/v1/actor_profiles/ap_one/env_private"
-        ));
-        assert!(requires_admin(
-            &Method::POST,
-            "/api/v1/space/providers/notebooklm/credential"
-        ));
-        assert!(!requires_admin(&Method::GET, "/api/v1/groups/g_one/actors"));
-    }
-
-    #[test]
-    fn global_control_plane_routes_require_admin() {
-        for (method, path) in [
-            (Method::GET, "/api/v1/remote_access"),
-            (Method::POST, "/api/v1/remote_access/start"),
-            (Method::GET, "/api/v1/debug/tail_logs"),
-            (Method::POST, "/api/v1/debug/clear_logs"),
-            (Method::GET, "/api/v1/capabilities/allowlist"),
-            (Method::POST, "/api/v1/capabilities/allowlist/validate"),
-            (Method::POST, "/api/v1/capabilities/block"),
-        ] {
-            assert!(requires_admin(&method, path), "{method} {path}");
-        }
-    }
-}
+#[path = "auth_tests.rs"]
+mod tests;

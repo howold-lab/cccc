@@ -12,19 +12,16 @@ import {
   MessageAttachment,
   PresentationMessageRef,
   TaskMessageRef,
+  VoiceDocumentMessageRef,
 } from "../types";
 import { formatFullTime, formatMessageTimestamp } from "../utils/time";
 import { classNames } from "../utils/classNames";
 import { getReplyEventId } from "../utils/chatReply";
-import { projectCrossGroupRecipients } from "../utils/crossGroupRecipients";
+import { projectCrossGroupRecipients, projectMessageMode } from "../utils/crossGroupRecipients";
 import { isGroupBridgeInboundMessage } from "../utils/groupBridgeMessages";
-import { getPresentationMessageRefs, getPresentationRefChipLabel } from "../utils/presentationRefs";
-import {
-  getTaskMessageRefs,
-  getTaskRefChipLabel,
-  getTaskRefStateKey,
-  type TaskRefStateKey,
-} from "../utils/taskRefs";
+import { getPresentationMessageRefs } from "../utils/presentationRefs";
+import { getVoiceDocumentMessageRefs } from "../utils/voiceDocumentRefs";
+import { getTaskMessageRefs } from "../utils/taskRefs";
 import { isRedundantWecomImagePlaceholder } from "../utils/messageAttachments";
 import { getMessageInsight } from "../utils/messagePerspective";
 import {
@@ -40,7 +37,6 @@ import type { WebModelDeliveryStatus } from "../utils/webModelDeliveryStatus";
 import {
   buildToLabel,
   buildVisibleReadStatusEntries,
-  computeAckSummary,
   computeObligationSummary,
   getSenderDisplayName,
 } from "./messageBubble/model";
@@ -54,38 +50,10 @@ import { AgentStateTooltip } from "./messageBubble/AgentStateTooltip";
 import { MessageContent } from "./messageBubble/MessageContent";
 import { MessageBubbleSurface } from "./messageBubble/MessageBubbleSurface";
 import { buildMessageCopyText } from "./messageBubble/messageCopyText";
+import { MessageReferenceSections } from "./messageBubble/MessageReferenceSections";
 
 const ANIMATED_MESSAGE_BUBBLE_KEYS = new Set<string>();
 const NEW_MESSAGE_ANIMATION_WINDOW_MS = 12000;
-
-const TASK_REF_STATE_TONE_CLASS: Record<TaskRefStateKey, string> = {
-  planned:
-    "border-slate-300/70 bg-slate-100/90 text-slate-800 dark:border-slate-300/30 dark:bg-slate-950/80 dark:text-slate-100",
-  active:
-    "border-emerald-300/70 bg-emerald-100/90 text-emerald-800 dark:border-emerald-300/35 dark:bg-emerald-950/80 dark:text-emerald-100",
-  handoff:
-    "border-sky-300/70 bg-sky-100/90 text-sky-800 dark:border-sky-300/35 dark:bg-sky-950/80 dark:text-sky-100",
-  waiting_user:
-    "border-amber-300/70 bg-amber-100/90 text-amber-800 dark:border-amber-300/35 dark:bg-amber-950/80 dark:text-amber-100",
-  blocked:
-    "border-rose-300/70 bg-rose-100/90 text-rose-800 dark:border-rose-300/35 dark:bg-rose-950/80 dark:text-rose-100",
-  done: "border-emerald-300/60 bg-emerald-50/95 text-emerald-800 dark:border-emerald-300/30 dark:bg-emerald-950/75 dark:text-emerald-100",
-  archived:
-    "border-slate-300/70 bg-slate-100/90 text-slate-700 dark:border-slate-300/25 dark:bg-slate-950/75 dark:text-slate-200",
-  linked:
-    "border-slate-300/70 bg-slate-100/90 text-slate-800 dark:border-slate-300/30 dark:bg-slate-950/80 dark:text-slate-100",
-};
-
-const TASK_REF_STATE_DOT_CLASS: Record<TaskRefStateKey, string> = {
-  planned: "bg-slate-400/90 dark:bg-slate-400",
-  active: "bg-emerald-500 dark:bg-emerald-400",
-  handoff: "bg-sky-500 dark:bg-sky-400",
-  waiting_user: "bg-amber-500 dark:bg-amber-400",
-  blocked: "bg-rose-500 dark:bg-rose-400",
-  done: "bg-emerald-500 dark:bg-emerald-400",
-  archived: "bg-slate-400/90 dark:bg-slate-500",
-  linked: "bg-slate-400/90 dark:bg-slate-400",
-};
 
 function buildSenderAvatarUrl(groupId: string, senderAvatarPath?: string): string {
   const gid = String(groupId || "").trim();
@@ -136,6 +104,7 @@ function MessageBubbleBody({
   quoteText,
   replyToEventId,
   presentationRefs,
+  voiceDocumentRefs,
   taskRefs,
   taskById,
   messageText,
@@ -168,6 +137,7 @@ function MessageBubbleBody({
   quoteText?: string;
   replyToEventId?: string;
   presentationRefs: PresentationMessageRef[];
+  voiceDocumentRefs: VoiceDocumentMessageRef[];
   taskRefs: TaskMessageRef[];
   taskById: Map<string, Task>;
   messageText: string;
@@ -204,17 +174,6 @@ function MessageBubbleBody({
     "mt-3 border-t pt-3",
     "border-[var(--glass-border-subtle)]",
   );
-  const taskStateLabels: Record<TaskRefStateKey, string> = {
-    planned: t("taskRefStatePlanned", { defaultValue: "Planned" }),
-    active: t("taskRefStateActive", { defaultValue: "Active" }),
-    handoff: t("taskRefStateHandoff", { defaultValue: "Handoff" }),
-    waiting_user: t("taskRefStateWaitingUser", { defaultValue: "Waiting user" }),
-    blocked: t("taskRefStateBlocked", { defaultValue: "Blocked" }),
-    done: t("taskRefStateDone", { defaultValue: "Done" }),
-    archived: t("taskRefStateArchived", { defaultValue: "Archived" }),
-    linked: t("taskRefStateLinked", { defaultValue: "Linked" }),
-  };
-
   return (
     <>
       {normalizedToLabel || (hasSource && !isGroupBridgeSource) || hasDestination ? (
@@ -297,75 +256,16 @@ function MessageBubbleBody({
         )
       ) : null}
 
-      {presentationRefs.length > 0 ? (
-        <div className={supportingSectionClass}>
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] opacity-50">
-            {t("presentation")}
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {presentationRefs.map((ref, index) => (
-              <button
-                key={`${String(event.id || "message")}:presentation-ref:${index}:${String(ref.slot_id || "")}`}
-                type="button"
-                onClick={() => onOpenPresentationRef?.(ref, event)}
-                className={classNames(
-                  "inline-flex max-w-full items-center rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
-                  "border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]",
-                )}
-                title={getPresentationRefChipLabel(ref)}
-              >
-                <span className="truncate">{getPresentationRefChipLabel(ref)}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {taskRefs.length > 0 ? (
-        <div className={supportingSectionClass}>
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] opacity-50">
-            {t("task", { defaultValue: "Task" })}
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {taskRefs.map((ref, index) => {
-              const taskId = String(ref.task_id || "").trim();
-              const liveTask = taskId ? taskById.get(taskId) || null : null;
-              const stateKey = getTaskRefStateKey(ref, liveTask);
-              const stateLabel = taskStateLabels[stateKey];
-              const chipLabel = getTaskRefChipLabel(ref, liveTask);
-              return (
-                <button
-                  key={`${String(event.id || "message")}:task-ref:${index}:${taskId}`}
-                  type="button"
-                  onClick={() => onOpenTaskRef?.(ref, event)}
-                  className={classNames(
-                    "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
-                    "border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg-hover)]",
-                  )}
-                  title={`${chipLabel} · ${stateLabel}`}
-                >
-                  <span
-                    className={classNames(
-                      "h-1.5 w-1.5 rounded-full",
-                      TASK_REF_STATE_DOT_CLASS[stateKey],
-                    )}
-                    aria-hidden="true"
-                  />
-                  <span className="truncate">{chipLabel}</span>
-                  <span
-                    className={classNames(
-                      "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold leading-none",
-                      TASK_REF_STATE_TONE_CLASS[stateKey],
-                    )}
-                  >
-                    {stateLabel}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
+      <MessageReferenceSections
+        event={event}
+        presentationRefs={presentationRefs}
+        voiceDocumentRefs={voiceDocumentRefs}
+        taskRefs={taskRefs}
+        taskById={taskById}
+        sectionClassName={supportingSectionClass}
+        onOpenPresentationRef={onOpenPresentationRef}
+        onOpenTaskRef={onOpenTaskRef}
+      />
 
       <MessageContent
         fallbackText={bodyText}
@@ -521,8 +421,9 @@ export const MessageBubble = memo(
       typeof msgData?.sender_avatar_path === "string"
         ? String(msgData.sender_avatar_path || "").trim()
         : "";
-    const isAttention = String(msgData?.priority || "normal") === "attention";
-    const replyRequired = !!msgData?.reply_required;
+    const displayedMessageMode = projectMessageMode(msgData);
+    const replyRequested = displayedMessageMode === "request_reply";
+    const isMail = displayedMessageMode === "mail";
     const srcGroupId =
       typeof msgData?.src_group_id === "string" ? String(msgData.src_group_id || "").trim() : "";
     const srcEventId =
@@ -575,6 +476,10 @@ export const MessageBubble = memo(
       [msgData?.refs],
     );
     const taskRefs = useMemo(() => getTaskMessageRefs(msgData?.refs), [msgData?.refs]);
+    const voiceDocumentRefs = useMemo(
+      () => getVoiceDocumentMessageRefs(msgData?.refs),
+      [msgData?.refs],
+    );
     const shouldRenderMarkdown = useMemo(
       () => !isStreaming && mayContainMarkdown(bubbleBodyText),
       [bubbleBodyText, isStreaming],
@@ -613,13 +518,23 @@ export const MessageBubble = memo(
           insight,
           insightLabel: t("senderPerspective"),
           presentationRefs,
+          voiceDocumentRefs,
           taskRefs,
           attachments: blobAttachments.map((attachment) => ({
             title: attachment.title,
             path: attachment.path || attachment.local_preview_url,
           })),
         }),
-      [blobAttachments, displayMessageText, insight, presentationRefs, quoteText, t, taskRefs],
+      [
+        blobAttachments,
+        displayMessageText,
+        insight,
+        presentationRefs,
+        quoteText,
+        t,
+        taskRefs,
+        voiceDocumentRefs,
+      ],
     );
     const messageTimestamp = formatMessageTimestamp(ev.ts);
     const fullMessageTimestamp = formatFullTime(ev.ts);
@@ -628,7 +543,6 @@ export const MessageBubble = memo(
     const blobGroupId = String(ev.group_id || "").trim() || groupId;
 
     const readStatus = ev._read_status;
-    const ackStatus = ev._ack_status;
     const recipients = msgData?.to;
 
     const visibleReadStatusEntries = useMemo(() => {
@@ -649,22 +563,8 @@ export const MessageBubble = memo(
         const ids = Object.keys(os);
         return ids.length === 1 && ids[0] === "user";
       }
-      if (ackStatus && typeof ackStatus === "object") {
-        const ids = Object.keys(ackStatus);
-        return ids.length === 1 && ids[0] === "user";
-      }
       return isDirectUserMessage;
-    }, [ackStatus, ev._obligation_status, isDirectUserMessage, isUserMessage]);
-
-    const ackSummary = useMemo(() => {
-      return computeAckSummary({
-        hideDirectUserObligationSummary,
-        isAttention,
-        replyRequired,
-        ackStatus,
-        isUserMessage,
-      });
-    }, [ackStatus, hideDirectUserObligationSummary, isAttention, isUserMessage, replyRequired]);
+    }, [ev._obligation_status, isDirectUserMessage, isUserMessage]);
 
     const obligationSummary = useMemo(() => {
       return computeObligationSummary({
@@ -872,24 +772,24 @@ export const MessageBubble = memo(
               "relative max-w-full min-w-0 md:w-auto",
               isUserMessage ? "w-auto self-end" : "w-full",
             )}
-            style={isAttention ? { minWidth: "min(8.5rem, 85vw)" } : undefined}
+            style={replyRequested ? { minWidth: "min(8.5rem, 85vw)" } : undefined}
           >
-            {isAttention && (
+            {replyRequested && (
               <span
                 className={classNames(
                   "absolute -top-2 z-10 text-[10px] font-semibold px-2 py-0.5 rounded-full border shadow-sm",
                   isUserMessage ? "left-3" : "right-3",
-                  "bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200 border-amber-300 dark:border-amber-700",
+                  "bg-violet-50 text-violet-700 dark:bg-violet-950/60 dark:text-violet-200 border-violet-200 dark:border-violet-800",
                 )}
               >
-                {t("important")}
+                {t("needReply")}
               </span>
             )}
             <MessageBubbleSurface
               isUserMessage={isUserMessage}
               isStreaming={isStreaming}
               motionClass={bubbleMotionClass}
-              isAttention={isAttention}
+              replyRequested={replyRequested}
               isHighlighted={Boolean(isHighlighted)}
             >
               <MessageBubbleBody
@@ -911,6 +811,7 @@ export const MessageBubble = memo(
                 quoteText={quoteText}
                 replyToEventId={replyToEventId}
                 presentationRefs={presentationRefs}
+                voiceDocumentRefs={voiceDocumentRefs}
                 taskRefs={taskRefs}
                 taskById={taskById}
                 messageText={displayMessageText}
@@ -931,14 +832,14 @@ export const MessageBubble = memo(
           <MessageFooter
             readOnly={readOnly}
             obligationSummary={obligationSummary}
-            ackSummary={ackSummary}
             visibleReadStatusEntries={visibleReadStatusEntries}
             webModelDeliveryStatus={webModelDeliveryStatus}
             readPreviewEntries={readPreviewEntries}
             readPreviewOverflow={readPreviewOverflow}
             displayNameMap={displayNameMap}
             isDark={isDark}
-            replyRequired={replyRequired}
+            isMail={isMail}
+            replyRequested={replyRequested}
             copiedMessageText={copiedMessageText}
             copyableMessageText={copyableMessageText}
             onCopyMessageText={() => void handleCopyMessageText()}

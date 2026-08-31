@@ -9,6 +9,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../../src/services/api", () => apiMocks);
 
 import { sendSlashSkillMessageRequest } from "../../src/hooks/useSlashSkillDispatch";
+import { DEFAULT_CAPSULE_SKILL_TASK_TEXT } from "../../src/utils/slashCommands";
 
 describe("sendSlashSkillMessageRequest", () => {
   beforeEach(() => {
@@ -25,8 +26,6 @@ describe("sendSlashSkillMessageRequest", () => {
         command: "",
         capabilityId: "",
         toTokens: ["@all"],
-        priority: "normal",
-        replyRequired: false,
         localId: "local-builtin",
         replyTarget: null,
       }),
@@ -37,8 +36,7 @@ describe("sendSlashSkillMessageRequest", () => {
       "/install cccc",
       ["@all"],
       undefined,
-      "normal",
-      false,
+      "send",
       "local-builtin",
       [],
     );
@@ -56,8 +54,6 @@ describe("sendSlashSkillMessageRequest", () => {
         command: "/using-superpowers",
         capabilityId: "skill:agent_self_proposed:using-superpowers",
         toTokens: ["@all"],
-        priority: "attention",
-        replyRequired: true,
         localId: "local-1",
         replyTarget: { eventId: "evt-original", by: "foreman", text: "失败日志" },
       }),
@@ -68,8 +64,6 @@ describe("sendSlashSkillMessageRequest", () => {
       command: "/using-superpowers",
       capabilityId: "skill:agent_self_proposed:using-superpowers",
       to: ["@all"],
-      priority: "attention",
-      replyRequired: true,
       clientId: "local-1",
       replyTo: "evt-original",
       quoteText: "失败日志",
@@ -88,8 +82,6 @@ describe("sendSlashSkillMessageRequest", () => {
         command: "/using-superpowers",
         capabilityId: "skill:agent_self_proposed:using-superpowers",
         toTokens: ["@all"],
-        priority: "normal",
-        replyRequired: false,
         localId: "local-2",
         replyTarget: null,
       }),
@@ -100,13 +92,30 @@ describe("sendSlashSkillMessageRequest", () => {
       command: "/using-superpowers",
       capabilityId: "skill:agent_self_proposed:using-superpowers",
       to: ["@all"],
-      priority: "normal",
-      replyRequired: false,
       clientId: "local-2",
       replyTo: "",
       quoteText: "",
     });
     expect(apiMocks.sendMessage).not.toHaveBeenCalled();
     expect(apiMocks.replyMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps the default workflow task non-empty at the hidden API boundary", async () => {
+    apiMocks.dispatchSlashSkill.mockResolvedValueOnce({ ok: true, result: {} });
+
+    await sendSlashSkillMessageRequest({
+      selectedGroupId: "g1",
+      message: DEFAULT_CAPSULE_SKILL_TASK_TEXT,
+      command: "/cccc-self-evolution",
+      capabilityId: "skill:agent_self_proposed:cccc-self-evolution",
+      toTokens: ["@all"],
+      localId: "local-default",
+      replyTarget: null,
+    });
+
+    expect(apiMocks.dispatchSlashSkill).toHaveBeenCalledWith(
+      "g1",
+      expect.objectContaining({ taskText: DEFAULT_CAPSULE_SKILL_TASK_TEXT }),
+    );
   });
 });

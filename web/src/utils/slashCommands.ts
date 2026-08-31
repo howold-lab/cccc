@@ -19,15 +19,14 @@ export type SlashCommandDisplayKind = "command" | "skill" | "tool";
 
 export type CapsuleSkillSlashCommandResolution =
   | { kind: "dispatch"; dispatchText: string }
-  | { kind: "missing_args"; message: string }
   | { kind: "not_capsule_skill" };
 
 export type SlashCommandGuardInput = {
   composerFilesCount: number;
   hasReplyTarget: boolean;
-  replyRequired?: boolean;
   sourceType?: SlashCommandItem["sourceType"];
   hasQuotedPresentationRef: boolean;
+  hasQuotedVoiceDocumentRef?: boolean;
   sendGroupId: string;
   selectedGroupId: string;
 };
@@ -38,17 +37,19 @@ export type SlashCommandGuardMessages = {
   attachmentsUnsupported: string;
   repliesUnsupported: string;
   quotedPresentationUnsupported: string;
+  quotedVoiceDocumentUnsupported: string;
   crossGroupUnsupported: string;
 };
-
-export type CapsuleSkillSlashCommandMessages = { missingArgs: (command: string) => string };
 
 const DEFAULT_SLASH_GUARD_MESSAGES: SlashCommandGuardMessages = {
   attachmentsUnsupported: "Slash command does not support attachments.",
   repliesUnsupported: "Slash command does not support replying to a specific message yet.",
   quotedPresentationUnsupported: "Slash command does not support quoted presentation views.",
+  quotedVoiceDocumentUnsupported: "Slash command does not support quoted voice documents.",
   crossGroupUnsupported: "Slash command does not support cross-group send.",
 };
+
+export const DEFAULT_CAPSULE_SKILL_TASK_TEXT = "Run the skill's default workflow.";
 
 export function slashCommandSupportsReplyTarget(
   sourceType: SlashCommandItem["sourceType"] | undefined,
@@ -260,6 +261,9 @@ export function resolveSlashCommandGuard(
   if (input.hasQuotedPresentationRef) {
     return { ok: false, message: copy.quotedPresentationUnsupported };
   }
+  if (input.hasQuotedVoiceDocumentRef) {
+    return { ok: false, message: copy.quotedVoiceDocumentUnsupported };
+  }
   const sendGroupId = String(input.sendGroupId || "").trim();
   const selectedGroupId = String(input.selectedGroupId || "").trim();
   if (sendGroupId && sendGroupId !== selectedGroupId) {
@@ -270,27 +274,15 @@ export function resolveSlashCommandGuard(
 
 export function buildCapsuleSkillDispatchText(item: SlashCommandItem, argsText: string): string {
   if (item.sourceType !== "capsule_skill") return "";
-  const text = String(argsText || "").trim();
-  if (!text) return "";
-  const skillLabel = String(item.command || item.name || "").trim();
-  return `请使用已激活的 ${skillLabel} skill 完成以下任务：\n\n${text}`;
+  return String(argsText || "").trim() || DEFAULT_CAPSULE_SKILL_TASK_TEXT;
 }
 
 export function resolveCapsuleSkillSlashCommand(
   item: SlashCommandItem,
   argsText: string,
-  messages: Partial<CapsuleSkillSlashCommandMessages> = {},
 ): CapsuleSkillSlashCommandResolution {
   if (item.sourceType !== "capsule_skill") return { kind: "not_capsule_skill" };
-  const dispatchText = buildCapsuleSkillDispatchText(item, argsText);
-  if (dispatchText) return { kind: "dispatch", dispatchText };
-  const skillLabel = String(item.command || item.name || "the skill").trim();
-  return {
-    kind: "missing_args",
-    message: messages.missingArgs
-      ? messages.missingArgs(skillLabel)
-      : `Enter a task after ${skillLabel}.`,
-  };
+  return { kind: "dispatch", dispatchText: buildCapsuleSkillDispatchText(item, argsText) };
 }
 
 function schemaProperties(schema: Record<string, unknown> | undefined): Record<string, unknown> {

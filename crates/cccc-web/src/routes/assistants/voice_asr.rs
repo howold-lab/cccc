@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 mod engine;
 pub use engine::{
-    StreamingSession, clean_transcript, diarize_pcm16_file, transcribe_file, transcribe_pcm16_file,
-    transcribe_pcm16_ranges,
+    StreamingSession, clean_transcript, diarize_pcm16_file, transcribe_file,
+    transcribe_pcm16_ranges, transcribe_pcm16_ranges_partial,
 };
 
 const BUILTIN_MANIFEST: &str = include_str!("../../../resources/voice-models.default.json");
@@ -180,16 +180,44 @@ fn default_min_duration_off() -> f32 {
 pub fn runtime_status() -> Value {
     json!({
         "runtime_id": RUNTIME_ID,
-        "title": "sherpa-onnx native Rust ASR",
+        "title": "sherpa-onnx ASR",
         "installed": true,
         "available": true,
         "status": "ready",
-        "managed": true,
-        "implementation": "rust",
-        "removable": false,
-        "primary_package": "sherpa-onnx",
         "installed_version": "1.13.4",
-        "reason": "sherpa-onnx is linked into the CCCC Rust binary"
+        "reason": "sherpa-onnx is included in the CCCC executable"
+    })
+}
+
+pub fn streaming_backend_status(home: &HomeLayout, requested: &str) -> Value {
+    let catalog = match catalog(home) {
+        Ok(value) => value,
+        Err(error) => {
+            return json!({
+                "ready":false,
+                "status":"failed",
+                "model_id":"",
+                "error":{"code":error.code,"message":error.message,"details":error.details}
+            });
+        }
+    };
+    let model = catalog
+        .get(requested)
+        .filter(|model| model.streaming.is_some())
+        .or_else(|| catalog.get(DEFAULT_STREAMING_MODEL_ID));
+    let Some(model) = model else {
+        return json!({
+            "ready":false,
+            "status":"not_installed",
+            "model_id":DEFAULT_STREAMING_MODEL_ID
+        });
+    };
+    let status = model_status(home, model);
+    json!({
+        "ready":status["streaming_ready"].as_bool().unwrap_or(false),
+        "status":status["status"],
+        "model_id":model.model_id,
+        "error":status["error"]
     })
 }
 

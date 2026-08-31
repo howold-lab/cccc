@@ -29,11 +29,28 @@ pub struct Capability {
     pub source: String,
     #[serde(default)]
     pub source_uri: String,
+    #[serde(default = "default_qualification_status")]
+    pub qualification_status: String,
+    #[serde(default = "default_enable_supported")]
+    pub enable_supported: bool,
+}
+
+fn default_qualification_status() -> String {
+    "qualified".into()
+}
+
+const fn default_enable_supported() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
 pub struct CapabilityStore {
     home: HomeLayout,
+}
+
+enum BindingMutation {
+    SetEnabled(bool),
+    EnableAndUnhide,
 }
 
 impl CapabilityStore {
@@ -46,13 +63,14 @@ impl CapabilityStore {
         self.migrate_legacy()?;
         let path = self.path();
         if path.exists() {
-            let raw: Value = read_json(&path)?;
+            let raw = read_document_object(&path)?;
             let mut state = CapabilityState::default();
             state.blocked.extend(
                 raw.get("global_blocked")
                     .and_then(Value::as_object)
                     .into_iter()
                     .flatten()
+                    .filter(|(_, entry)| block_entry_is_active(entry))
                     .map(|(id, _)| id.clone()),
             );
             Ok(state)
@@ -137,8 +155,8 @@ impl CapabilityStore {
             "capsule_text":capability.capsule_text,
             "source_id":if capability.source.is_empty(){"manual_import"}else{&capability.source},
             "source_uri":capability.source_uri,
-            "qualification_status":"qualified",
-            "enable_supported":true
+            "qualification_status":capability.qualification_status,
+            "enable_supported":capability.enable_supported
         });
         self.import_record(record)?;
         self.load()
@@ -162,7 +180,7 @@ impl CapabilityStore {
         let path = self.catalog_path();
         with_exclusive_lock(&path.with_extension("json.lock"), || {
             let mut raw = if path.exists() {
-                read_json::<Value>(&path)?
+                read_document_object(&path)?
             } else {
                 json!({"v":1,"created_at":utc_now(),"sources":{},"records":{}})
             };
@@ -203,7 +221,7 @@ impl CapabilityStore {
         let path = self.catalog_path();
         with_exclusive_lock(&path.with_extension("json.lock"), || {
             let mut raw = if path.exists() {
-                read_json::<Value>(&path)?
+                read_document_object(&path)?
             } else {
                 json!({})
             };
@@ -215,17 +233,24 @@ impl CapabilityStore {
     }
 
     pub fn remove_bindings_for_group(&self, id: &str, group_id: &str) -> io::Result<usize> {
+        self.mutate_state(|raw| Ok(remove_enabled_bindings(raw, id, Some(group_id))))
+    }
+
+    pub fn uninstall_for_group(&self, id: &str, group_id: &str) -> io::Result<(usize, bool, bool)> {
+        if group_id.is_empty() {
+            return Err(io::Error::other("group_id is required"));
+        }
         self.mutate_state(|raw| {
-            let mut removed = 0;
-            for key in ["group_enabled", "actor_enabled", "session_enabled"] {
-                if let Some(groups) = raw.get_mut(key).and_then(Value::as_object_mut)
-                    && let Some(group) = groups.get_mut(group_id)
-                {
-                    removed += remove_id(group, id);
-                    remove_empty_entry(groups, group_id);
-                }
-            }
-            Ok(removed)
+            let removed_bindings = remove_enabled_bindings(raw, id, Some(group_id));
+            let groups = object_field(raw, "group_removed");
+            let items = groups.entry(group_id).or_insert_with(|| json!([]));
+            let marker_changed = !array_contains_id(items, id);
+            set_array_member(items, id, true);
+            let has_remaining_bindings = ["group_enabled", "actor_enabled", "session_enabled"]
+                .iter()
+                .filter_map(|key| raw.get(*key))
+                .any(|value| contains_id(value, id));
+            Ok((removed_bindings, marker_changed, has_remaining_bindings))
         })
     }
 
@@ -238,7 +263,7 @@ impl CapabilityStore {
         if !path.exists() {
             return Ok(false);
         }
-        let raw = read_json::<Value>(&path)?;
+        let raw = read_document_object(&path)?;
         Ok(["group_enabled", "actor_enabled", "session_enabled"]
             .iter()
             .filter_map(|key| raw.get(*key))
@@ -250,7 +275,7 @@ impl CapabilityStore {
         if group_id.is_empty() || !path.exists() {
             return Ok(BTreeSet::new());
         }
-        let raw = read_json::<Value>(&path)?;
+        let raw = read_document_object(&path)?;
         Ok(raw
             .pointer(&format!("/group_removed/{}", escape_pointer(group_id)))
             .and_then(Value::as_array)
@@ -291,7 +316,7 @@ impl CapabilityStore {
         if !path.exists() {
             return Ok(false);
         }
-        let raw = read_json::<Value>(&path)?;
+        let raw = read_document_object(&path)?;
         let value = match scope {
             "group" => raw.pointer(&format!("/group_enabled/{}", escape_pointer(group_id))),
             "actor" => raw.pointer(&format!(
@@ -319,7 +344,7 @@ impl CapabilityStore {
         if !path.exists() {
             return Ok(false);
         }
-        let raw = read_json::<Value>(&path)?;
+        let raw = read_document_object(&path)?;
         Ok(raw
             .pointer(&format!(
                 "/actor_hidden/{}/{}",
@@ -328,6 +353,26 @@ impl CapabilityStore {
             ))
             .and_then(Value::as_array)
             .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(id))))
+    }
+
+    pub fn blocked_for_group(
+        &self,
+        id: &str,
+        group_id: &str,
+    ) -> io::Result<Option<(String, Value)>> {
+        let path = self.path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = read_document_object(&path)?;
+        if let Some(entry) = active_block_entry(raw.get("global_blocked"), id) {
+            return Ok(Some(("global".into(), entry)));
+        }
+        Ok(active_block_entry(
+            raw.pointer(&format!("/group_blocked/{}", escape_pointer(group_id))),
+            id,
+        )
+        .map(|entry| ("group".into(), entry)))
     }
 
     pub fn delete_source(&self, source: &str) -> io::Result<Vec<String>> {
@@ -387,10 +432,122 @@ impl CapabilityStore {
         scope: &str,
         ttl_seconds: i64,
     ) -> io::Result<CapabilityState> {
+        self.mutate_binding_for(
+            id,
+            BindingMutation::SetEnabled(enabled),
+            group_id,
+            actor_id,
+            scope,
+            ttl_seconds,
+        )
+    }
+
+    pub fn seed_default_group_capabilities(&self, group_id: &str) -> io::Result<bool> {
+        use crate::capability_builtin::{
+            DEFAULT_GROUP_CAPABILITY_SEED_VERSION, LEGACY_SELF_EVOLUTION_CAPABILITY_ID,
+            SELF_EVOLUTION_CAPABILITY_ID,
+        };
+
+        if group_id.is_empty() {
+            return Ok(false);
+        }
+        self.mutate_state(|raw| {
+            let current_version = raw
+                .pointer(&format!(
+                    "/default_group_capability_seed_versions/{}",
+                    escape_pointer(group_id)
+                ))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if current_version >= DEFAULT_GROUP_CAPABILITY_SEED_VERSION {
+                return Ok(false);
+            }
+
+            let legacy_explicitly_removed = raw
+                .pointer(&format!("/group_removed/{}", escape_pointer(group_id)))
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.as_str() == Some(LEGACY_SELF_EVOLUTION_CAPABILITY_ID))
+                });
+            migrate_capability_controls(
+                raw,
+                group_id,
+                LEGACY_SELF_EVOLUTION_CAPABILITY_ID,
+                SELF_EVOLUTION_CAPABILITY_ID,
+            );
+            let legacy_removed =
+                remove_enabled_bindings(raw, LEGACY_SELF_EVOLUTION_CAPABILITY_ID, Some(group_id));
+            if legacy_removed > 0 {
+                let groups = object_field(raw, "group_removed");
+                let items = groups.entry(group_id).or_insert_with(|| json!([]));
+                set_array_member(items, LEGACY_SELF_EVOLUTION_CAPABILITY_ID, true);
+            }
+
+            if legacy_explicitly_removed {
+                let groups = object_field(raw, "group_removed");
+                let items = groups.entry(group_id).or_insert_with(|| json!([]));
+                set_array_member(items, SELF_EVOLUTION_CAPABILITY_ID, true);
+            }
+
+            let self_evolution_removed = raw
+                .pointer(&format!("/group_removed/{}", escape_pointer(group_id)))
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.as_str() == Some(SELF_EVOLUTION_CAPABILITY_ID))
+                });
+            if !self_evolution_removed {
+                let groups = object_field(raw, "group_enabled");
+                let items = groups.entry(group_id).or_insert_with(|| json!([]));
+                set_array_member(items, SELF_EVOLUTION_CAPABILITY_ID, true);
+            }
+
+            object_field(raw, "default_group_capability_seed_versions").insert(
+                group_id.into(),
+                json!(DEFAULT_GROUP_CAPABILITY_SEED_VERSION),
+            );
+            Ok(true)
+        })
+    }
+
+    pub fn enable_and_unhide_for(
+        &self,
+        id: &str,
+        group_id: &str,
+        actor_id: &str,
+        scope: &str,
+        ttl_seconds: i64,
+    ) -> io::Result<CapabilityState> {
+        self.mutate_binding_for(
+            id,
+            BindingMutation::EnableAndUnhide,
+            group_id,
+            actor_id,
+            scope,
+            ttl_seconds,
+        )
+    }
+
+    fn mutate_binding_for(
+        &self,
+        id: &str,
+        mutation: BindingMutation,
+        group_id: &str,
+        actor_id: &str,
+        scope: &str,
+        ttl_seconds: i64,
+    ) -> io::Result<CapabilityState> {
         self.require(id)?;
         if group_id.is_empty() {
             return Err(io::Error::other("group_id is required"));
         }
+        let (enabled, unhide) = match mutation {
+            BindingMutation::SetEnabled(enabled) => (enabled, false),
+            BindingMutation::EnableAndUnhide => (true, true),
+        };
         self.mutate_state(|raw| {
             if enabled {
                 let groups = object_field(raw, "group_removed");
@@ -401,6 +558,12 @@ impl CapabilityStore {
             }
             match scope {
                 "group" => {
+                    if id == crate::capability_builtin::SELF_EVOLUTION_CAPABILITY_ID {
+                        object_field(raw, "default_group_capability_seed_versions").insert(
+                            group_id.into(),
+                            json!(crate::capability_builtin::DEFAULT_GROUP_CAPABILITY_SEED_VERSION),
+                        );
+                    }
                     let groups = object_field(raw, "group_enabled");
                     let items = groups.entry(group_id).or_insert_with(|| json!([]));
                     set_array_member(items, id, enabled);
@@ -448,6 +611,16 @@ impl CapabilityStore {
                     return Err(io::Error::other("scope must be group, actor, or session"));
                 }
             }
+            if unhide && !actor_id.is_empty() {
+                let groups = object_field(raw, "actor_hidden");
+                if let Some(group) = groups.get_mut(group_id).and_then(Value::as_object_mut) {
+                    if let Some(items) = group.get_mut(actor_id) {
+                        set_array_member(items, id, false);
+                    }
+                    remove_empty_entry(group, actor_id);
+                }
+                remove_empty_entry(groups, group_id);
+            }
             Ok(())
         })?;
         self.load()
@@ -462,37 +635,56 @@ impl CapabilityStore {
         by: &str,
         ttl_seconds: i64,
     ) -> io::Result<CapabilityState> {
+        self.set_blocked_and_revoke_for(id, blocked, group_id, reason, by, ttl_seconds)
+            .map(|(state, _, _)| state)
+    }
+
+    pub fn set_blocked_and_revoke_for(
+        &self,
+        id: &str,
+        blocked: bool,
+        group_id: &str,
+        reason: &str,
+        by: &str,
+        ttl_seconds: i64,
+    ) -> io::Result<(CapabilityState, usize, Option<Value>)> {
         self.require(id)?;
-        self.mutate_state(|raw| {
-            let target = if group_id.is_empty() {
-                object_field(raw, "global_blocked")
+        let block_entry = blocked.then(|| {
+            let expires_at = if ttl_seconds > 0 {
+                (chrono::Utc::now()
+                    + chrono::Duration::seconds(ttl_seconds.clamp(1, 30 * 24 * 3600)))
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
             } else {
-                let groups = object_field(raw, "group_blocked");
-                ensure_object(groups.entry(group_id).or_insert_with(|| json!({})))
+                String::new()
             };
-            if blocked {
-                let expires_at = if ttl_seconds > 0 {
-                    (chrono::Utc::now()
-                        + chrono::Duration::seconds(ttl_seconds.clamp(1, 30 * 24 * 3600)))
-                    .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+            json!({
+                "reason":reason.chars().take(280).collect::<String>(),
+                "by":by,
+                "blocked_at":utc_now(),
+                "expires_at":expires_at,
+            })
+        });
+        let removed_bindings = self.mutate_state(|raw| {
+            {
+                let target = if group_id.is_empty() {
+                    object_field(raw, "global_blocked")
                 } else {
-                    String::new()
+                    let groups = object_field(raw, "group_blocked");
+                    ensure_object(groups.entry(group_id).or_insert_with(|| json!({})))
                 };
-                target.insert(
-                    id.into(),
-                    json!({
-                        "reason":reason.chars().take(280).collect::<String>(),
-                        "by":by,
-                        "blocked_at":utc_now(),
-                        "expires_at":expires_at,
-                    }),
-                );
-            } else {
-                target.remove(id);
+                if let Some(entry) = block_entry.as_ref() {
+                    target.insert(id.into(), entry.clone());
+                } else {
+                    target.remove(id);
+                }
             }
-            Ok(())
+            Ok(if blocked {
+                remove_enabled_bindings(raw, id, (!group_id.is_empty()).then_some(group_id))
+            } else {
+                0
+            })
         })?;
-        self.load()
+        Ok((self.load()?, removed_bindings, block_entry))
     }
 
     pub fn set_hidden_for(
@@ -522,14 +714,17 @@ impl CapabilityStore {
         let path = self.path();
         with_exclusive_lock(&path.with_extension("json.lock"), || {
             let mut raw = if path.exists() {
-                read_json::<Value>(&path)?
+                read_document_object(&path)?
             } else {
                 json!({"v":1,"created_at":utc_now()})
             };
+            let original = raw.clone();
             let result = change(&mut raw)?;
             raw["v"] = json!(1);
-            raw["updated_at"] = json!(utc_now());
-            write_json(&path, &raw)?;
+            if raw != original {
+                raw["updated_at"] = json!(utc_now());
+                write_json(&path, &raw)?;
+            }
             Ok(result)
         })
     }
@@ -552,7 +747,7 @@ impl CapabilityStore {
                 let legacy: CapabilityState = read_json(&legacy_path)?;
                 let state_path = self.path();
                 let mut state = if state_path.exists() {
-                    read_json::<Value>(&state_path)?
+                    read_document_object(&state_path)?
                 } else {
                     json!({"v":1,"created_at":utc_now()})
                 };
@@ -583,7 +778,7 @@ impl CapabilityStore {
                 if !legacy.custom.is_empty() {
                     let catalog_path = self.catalog_path();
                     let mut catalog = if catalog_path.exists() {
-                        read_json::<Value>(&catalog_path)?
+                        read_document_object(&catalog_path)?
                     } else {
                         json!({"v":1,"created_at":utc_now(),"sources":{},"records":{}})
                     };
@@ -637,6 +832,18 @@ fn object_field<'a>(value: &'a mut Value, field: &str) -> &'a mut Map<String, Va
     field.as_object_mut().expect("field object initialized")
 }
 
+fn read_document_object(path: &std::path::Path) -> io::Result<Value> {
+    let value = read_json::<Value>(path)?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(io::Error::other(format!(
+            "shared capability document must be an object: {}",
+            path.display()
+        )))
+    }
+}
+
 fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
     if !value.is_object() {
         *value = json!({});
@@ -662,12 +869,101 @@ fn array_contains_id(value: &Value, id: &str) -> bool {
         .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(id)))
 }
 
+fn migrate_capability_controls(raw: &mut Value, group_id: &str, legacy_id: &str, new_id: &str) {
+    let global_block = raw
+        .get("global_blocked")
+        .and_then(Value::as_object)
+        .and_then(|entries| entries.get(legacy_id))
+        .cloned();
+    if let Some(entry) = global_block {
+        object_field(raw, "global_blocked")
+            .entry(new_id)
+            .or_insert(entry);
+    }
+
+    let group_block = raw
+        .get("group_blocked")
+        .and_then(Value::as_object)
+        .and_then(|groups| groups.get(group_id))
+        .and_then(Value::as_object)
+        .and_then(|entries| entries.get(legacy_id))
+        .cloned();
+    if let Some(entry) = group_block {
+        let groups = object_field(raw, "group_blocked");
+        ensure_object(groups.entry(group_id).or_insert_with(|| json!({})))
+            .entry(new_id)
+            .or_insert(entry);
+    }
+
+    let Some(hidden_by_actor) = raw
+        .get_mut("actor_hidden")
+        .and_then(Value::as_object_mut)
+        .and_then(|groups| groups.get_mut(group_id))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for hidden in hidden_by_actor.values_mut() {
+        if array_contains_id(hidden, legacy_id) {
+            set_array_member(hidden, new_id, true);
+        }
+    }
+}
+
+fn active_block_entry(value: Option<&Value>, id: &str) -> Option<Value> {
+    match value {
+        Some(Value::Object(entries)) => entries
+            .get(id)
+            .filter(|entry| block_entry_is_active(entry))
+            .cloned(),
+        Some(Value::Array(entries)) if entries.iter().any(|entry| entry.as_str() == Some(id)) => {
+            Some(json!({"reason":"","by":"","blocked_at":"","expires_at":""}))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn block_entry_is_active(entry: &Value) -> bool {
+    entry
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_none_or(|expires_at| expires_at > chrono::Utc::now())
+}
+
 fn remove_empty_entry(map: &mut Map<String, Value>, key: &str) {
     if map.get(key).is_some_and(|value| {
         value.as_array().is_some_and(Vec::is_empty) || value.as_object().is_some_and(Map::is_empty)
     }) {
         map.remove(key);
     }
+}
+
+fn remove_enabled_bindings(raw: &mut Value, id: &str, group_id: Option<&str>) -> usize {
+    let mut removed = 0;
+    for key in ["group_enabled", "actor_enabled", "session_enabled"] {
+        let Some(groups) = raw.get_mut(key).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if let Some(group_id) = group_id {
+            if let Some(group) = groups.get_mut(group_id) {
+                removed += remove_id(group, id);
+                remove_empty_entry(groups, group_id);
+            }
+        } else {
+            removed += groups
+                .values_mut()
+                .map(|value| remove_id(value, id))
+                .sum::<usize>();
+            groups.retain(|_, value| {
+                !value.as_array().is_some_and(Vec::is_empty)
+                    && !value.as_object().is_some_and(Map::is_empty)
+            });
+        }
+    }
+    removed
 }
 
 fn remove_id(value: &mut Value, id: &str) -> usize {
@@ -766,6 +1062,15 @@ fn capability_from_record(record: &Value) -> io::Result<Capability> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned(),
+        qualification_status: record
+            .get("qualification_status")
+            .and_then(Value::as_str)
+            .unwrap_or("qualified")
+            .to_owned(),
+        enable_supported: record
+            .get("enable_supported")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     })
 }
 
@@ -817,6 +1122,35 @@ mod tests {
     }
 
     #[test]
+    fn enable_and_unhide_updates_one_state_document() {
+        let (_temp, store) = store();
+        store
+            .import_record(json!({
+                "capability_id":"skill:test","kind":"skill","name":"Test",
+                "capsule_text":"Test skill"
+            }))
+            .expect("import");
+        store
+            .set_hidden_for("skill:test", true, "g_test", "user")
+            .expect("hide");
+
+        store
+            .enable_and_unhide_for("skill:test", "g_test", "user", "group", 3600)
+            .expect("enable and unhide");
+
+        assert!(
+            store
+                .is_enabled_for("skill:test", "g_test", "user", "group")
+                .expect("enabled")
+        );
+        assert!(
+            !store
+                .is_hidden_for("skill:test", "g_test", "user")
+                .expect("visible")
+        );
+    }
+
+    #[test]
     fn group_uninstall_keeps_other_group_bindings() {
         let (_temp, store) = store();
         store
@@ -831,13 +1165,11 @@ mod tests {
         store
             .set_hidden_for("skill:test", true, "g_one", "actor")
             .expect("hidden preference");
-        store
-            .set_blocked_for("skill:test", true, "g_one", "reason", "user", 0)
-            .expect("group block");
         assert_eq!(
             store
-                .remove_bindings_for_group("skill:test", "g_one")
-                .expect("remove"),
+                .set_blocked_and_revoke_for("skill:test", true, "g_one", "reason", "user", 0)
+                .expect("group block")
+                .1,
             1
         );
         assert!(
@@ -861,6 +1193,28 @@ mod tests {
         assert_eq!(
             store.removed_for_group("g_one").expect("removed ids"),
             BTreeSet::from(["skill:test".to_owned()])
+        );
+    }
+
+    #[test]
+    fn repeated_default_seed_does_not_rewrite_state() {
+        let (_temp, store) = store();
+        assert!(
+            store
+                .seed_default_group_capabilities("g_test")
+                .expect("first seed")
+        );
+        let before = std::fs::read(store.path()).expect("state before repeated seed");
+
+        assert!(
+            !store
+                .seed_default_group_capabilities("g_test")
+                .expect("repeated seed")
+        );
+
+        assert_eq!(
+            std::fs::read(store.path()).expect("state after repeated seed"),
+            before
         );
     }
 }

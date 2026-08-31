@@ -1,36 +1,35 @@
 // Chat composer state store with per-group draft preservation.
 import { create } from "zustand";
-import type { PresentationMessageRef, ReplyTarget } from "../types";
+import type {
+  AssistantVoiceDocument,
+  PresentationMessageRef,
+  ReplyTarget,
+  VoiceDocumentMessageRef,
+} from "../types";
+import { voiceDocumentRefMatchesDocument } from "../utils/voiceDocumentRefs";
+import {
+  loadComposerMessageModePreference,
+  normalizeComposerMessageMode,
+  normalizeReplyMessageMode,
+  saveComposerMessageModePreference,
+  type ComposerMessageMode,
+} from "./composerMessageMode";
 
-export function getEffectiveComposerDestGroupId(
-  destGroupId: string,
-  activeGroupId: string,
-  selectedGroupId: string,
-): string {
-  const selected = String(selectedGroupId || "").trim();
-  const active = String(activeGroupId || "").trim();
-  const dest = String(destGroupId || "").trim();
+export {
+  COMPOSER_MESSAGE_MODE_STORAGE_KEY,
+  DEFAULT_COMPOSER_MESSAGE_MODE,
+  loadComposerMessageModePreference,
+  normalizeComposerMessageMode,
+  normalizeReplyMessageMode,
+  type ComposerMessageMode,
+} from "./composerMessageMode";
+export {
+  getComposerDestGroupDisplayValue,
+  getEffectiveComposerDestGroupId,
+  isComposerGroupSettled,
+} from "./composerGroupRouting";
 
-  if (!selected) return dest;
-  // During the first frame after a group switch, composer state may still belong
-  // to the previous group; avoid carrying that old destination into the new group.
-  if (active !== selected) return selected;
-  return dest || selected;
-}
-
-export function isComposerGroupSettled(activeGroupId: string, selectedGroupId: string): boolean {
-  return String(activeGroupId || "").trim() === String(selectedGroupId || "").trim();
-}
-
-export function getComposerDestGroupDisplayValue(
-  destGroupId: string,
-  selectedGroupId: string,
-  composerGroupSettled: boolean,
-): string {
-  const selected = String(selectedGroupId || "").trim();
-  if (!composerGroupSettled) return selected;
-  return String(destGroupId || "").trim() || selected;
-}
+const initialMessageMode = loadComposerMessageModePreference();
 
 interface GroupDraft {
   composerText: string;
@@ -38,20 +37,21 @@ interface GroupDraft {
   toText: string;
   replyTarget: ReplyTarget;
   quotedPresentationRef: PresentationMessageRef | null;
-  priority: "normal" | "attention";
-  replyRequired: boolean;
+  quotedVoiceDocumentRef: VoiceDocumentMessageRef | null;
+  messageMode: ComposerMessageMode;
 }
 
 interface ComposerState {
   activeGroupId: string;
+  preferredMessageMode: ComposerMessageMode;
   // Current active state
   composerText: string;
   composerFiles: File[];
   toText: string;
   replyTarget: ReplyTarget;
   quotedPresentationRef: PresentationMessageRef | null;
-  priority: "normal" | "attention";
-  replyRequired: boolean;
+  quotedVoiceDocumentRef: VoiceDocumentMessageRef | null;
+  messageMode: ComposerMessageMode;
   destGroupId: string;
 
   // Drafts per group (memory only)
@@ -66,8 +66,12 @@ interface ComposerState {
   setReplyToText: (text: string) => void;
   setReplyTarget: (target: ReplyTarget) => void;
   setQuotedPresentationRef: (ref: PresentationMessageRef | null) => void;
-  setPriority: (priority: "normal" | "attention") => void;
-  setReplyRequired: (value: boolean) => void;
+  setQuotedVoiceDocumentRef: (ref: VoiceDocumentMessageRef | null) => void;
+  clearQuotedVoiceDocumentRefsForDocument: (
+    groupId: string,
+    document: AssistantVoiceDocument,
+  ) => void;
+  setMessageMode: (mode: ComposerMessageMode) => void;
   setDestGroupId: (groupId: string) => void;
   clearComposer: () => void;
 
@@ -80,13 +84,14 @@ interface ComposerState {
 
 export const useComposerStore = create<ComposerState>((set, get) => ({
   activeGroupId: "",
+  preferredMessageMode: initialMessageMode,
   composerText: "",
   composerFiles: [],
   toText: "",
   replyTarget: null,
   quotedPresentationRef: null,
-  priority: "normal",
-  replyRequired: false,
+  quotedVoiceDocumentRef: null,
+  messageMode: initialMessageMode,
   destGroupId: "",
   drafts: {},
   normalToTextByGroup: {},
@@ -135,34 +140,62 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
   setReplyTarget: (target) =>
     set((state) => {
       if (target) {
-        return { replyTarget: target };
+        return { replyTarget: target, messageMode: "send" };
       }
       const activeGroupId = String(state.activeGroupId || "").trim();
       const normalToText = activeGroupId ? state.normalToTextByGroup[activeGroupId] : undefined;
-      return { replyTarget: null, toText: normalToText ?? state.toText };
+      return {
+        replyTarget: null,
+        toText: normalToText ?? "",
+        messageMode: state.preferredMessageMode,
+      };
     }),
   setQuotedPresentationRef: (ref) => set({ quotedPresentationRef: ref }),
-  setPriority: (priority) => set({ priority }),
-  setReplyRequired: (value) => set({ replyRequired: !!value }),
+  setQuotedVoiceDocumentRef: (ref) => set({ quotedVoiceDocumentRef: ref }),
+  clearQuotedVoiceDocumentRefsForDocument: (groupId, document) =>
+    set((state) => {
+      const gid = String(groupId || "").trim();
+      if (!gid) return state;
+      const activeMatches =
+        String(state.activeGroupId || "").trim() === gid &&
+        !!state.quotedVoiceDocumentRef &&
+        voiceDocumentRefMatchesDocument(state.quotedVoiceDocumentRef, gid, document);
+      const draft = state.drafts[gid];
+      const draftMatches =
+        !!draft?.quotedVoiceDocumentRef &&
+        voiceDocumentRefMatchesDocument(draft.quotedVoiceDocumentRef, gid, document);
+      if (!activeMatches && !draftMatches) return state;
+      return {
+        ...(activeMatches ? { quotedVoiceDocumentRef: null } : {}),
+        ...(draftMatches
+          ? { drafts: { ...state.drafts, [gid]: { ...draft, quotedVoiceDocumentRef: null } } }
+          : {}),
+      };
+    }),
+  setMessageMode: (mode) => {
+    if (get().replyTarget) {
+      set({ messageMode: normalizeReplyMessageMode(mode) });
+      return;
+    }
+    const normalized = normalizeComposerMessageMode(mode);
+    saveComposerMessageModePreference(normalized);
+    set({ preferredMessageMode: normalized, messageMode: normalized });
+  },
   setDestGroupId: (groupId) => set({ destGroupId: String(groupId || "").trim() }),
 
   clearComposer: () =>
     set((state) => {
       const activeGroupId = String(state.activeGroupId || "").trim();
-      const normalToText = activeGroupId ? state.normalToTextByGroup[activeGroupId] : undefined;
-      const nextToText = state.replyTarget ? (normalToText ?? "") : state.toText;
       return {
         composerText: "",
         composerFiles: [],
-        toText: nextToText,
+        toText: "",
         replyTarget: null,
         quotedPresentationRef: null,
-        priority: "normal",
-        replyRequired: false,
+        quotedVoiceDocumentRef: null,
+        messageMode: state.preferredMessageMode,
         destGroupId: activeGroupId,
-        normalToTextByGroup: activeGroupId
-          ? { ...state.normalToTextByGroup, [activeGroupId]: nextToText }
-          : state.normalToTextByGroup,
+        normalToTextByGroup: {},
       };
     }),
 
@@ -180,19 +213,19 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
       const hasContent =
         state.composerText.trim() ||
         state.composerFiles.length > 0 ||
-        state.toText.trim() ||
         state.replyTarget ||
-        state.quotedPresentationRef;
+        state.quotedPresentationRef ||
+        state.quotedVoiceDocumentRef;
 
       if (hasContent) {
         newDrafts[normalizedFromGroupId] = {
           composerText: state.composerText,
           composerFiles: state.composerFiles,
-          toText: state.toText,
+          toText: state.replyTarget ? state.toText : "",
           replyTarget: state.replyTarget,
           quotedPresentationRef: state.quotedPresentationRef,
-          priority: state.priority,
-          replyRequired: state.replyRequired,
+          quotedVoiceDocumentRef: state.quotedVoiceDocumentRef,
+          messageMode: state.messageMode,
         };
       } else {
         delete newDrafts[normalizedFromGroupId];
@@ -203,21 +236,22 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
     const draft = normalizedToGroupId ? newDrafts[normalizedToGroupId] : null;
     const normalizedDestGroupId = normalizedToGroupId;
 
-    const nextToText =
-      draft?.toText ??
-      (normalizedToGroupId ? state.normalToTextByGroup[normalizedToGroupId] : undefined) ??
-      "";
+    const nextToText = draft?.replyTarget ? draft.toText : "";
+    const nextMessageMode = draft?.replyTarget
+      ? normalizeReplyMessageMode(draft.messageMode)
+      : draft?.messageMode || state.preferredMessageMode;
 
     set({
       activeGroupId: normalizedDestGroupId,
       drafts: newDrafts,
+      normalToTextByGroup: {},
       composerText: draft?.composerText || "",
       composerFiles: draft?.composerFiles || [],
       toText: nextToText,
       replyTarget: draft?.replyTarget || null,
       quotedPresentationRef: draft?.quotedPresentationRef || null,
-      priority: draft?.priority || "normal",
-      replyRequired: draft?.replyRequired || false,
+      quotedVoiceDocumentRef: draft?.quotedVoiceDocumentRef || null,
+      messageMode: nextMessageMode,
       // After switching groups, return delivery to the current group. Cross-group
       // sends must be selected explicitly so restored drafts do not trigger remote fetches.
       destGroupId: normalizedDestGroupId,

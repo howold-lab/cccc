@@ -201,8 +201,8 @@ CCCC formats responses with Discord embeds for better readability when appropria
 | `/send @all <message>` | Send to all agents |
 | `/send @peers <message>` | Send to non-foreman agents |
 | `/status` | Show group and agent status |
-| `/pause` | Pause message delivery |
-| `/resume` | Resume message delivery |
+| `/pause` | Pause delivery for this channel or thread |
+| `/resume` | Resume delivery for this channel or thread |
 | `/verbose [on\|off]` | Enable verbose delivery, or disable it with `off` |
 | `/help` | Show available commands |
 
@@ -242,7 +242,7 @@ Enable Message Content Intent:
 
 ### "Gateway READY timed out" Error
 
-The Discord Gateway uses a WebSocket connection. If Discord is only reachable through a proxy, set the proxy before starting CCCC. The Rust implementation supports HTTP CONNECT and SOCKS5 proxy URLs and respects `NO_PROXY`.
+The Discord Gateway uses a WebSocket connection. If Discord is only reachable through a proxy, set the proxy before starting CCCC. CCCC supports HTTP CONNECT and SOCKS5 proxy URLs and respects `NO_PROXY`.
 
 macOS/Linux:
 

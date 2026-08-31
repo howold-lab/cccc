@@ -5,6 +5,7 @@ import {
   isAuthRequiredErrorCode,
   normalizePresentationBrowserSurfaceState,
   onAuthRequired,
+  removeAuthTokenFromUrl,
   refreshAuthTokenInUrl,
   setAuthToken,
   withAuthToken,
@@ -17,7 +18,7 @@ describe("apiJson", () => {
     vi.unstubAllGlobals();
   });
 
-  it("recognizes Python and Rust authentication error codes", () => {
+  it("recognizes the supported authentication error codes", () => {
     expect(isAuthRequiredErrorCode("unauthorized")).toBe(true);
     expect(isAuthRequiredErrorCode("auth_required")).toBe(true);
     expect(isAuthRequiredErrorCode("permission_denied")).toBe(false);
@@ -44,7 +45,7 @@ describe("apiJson", () => {
     expect(onRequired).not.toHaveBeenCalled();
   });
 
-  it("notifies the auth gate for Rust auth_required responses", async () => {
+  it("notifies the auth gate for auth_required responses", async () => {
     vi.stubGlobal("window", { location: { search: "" } });
     const onRequired = vi.fn();
     onAuthRequired(onRequired);
@@ -104,19 +105,20 @@ describe("authenticated URLs", () => {
     vi.unstubAllGlobals();
   });
 
-  it("replaces an expired token instead of appending a duplicate", () => {
+  it("does not place long-lived access tokens in URLs", () => {
     vi.stubGlobal("window", {
       location: { origin: "http://localhost:5555", href: "http://localhost:5555/ui/", search: "" },
     });
     vi.stubGlobal("sessionStorage", { setItem: vi.fn() });
     setAuthToken("current-token");
 
-    expect(withAuthToken("http://172.19.79.11:8848/ui/?token=expired&view=1")).toBe(
-      "http://172.19.79.11:8848/ui/?token=current-token&view=1",
+    expect(withAuthToken("/api/v1/events/stream")).toBe("/api/v1/events/stream");
+    expect(withAuthToken("http://172.19.79.11:8848/ui/?view=1")).toBe(
+      "http://172.19.79.11:8848/ui/?view=1",
     );
   });
 
-  it("only refreshes arbitrary page URLs that already carry a CCCC token", () => {
+  it("never injects the owner token into a cross-origin URL", () => {
     vi.stubGlobal("window", {
       location: { origin: "http://localhost:5555", href: "http://localhost:5555/ui/", search: "" },
     });
@@ -124,9 +126,43 @@ describe("authenticated URLs", () => {
     setAuthToken("current-token");
 
     expect(refreshAuthTokenInUrl("https://example.com/page")).toBe("https://example.com/page");
-    expect(refreshAuthTokenInUrl("http://127.0.0.1:8848/ui/?token=expired")).toBe(
-      "http://127.0.0.1:8848/ui/?token=current-token",
+    expect(refreshAuthTokenInUrl("https://evil.example/page?token=1")).toBe(
+      "https://evil.example/page?token=1",
     );
+    expect(refreshAuthTokenInUrl("//evil.example/page?token=1")).toBe(
+      "//evil.example/page?token=1",
+    );
+    expect(refreshAuthTokenInUrl("http://localhost:5556/page?token=1")).toBe(
+      "http://localhost:5556/page?token=1",
+    );
+    expect(refreshAuthTokenInUrl("https://localhost:5555/page?token=1")).toBe(
+      "https://localhost:5555/page?token=1",
+    );
+  });
+
+  it("strips stale query tokens from same-origin presentation URLs", () => {
+    vi.stubGlobal("window", {
+      location: { origin: "http://localhost:5555", href: "http://localhost:5555/ui/", search: "" },
+    });
+    vi.stubGlobal("sessionStorage", { setItem: vi.fn() });
+    setAuthToken("current-token");
+
+    expect(refreshAuthTokenInUrl("/preview?token=expired&view=1")).toBe("/preview?view=1");
+    expect(refreshAuthTokenInUrl("http://localhost:5555/preview?token=expired")).toBe(
+      "http://localhost:5555/preview",
+    );
+  });
+
+  it("removes the consumed token from browser history without dropping other URL state", () => {
+    const replaceState = vi.fn();
+    vi.stubGlobal("window", {
+      location: { href: "https://d-1.cccc.foo/ui/?token=acc_secret&view=group#actor" },
+      history: { state: { preserved: true }, replaceState },
+    });
+
+    removeAuthTokenFromUrl();
+
+    expect(replaceState).toHaveBeenCalledWith({ preserved: true }, "", "/ui/?view=group#actor");
   });
 });
 

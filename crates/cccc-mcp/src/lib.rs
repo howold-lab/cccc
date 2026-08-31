@@ -1,5 +1,8 @@
 mod actions;
+mod argument_normalization;
+mod bootstrap;
 mod code_mode;
+mod context_projection;
 mod local_sessions;
 mod local_tools;
 mod mapping;
@@ -10,6 +13,8 @@ mod router;
 mod tools;
 
 #[cfg(test)]
+mod lib_tests;
+#[cfg(test)]
 mod repo_tests;
 
 use anyhow::Result;
@@ -17,6 +22,26 @@ use cccc_client::DaemonClient;
 use cccc_core::HomeLayout;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+const SUPPORTED_LEGACY_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
+const DEFAULT_LEGACY_PROTOCOL_VERSION: &str = SUPPORTED_LEGACY_PROTOCOL_VERSIONS[0];
+const CORE_TOOL_NAMES: &[&str] = &[
+    "cccc_help",
+    "cccc_bootstrap",
+    "cccc_capability_search",
+    "cccc_capability_use",
+    "cccc_inbox_read",
+    "cccc_message_history",
+    "cccc_message_send",
+    "cccc_message_reply",
+    "cccc_message_deliver",
+    "cccc_reply_request_cancel",
+    "cccc_file",
+    "cccc_context_get",
+    "cccc_coordination",
+    "cccc_task",
+    "cccc_agent_state",
+];
 
 pub async fn run_stdio(home: HomeLayout) -> Result<()> {
     let result = run_stdio_loop(&home).await;
@@ -39,6 +64,11 @@ async fn run_stdio_loop(home: &HomeLayout) -> Result<()> {
                 continue;
             }
         };
+        if !request.is_object() {
+            let response = handle(home, &client, &request, None).await;
+            write_response(&mut output, &response).await?;
+            continue;
+        }
         if request.get("id").is_none() {
             continue;
         }
@@ -85,37 +115,97 @@ async fn handle(
     request: &Value,
     context: Option<RequestContext<'_>>,
 ) -> Value {
+    if !request.is_object() {
+        return protocol_error(Value::Null, -32600, "Invalid Request");
+    }
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let result = match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {"listChanged": true}},
+        "initialize" => json!({
+            "protocolVersion": negotiated_protocol_version(request),
+            "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "cccc-mcp", "version": env!("CARGO_PKG_VERSION")},
-        })),
-        "ping" => Ok(json!({})),
+        }),
+        "ping" => json!({}),
         "tools/list" => {
-            Ok(json!({"tools": visible_tools_with_context(home, client, context).await}))
+            json!({"tools": visible_tools_with_context(home, client, context).await})
         }
         "tools/call" => {
-            let params = request.get("params").and_then(Value::as_object);
-            let name = params
-                .and_then(|value| value.get("name"))
+            let Some(params) = request.get("params").and_then(Value::as_object) else {
+                return protocol_error(id, -32602, "tools/call params must be an object");
+            };
+            let Some(name) = params
+                .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or("");
-            let arguments = params
-                .and_then(|value| value.get("arguments"))
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            router::call_with_context(home, client, name, arguments, context).await
+                .filter(|name| !name.is_empty())
+            else {
+                return protocol_error(id, -32602, "tools/call name must be a non-empty string");
+            };
+            let arguments = match params.get("arguments") {
+                None => serde_json::Map::new(),
+                Some(Value::Object(arguments)) => arguments.clone(),
+                Some(_) => {
+                    return protocol_error(id, -32602, "tools/call arguments must be an object");
+                }
+            };
+            if !tools::contains(name)
+                && !visible_tools_with_context(home, client, context)
+                    .await
+                    .iter()
+                    .any(|tool| tool["name"].as_str() == Some(name))
+            {
+                return protocol_error(id, -32602, &format!("Unknown tool: {name}"));
+            }
+            return match router::call_with_context(home, client, name, arguments, context, false)
+                .await
+            {
+                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(message) => {
+                    json!({"jsonrpc":"2.0","id":id,"result":tool_error_result(&message)})
+                }
+            };
         }
-        _ => Err(format!("unknown method: {method}")),
+        notification if notification.starts_with("notifications/") => return json!({}),
+        _ => return protocol_error(id, -32601, &format!("Method not found: {method}")),
     };
-    match result {
-        Ok(value) => json!({"jsonrpc":"2.0","id":id,"result":value}),
-        Err(message) => json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":message}}),
-    }
+    json!({"jsonrpc":"2.0","id":id,"result":result})
+}
+
+fn protocol_error(id: Value, code: i64, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+}
+
+fn tool_error_result(message: &str) -> Value {
+    let (code, message) = message
+        .split_once(": ")
+        .filter(|(code, _)| {
+            !code.is_empty()
+                && code
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        })
+        .unwrap_or(("tool_execution_error", message));
+    let payload = json!({"error":{"code":code,"message":message}});
+    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".into());
+    json!({
+        "content":[{"type":"text","text":text}],
+        "structuredContent":payload,
+        "isError":true
+    })
+}
+
+fn negotiated_protocol_version(request: &Value) -> &'static str {
+    let requested = request
+        .get("params")
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    SUPPORTED_LEGACY_PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|version| *version == requested)
+        .unwrap_or(DEFAULT_LEGACY_PROTOCOL_VERSION)
 }
 
 pub(crate) async fn visible_tools_for_actor(
@@ -160,17 +250,17 @@ async fn visible_tools_with_context(
             v: 1,
             op: "capability_state".into(),
             args: serde_json::Map::from_iter([
-                ("group_id".into(), Value::String(group_id)),
+                ("group_id".into(), Value::String(group_id.clone())),
                 ("actor_id".into(), Value::String(actor_id.clone())),
-                ("by".into(), Value::String(actor_id)),
+                ("by".into(), Value::String(actor_id.clone())),
             ]),
         })
         .await;
     let Ok(response) = response else {
-        return core_tools(catalog);
+        return actor_fallback_tools(home, catalog, &group_id, &actor_id);
     };
     if !response.ok {
-        return core_tools(catalog);
+        return actor_fallback_tools(home, catalog, &group_id, &actor_id);
     }
     let visible = response
         .result
@@ -206,6 +296,32 @@ async fn visible_tools_with_context(
     output
 }
 
+fn actor_fallback_tools(
+    home: &HomeLayout,
+    catalog: Vec<Value>,
+    group_id: &str,
+    actor_id: &str,
+) -> Vec<Value> {
+    let web_model = cccc_core::GroupStore::new(home.clone())
+        .and_then(|store| store.load(group_id))
+        .ok()
+        .and_then(|group| group.actors.into_iter().find(|actor| actor.id == actor_id))
+        .is_some_and(|actor| actor.runtime == cccc_contracts::ActorRuntime::WebModel);
+    if !web_model {
+        return core_tools(catalog);
+    }
+    let mut output = catalog
+        .into_iter()
+        .filter(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| cccc_core::WEB_MODEL_CORE_TOOL_NAMES.contains(&name))
+        })
+        .collect::<Vec<_>>();
+    hide_disabled_code_mode_tools(&mut output);
+    output
+}
+
 fn hide_disabled_code_mode_tools(tools: &mut Vec<Value>) {
     if code_mode::enabled() {
         return;
@@ -219,29 +335,18 @@ fn hide_disabled_code_mode_tools(tools: &mut Vec<Value>) {
 }
 
 fn core_tools(catalog: Vec<Value>) -> Vec<Value> {
-    const CORE: &[&str] = &[
-        "cccc_help",
-        "cccc_bootstrap",
-        "cccc_capability_search",
-        "cccc_capability_use",
-        "cccc_inbox_list",
-        "cccc_inbox_mark_read",
-        "cccc_message_send",
-        "cccc_message_reply",
-        "cccc_file",
-        "cccc_context_get",
-        "cccc_coordination",
-        "cccc_task",
-        "cccc_agent_state",
-    ];
     catalog
         .into_iter()
         .filter(|tool| {
             tool["name"]
                 .as_str()
-                .is_some_and(|name| CORE.contains(&name))
+                .is_some_and(|name| CORE_TOOL_NAMES.contains(&name))
         })
         .collect()
+}
+
+fn is_core_tool(name: &str) -> bool {
+    CORE_TOOL_NAMES.contains(&name)
 }
 
 async fn write_response(output: &mut tokio::io::Stdout, response: &Value) -> Result<()> {
@@ -250,37 +355,4 @@ async fn write_response(output: &mut tokio::io::Stdout, response: &Value) -> Res
     output.write_all(&bytes).await?;
     output.flush().await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    #[test]
-    fn unscoped_fallback_remains_the_thirteen_core_tools() {
-        let names = super::core_tools(super::tools::catalog())
-            .into_iter()
-            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
-            .collect::<BTreeSet<_>>();
-        let expected = [
-            "cccc_agent_state",
-            "cccc_bootstrap",
-            "cccc_capability_search",
-            "cccc_capability_use",
-            "cccc_context_get",
-            "cccc_coordination",
-            "cccc_file",
-            "cccc_help",
-            "cccc_inbox_list",
-            "cccc_inbox_mark_read",
-            "cccc_message_reply",
-            "cccc_message_send",
-            "cccc_task",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-
-        assert_eq!(names, expected);
-    }
 }

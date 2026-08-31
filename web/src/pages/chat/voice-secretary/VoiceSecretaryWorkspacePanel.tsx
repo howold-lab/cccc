@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 import { useMemo } from "react";
 import { MarkdownDocumentSurface } from "../../../components/document/MarkdownDocumentSurface";
+import { MessageSquareQuoteIcon } from "../../../components/Icons";
 import { classNames } from "../../../utils/classNames";
 import {
   isDisplayableFinalVoiceTranscriptItem,
@@ -29,10 +30,12 @@ type VoiceSecretaryWorkspacePanelProps = {
   transcriptItems: VoiceTranscriptItem[];
   view: VoiceWorkspaceView;
   onChangeView: (view: VoiceWorkspaceView) => void;
+  onArchiveDocument: () => void;
   onClearTranscript: () => void;
   onDownloadDocument: () => void;
   onEditDocumentChange: (value: string) => void;
   onLoadLatestDocument: () => void;
+  onQuoteDocument: () => void;
   onSaveDocument: () => void;
   onToggleDocumentEditing: () => void;
   formatTime: (value: number) => string;
@@ -58,10 +61,12 @@ export function VoiceSecretaryWorkspacePanel({
   transcriptItems,
   view,
   onChangeView,
+  onArchiveDocument,
   onClearTranscript,
   onDownloadDocument,
   onEditDocumentChange,
   onLoadLatestDocument,
+  onQuoteDocument,
   onSaveDocument,
   onToggleDocumentEditing,
   formatTime,
@@ -81,6 +86,12 @@ export function VoiceSecretaryWorkspacePanel({
     [transcriptItems],
   );
   const transcriptCount = transcriptRows.length;
+  const documentActionClassName = classNames(
+    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50",
+    isDark
+      ? "border-white/10 bg-white/[0.04] text-slate-300 hover:bg-white/10"
+      : "border-black/10 bg-white text-gray-600 hover:bg-black/5",
+  );
   return (
     <section
       className={classNames(
@@ -135,39 +146,31 @@ export function VoiceSecretaryWorkspacePanel({
                 );
               })}
             </div>
-            <span
-              className={classNames(
-                "rounded-full px-2 py-0.5 text-[10px] font-medium",
-                isDark
-                  ? "bg-white/10 text-slate-100"
-                  : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]",
-              )}
-            >
-              {view === "transcript"
-                ? t("voiceSecretaryTranscriptCount", {
-                    count: transcriptCount,
-                    defaultValue: "{{count}} entries",
-                  })
-                : t("voiceSecretaryMarkdownBadge", { defaultValue: "Markdown" })}
-            </span>
-            {view === "document" ? (
+            {view === "transcript" ? (
               <span
                 className={classNames(
                   "rounded-full px-2 py-0.5 text-[10px] font-medium",
-                  activeDocumentPath
-                    ? isDark
-                      ? "bg-white/10 text-slate-200"
-                      : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]"
-                    : isDark
-                      ? "bg-slate-800 text-slate-300"
-                      : "bg-gray-100 text-gray-600",
+                  isDark
+                    ? "bg-white/10 text-slate-100"
+                    : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]",
                 )}
               >
-                {activeDocumentPath
-                  ? t("voiceSecretaryRepoBackedBadge", { defaultValue: "Repo-backed" })
-                  : t("voiceSecretaryWaitingTranscriptBadge", {
-                      defaultValue: "Waiting for transcript",
-                    })}
+                {t("voiceSecretaryTranscriptCount", {
+                  count: transcriptCount,
+                  defaultValue: "{{count}} entries",
+                })}
+              </span>
+            ) : null}
+            {view === "document" && !activeDocumentPath ? (
+              <span
+                className={classNames(
+                  "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  isDark ? "bg-slate-800 text-slate-300" : "bg-gray-100 text-gray-600",
+                )}
+              >
+                {t("voiceSecretaryWaitingTranscriptBadge", {
+                  defaultValue: "Waiting for transcript",
+                })}
               </span>
             ) : null}
             {view === "document" &&
@@ -183,6 +186,37 @@ export function VoiceSecretaryWorkspacePanel({
               >
                 {t("voiceSecretaryDefaultDocumentBadge", { defaultValue: "Default document" })}
               </span>
+            ) : null}
+            {view === "document" && activeDocumentPath ? (
+              <>
+                <button
+                  type="button"
+                  onClick={onQuoteDocument}
+                  disabled={documentLoading || documentHasUnsavedEdits}
+                  className={documentActionClassName}
+                  title={
+                    documentHasUnsavedEdits
+                      ? t("voiceSecretaryQuoteDocumentSaveFirst", {
+                          defaultValue: "Save document edits before quoting it in chat",
+                        })
+                      : t("voiceSecretaryQuoteDocumentInChat", { defaultValue: "Quote in chat" })
+                  }
+                >
+                  <MessageSquareQuoteIcon size={12} aria-hidden="true" />
+                  {t("voiceSecretaryQuoteDocumentInChat", { defaultValue: "Quote in chat" })}
+                </button>
+                <button
+                  type="button"
+                  onClick={onArchiveDocument}
+                  disabled={!!actionBusy || documentLoading}
+                  className={documentActionClassName}
+                  title={t("voiceSecretaryArchiveDocument", { defaultValue: "Archive viewed" })}
+                >
+                  {actionBusy === "archive_doc"
+                    ? t("voiceSecretaryArchivingDocument", { defaultValue: "Archiving..." })
+                    : t("voiceSecretaryArchiveShort", { defaultValue: "Archive" })}
+                </button>
+              </>
             ) : null}
             {view === "document" && documentHasUnsavedEdits ? (
               <span
@@ -404,51 +438,58 @@ export function VoiceSecretaryWorkspacePanel({
                     isDark ? "border-white/10 bg-white/[0.04]" : "border-black/[0.08] bg-white",
                   )}
                 >
-                  <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                    {speakerLabel ? (
-                      <span
-                        className={classNames(
-                          "shrink-0 text-[11px] font-semibold",
-                          isDark ? "text-sky-100" : "text-sky-800",
-                        )}
-                      >
-                        {speakerLabel}
-                      </span>
-                    ) : null}
-                    {itemText ? (
-                      <span
-                        className={classNames(
-                          "min-w-[10rem] flex-1 whitespace-pre-wrap break-words text-sm leading-5",
-                          isDark ? "text-slate-100" : "text-gray-900",
-                        )}
-                      >
-                        {itemText}
-                      </span>
-                    ) : null}
-                    {sourceLabel ? (
-                      <span
-                        className={classNames(
-                          "shrink-0 text-[10px] font-semibold",
-                          isDark ? "text-emerald-100/85" : "text-emerald-800",
-                        )}
-                        title={sourceDetail || sourceLabel}
-                      >
-                        {sourceLabel}
-                      </span>
-                    ) : null}
-                    {timeLabel ? (
-                      <time
-                        className="ml-auto shrink-0 text-[10px] tabular-nums text-[var(--color-text-muted)]"
-                        dateTime={new Date(item.updatedAt).toISOString()}
-                        title={fullTimeLabel}
-                      >
-                        {timeLabel}
-                      </time>
-                    ) : null}
-                  </div>
-                  {sourceDetail ? (
-                    <div className="mt-0.5 truncate text-[10px] text-[var(--color-text-muted)]">
-                      {sourceDetail}
+                  {speakerLabel ? (
+                    <div
+                      className={classNames(
+                        "mb-0.5 text-[11px] font-semibold",
+                        isDark ? "text-sky-100" : "text-sky-800",
+                      )}
+                    >
+                      {speakerLabel}
+                    </div>
+                  ) : null}
+                  {itemText ? (
+                    <div
+                      className={classNames(
+                        "whitespace-pre-wrap break-words text-sm leading-5",
+                        isDark ? "text-slate-100" : "text-gray-900",
+                      )}
+                    >
+                      {itemText}
+                    </div>
+                  ) : null}
+                  {sourceLabel || sourceDetail || timeLabel ? (
+                    <div className="mt-1 flex min-w-0 items-center gap-2">
+                      {sourceDetail ? (
+                        <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--color-text-muted)]">
+                          {sourceDetail}
+                        </span>
+                      ) : null}
+                      {sourceLabel ? (
+                        <span
+                          className={classNames(
+                            "ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+                            isDark
+                              ? "bg-emerald-300/10 text-emerald-100/85"
+                              : "bg-emerald-50 text-emerald-800",
+                          )}
+                          title={sourceDetail || sourceLabel}
+                        >
+                          {sourceLabel}
+                        </span>
+                      ) : null}
+                      {timeLabel ? (
+                        <time
+                          className={classNames(
+                            "shrink-0 text-[10px] tabular-nums text-[var(--color-text-muted)]",
+                            !sourceLabel && !sourceDetail && "ml-auto",
+                          )}
+                          dateTime={new Date(item.updatedAt).toISOString()}
+                          title={fullTimeLabel}
+                        >
+                          {timeLabel}
+                        </time>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>

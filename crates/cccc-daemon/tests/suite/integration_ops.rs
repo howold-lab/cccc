@@ -4,59 +4,545 @@ use cccc_core::HomeLayout;
 use serde_json::{Map, Value, json};
 
 #[test]
-fn chatgpt_web_model_actor_is_singleton_across_groups() {
+fn im_auth_operations_use_python_compatible_state_and_standard_results() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
-    let first = call(&home, "group_create", json!({"title":"first"}));
-    let first_group = first.result["group"]["group_id"]
+    let created = call(&home, "group_create", json!({"title":"IM auth"}));
+    let group_id = created.result["group"]["group_id"]
         .as_str()
-        .expect("first group id");
-    let second = call(&home, "group_create", json!({"title":"second"}));
-    let second_group = second.result["group"]["group_id"]
-        .as_str()
-        .expect("second group id");
+        .expect("group id");
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    store
+        .mutate(group_id, |group| {
+            group.extra.insert(
+                "im".into(),
+                json!({"platform":"telegram","bot_token_env":"TOKEN","enabled":false}),
+            );
+            Ok(())
+        })
+        .expect("config");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs_f64();
+    std::fs::write(
+        store
+            .state_dir(group_id)
+            .expect("state dir")
+            .join("im_pending_keys.json"),
+        serde_json::to_vec_pretty(&json!({
+            "fresh-key":{
+                "chat_id":"chat-1","thread_id":9,"platform":"telegram","created_at":now
+            },
+            "expired-key":{
+                "chat_id":"old","thread_id":0,"platform":"telegram","created_at":now-1200.0
+            }
+        }))
+        .expect("pending json"),
+    )
+    .expect("pending fixture");
 
+    let pending = call(&home, "im_list_pending", json!({"group_id":group_id}));
+    assert_eq!(
+        pending.result["pending"].as_array().expect("pending").len(),
+        1
+    );
+    assert_eq!(pending.result["pending"][0]["key"], "fresh-key");
+    assert!(pending.result["pending"][0]["expires_in_seconds"].is_number());
+
+    let bound = call(
+        &home,
+        "im_bind_chat",
+        json!({"group_id":group_id,"key":"fresh-key"}),
+    );
+    assert_eq!(
+        Value::Object(bound.result),
+        json!({"chat_id":"chat-1","thread_id":9,"platform":"telegram"})
+    );
+    let state = cccc_core::im_state::load(&store, group_id).expect("state after bind");
+    assert_eq!(state["pending"], json!([]));
+    assert_eq!(state["authorized"][0]["chat_id"], "chat-1");
+    assert_eq!(state["subscribers"][0]["subscribed"], true);
+
+    let revoked = call(
+        &home,
+        "im_revoke_chat",
+        json!({"group_id":group_id,"chat_id":"chat-1","thread_id":9}),
+    );
+    assert_eq!(
+        Value::Object(revoked.result),
+        json!({"revoked":true,"unsubscribed":true})
+    );
+    let state = cccc_core::im_state::load(&store, group_id).expect("state after revoke");
+    assert_eq!(state["authorized"], json!([]));
+    assert_eq!(state["subscribers"][0]["subscribed"], false);
+
+    let invalid = raw_call(
+        &home,
+        "im_bind_chat",
+        json!({"group_id":group_id,"key":"expired-key"}),
+    );
+    assert_eq!(invalid.error.expect("invalid key").code, "invalid_key");
+
+    let missing_key = raw_call(&home, "im_bind_chat", json!({"group_id":group_id}));
+    assert_eq!(missing_key.error.expect("missing key").code, "missing_key");
+    let missing_group = raw_call(&home, "im_list_pending", json!({}));
+    assert_eq!(
+        missing_group.error.expect("missing group id").code,
+        "missing_group_id"
+    );
+    let unknown_group = raw_call(&home, "im_list_authorized", json!({"group_id":"g_missing"}));
+    assert_eq!(
+        unknown_group.error.expect("unknown group").code,
+        "group_not_found"
+    );
+    let missing_chat = raw_call(&home, "im_revoke_chat", json!({"group_id":group_id}));
+    assert_eq!(
+        missing_chat.error.expect("missing chat id").code,
+        "missing_chat_id"
+    );
+}
+#[test]
+fn actor_remove_ledger_failure_restores_authority_before_runtime_cleanup() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"remove rollback"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
     call(
         &home,
         "actor_add",
-        json!({"group_id":first_group,"actor_id":"web1","runtime":"web_model","by":"user"}),
+        json!({
+            "group_id":group_id,
+            "actor_id":"web1",
+            "runtime":"web_model",
+            "env_private":{"TOKEN":"restore-me"},
+            "by":"user"
+        }),
     );
-    let duplicate = raw_call(
+    let connector = json!({
+        "connector_id":"wmc_remove_rollback",
+        "group_id":group_id,
+        "actor_id":"web1",
+        "provider":"chatgpt",
+        "secret":"wmcs_remove_rollback",
+        "created_at":"2026-08-12T00:00:00Z",
+        "updated_at":"2026-08-12T00:00:00Z",
+        "revoked":false
+    });
+    cccc_core::web_model_connectors::replace_active(&home, &connector).expect("connector");
+
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let headless_state = store
+        .state_dir(group_id)
+        .expect("state dir")
+        .join("runners/headless/web1.json");
+    std::fs::create_dir_all(headless_state.parent().expect("headless parent"))
+        .expect("headless directory");
+    std::fs::write(&headless_state, b"{\"status\":\"working\"}\n").expect("headless fixture");
+
+    let ledger = store.ledger_path(group_id).expect("ledger path");
+    std::fs::remove_file(&ledger).expect("remove ledger");
+    std::fs::create_dir(&ledger).expect("replace ledger with directory");
+    let failed = raw_call(
         &home,
-        "actor_add",
-        json!({"group_id":second_group,"actor_id":"web2","runtime":"web_model","by":"user"}),
-    );
-    assert_eq!(
-        duplicate.error.expect("singleton error").code,
-        "chatgpt_web_model_singleton"
+        "actor_remove",
+        json!({"group_id":group_id,"actor_id":"web1","by":"user"}),
     );
 
+    assert!(!failed.ok, "corrupt ledger unexpectedly accepted removal");
+    assert!(
+        store
+            .load(group_id)
+            .expect("restored group")
+            .actors
+            .iter()
+            .any(|actor| actor.id == "web1")
+    );
+    assert!(
+        headless_state.is_file(),
+        "runtime state was cleaned before commit"
+    );
+    let connectors = cccc_core::web_model_connectors::load(&home).expect("connectors");
+    assert_eq!(
+        connectors
+            .iter()
+            .find(|entry| entry["connector_id"] == "wmc_remove_rollback")
+            .expect("restored connector")["revoked"],
+        json!(false)
+    );
+    let secret_keys = call(
+        &home,
+        "actor_env_private_keys",
+        json!({"group_id":group_id,"actor_id":"web1","by":"user"}),
+    );
+    assert_eq!(secret_keys.result["keys"], json!(["TOKEN"]));
+}
+
+#[test]
+fn actor_stop_ledger_failure_restores_enabled_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"stop rollback"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
     call(
         &home,
         "actor_add",
-        json!({"group_id":second_group,"actor_id":"peer","runtime":"codex","by":"user"}),
+        json!({
+            "group_id":group_id,
+            "actor_id":"web1",
+            "runtime":"web_model",
+            "runner":"headless",
+            "by":"user"
+        }),
     );
-    let converted = raw_call(
+
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let before = store.load(group_id).expect("group before stop");
+    assert!(before.actors[0].enabled);
+    let ledger = store.ledger_path(group_id).expect("ledger path");
+    std::fs::remove_file(&ledger).expect("remove ledger");
+    std::fs::create_dir(&ledger).expect("replace ledger with directory");
+
+    let failed = raw_call(
         &home,
-        "actor_update",
-        json!({"group_id":second_group,"actor_id":"peer","patch":{"runtime":"web_model"},"by":"user"}),
+        "actor_stop",
+        json!({"group_id":group_id,"actor_id":"web1","by":"user"}),
+    );
+
+    assert!(!failed.ok, "corrupt ledger unexpectedly accepted stop");
+    let restored = store.load(group_id).expect("restored group");
+    assert!(restored.actors[0].enabled);
+    assert_eq!(restored.running, before.running);
+    assert_eq!(restored.state, before.state);
+}
+
+#[test]
+fn actor_add_validates_private_env_before_persisting_actor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(
+        &home,
+        "group_create",
+        json!({"title":"private env validation"}),
+    );
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+
+    let invalid_key = raw_call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"invalid-key",
+            "runtime":"codex",
+            "runner":"headless",
+            "env_private":{"BAD-KEY":"secret"},
+            "by":"user"
+        }),
     );
     assert_eq!(
-        converted.error.expect("update singleton error").code,
-        "chatgpt_web_model_singleton"
+        invalid_key.error.expect("invalid key rejected").code,
+        "invalid_args"
     );
+
+    let too_large = raw_call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"large-secret",
+            "runtime":"codex",
+            "runner":"headless",
+            "env_private":{"TOKEN":"x".repeat(200_001)},
+            "by":"user"
+        }),
+    );
+    assert_eq!(
+        too_large.error.expect("oversized value rejected").code,
+        "invalid_args"
+    );
+
+    let group = cccc_core::GroupStore::new(home).expect("store");
+    assert!(
+        group
+            .load(group_id)
+            .expect("group")
+            .actors
+            .iter()
+            .all(|actor| actor.id != "invalid-key" && actor.id != "large-secret")
+    );
+}
+
+#[test]
+fn actor_add_rejects_private_env_from_foreman() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(
+        &home,
+        "group_create",
+        json!({"title":"private env authority"}),
+    );
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"lead",
+            "runtime":"codex",
+            "runner":"headless",
+            "by":"user"
+        }),
+    );
+
+    let denied = raw_call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"peer1",
+            "runtime":"codex",
+            "runner":"headless",
+            "env_private":{"TOKEN":"secret"},
+            "by":"lead"
+        }),
+    );
+
+    assert!(!denied.ok, "foreman unexpectedly persisted private env");
+    assert_eq!(
+        denied.error.expect("permission error").code,
+        "permission_denied"
+    );
+    let group = cccc_core::GroupStore::new(home)
+        .expect("store")
+        .load(group_id)
+        .expect("group");
+    assert!(group.actors.iter().all(|actor| actor.id != "peer1"));
+}
+#[test]
+fn actor_removal_retires_connectors_after_the_runtime_changes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(
+        &home,
+        "group_create",
+        json!({"title":"connector retirement"}),
+    );
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"former-web",
+            "runtime":"custom",
+            "runner":"pty",
+            "command":["sh"],
+            "enabled":false,
+            "by":"user"
+        }),
+    );
+    let connector = json!({
+        "connector_id":"wmc_former_web",
+        "group_id":group_id,
+        "actor_id":"former-web",
+        "provider":"chatgpt",
+        "secret":"wmcs_former_web",
+        "created_at":"2026-08-12T00:00:00Z",
+        "updated_at":"2026-08-12T00:00:00Z",
+        "revoked":false
+    });
+    cccc_core::web_model_connectors::replace_active(&home, &connector)
+        .expect("historical connector");
 
     call(
         &home,
         "actor_remove",
-        json!({"group_id":first_group,"actor_id":"web1","by":"user"}),
+        json!({"group_id":group_id,"actor_id":"former-web","by":"user"}),
     );
-    let replacement = call(
+
+    let connectors = cccc_core::web_model_connectors::load(&home).expect("connectors");
+    assert_eq!(
+        connectors
+            .iter()
+            .find(|entry| entry["connector_id"] == "wmc_former_web")
+            .expect("retired connector")["revoked"],
+        json!(true)
+    );
+}
+
+#[test]
+fn actor_private_env_requires_user_and_an_existing_custom_actor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"actor secrets"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    call(
         &home,
-        "actor_update",
-        json!({"group_id":second_group,"actor_id":"peer","patch":{"runtime":"web_model"},"by":"user"}),
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"peer1",
+            "runtime":"custom",
+            "env_private":{"TOKEN":"owner-secret"},
+            "by":"user"
+        }),
     );
-    assert_eq!(replacement.result["actor"]["runtime"], "web_model");
+
+    for response in [
+        raw_call(
+            &home,
+            "actor_env_private_keys",
+            json!({"group_id":group_id,"actor_id":"peer1","by":"peer1"}),
+        ),
+        raw_call(
+            &home,
+            "actor_env_private_update",
+            json!({
+                "group_id":group_id,
+                "actor_id":"peer1",
+                "by":"peer1",
+                "set":{"PWNED":"peer-write"}
+            }),
+        ),
+    ] {
+        assert_eq!(
+            response.error.expect("peer denial").code,
+            "permission_denied"
+        );
+    }
+
+    for response in [
+        raw_call(
+            &home,
+            "actor_env_private_keys",
+            json!({"group_id":group_id,"actor_id":"future","by":"user"}),
+        ),
+        raw_call(
+            &home,
+            "actor_env_private_update",
+            json!({
+                "group_id":group_id,
+                "actor_id":"future",
+                "by":"user",
+                "set":{"INJECTED":"before-actor-exists"}
+            }),
+        ),
+    ] {
+        assert_eq!(
+            response.error.expect("missing actor").code,
+            "actor_not_found"
+        );
+    }
+    let user_keys = call(
+        &home,
+        "actor_env_private_keys",
+        json!({"group_id":group_id,"actor_id":"peer1","by":"user"}),
+    );
+    assert_eq!(user_keys.result["group_id"], group_id);
+    assert_eq!(user_keys.result["keys"], json!(["TOKEN"]));
+
+    call(
+        &home,
+        "actor_profile_upsert",
+        json!({"profile_id":"linked-profile","name":"Linked","runtime":"codex"}),
+    );
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"linked",
+            "profile_id":"linked-profile",
+            "by":"user"
+        }),
+    );
+    for response in [
+        raw_call(
+            &home,
+            "actor_env_private_keys",
+            json!({"group_id":group_id,"actor_id":"linked","by":"user"}),
+        ),
+        raw_call(
+            &home,
+            "actor_env_private_update",
+            json!({
+                "group_id":group_id,
+                "actor_id":"linked",
+                "by":"user",
+                "set":{"TOKEN":"denied"}
+            }),
+        ),
+    ] {
+        assert_eq!(
+            response.error.expect("linked actor denial").code,
+            "actor_profile_linked_readonly"
+        );
+    }
+
+    call(
+        &home,
+        "actor_add",
+        json!({"group_id":group_id,"actor_id":"future","runtime":"custom","by":"user"}),
+    );
+    let future = call(
+        &home,
+        "actor_env_private_keys",
+        json!({"group_id":group_id,"actor_id":"future","by":"user"}),
+    );
+    assert_eq!(future.result["keys"], json!([]));
+
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"reused",
+            "runtime":"custom",
+            "env_private":{"OLD_TOKEN":"old-generation"},
+            "by":"user"
+        }),
+    );
+    let secret_dir = home.root().join("state/secrets/actors").join(group_id);
+    let residual_path = std::fs::read_dir(&secret_dir)
+        .expect("secret directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+                && std::fs::read_to_string(path).is_ok_and(|text| text.contains("OLD_TOKEN"))
+        })
+        .expect("reused actor secret");
+    call(
+        &home,
+        "actor_remove",
+        json!({"group_id":group_id,"actor_id":"reused","by":"user"}),
+    );
+    std::fs::write(&residual_path, b"{\"OLD_TOKEN\":\"old-generation\"}\n")
+        .expect("residual secret fixture");
+    call(
+        &home,
+        "actor_add",
+        json!({"group_id":group_id,"actor_id":"reused","runtime":"custom","by":"user"}),
+    );
+    let reused = call(
+        &home,
+        "actor_env_private_keys",
+        json!({"group_id":group_id,"actor_id":"reused","by":"user"}),
+    );
+    assert_eq!(reused.result["keys"], json!([]));
 }
 
 #[test]
@@ -74,9 +560,7 @@ fn actor_scope_paths_are_persisted_as_attached_scope_keys() {
         "attach",
         json!({"group_id":group_id,"path":project,"by":"user"}),
     );
-    let scope_key = attached.result["group"]["active_scope_key"]
-        .as_str()
-        .expect("scope key");
+    let scope_key = attached.result["scope_key"].as_str().expect("scope key");
 
     let added = call(
         &home,
@@ -125,6 +609,168 @@ fn actor_scope_paths_are_persisted_as_attached_scope_keys() {
         invalid.error.expect("scope error").code,
         "scope_not_attached"
     );
+}
+
+#[test]
+fn attach_selects_the_attached_group() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).expect("project");
+    let target = call(&home, "group_create", json!({"title":"target"}));
+    let target_id = target.result["group"]["group_id"]
+        .as_str()
+        .expect("target group id");
+    let previous = call(&home, "group_create", json!({"title":"previous"}));
+    let previous_id = previous.result["group"]["group_id"]
+        .as_str()
+        .expect("previous group id");
+    assert_eq!(
+        cccc_core::active::get(&home)
+            .expect("active group")
+            .as_deref(),
+        Some(previous_id)
+    );
+
+    let attached = call(
+        &home,
+        "attach",
+        json!({"group_id":target_id,"path":project,"by":"user"}),
+    );
+    assert_eq!(attached.result["group_id"], target_id);
+    assert_eq!(
+        cccc_core::active::get(&home)
+            .expect("active group")
+            .as_deref(),
+        Some(target_id)
+    );
+
+    let fresh_home = HomeLayout::from_path(temp.path().join("fresh-home")).expect("fresh home");
+    let fresh_project = temp.path().join("fresh-project");
+    std::fs::create_dir(&fresh_project).expect("fresh project");
+    let created = call(
+        &fresh_home,
+        "attach",
+        json!({"path":fresh_project,"by":"user"}),
+    );
+    let created_id = created.result["group_id"]
+        .as_str()
+        .expect("created group id");
+    assert_eq!(
+        cccc_core::active::get(&fresh_home)
+            .expect("fresh active group")
+            .as_deref(),
+        Some(created_id)
+    );
+}
+
+#[test]
+fn scope_lifecycle_uses_canonical_receipts_state_and_events() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let scope_a = temp.path().join("scope-a");
+    let scope_b = temp.path().join("scope-b");
+    let unattached = temp.path().join("unattached");
+    for path in [&scope_a, &scope_b, &unattached] {
+        std::fs::create_dir(path).expect("scope directory");
+    }
+    let created = call(&home, "group_create", json!({"title":"scope lifecycle"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    let attached_a = call(
+        &home,
+        "attach",
+        json!({"group_id":group_id,"path":scope_a,"by":"user"}),
+    );
+    let scope_a_key = attached_a.result["scope_key"]
+        .as_str()
+        .expect("scope a key");
+    assert_eq!(attached_a.result["group_id"], group_id);
+    assert!(attached_a.result.get("group").is_none());
+    let attached_b = call(
+        &home,
+        "attach",
+        json!({"group_id":group_id,"path":scope_b,"by":"user"}),
+    );
+    let scope_b_key = attached_b.result["scope_key"]
+        .as_str()
+        .expect("scope b key");
+
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"scope-peer",
+            "default_scope_key":scope_a_key,
+            "enabled":false,
+            "by":"user"
+        }),
+    );
+    let selected = call(
+        &home,
+        "group_use",
+        json!({"group_id":group_id,"path":scope_a,"by":"user"}),
+    );
+    assert_eq!(selected.result["group_id"], group_id);
+    assert_eq!(selected.result["active_scope_key"], scope_a_key);
+    assert_eq!(selected.result["event"]["kind"], "group.set_active_scope");
+    assert_eq!(selected.result["event"]["scope_key"], scope_a_key);
+
+    let detached = call(
+        &home,
+        "group_detach_scope",
+        json!({"group_id":group_id,"scope_key":scope_a_key,"by":"user"}),
+    );
+    assert_eq!(detached.result["group_id"], group_id);
+    assert_eq!(detached.result["event"]["kind"], "group.detach_scope");
+    assert_eq!(detached.result["event"]["scope_key"], scope_a_key);
+
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let group = store.load(group_id).expect("group");
+    assert_eq!(group.active_scope_key, scope_b_key);
+    assert_eq!(group.scopes.len(), 1);
+    assert_eq!(group.scopes[0].scope_key, scope_b_key);
+    assert_eq!(group.actors[0].default_scope_key, scope_b_key);
+    let registry = cccc_core::Registry::load(&home).expect("registry");
+    assert_eq!(registry.groups[group_id].default_scope_key, scope_b_key);
+    assert!(!registry.defaults.contains_key(scope_a_key));
+    assert_eq!(registry.defaults[scope_b_key], group_id);
+
+    let events = cccc_core::ledger::read_all(&store.ledger_path(group_id).expect("ledger path"))
+        .expect("ledger");
+    let scope_kinds = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "group.attach" | "group.set_active_scope" | "group.detach_scope"
+            )
+        })
+        .map(|event| event.kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scope_kinds,
+        [
+            "group.attach",
+            "group.attach",
+            "group.set_active_scope",
+            "group.detach_scope"
+        ]
+    );
+
+    let before = group;
+    let invalid = raw_call(
+        &home,
+        "group_use",
+        json!({"group_id":group_id,"path":unattached,"by":"user"}),
+    );
+    assert_eq!(
+        invalid.error.expect("unattached scope").code,
+        "scope_not_attached"
+    );
+    assert_eq!(store.load(group_id).expect("unchanged group"), before);
 }
 
 #[test]
@@ -185,12 +831,20 @@ fn prompt_im_space_and_voice_operations_share_rust_state() {
     );
     assert_eq!(
         capabilities.result["ingest"]["resource_ingest"]["source_types"],
-        json!(["pasted_text"])
+        json!([
+            "file",
+            "pasted_text",
+            "web_page",
+            "youtube",
+            "google_docs",
+            "google_slides",
+            "google_spreadsheet"
+        ])
     );
     assert!(
         capabilities.result["unavailable_capabilities"]
             .as_array()
-            .is_some_and(|items| items.contains(&json!("resource_ingest.web_page")))
+            .is_some_and(|items| !items.contains(&json!("resource_ingest.file")))
     );
     let unsupported_resource = raw_call(
         &home,
@@ -199,12 +853,29 @@ fn prompt_im_space_and_voice_operations_share_rust_state() {
             "group_id":group_id,
             "lane":"work",
             "kind":"resource_ingest",
-            "payload":{"source_type":"web_page","url":"https://example.test"}
+            "payload":{"source_type":"file","file_path":"notes.md"}
         }),
     );
     assert_eq!(
-        unsupported_resource.error.expect("capability error").code,
-        "capability_unavailable"
+        unsupported_resource
+            .error
+            .expect("attached-scope preflight error")
+            .code,
+        "scope_required"
+    );
+    let invalid_url = raw_call(
+        &home,
+        "group_space_ingest",
+        json!({
+            "group_id":group_id,
+            "lane":"work",
+            "kind":"resource_ingest",
+            "payload":{"source_type":"web_page","url":"file:///tmp/secret"}
+        }),
+    );
+    assert_eq!(
+        invalid_url.error.expect("URL preflight error").code,
+        "invalid_args"
     );
     let unavailable = raw_call(
         &home,
@@ -258,16 +929,13 @@ fn prompt_im_space_and_voice_operations_share_rust_state() {
         "actor_profile_upsert",
         json!({"profile_id":"legacy","name":"Legacy","env":{"LEGACY_TOKEN":"secret"}}),
     );
-    assert_eq!(
-        legacy.result["profile"]["env"],
-        json!({"LEGACY_TOKEN":"secret"})
-    );
+    assert_eq!(legacy.result["profile"]["env"], json!({}));
     let legacy_keys = call(
         &home,
         "actor_profile_secret_keys",
         json!({"profile_id":"legacy"}),
     );
-    assert_eq!(legacy_keys.result["keys"], json!([]));
+    assert_eq!(legacy_keys.result["keys"], json!(["LEGACY_TOKEN"]));
     let linked = call(
         &home,
         "actor_add",
@@ -353,6 +1021,29 @@ fn prompt_im_space_and_voice_operations_share_rust_state() {
         health.result["error"]["code"],
         "space_provider_auth_invalid"
     );
+    let auth_status = call(
+        &home,
+        "group_space_provider_auth",
+        json!({"provider":"notebooklm","by":"user","action":"status"}),
+    );
+    assert_eq!(auth_status.result["credential"]["configured"], true);
+    assert_eq!(auth_status.result["provider_state"]["write_ready"], false);
+    let provider_state_before_candidate = auth_status.result["provider_state"].clone();
+    let candidate_health = call(
+        &home,
+        "group_space_provider_health_check",
+        json!({"provider":"notebooklm","by":"user","auth_json":"{}"}),
+    );
+    assert_eq!(candidate_health.result["healthy"], false);
+    let auth_status_after_candidate = call(
+        &home,
+        "group_space_provider_auth",
+        json!({"provider":"notebooklm","by":"user","action":"status"}),
+    );
+    assert_eq!(
+        auth_status_after_candidate.result["provider_state"],
+        provider_state_before_candidate
+    );
     let remote_status = call(
         &home,
         "group_space_status",
@@ -417,6 +1108,185 @@ fn prompt_im_space_and_voice_operations_share_rust_state() {
                 .iter()
                 .all(|path| path.as_str().is_some_and(|path| path.ends_with(".md"))))
     );
+}
+
+#[test]
+fn rust_group_space_sync_status_reads_python_canonical_manifests() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let project = temp.path().join("project");
+    let space = project.join("space");
+    std::fs::create_dir_all(&space).expect("space root");
+    let created = call(&home, "group_create", json!({"title":"space sync status"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    call(
+        &home,
+        "attach",
+        json!({"group_id":group_id,"path":project,"by":"user"}),
+    );
+    call(
+        &home,
+        "group_space_bind",
+        json!({
+            "group_id":group_id,"provider":"notebooklm","lane":"work",
+            "remote_space_id":"nb-work","by":"user"
+        }),
+    );
+    std::fs::write(
+        space.join(".space-sync-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "v":1,"group_id":group_id,"provider":"notebooklm",
+            "remote_space_id":"nb-work","last_run_at":"2026-08-11T00:00:00Z",
+            "state":"ok","converged":true,"unsynced_count":0,"uploaded":1
+        }))
+        .expect("work sync state"),
+    )
+    .expect("write work sync state");
+
+    let work = call(
+        &home,
+        "group_space_sync",
+        json!({
+            "group_id":group_id,"provider":"notebooklm","lane":"work","action":"status"
+        }),
+    );
+    assert_eq!(work.result["sync"]["available"], true);
+    assert_eq!(work.result["sync"]["remote_space_id"], "nb-work");
+    assert_eq!(work.result["sync"]["converged"], true);
+
+    call(
+        &home,
+        "group_space_bind",
+        json!({
+            "group_id":group_id,"provider":"notebooklm","lane":"memory",
+            "remote_space_id":"nb-memory","by":"user"
+        }),
+    );
+    let memory_root = cccc_core::GroupStore::new(home.clone())
+        .expect("store")
+        .state_dir(group_id)
+        .expect("state dir")
+        .join("memory");
+    std::fs::create_dir_all(&memory_root).expect("memory root");
+    std::fs::write(
+        memory_root.join("notebooklm_sync.json"),
+        serde_json::to_vec_pretty(&json!({
+            "v":1,"provider":"notebooklm","lane":"memory","group_id":group_id,
+            "group_label":"space-sync-status","remote_space_id":"nb-memory",
+            "last_scan_at":"2026-08-11T00:00:00Z","last_success_at":"2026-08-11T00:01:00Z",
+            "files":{"2026-08-10":{
+                "date":"2026-08-10","content_hash":"abc","entry_count":1,
+                "source_ids":["src-1"],"state":"succeeded"
+            }}
+        }))
+        .expect("memory sync state"),
+    )
+    .expect("write memory sync state");
+
+    let memory = call(
+        &home,
+        "group_space_sync",
+        json!({
+            "group_id":group_id,"provider":"notebooklm","lane":"memory","action":"status"
+        }),
+    );
+    assert_eq!(memory.result["sync"]["remote_space_id"], "nb-memory");
+    assert_eq!(
+        memory.result["sync"]["files"]["2026-08-10"]["state"],
+        "succeeded"
+    );
+    assert_eq!(memory.result["summary"]["eligible_daily_files"], 1);
+    assert_eq!(memory.result["summary"]["synced_daily_files"], 1);
+
+    let overview = call(
+        &home,
+        "group_space_status",
+        json!({"group_id":group_id,"provider":"notebooklm"}),
+    );
+    assert_eq!(overview.result["sync"]["remote_space_id"], "nb-work");
+    assert_eq!(overview.result["sync"]["converged"], true);
+    assert_eq!(overview.result["memory_sync"]["eligible_daily_files"], 1);
+    assert_eq!(overview.result["memory_sync"]["synced_daily_files"], 1);
+}
+
+#[test]
+fn rust_group_space_sync_is_truthfully_unavailable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(
+        &home,
+        "group_create",
+        json!({"title":"space sync capability"}),
+    );
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+
+    let capabilities = call(
+        &home,
+        "group_space_capabilities",
+        json!({"group_id":group_id,"provider":"notebooklm"}),
+    );
+    let available = capabilities.result["capabilities"]
+        .as_array()
+        .expect("capabilities");
+    assert!(!available.iter().any(|value| value == "sync"));
+    let unavailable = capabilities.result["unavailable_capabilities"]
+        .as_array()
+        .expect("unavailable capabilities");
+    assert!(unavailable.iter().any(|value| value == "sync.work"));
+    assert!(unavailable.iter().any(|value| value == "sync.memory"));
+
+    let response = raw_call(
+        &home,
+        "group_space_sync",
+        json!({
+            "group_id":group_id,
+            "provider":"notebooklm",
+            "lane":"work",
+            "action":"run",
+            "by":"user"
+        }),
+    );
+    assert_eq!(
+        response.error.expect("unsupported sync").code,
+        "capability_unavailable"
+    );
+}
+
+#[test]
+fn rust_daemon_provider_auth_mutations_do_not_report_synthetic_lifecycle() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+
+    let status = call(
+        &home,
+        "group_space_provider_auth",
+        json!({"provider":"notebooklm","by":"user","action":"status"}),
+    );
+    assert_eq!(status.result["auth"]["state"], "idle");
+
+    for action in ["start", "cancel", "disconnect"] {
+        let response = raw_call(
+            &home,
+            "group_space_provider_auth",
+            json!({"provider":"notebooklm","by":"user","action":action}),
+        );
+        assert_eq!(
+            response.error.expect("Web-owned auth lifecycle").code,
+            "capability_unavailable",
+            "action={action}"
+        );
+    }
+
+    let invalid = raw_call(
+        &home,
+        "group_space_provider_auth",
+        json!({"provider":"notebooklm","by":"user","action":"unknown"}),
+    );
+    assert_eq!(invalid.error.expect("invalid action").code, "invalid_args");
 }
 
 fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
