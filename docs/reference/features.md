@@ -28,7 +28,7 @@ cccc reply <event_id> "Reply text"
 # MCP
 cccc_message_send(text="Hello", to=["@foreman"], mode="send", insight="This direction may still be framed too narrowly.")
 cccc_tracked_send(title="Task title", text="Delegated work", to=["assistant"], outcome="Done criterion", insight="The assignee should be free to reject the proposed approach.")
-cccc_message_reply(reply_to="evt_xxx", text="Reply", insight="The original framing may be hiding a better route.")
+cccc_message_reply(event_id="evt_xxx", text="Reply", insight="The original framing may be hiding a better route.")
 ```
 
 Agents may add `suggested_user_message` when sending to `user`; CCCC Web shows it as an editable next-message suggestion in the composer and never sends it automatically.
@@ -61,9 +61,14 @@ Agent consumes deferred Mail with cccc_inbox_read
 
 Delivery format:
 ```
-[cccc] user → peer-a: Please implement the login feature
-[cccc] user → peer-a (reply to evt_abc): OK, please continue
+[cccc] user → peer-a [event_id=<full event id>]: Please implement the login feature
+[cccc] user → peer-a (reply:evt_abc) [event_id=<full event id>]: OK, please continue
 ```
+
+The full current `event_id` is the value passed to
+`cccc_message_reply(event_id=...)`. The short `reply:` marker only correlates the
+message with its parent; ordinary delivery omits non-actionable storage mode and
+full parent metadata.
 
 ## IM Bridge
 
@@ -243,12 +248,6 @@ off by default. Mail and reply notices are bounded delivery semantics, not
 periodic automation: paused/stopped actors are not woken, notices never include
 message bodies, and no universal runtime-idle detector is assumed.
 
-### Delivery Policy
-
-| Config | Default | Description |
-|--------|---------|-------------|
-| `min_interval_seconds` | `0` | Optional per-actor spacing between runtime handoffs; `0` disables throttling |
-
 Runtime handoff and Inbox read are separate facts. A successful
 `runtime.delivery` never advances the Inbox cursor.
 
@@ -340,7 +339,7 @@ Recommended options:
 | amp | `amp` | Amp |
 | auggie | `auggie` | Auggie (Augment CLI) |
 | claude | `claude` | Claude Code |
-| cline | `cline` | Cline CLI PTY TUI |
+| cline | `cline` | Cline CLI native TUI |
 | codex | `codex` | Codex CLI |
 | copilot | `copilot` | GitHub Copilot CLI |
 | cursor | `cursor-agent` | Cursor CLI |
@@ -351,7 +350,7 @@ Recommended options:
 | droid | `droid` | Droid |
 | grok | `grok` | Grok Build |
 | hermes | `hermes` | Hermes Agent |
-| kimi | `kimi` | Kimi CLI |
+| kimi | `kimi` | Kimi Code |
 | opencode | `opencode` | OpenCode |
 | web_model | ChatGPT Web conversation | ChatGPT Web conversation with CCCC MCP access; optional experimental GPT Pro delivery attaches a tiny blank PNG but does not select the model or guarantee connector availability |
 | custom | Any command | Any command |
@@ -363,7 +362,7 @@ CCCC first-class runtime support is the named runtimes above. `custom` remains t
 ### Setup Commands
 
 ```bash
-cccc setup --runtime claude   # Configure MCP (auto)
+cccc setup --runtime claude   # Report CCCC-owned per-session MCP
 cccc setup --runtime cline
 cccc setup --runtime codex
 cccc setup --runtime droid

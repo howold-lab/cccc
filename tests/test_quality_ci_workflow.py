@@ -91,24 +91,24 @@ def test_web_ci_uses_managed_node_and_composite_vite_plus_check() -> None:
     assert "npm -C web run lint" not in runs
 
 
-def test_windows_smoke_keeps_only_native_process_lifecycle_checks() -> None:
-    windows = _workflow()["jobs"]["windows-smoke"]
-    runs = _runs(windows)
-    uses = {step.get("uses", "") for step in windows["steps"]}
-
-    assert windows["needs"] == "web"
-    assert "cargo build" not in runs
-    assert "install_windows.ps1" not in runs
-    assert any(item.startswith("actions/download-artifact") for item in uses)
-    assert any(item.startswith("dtolnay/rust-toolchain") for item in uses)
-    assert any(item.startswith("Swatinem/rust-cache") for item in uses)
-    assert "cargo test --package cccc-pair-daemon --lib --locked" in runs
-    assert "process_tree::tests::abrupt_daemon_exit_reaps_child_and_grandchild_without_deleting_history" in runs
-    assert "-- --test-threads=1" in runs
-    assert not any(item.startswith("actions/setup-node") for item in uses)
-    assert not any(item.startswith("actions/setup-python") for item in uses)
-    assert "npm " not in runs
-    assert "python " not in runs.lower()
+def test_native_empty_session_smoke_is_enabled_without_provider_secrets() -> None:
+    steps = _workflow()["jobs"]["rust-linux"]["steps"]
+    install = next(step for step in steps if step.get("name") == "Install verified native CLI versions")
+    assert "@openai/codex@0.153.2" in install["run"]
+    assert "@anthropic-ai/claude-code@2.1.261" in install["run"]
+    assert "@kilocode/cli@7.5.14" in install["run"]
+    smoke = next(step for step in steps if step.get("name") == "Verify native sessions without external model access")
+    assert smoke["timeout-minutes"] == "5"
+    assert smoke["env"]["CCCC_CODEX_EMPTY_LIVE"] == "1"
+    assert smoke["env"]["CCCC_CLAUDE_EMPTY_LIVE"] == "1"
+    assert smoke["env"]["CCCC_KILO_MANAGED_LIVE"] == "1"
+    assert smoke["env"]["CCCC_KILO_MODEL_SYNC_LIVE"] == "1"
+    assert smoke["env"]["CCCC_LAUNCHER_PATH"].endswith("/target/debug/cccc")
+    assert "cargo build --package cccc --bin cccc --locked" in smoke["run"]
+    assert "live_codex_empty_actor_and_analyst_resume_with_native_terminal" in smoke["run"]
+    assert "live_claude_empty_session_resumes_without_a_prompt" in smoke["run"]
+    assert "live_kilo -- --test-threads=1" in smoke["run"]
+    assert "secrets." not in json.dumps(smoke)
 
 
 def test_windows_installer_job_is_a_nightly_native_fixture() -> None:
@@ -334,12 +334,10 @@ def test_release_builds_one_atomic_rust_only_set() -> None:
     desktop_matrix = jobs["build-desktop"]["strategy"]["matrix"]["include"]
     assert {item["target"] for item in desktop_matrix} == {
         "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
         "x86_64-pc-windows-msvc",
     }
     assert {item["platform_tag"] for item in desktop_matrix} == {
         "macosx_11_0_arm64",
-        "macosx_11_0_x86_64",
         "win_amd64",
     }
     assert next(item for item in desktop_matrix if item["platform_tag"] == "win_amd64")["os"] == (
@@ -427,7 +425,6 @@ def test_product_tag_publishes_one_verified_pypi_and_github_release() -> None:
     assert desktop["needs"] == "web"
     assert {item["target"] for item in desktop["strategy"]["matrix"]["include"]} == {
         "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
         "x86_64-pc-windows-msvc",
     }
     assert next(item for item in desktop["strategy"]["matrix"]["include"] if "windows" in item["target"])[
@@ -457,7 +454,6 @@ def test_product_tag_publishes_one_verified_pypi_and_github_release() -> None:
     assert verify["timeout-minutes"] == "10"
     assert {item["target"] for item in verify["strategy"]["matrix"]["include"]} == {
         "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
         "x86_64-unknown-linux-gnu",
         "x86_64-pc-windows-msvc",
     }
@@ -538,7 +534,22 @@ def test_docs_publish_stable_installers_from_the_canonical_scripts() -> None:
     )
     assert checkout["with"]["ref"] == "${{ github.event.repository.default_branch }}"
     docs_runs = _runs(docs_workflow["jobs"]["build"])
-    assert "node scripts/resolve_docs_installer_version.mjs" in docs_runs
+    resolver_command = "node scripts/resolve_docs_installer_version.mjs --output docs/public/releases.json"
+    assert f'version="$({resolver_command})"' in docs_runs
+    assert 'echo "version=$version" >> "$GITHUB_OUTPUT"' in docs_runs
+    resolver = next(
+        step for step in docs_workflow["jobs"]["build"]["steps"]
+        if step.get("id") == "installer-release"
+    )
+    assert resolver["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
+    verification = "cmp docs/public/releases.json docs/.vitepress/dist/releases.json"
+    assert docs_runs.index(resolver_command) < docs_runs.index("npm run build") < docs_runs.index(verification)
+    steps = docs_workflow["jobs"]["build"]["steps"]
+    upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-pages-artifact"))
+    verify = next(step for step in steps if step.get("run") == verification)
+    assert steps.index(verify) < steps.index(upload)
+    assert upload["with"]["path"] == "docs/.vitepress/dist"
+    assert docs_workflow["jobs"]["deploy"]["needs"] == "build"
     build = next(
         step
         for step in docs_workflow["jobs"]["build"]["steps"]

@@ -17,6 +17,9 @@ pub(super) fn is_provider_binary(actor: &Actor, command: &[String]) -> bool {
     let expected = match actor.runtime {
         ActorRuntime::Codex => "codex",
         ActorRuntime::Claude => "claude",
+        ActorRuntime::Grok => "grok",
+        ActorRuntime::Opencode => "opencode",
+        ActorRuntime::Kilo => "kilo",
         _ => return false,
     };
     command.first().is_some_and(|program| {

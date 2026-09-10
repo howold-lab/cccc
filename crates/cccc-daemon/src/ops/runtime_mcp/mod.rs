@@ -3,7 +3,6 @@ mod state;
 
 use cccc_contracts::ActorRuntime;
 use cccc_core::HomeLayout;
-use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -30,9 +29,16 @@ pub(super) fn prepare(
     if !cccc_core::runtime_mcp::is_auto_managed(runtime) {
         return Ok(());
     }
-    // Codex receives its actor-scoped MCP entry later in the launch pipeline.
-    // Do not require a discoverable public launcher for custom Codex commands.
-    if runtime == ActorRuntime::Codex {
+    // Managed sessions receive their actor-scoped MCP entry later in the launch
+    // pipeline. Do not mutate a provider-global MCP registry for these runtimes.
+    if matches!(
+        runtime,
+        ActorRuntime::Claude
+            | ActorRuntime::Codex
+            | ActorRuntime::Grok
+            | ActorRuntime::Opencode
+            | ActorRuntime::Kilo
+    ) {
         return Ok(());
     }
     let executable = super::codex_mcp::resolve_cccc_executable().ok_or_else(|| {
@@ -47,8 +53,13 @@ pub(super) fn prepare(
     );
 
     match runtime {
-        ActorRuntime::Codex => unreachable!("Codex returns before persistent MCP setup"),
-        ActorRuntime::Opencode => inject_opencode(env, &executable),
+        ActorRuntime::Claude
+        | ActorRuntime::Codex
+        | ActorRuntime::Grok
+        | ActorRuntime::Kilo
+        | ActorRuntime::Opencode => {
+            unreachable!("managed runtime returned early")
+        }
         ActorRuntime::Hermes => {
             let _guard = setup_lock().lock().map_err(|_| {
                 OpError::new(
@@ -76,15 +87,18 @@ fn ensure_persistent(
     env: &BTreeMap<String, String>,
     executable: &Path,
 ) -> Result<(), OpError> {
+    if runtime == ActorRuntime::Kimi {
+        return cccc_core::runtime_mcp::ensure_kimi(cwd, env, executable)
+            .map(|_| ())
+            .map_err(|error| OpError::new("runtime_mcp_setup_failed", error.to_string()));
+    }
     let expected = cccc_core::runtime_mcp::expected_command(executable);
     let report = inspect(runtime, cwd, env, &expected)?;
     if report.state == State::Ready {
         return Ok(());
     }
-    if matches!(
-        runtime,
-        ActorRuntime::Claude | ActorRuntime::Copilot | ActorRuntime::Kiro
-    ) && report.state == State::Stale
+    if matches!(runtime, ActorRuntime::Copilot | ActorRuntime::Kiro)
+        && report.state == State::Stale
         && !report.source.is_empty()
         && !report.source.contains("user")
     {
@@ -147,13 +161,6 @@ fn inspect(
     expected: &[String],
 ) -> Result<Report, OpError> {
     match runtime {
-        ActorRuntime::Claude => inspect_cli(
-            runtime,
-            &["claude", "mcp", "get", "cccc"],
-            cwd,
-            env,
-            expected,
-        ),
         ActorRuntime::Copilot => inspect_cli(
             runtime,
             &["copilot", "mcp", "get", "cccc", "--json"],
@@ -162,13 +169,6 @@ fn inspect(
             expected,
         ),
         ActorRuntime::Devin => inspect_devin(cwd, env, expected),
-        ActorRuntime::Grok => inspect_cli(
-            runtime,
-            &["grok", "mcp", "list", "--json"],
-            cwd,
-            env,
-            expected,
-        ),
         _ => Ok(state::json_state(runtime, cwd, env, expected)),
     }
 }
@@ -277,131 +277,66 @@ fn run_checked(
     ))
 }
 
-fn inject_opencode(env: &mut BTreeMap<String, String>, executable: &Path) -> Result<(), OpError> {
-    let mut document = match env.get("OPENCODE_CONFIG_CONTENT") {
-        Some(raw) if !raw.trim().is_empty() => serde_json::from_str::<Value>(raw)
-            .map_err(|error| OpError::new("runtime_mcp_config_invalid", error.to_string()))?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| {
-                OpError::new(
-                    "runtime_mcp_config_invalid",
-                    "OPENCODE_CONFIG_CONTENT must be a JSON object",
-                )
-            })?,
-        _ => Map::new(),
-    };
-    let mcp = document
-        .entry("mcp")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !mcp.is_object() {
-        *mcp = Value::Object(Map::new());
-    }
-    let environment = ["CCCC_HOME", "CCCC_GROUP_ID", "CCCC_ACTOR_ID"]
-        .into_iter()
-        .filter_map(|key| env.get(key).map(|value| (key.to_owned(), value.clone())))
-        .collect::<BTreeMap<_, _>>();
-    let mcp = mcp.as_object_mut().ok_or_else(|| {
-        OpError::new(
-            "runtime_mcp_config_invalid",
-            "OpenCode mcp config must be an object",
-        )
-    })?;
-    mcp.insert(
-        "cccc".into(),
-        json!({
-            "type":"local",
-            "command":cccc_core::runtime_mcp::expected_command(executable),
-            "enabled":true,
-            "environment":environment,
-        }),
-    );
-    env.insert(
-        "OPENCODE_CONFIG_CONTENT".into(),
-        Value::Object(document).to_string(),
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn opencode_injection_preserves_unrelated_inline_config() {
-        let mut env = BTreeMap::from([
-            ("CCCC_HOME".into(), "/tmp/home".into()),
-            ("CCCC_GROUP_ID".into(), "g_test".into()),
-            ("CCCC_ACTOR_ID".into(), "peer1".into()),
-            (
-                "OPENCODE_CONFIG_CONTENT".into(),
-                r#"{"theme":"dark","mcp":{"other":{"type":"remote"}}}"#.into(),
-            ),
+    fn kimi_actor_setup_uses_the_code_config_without_invoking_a_cli() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cwd = temp.path().join("project");
+        let config = temp.path().join("kimi-code");
+        let home = temp.path().join("cccc-home");
+        let env = BTreeMap::from([
+            ("KIMI_CODE_HOME".into(), config.display().to_string()),
+            ("CCCC_HOME".into(), home.display().to_string()),
+            ("PATH".into(), String::new()),
         ]);
-        inject_opencode(&mut env, Path::new("/opt/cccc")).expect("inject");
-        let document: Value = serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).expect("json");
-        assert_eq!(document["theme"], "dark");
-        assert_eq!(document["mcp"]["other"]["type"], "remote");
+        ensure_persistent(ActorRuntime::Kimi, &cwd, &env, Path::new("/opt/cccc"))
+            .expect("setup without kimi mcp command");
+        let config: serde_json::Value =
+            cccc_core::fs::read_json(&config.join("mcp.json")).expect("config");
+        assert_eq!(config["mcpServers"]["cccc"]["command"], "/opt/cccc");
         assert_eq!(
-            document["mcp"]["cccc"]["command"],
-            json!(["/opt/cccc", "mcp"])
-        );
-        assert_eq!(
-            document["mcp"]["cccc"]["environment"]["CCCC_ACTOR_ID"],
-            "peer1"
+            config["mcpServers"]["cccc"]["env"]["CCCC_HOME"],
+            home.display().to_string()
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn stale_claude_user_entry_is_replaced_and_verified_before_launch() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn kimi_actor_setup_inherits_the_daemon_environment() {
+        const CANARY: &str = "CCCC_KIMI_SETUP_CANARY";
+        if let Some(root) = std::env::var_os(CANARY) {
+            let root = std::path::PathBuf::from(root);
+            // No HOME/KIMI_CODE_HOME override on the Actor itself.
+            let overrides =
+                BTreeMap::from([("CCCC_HOME".into(), root.join("cccc").display().to_string())]);
+            ensure_persistent(
+                ActorRuntime::Kimi,
+                &root.join("project"),
+                &overrides,
+                Path::new("/opt/cccc"),
+            )
+            .expect("inherited Kimi Code home");
+            assert!(root.join("kimi-code/mcp.json").is_file());
+            return;
+        }
         let temp = tempfile::tempdir().expect("tempdir");
-        let bin = temp.path().join("bin");
-        std::fs::create_dir(&bin).expect("bin");
-        let claude = bin.join("claude");
-        let state = temp.path().join("claude-mcp-state");
-        std::fs::write(&state, "/missing/cccc").expect("state");
-        std::fs::write(
-            &claude,
-            r#"#!/bin/sh
-state=$CCCC_TEST_MCP_STATE
-case "$1 $2 $3" in
-  "mcp get cccc")
-    command=
-    IFS= read -r command < "$state" || :
-    printf 'Transport: stdio\nCommand: %s\nArgs: mcp\nScope: User config\n' "$command"
-    ;;
-  "mcp remove cccc")
-    : > "$state"
-    ;;
-  "mcp add -s")
-    shift 6
-    printf '%s' "$1" > "$state"
-    ;;
-  *) exit 2 ;;
-esac
-"#,
-        )
-        .expect("script");
-        let mut permissions = std::fs::metadata(&claude).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&claude, permissions).expect("permissions");
-        let env = BTreeMap::from([
-            ("PATH".into(), bin.to_string_lossy().into_owned()),
-            (
-                "CCCC_TEST_MCP_STATE".into(),
-                state.to_string_lossy().into_owned(),
-            ),
-        ]);
-        ensure_persistent(
-            ActorRuntime::Claude,
-            temp.path(),
-            &env,
-            Path::new("/opt/cccc"),
-        )
-        .expect("repair");
-        assert_eq!(std::fs::read_to_string(state).expect("state"), "/opt/cccc");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "ops::runtime_mcp::tests::kimi_actor_setup_inherits_the_daemon_environment",
+                "--nocapture",
+            ])
+            .env(CANARY, temp.path())
+            .env("KIMI_CODE_HOME", temp.path().join("kimi-code"))
+            .output()
+            .expect("isolated test process");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

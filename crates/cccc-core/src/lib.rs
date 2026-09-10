@@ -16,7 +16,7 @@ pub mod capability_legacy;
 #[cfg(test)]
 mod capability_legacy_tests;
 pub mod cloudflared;
-pub mod codex_hook_state;
+pub mod codex_voice_settings;
 pub mod context;
 pub mod deepseek_restart_gate;
 pub mod fs;
@@ -45,20 +45,21 @@ pub mod permissions;
 pub mod presentation;
 pub mod profiles;
 pub mod registry;
-pub mod runtime_activity;
-pub mod runtime_hook_identity;
 pub mod runtime_mcp;
 pub mod scope;
 pub mod settings;
 pub mod space_credentials;
 pub mod system_prompt;
+pub mod voice_notifications;
 pub mod voice_recording_lease;
 pub mod web_bootstrap;
 pub mod web_login_grants;
 pub mod web_model_connectors;
 pub mod web_runtime_proof;
 
-pub use capability_builtin::{WEB_MODEL_CORE_TOOL_NAMES, is_builtin_capability_pack_tool};
+pub use capability_builtin::{
+    USER_CONTROL_TOOL_NAMES, WEB_MODEL_CORE_TOOL_NAMES, is_builtin_capability_pack_tool,
+};
 pub use group::{GroupDoc, GroupStore, Scope};
 pub use home::{HomeError, HomeLayout};
 pub use registry::{GroupMeta, Registry};

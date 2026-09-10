@@ -20,7 +20,8 @@ mod repo_tests;
 use anyhow::Result;
 use cccc_client::DaemonClient;
 use cccc_core::HomeLayout;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use std::fmt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const SUPPORTED_LEGACY_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
@@ -43,9 +44,95 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "cccc_agent_state",
 ];
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolCallError {
+    code: String,
+    message: String,
+    details: Map<String, Value>,
+}
+
+impl ToolCallError {
+    fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Map<String, Value>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details,
+        }
+    }
+
+    fn from_message(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let parsed = message
+            .split_once(": ")
+            .filter(|(code, _)| valid_error_code(code));
+        let (code, message) = parsed
+            .map(|(code, message)| (code.to_owned(), message.to_owned()))
+            .unwrap_or_else(|| ("tool_execution_error".into(), message));
+        Self {
+            code,
+            message,
+            details: Map::new(),
+        }
+    }
+
+    fn from_daemon(error: cccc_contracts::DaemonError) -> Self {
+        Self::new(error.code, error.message, error.details)
+    }
+
+    pub(crate) fn error_value(&self) -> Value {
+        let mut error = json!({"code":self.code,"message":self.message});
+        if !self.details.is_empty() {
+            error["details"] = Value::Object(self.details.clone());
+        }
+        error
+    }
+
+    fn payload(&self) -> Value {
+        json!({"error":self.error_value()})
+    }
+
+    #[cfg(test)]
+    fn contains(&self, pattern: &str) -> bool {
+        self.to_string().contains(pattern)
+    }
+}
+
+impl From<String> for ToolCallError {
+    fn from(message: String) -> Self {
+        Self::from_message(message)
+    }
+}
+
+impl From<&str> for ToolCallError {
+    fn from(message: &str) -> Self {
+        Self::from_message(message)
+    }
+}
+
+impl fmt::Display for ToolCallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.code == "tool_execution_error" {
+            formatter.write_str(&self.message)
+        } else {
+            write!(formatter, "{}: {}", self.code, self.message)
+        }
+    }
+}
+
+fn valid_error_code(code: &str) -> bool {
+    !code.is_empty()
+        && code
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
 pub async fn run_stdio(home: HomeLayout) -> Result<()> {
     let result = run_stdio_loop(&home).await;
-    code_mode::shutdown(&home).await;
+    shutdown(&home).await;
     result
 }
 
@@ -79,7 +166,14 @@ async fn run_stdio_loop(home: &HomeLayout) -> Result<()> {
 }
 
 pub async fn shutdown(home: &HomeLayout) {
+    let command_home = home.clone();
+    let commands = tokio::task::spawn_blocking(move || local_sessions::shutdown(&command_home));
     code_mode::shutdown(home).await;
+    match commands.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("[cccc] local command shutdown failed: {error}"),
+        Err(error) => eprintln!("[cccc] local command cleanup worker failed: {error}"),
+    }
 }
 
 pub async fn handle_request(home: &HomeLayout, request: &Value) -> Value {
@@ -160,8 +254,8 @@ async fn handle(
                 .await
             {
                 Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-                Err(message) => {
-                    json!({"jsonrpc":"2.0","id":id,"result":tool_error_result(&message)})
+                Err(error) => {
+                    json!({"jsonrpc":"2.0","id":id,"result":tool_error_result(&error)})
                 }
             };
         }
@@ -175,17 +269,8 @@ fn protocol_error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
 
-fn tool_error_result(message: &str) -> Value {
-    let (code, message) = message
-        .split_once(": ")
-        .filter(|(code, _)| {
-            !code.is_empty()
-                && code
-                    .chars()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
-        })
-        .unwrap_or(("tool_execution_error", message));
-    let payload = json!({"error":{"code":code,"message":message}});
+fn tool_error_result(error: &ToolCallError) -> Value {
+    let payload = error.payload();
     let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".into());
     json!({
         "content":[{"type":"text","text":text}],
@@ -246,15 +331,7 @@ async fn visible_tools_with_context(
         return core_tools(catalog);
     };
     let response = client
-        .call(&cccc_contracts::DaemonRequest {
-            v: 1,
-            op: "capability_state".into(),
-            args: serde_json::Map::from_iter([
-                ("group_id".into(), Value::String(group_id.clone())),
-                ("actor_id".into(), Value::String(actor_id.clone())),
-                ("by".into(), Value::String(actor_id.clone())),
-            ]),
-        })
+        .call(&capability_catalog_request(&group_id, &actor_id))
         .await;
     let Ok(response) = response else {
         return actor_fallback_tools(home, catalog, &group_id, &actor_id);
@@ -296,6 +373,19 @@ async fn visible_tools_with_context(
     output
 }
 
+fn capability_catalog_request(group_id: &str, actor_id: &str) -> cccc_contracts::DaemonRequest {
+    cccc_contracts::DaemonRequest {
+        v: 1,
+        op: "capability_state".into(),
+        args: serde_json::Map::from_iter([
+            ("group_id".into(), Value::String(group_id.into())),
+            ("actor_id".into(), Value::String(actor_id.into())),
+            ("by".into(), Value::String(actor_id.into())),
+            ("view".into(), Value::String("mcp_catalog".into())),
+        ]),
+    }
+}
+
 fn actor_fallback_tools(
     home: &HomeLayout,
     catalog: Vec<Value>,
@@ -308,7 +398,16 @@ fn actor_fallback_tools(
         .and_then(|group| group.actors.into_iter().find(|actor| actor.id == actor_id))
         .is_some_and(|actor| actor.runtime == cccc_contracts::ActorRuntime::WebModel);
     if !web_model {
-        return core_tools(catalog);
+        return catalog
+            .into_iter()
+            .filter(|tool| {
+                tool["name"].as_str().is_some_and(|name| {
+                    CORE_TOOL_NAMES.contains(&name)
+                        || (actor_id == "user"
+                            && cccc_core::USER_CONTROL_TOOL_NAMES.contains(&name))
+                })
+            })
+            .collect();
     }
     let mut output = catalog
         .into_iter()

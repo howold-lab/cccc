@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type CSSProperties,
+} from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -14,7 +21,12 @@ import {
 import { useActorDisplayState } from "../hooks/useActorDisplayState";
 import { classNames } from "../utils/classNames";
 import { formatFullTime, formatTime } from "../utils/time";
-import { useGroupStore, useObservabilityStore, useTerminalSignalsStore } from "../stores";
+import {
+  useGroupStore,
+  useObservabilityStore,
+  useTerminalSignalsStore,
+  useUIStore,
+} from "../stores";
 import { HeadlessRuntimePanel } from "./headless/HeadlessRuntimePanel";
 import { WebModelRuntimePanel } from "./webModel/WebModelRuntimePanel";
 import {
@@ -27,7 +39,10 @@ import {
   EditIcon,
   TerminalIcon,
   PlusIcon,
+  ClockIcon,
 } from "./Icons";
+import { ActorQuickControls } from "./agentTerminal/ActorQuickControls";
+import { TerminalHistoryPanel } from "./agentTerminal/TerminalHistoryPanel";
 import { ScrollFade } from "./ScrollFade";
 import { getRuntimeIndicatorState } from "../utils/statusIndicators";
 import { getEffectiveActorRunner } from "../utils/headlessRuntimeSupport";
@@ -90,6 +105,10 @@ interface AgentTabProps {
   termEpoch?: number;
   agentState: AgentState | null;
   isVisible: boolean;
+  compact?: boolean;
+  suspendWhenHidden?: boolean;
+  onExpand?: () => void;
+  navigation?: ReactNode;
   readOnly?: boolean;
   actorStatusProvisional: boolean;
   onQuit: () => void;
@@ -112,6 +131,10 @@ export function AgentTab({
   termEpoch = 0,
   agentState,
   isVisible,
+  compact = false,
+  suspendWhenHidden = false,
+  onExpand,
+  navigation,
   readOnly,
   actorStatusProvisional,
   onQuit,
@@ -143,7 +166,10 @@ export function AgentTab({
   const hasRuntimeResumeFailure = actorHasRuntimeResumeFailure(actor);
   const runtimeResumeError = String(actor.runtime_session_last_resume_error || "").trim();
   const canControl = !readOnly;
-  const isBusy = busy.includes(actor.id);
+  const actorBusy = useUIStore(
+    (state) => (state.actorBusy[JSON.stringify([groupId, actor.id])] || 0) > 0,
+  );
+  const isBusy = actorBusy || busy.includes(actor.id);
   const latestHeadlessText = useGroupStore((state) => {
     const bucket = state.chatByGroup[String(groupId || "").trim()];
     if (!bucket) return "";
@@ -189,6 +215,7 @@ export function AgentTab({
     scrollbackLines: terminalScrollbackLines,
   });
   const [activated, setActivated] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Bumped to trigger a fresh WebSocket connection from the reconnect button
   const [reconnectTrigger, setReconnectTrigger] = useState(0);
   const [stoppedTerminalText, setStoppedTerminalText] = useState("");
@@ -208,7 +235,7 @@ export function AgentTab({
   }, [canControl]);
 
   // Activate the terminal only after the user has visited this actor tab at least once.
-  // Once activated, keep the PTY session connected even when the tab is hidden to avoid backlog replay and scroll jumps.
+  // Keep the xterm instance; tiled views suspend the browser connection while hidden.
   useEffect(() => {
     if (!isVisible) return;
     const timer = window.setTimeout(() => setActivated(true), 0);
@@ -339,7 +366,8 @@ export function AgentTab({
 
   const runtimeStatusText = (() => {
     if (!isRunning) return t("stopped");
-    if (workingState === "working") return t("working");
+    if (workingState === "working" || workingState === "waiting" || workingState === "stuck")
+      return t(workingState);
     return t("running");
   })();
   const handleNewSession = () => {
@@ -422,7 +450,6 @@ export function AgentTab({
     // Ensure focus works consistently across browsers (and prevents the inactive cursor style).
     const onMouseDown = () => term.focus();
     term.element?.addEventListener("mousedown", onMouseDown);
-    const detachTouchScroll = attachTerminalTouchScroll(term);
 
     const copySelection = async (): Promise<boolean> => {
       try {
@@ -513,7 +540,6 @@ export function AgentTab({
 
     return () => {
       if (fitFrame) cancelAnimationFrame(fitFrame);
-      detachTouchScroll();
       term.element?.removeEventListener("contextmenu", onContextMenu);
       term.element?.removeEventListener("mousedown", onMouseDown);
       term.dispose();
@@ -531,10 +557,13 @@ export function AgentTab({
     connectionFailed,
     terminalReady,
     terminalWritable,
+    canSendInput,
     requestReconnect,
+    requestTakeover,
     sendInterrupt,
   } = useAgentTerminalConnection({
-    activated,
+    takeoverOnAttach: false,
+    activated: activated && (!suspendWhenHidden || isVisible),
     isRunning,
     isHeadless,
     groupId,
@@ -550,6 +579,13 @@ export function AgentTab({
     clearTerminalSignal,
     setReconnectTrigger,
   });
+
+  // Follow xterm's lifetime, while reading connection ownership live on each move.
+  useEffect(() => {
+    const term = terminalRef.current;
+    if (!term) return;
+    return attachTerminalTouchScroll(term, canSendInput);
+  }, [actor.id, groupId, isHeadless, isRunning, activated, canSendInput]);
 
   // Fit terminal on visibility change and resize (with debounce to reduce jitter)
   useEffect(() => {
@@ -592,12 +628,12 @@ export function AgentTab({
       if (resizeTimeout) clearTimeout(resizeTimeout);
       for (const timer of initialTimers) window.clearTimeout(timer);
     };
-  }, [actor.id, groupId, isRunning, isVisible]);
+  }, [activated, actor.id, groupId, isHeadless, isRunning, isVisible]);
 
   // UX: when the user switches to an agent tab (ops mode), focus the terminal automatically.
   // This avoids "typing into nowhere" if the chat composer was previously focused.
   useEffect(() => {
-    if (!canControl) return;
+    if (!canControl || compact) return;
     if (!isVisible) return;
     if (!terminalReady || !terminalWritable) return;
     if (isSmallScreen) return;
@@ -611,7 +647,7 @@ export function AgentTab({
       }
     }, 0);
     return () => clearTimeout(t);
-  }, [canControl, isVisible, isSmallScreen, terminalReady, terminalWritable]);
+  }, [canControl, compact, isVisible, isSmallScreen, terminalReady, terminalWritable]);
 
   const stateHeadline =
     String(agentState?.hot?.focus || agentState?.hot?.next_action || "").trim() ||
@@ -622,13 +658,89 @@ export function AgentTab({
     : 0;
   const stateNext = String(agentState?.hot?.next_action || "").trim();
   const actorGroupRole = normalizeActorGroupRole(actor.role);
+  const compactStatusText = !isRunning
+    ? runtimeStatusText
+    : !isHeadless && connectionStatus !== "connected"
+      ? t(connectionStatus === "disconnected" ? "connectionLost" : "chat:workView.connecting")
+      : workingState === "waiting" || workingState === "stuck"
+        ? runtimeStatusText
+        : !isHeadless && terminalReady && !terminalWritable
+          ? t("readOnlyConnection")
+          : "";
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="@container/actor-view flex min-h-0 min-w-0 flex-col h-full">
+      {compact ? (
+        <div
+          className={classNames(
+            "flex min-h-9 shrink-0 items-center border-b border-[var(--glass-border-subtle)] px-2 text-xs [@media(pointer:coarse)]:min-h-11",
+            navigation
+              ? "flex-wrap @min-[480px]/actor-view:flex-nowrap @min-[480px]/actor-view:gap-2"
+              : "gap-2",
+          )}
+        >
+          <div
+            className={classNames(
+              "flex min-w-0 flex-1 items-center gap-2",
+              Boolean(navigation) && "basis-full min-h-8 @min-[480px]/actor-view:basis-auto",
+            )}
+          >
+            <span
+              className={`h-2 w-2 shrink-0 rounded-full ${statusTone.dotClass}`}
+              role="img"
+              aria-label={runtimeStatusText}
+              title={[runtimeStatusText, actor.effective_working_reason].filter(Boolean).join("\n")}
+            />
+            <span
+              id={`runtime-inspector-${actor.id}`}
+              className="min-w-0 flex-1 truncate font-semibold"
+              title={actor.title || actor.id}
+            >
+              {actor.title || actor.id}
+            </span>
+            {compactStatusText ? (
+              <span
+                className="max-w-[40%] shrink-0 truncate text-[var(--color-text-secondary)]"
+                title={[compactStatusText, actor.effective_working_reason]
+                  .filter(Boolean)
+                  .join("\n")}
+              >
+                {compactStatusText}
+              </span>
+            ) : null}
+          </div>
+          {navigation}
+          <ActorQuickControls
+            key={String(isVisible)}
+            actorTitle={actor.title || actor.id}
+            running={isRunning}
+            busy={isBusy}
+            readOnly={!canControl}
+            hasTerminal={!isHeadless}
+            writable={terminalWritable}
+            connected={terminalReady && connectionStatus === "connected"}
+            connectionFailed={connectionFailed}
+            canStartNewSession={canStartNewSession}
+            unreadCount={unreadCount}
+            onInterrupt={sendInterrupt}
+            onLaunch={onLaunch}
+            onReconnect={requestReconnect}
+            onTakeover={requestTakeover}
+            onHistory={() => setHistoryOpen(true)}
+            onNewSession={handleNewSession}
+            onRestart={onRelaunch}
+            onStop={onQuit}
+            onEdit={onEdit}
+            onInbox={onInbox}
+            onRemove={onRemove}
+            onExpand={onExpand}
+          />
+        </div>
+      ) : null}
       {/* Agent Header */}
       <div
         className={classNames(
-          "border-b px-4 py-2 sm:px-5",
+          compact ? "hidden" : "border-b px-4 py-2 sm:px-5",
           isDark
             ? "border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))]"
             : "border-black/6 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.88))]",
@@ -675,7 +787,10 @@ export function AgentTab({
             <div className="flex min-w-0 items-center gap-3">
               <div className="min-w-0 shrink-0">
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="min-w-0 truncate font-semibold text-[var(--color-text-primary)]">
+                  <span
+                    id={compact ? undefined : `runtime-inspector-${actor.id}`}
+                    className="min-w-0 truncate font-semibold text-[var(--color-text-primary)]"
+                  >
                     {actor.title || actor.id}
                   </span>
                   <span className={actorGroupRoleBadgeClass(actorGroupRole)}>
@@ -691,7 +806,6 @@ export function AgentTab({
                   )}
                 >
                   {rtInfo?.label || t("custom")} • {runtimeStatusText}
-                  {isHeadless && ` • ${t("headless")}`}
                 </div>
                 {/* Mobile-only: condensed single-line agent state */}
                 <div
@@ -790,9 +904,11 @@ export function AgentTab({
           <div
             className={classNames(
               "flex h-full min-h-0 flex-col",
-              isWebModel
-                ? "px-3 pb-3 pt-2 sm:px-4 sm:pb-4"
-                : "px-5 pb-5 pt-3 sm:px-7 sm:pb-6 sm:pt-3",
+              compact
+                ? "p-2"
+                : isWebModel
+                  ? "px-3 pb-3 pt-2 sm:px-4 sm:pb-4"
+                  : "px-5 pb-5 pt-3 sm:px-7 sm:pb-6 sm:pt-3",
             )}
           >
             <div
@@ -814,7 +930,9 @@ export function AgentTab({
               {!isWebModel ? (
                 <div className="min-h-0 flex-1">
                   {resumeFailureNotice && !isRunning ? (
-                    <div className="flex h-full min-h-[420px] items-center justify-center">
+                    <div
+                      className={`flex h-full ${compact ? "min-h-0 overflow-y-auto" : "min-h-[420px]"} items-center justify-center`}
+                    >
                       {resumeFailureNotice}
                     </div>
                   ) : (
@@ -828,6 +946,7 @@ export function AgentTab({
                         defaultValue: "There is no streaming output to show yet.",
                       })}
                       isDark={isDark}
+                      compact={compact}
                     />
                   )}
                 </div>
@@ -852,7 +971,9 @@ export function AgentTab({
             {connectionStatus === "disconnected" && !terminalReady && (
               <div
                 className={classNames(
-                  "absolute inset-0 flex flex-col items-center justify-center p-8",
+                  compact
+                    ? "absolute inset-0 flex flex-col items-center overflow-y-auto p-2 text-xs"
+                    : "absolute inset-0 flex flex-col items-center justify-center p-8",
                   "text-[var(--color-text-tertiary)] bg-[var(--glass-panel-bg)]",
                 )}
               >
@@ -879,14 +1000,16 @@ export function AgentTab({
                 )}
               </div>
             )}
-            {canControl &&
+            {!compact &&
+            canControl &&
             connectionStatus === "connected" &&
             terminalReady &&
             !terminalWritable ? (
               <div className="absolute right-4 top-4 z-10 rounded-lg border border-amber-500/30 bg-amber-500/12 px-3 py-2 text-xs font-medium text-amber-700 shadow-sm backdrop-blur dark:text-amber-200">
-                {t("terminalReadOnlyNotice", {
-                  defaultValue: "Terminal is connected read-only. Reconnect to take control.",
-                })}
+                {t("terminalReadOnlyNotice", { defaultValue: "Terminal is connected read-only." })}
+                <button type="button" className="ml-2 underline" onClick={requestTakeover}>
+                  {t("takeControl")}
+                </button>
               </div>
             ) : null}
           </>
@@ -894,7 +1017,9 @@ export function AgentTab({
           // Stopped agent
           <div
             className={classNames(
-              "flex flex-col items-center h-full p-8 overflow-y-auto",
+              compact
+                ? "flex flex-col items-center h-full p-3 overflow-y-auto"
+                : "flex flex-col items-center h-full p-8 overflow-y-auto",
               "text-[var(--color-text-tertiary)]",
             )}
           >
@@ -940,7 +1065,7 @@ export function AgentTab({
       </div>
 
       {/* Action Buttons - Scrollable on mobile with fade edges */}
-      {canControl ? (
+      {canControl && !compact ? (
         <ScrollFade
           className={classNames("border-t select-none", "glass-header")}
           innerClassName="flex items-center gap-2 px-4 py-3 sm:px-5"
@@ -1028,6 +1153,20 @@ export function AgentTab({
               </button>
             </>
           )}
+          {!isHeadless ? (
+            // A runtime that repaints in place leaves xterm's scrollback empty,
+            // so scrolling the terminal cannot reach earlier output. The bytes
+            // live on the server either way; this reads them from there.
+            <button
+              onClick={() => setHistoryOpen(true)}
+              className={`${ghostActionButtonClass} flex-shrink-0 whitespace-nowrap`}
+              aria-label={t("openTerminalHistory")}
+              title={t("openTerminalHistory")}
+            >
+              <ClockIcon size={16} />
+              {!isSmallScreen && t("terminalHistory")}
+            </button>
+          ) : null}
           <button
             onClick={onInbox}
             className={classNames(
@@ -1070,6 +1209,15 @@ export function AgentTab({
             {!isSmallScreen && t("common:remove")}
           </button>
         </ScrollFade>
+      ) : null}
+      {historyOpen ? (
+        <TerminalHistoryPanel
+          groupId={groupId}
+          actorId={actor.id}
+          actorTitle={actor.title || actor.id}
+          isDark={isDark}
+          onClose={() => setHistoryOpen(false)}
+        />
       ) : null}
     </div>
   );

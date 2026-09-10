@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+"""Browser regression using real AppShell, xterm and synthetic fixture transports.
+
+Requires Chrome, requests and websocket-client. Run an isolated Vite server first:
+  CCCC_WEB_PORT=19999 npm -C web run dev -- --host 127.0.0.1 --port 15559
+Then: python3 web/tests/browser/group-work.py
+Do not edit frontend files during this run (Vite hot reload replaces fixture state).
+Optional env: CHROME_BIN, CCCC_GROUP_WORK_BASE_URL, CCCC_GROUP_WORK_OUTPUT_DIR.
+The browser always uses a new temporary profile; it never accesses existing tabs.
+"""
+
+import base64, json, os, subprocess, tempfile, time
+from pathlib import Path
+import requests, websocket
+
+OUT = Path(
+    os.environ.get("CCCC_GROUP_WORK_OUTPUT_DIR")
+    or tempfile.mkdtemp(prefix="cccc-group-work-evidence-")
+)
+OUT.mkdir(parents=True, exist_ok=True)
+BASE_URL = os.environ.get("CCCC_GROUP_WORK_BASE_URL", "http://127.0.0.1:15559").rstrip(
+    "/"
+)
+with tempfile.TemporaryDirectory(
+    prefix="cccc-group-work-browser-", ignore_cleanup_errors=True
+) as profile:
+    browser = subprocess.Popen(
+        [
+            os.environ.get("CHROME_BIN", "/usr/bin/google-chrome"),
+            "--headless=new",
+            "--no-sandbox",
+            "--remote-debugging-port=0",
+            "--remote-allow-origins=*",
+            "--user-data-dir=" + profile,
+            "about:blank",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    sock = None
+    try:
+        portfile = Path(profile) / "DevToolsActivePort"
+        for _ in range(100):
+            if portfile.exists():
+                break
+            time.sleep(0.1)
+        port = portfile.read_text().splitlines()[0]
+        target = requests.put(
+            f"http://127.0.0.1:{port}/json/new?about:blank", timeout=5
+        ).json()
+        sock = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=20)
+        seq = 0
+
+        def cdp(method, params=None):
+            global seq
+            seq += 1
+            sock.send(json.dumps({"id": seq, "method": method, "params": params or {}}))
+            while True:
+                msg = json.loads(sock.recv())
+                if msg.get("method") == "Runtime.consoleAPICalled" and msg.get(
+                    "params", {}
+                ).get("type") in ["warning", "error"]:
+                    print("CONSOLE", msg["params"], flush=True)
+                if msg.get("id") != seq:
+                    continue
+                if "error" in msg:
+                    raise RuntimeError(msg["error"])
+                return msg["result"]
+
+        def js(expr):
+            r = cdp(
+                "Runtime.evaluate",
+                {"expression": expr, "awaitPromise": True, "returnByValue": True},
+            )
+            if "exceptionDetails" in r:
+                raise RuntimeError(r["exceptionDetails"])
+            return r.get("result", {}).get("value")
+
+        def click(selector):
+            js(f"document.querySelector({json.dumps(selector)}).click()")
+            time.sleep(0.15)
+
+        def shot(name):
+            time.sleep(0.2)
+            r = cdp("Page.captureScreenshot", {"format": "png"})
+            (OUT / (name + ".png")).write_bytes(base64.b64decode(r["data"]))
+
+        def key(name, shift=False):
+            cdp(
+                "Input.dispatchKeyEvent",
+                {
+                    "type": "keyDown",
+                    "key": name,
+                    "code": name,
+                    "windowsVirtualKeyCode": 9 if name == "Tab" else 27,
+                    "modifiers": 8 if shift else 0,
+                },
+            )
+            cdp(
+                "Input.dispatchKeyEvent",
+                {
+                    "type": "keyUp",
+                    "key": name,
+                    "code": name,
+                    "windowsVirtualKeyCode": 9 if name == "Tab" else 27,
+                    "modifiers": 8 if shift else 0,
+                },
+            )
+            time.sleep(0.03)
+
+        def wait(expr):
+            for _ in range(150):
+                if js(expr):
+                    return
+                time.sleep(0.1)
+            shot("failure")
+            print(
+                "RESOURCES",
+                js(
+                    'performance.getEntriesByType("resource").map(e=>e.name).filter(n=>n.includes("fixture")||n.includes("main"))'
+                ),
+                flush=True,
+            )
+            print(
+                "FAILURE",
+                js(
+                    "({body:document.body.innerText.slice(0,2500),errors:groupWorkProbe.errors,state:groupWorkProbe.ui.getState().chatSessions,sockets:groupWorkProbe.sockets.map(s=>({actor:s.actor,ready:s.readyState,frames:s.frames})),requests:groupWorkProbe.requests})"
+                ),
+                flush=True,
+            )
+            raise AssertionError(expr)
+
+        def dimensions(width, height=900):
+            cdp(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": 1,
+                    "mobile": width < 600,
+                },
+            )
+            time.sleep(0.15)
+
+        def rect(selector):
+            return js(
+                f"document.querySelector({json.dumps(selector)}).getBoundingClientRect().toJSON()"
+            )
+
+        def drag_to(x):
+            r = js(
+                'document.querySelector("[data-group-work-area]").parentElement.nextElementSibling.getBoundingClientRect().toJSON()'
+            )
+            start = r["x"] + r["width"] / 2
+            y = r["y"] + r["height"] / 2
+            cdp("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start, "y": y})
+            cdp(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mousePressed",
+                    "x": start,
+                    "y": y,
+                    "button": "left",
+                    "buttons": 1,
+                    "clickCount": 1,
+                },
+            )
+            for i in range(1, 11):
+                cdp(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseMoved",
+                        "x": start + (x - start) * i / 10,
+                        "y": y,
+                        "buttons": 1,
+                        "button": "left",
+                    },
+                )
+            cdp(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseReleased",
+                    "x": x,
+                    "y": y,
+                    "button": "left",
+                    "clickCount": 1,
+                },
+            )
+            time.sleep(0.15)
+
+        cdp("Runtime.enable")
+        cdp("Emulation.setFocusEmulationEnabled", {"enabled": True})
+        dimensions(1440)
+        cdp("Page.navigate", {"url": BASE_URL + "/ui/tests/browser/group-work.html"})
+        wait(
+            '!!window.groupWorkProbe && !!document.querySelector("[data-group-work-area]")'
+        )
+        time.sleep(0.5)
+
+        def live():
+            return js(
+                "groupWorkProbe.sockets.filter(s=>s.readyState===1).map(s=>s.actor).sort()"
+            )
+
+        def tiled():
+            js(
+                "document.querySelector('[data-group-view-switch] button:last-child').click()"
+            )
+
+        def messages():
+            js(
+                "document.querySelector('[data-group-view-switch] button:first-child').click()"
+            )
+
+        def point_click(selector):
+            r = rect(selector)
+            x = r["x"] + min(20, r["width"] / 2)
+            y = r["y"] + min(20, r["height"] / 2)
+            cdp(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mousePressed",
+                    "x": x,
+                    "y": y,
+                    "button": "left",
+                    "clickCount": 1,
+                },
+            )
+            cdp(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseReleased",
+                    "x": x,
+                    "y": y,
+                    "button": "left",
+                    "clickCount": 1,
+                },
+            )
+            time.sleep(0.1)
+
+        def typing(text):
+            cdp("Input.insertText", {"text": text})
+            time.sleep(0.1)
+
+        def visible_panes():
+            return js(
+                'Array.from(document.querySelectorAll("[data-runtime-actor-id]")).filter(e=>e.getBoundingClientRect().width>0).map(e=>e.dataset.runtimeActorId)'
+            )
+
+        # Desktop preferences share controls with the narrow-header sheet.
+        settings_trigger = "[data-app-settings-trigger]"
+        settings_panel = "[data-app-settings-menu]"
+
+        def preference(index, value, container=settings_panel):
+            js(f'''(() => {{
+              const select = document.querySelector({json.dumps(container)}).querySelectorAll('select')[{index}];
+              select.value = {json.dumps(value)};
+              select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            }})()''')
+            time.sleep(0.2)
+
+        def menu_bounds(selector):
+            bounds = rect(selector)
+            assert bounds["x"] >= 0 and bounds["y"] >= 0, bounds
+            assert bounds["right"] <= js("innerWidth") + 1, bounds
+            assert bounds["bottom"] <= js("innerHeight") + 1, bounds
+            assert js(f'''Array.from(document.querySelector({json.dumps(selector)}).querySelectorAll('select')).every(e => e.scrollWidth <= e.clientWidth + 1)''')
+
+        point_click('header [aria-label="Edit group"]')
+        point_click('header [aria-label="Context Panel"]')
+        assert js('groupWorkProbe.actions.includes("onOpenGroupEdit") && groupWorkProbe.actions.includes("onOpenContext")')
+        point_click(settings_trigger)
+        wait('!!document.querySelector("[data-app-settings-menu]")')
+        menu_bounds(settings_panel)
+        assert js('document.activeElement === document.querySelector("[data-app-settings-menu] select")')
+        key("Tab")
+        assert js('document.activeElement === document.querySelectorAll("[data-app-settings-menu] select")[1]')
+        key("Tab", shift=True)
+        key("Escape")
+        wait('!document.querySelector("[data-app-settings-menu]")')
+        assert js('document.activeElement.matches("[data-app-settings-trigger]")')
+
+        for locale in ["en", "zh", "ja"]:
+            js("groupWorkProbe.language(" + json.dumps(locale) + ")")
+            for dark in [False, True]:
+                js("groupWorkProbe.setDark(" + json.dumps(dark) + ")")
+                point_click(settings_trigger)
+                wait('!!document.querySelector("[data-app-settings-menu]")')
+                for scale in ["125", "70", "100"]:
+                    preference(1, scale)
+                    menu_bounds(settings_panel)
+                    assert js('document.querySelectorAll("[data-app-settings-menu] select")[1].value') == scale
+                shot("settings-" + locale + ("-dark" if dark else "-light"))
+                key("Escape")
+                wait('!document.querySelector("[data-app-settings-menu]")')
+        js('groupWorkProbe.language("en")')
+        js("groupWorkProbe.setDark(false)")
+        point_click(settings_trigger)
+        preference(0, "dark")
+        assert js('document.documentElement.classList.contains("dark")')
+        assert js('localStorage.getItem("cccc-theme")') == "dark"
+        preference(0, "light")
+        preference(2, "ja")
+        assert js('document.querySelectorAll("[data-app-settings-menu] select")[2].value') == "ja"
+        assert js('localStorage.getItem("cccc-language")') == "ja"
+        preference(2, "en")
+        # The full production SettingsModal must own focus after the popover closes.
+        point_click(settings_panel + " button:last-child")
+        wait('!!document.querySelector("[aria-modal=true]") && !document.querySelector("[data-app-settings-menu]")')
+        time.sleep(0.3)
+        assert js('document.activeElement.closest("[aria-modal=true]")!==null')
+        key("Escape")
+        wait('!document.querySelector("[aria-modal=true]")')
+        assert js('document.activeElement.matches("[data-app-settings-trigger]")')
+        point_click(settings_trigger)
+        point_click(settings_panel + " button:first-of-type")
+        wait('!!document.querySelector("[aria-modal=true]")')
+        assert js('groupWorkProbe.actions.includes("onOpenAccount")')
+        key("Escape")
+        wait('!document.querySelector("[aria-modal=true]")')
+        js("groupWorkProbe.setCanAccessAccount(false)")
+        point_click(settings_trigger)
+        assert js('document.querySelectorAll("[data-app-settings-menu] button").length') == 1
+        key("Escape")
+        js("groupWorkProbe.setCanAccessAccount(true)")
+        point_click(settings_trigger)
+        js('groupWorkProbe.chooseGroup("g2")')
+        wait('!document.querySelector("[data-app-settings-menu]")')
+        js('groupWorkProbe.chooseGroup("g1")')
+        point_click(settings_trigger)
+        dimensions(900)
+        wait('!document.querySelector("[data-app-settings-menu]")')
+        assert js('document.querySelector("[data-app-settings-trigger]").getClientRects().length') == 0
+        point_click('header [aria-label="Menu"]')
+        wait('!!document.querySelector(".mobile-menu-panel")')
+        for width, height in [(900, 700), (390, 844), (320, 568), (390, 360)]:
+            dimensions(width, height)
+            preference(1, "125", ".mobile-menu-panel")
+            menu_bounds(".mobile-menu-panel")
+            js('document.querySelector(".mobile-menu-content").scrollTop=9999')
+            time.sleep(0.1)
+            assert js('(() => {const e=document.querySelector(".mobile-menu-panel button:last-child");const r=e.getBoundingClientRect();return r.bottom<=innerHeight && r.top>=0;})()')
+            shot("settings-mobile-" + str(width) + "-" + str(height))
+            preference(1, "100", ".mobile-menu-panel")
+        key("Escape")
+        wait('!document.querySelector(".mobile-menu-panel")')
+        dimensions(1440)
+        print("PASS settings choices/locales/scale, account scope, keyboard focus, dialog handoff, responsive dismissal and mobile reachability", flush=True)
+
+        composer_selector = "textarea:not(.xterm-helper-textarea)"
+        composer = rect(composer_selector)
+        js("document.querySelector(" + json.dumps(composer_selector) + ").focus()")
+        typing("Keep this Group draft")
+        logselector = "[data-group-message-view] [role=log]"
+        print(
+            "SCROLL_ELEMENTS",
+            js(
+                'Array.from(document.querySelectorAll("[data-group-message-view] *")).filter(e=>e.scrollHeight>e.clientHeight+200&&e.clientHeight>200).map(e=>({tag:e.tagName,role:e.getAttribute("role"),cls:e.className}))'
+            ),
+            flush=True,
+        )
+        if js("!!document.querySelector(" + json.dumps(logselector) + ")"):
+            js("document.querySelector(" + json.dumps(logselector) + ").scrollTop=800")
+            time.sleep(0.3)
+            beforeScroll = js(
+                "document.querySelector(" + json.dumps(logselector) + ").scrollTop"
+            )
+        else:
+            beforeScroll = None
+        tiled()
+        wait("groupWorkProbe.sockets.filter(s=>s.readyState===1).length===4")
+        time.sleep(0.5)
+        assert live() == ["actor-1", "actor-2", "actor-3", "actor-4"], live()
+        assert rect(composer_selector) == composer, (rect(composer_selector), composer)
+        assert (
+            js("document.querySelector(" + json.dumps(composer_selector) + ").value")
+            == "Keep this Group draft"
+        )
+        assert js(
+            'Array.from(document.querySelectorAll("[data-group-presentation-trigger]")).some(e=>{let r=e.getBoundingClientRect();return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===e||e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))})'
+        )
+        for id, text in [("actor-1", "first-window"), ("actor-3", "third-window")]:
+            point_click('[data-runtime-actor-id="' + id + '"] .xterm-screen')
+            typing(text)
+            assert js(
+                "groupWorkProbe.sockets.filter(s=>s.readyState===1&&s.actor==="
+                + json.dumps(id)
+                + ").some(s=>s.frames.some(f=>f.type===48&&f.text.includes("
+                + json.dumps(text)
+                + ")))"
+            )
+            assert not js(
+                "groupWorkProbe.sockets.filter(s=>s.readyState===1&&s.actor!=="
+                + json.dumps(id)
+                + ").some(s=>s.frames.some(f=>f.type===48&&f.text.includes("
+                + json.dumps(text)
+                + ")))"
+            )
+        js("window.focusedTerminal=document.activeElement")
+        time.sleep(1.7)
+        assert js("document.activeElement===window.focusedTerminal")
+        js(
+            'window.savedTerminal=document.querySelector("[data-runtime-actor-id=actor-1] .xterm-screen")'
+        )
+        opens = js("groupWorkProbe.sockets.length")
+        click('[aria-label="Maximize Foreman"]')
+        wait('!!document.querySelector("[aria-modal=true]")')
+        time.sleep(0.4)
+        assert js(
+            'document.querySelector("[data-runtime-actor-id=actor-1] .xterm-screen")===window.savedTerminal'
+        )
+        assert js("groupWorkProbe.sockets.length") == opens
+        point_click('[data-runtime-actor-id="actor-1"] .xterm-screen')
+        key("Escape")
+        key("Tab")
+        assert js('!!document.querySelector("[aria-modal=true]")')
+        assert js(
+            'groupWorkProbe.sockets.find(s=>s.actor==="actor-1").frames.some(f=>f.type===48&&f.text.includes(String.fromCharCode(27)))'
+        )
+        assert js(
+            'document.querySelector("[data-runtime-actor-id=actor-1] .xterm-screen").getBoundingClientRect().height>600'
+        )
+        shot("maximized-desktop")
+        click('[aria-label="Close expanded Actor view"]')
+        time.sleep(0.3)
+        assert js(
+            'document.querySelector("[data-runtime-actor-id=actor-1] .xterm-screen")===window.savedTerminal'
+        )
+        assert js("groupWorkProbe.sockets.length") == opens
+        assert visible_panes() == ["actor-1", "actor-2", "actor-3", "actor-4"], (
+            visible_panes()
+        )
+        assert (
+            js(
+                'document.activeElement.closest("[data-runtime-actor-id]")?.dataset.runtimeActorId'
+            )
+            == "actor-1"
+        )
+        # Tile controls route to the intended Actor without reconnecting its terminal.
+        click('[data-runtime-actor-id=actor-1] [aria-label="Send interrupt signal"]')
+        assert js('groupWorkProbe.sockets.filter(s=>s.readyState===1&&s.actor==="actor-1").some(s=>s.frames.some(f=>f.type===48&&f.text.includes(String.fromCharCode(3))))')
+        click('[data-runtime-actor-id=actor-1] [aria-label="Controls for Foreman"]')
+        wait('!!document.querySelector("[data-radix-popper-content-wrapper]")')
+        shot("actor-controls")
+        key("Escape")
+        wait('!document.querySelector("[data-radix-popper-content-wrapper]")')
+        assert js('document.activeElement.getAttribute("aria-label")') == "Controls for Foreman"
+        click('[data-runtime-actor-id=actor-1] [aria-label="Controls for Foreman"]')
+        js('Array.from(document.querySelectorAll("[data-radix-popper-content-wrapper] button")).find(e=>e.textContent.includes("Terminal history")).click()')
+        # The modal schedules initial focus on the next animation frame.
+        wait('document.activeElement.closest("[aria-modal=true]")!==null')
+        key("Escape")
+        wait('!document.querySelector("[aria-modal=true]")')
+        assert js("groupWorkProbe.sockets.length") == opens
+        assert js('document.activeElement.getAttribute("aria-label")') == "Controls for Foreman"
+        messages()
+        wait("groupWorkProbe.sockets.every(s=>s.readyState===3)")
+        time.sleep(0.3)
+        if beforeScroll is not None:
+            afterScroll = js(
+                "document.querySelector(" + json.dumps(logselector) + ").scrollTop"
+            )
+            assert abs(afterScroll - beforeScroll) < 2, (beforeScroll, afterScroll)
+        assert (
+            js("document.querySelector(" + json.dumps(composer_selector) + ").value")
+            == "Keep this Group draft"
+        )
+        tiled()
+        wait("groupWorkProbe.sockets.filter(s=>s.readyState===1).length===4")
+        click('[aria-label="Next page"]')
+        wait(
+            'groupWorkProbe.sockets.filter(s=>s.readyState===1).map(s=>s.actor).sort().join(",")==="actor-5,actor-6,actor-7,actor-8"'
+        )
+        js('groupWorkProbe.chooseGroup("g2")')
+        time.sleep(0.3)
+        assert live() == [], live()
+        assert (
+            js(
+                'document.querySelector("[data-group-terminal-view]").dataset.groupTerminalView'
+            )
+            == "hidden"
+        )
+        js('groupWorkProbe.chooseGroup("g1")')
+        wait(
+            'groupWorkProbe.sockets.filter(s=>s.readyState===1).map(s=>s.actor).sort().join(",")==="actor-5,actor-6,actor-7,actor-8"'
+        )
+        js("window.groupWorkReloadPending=true")
+        cdp("Page.reload")
+        wait(
+            '!window.groupWorkReloadPending && !!window.groupWorkProbe && groupWorkProbe.sockets.filter(s=>s.readyState===1).map(s=>s.actor).sort().join(",")==="actor-5,actor-6,actor-7,actor-8"'
+        )
+        # Width changes keep the focused Actor, then the visible page anchor.
+        point_click('[data-runtime-actor-id="actor-7"] .xterm-screen')
+        dimensions(700)
+        wait('groupWorkProbe.sockets.filter(s=>s.readyState===1).map(s=>s.actor).sort().join(",")==="actor-7"')
+        assert js('groupWorkProbe.ui.getState().chatSessions.g1.terminalPage') == 6
+        dimensions(1440)
+        wait('groupWorkProbe.sockets.filter(s=>s.readyState===1).length===4')
+        assert visible_panes() == ["actor-5", "actor-6", "actor-7", "actor-8"]
+        for count in [2, 3, 4, 8]:
+            js("groupWorkProbe.setCount(" + str(count) + ")")
+            time.sleep(0.35)
+            assert len(live()) == min(count, 4), (count, live())
+            shot("actors-" + str(count))
+        for locale in ["en", "zh", "ja"]:
+            js("groupWorkProbe.language(" + json.dumps(locale) + ")")
+            time.sleep(0.3)
+            for w, h in [(1440, 900), (1024, 900), (390, 844), (320, 568)]:
+                dimensions(w, h)
+                time.sleep(0.35)
+                assert len(live()) == (4 if w >= 1024 else 1), (locale, w, live())
+                assert js('Array.from(document.querySelectorAll("header button")).filter(e=>e.getBoundingClientRect().width>0).every(e=>{let r=e.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth+1})'), (locale, w, "header overflow")
+                assert not js("document.documentElement.scrollWidth>innerWidth"), (
+                    locale,
+                    w,
+                )
+                assert js(
+                    'Array.from(document.querySelectorAll("[data-runtime-actor-id]")).filter(e=>e.getBoundingClientRect().width>0).every(e=>{let r=e.getBoundingClientRect();let a=document.querySelector("[data-group-work-area]").getBoundingClientRect();return r.top>=a.top&&r.bottom<=a.bottom+1&&r.width>250&&r.height>150})'
+                ), (locale, w)
+                assert js(
+                    'Array.from(document.querySelectorAll("[data-group-work-area] button, [data-group-work-area] select")).filter(e=>e.getBoundingClientRect().width>0).every(e=>{let r=e.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth+1})'
+                ), (locale, w)
+                if w < 480:
+                    assert js('Array.from(document.querySelectorAll("[data-actor-quick-controls]")).filter(e=>e.getBoundingClientRect().width>0).every(e=>Array.from(e.children).filter(b=>b.tagName==="BUTTON"&&b.getBoundingClientRect().width>0).length===2)'), (locale, w, "compact controls")
+                assert js(
+                    'document.querySelector("[data-group-work-area]").getBoundingClientRect().top>=document.querySelector("header").getBoundingClientRect().bottom-1'
+                ), (locale, w)
+                assert js(
+                    'Array.from(document.querySelectorAll("[data-runtime-actor-id] .xterm-screen")).filter(e=>e.getBoundingClientRect().width>0).every(e=>{let parent=e.closest(".xterm").parentElement;return Math.abs(e.getBoundingClientRect().height-parent.clientHeight)<25})'
+                ), (locale, w)
+                shot("layout-" + locale + "-" + str(w))
+            js("groupWorkProbe.setDark(true)")
+            shot("dark-" + locale + "-320")
+            js("groupWorkProbe.setDark(false)")
+
+        dimensions(1440)
+        js('groupWorkProbe.language("en")')
+        js("groupWorkProbe.setCount(8)")
+        time.sleep(0.3)
+        # Presentation must be operable while tiles are visible, including its split viewer.
+        click("[data-group-presentation-trigger]")
+        time.sleep(0.2)
+        shot("presentation-dock")
+        js('groupWorkProbe.ui.getState().setChatPresentationDisplayMode("g1","split")')
+        js(
+            'groupWorkProbe.modals.getState().setPresentationViewer({groupId:"g1",slotId:"slot-1",surface:"split"})'
+        )
+        time.sleep(0.5)
+        shot("presentation-split")
+        assert js('!!document.querySelector("[role=separator]")')
+        drag_to(850)
+        time.sleep(0.4)
+        assert len(live()) == 1, live()
+        js("groupWorkProbe.modals.getState().setPresentationViewer(null)")
+        time.sleep(0.5)
+        assert len(live()) == 4
+        js('groupWorkProbe.ui.getState().setChatPresentationDockOpen("g1",false)')
+        # Stopped/headless Actors remain useful without creating a PTY connection.
+        js('groupWorkProbe.ui.getState().setGroupTerminalPage("g1",0)')
+        time.sleep(0.3)
+        js(
+            'groupWorkProbe.patchActor("actor-1",{running:false,enabled:false,effective_working_state:"idle"})'
+        )
+        js('groupWorkProbe.patchActor("actor-2",{runner:"headless"})')
+        js('groupWorkProbe.patchActor("actor-3",{effective_working_state:"waiting"})')
+        time.sleep(0.5)
+        shot("mixed-runtime-states")
+        assert len(live()) == 2, live()
+        assert js(
+            'document.querySelector("[data-runtime-actor-id=actor-1]").innerText.includes("Stopped")'
+        )
+        assert js(
+            'document.querySelector("[data-runtime-actor-id=actor-3]").innerText.includes("Waiting")'
+        )
+        # Coarse pointers enlarge touch controls: notices must not displace actions.
+        js('groupWorkProbe.patchActor("actor-4",{effective_working_state:"stuck"})')
+        cdp("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
+        dimensions(320, 568)
+        for scale in [100, 125]:
+            js(f'groupWorkProbe.setTextScale({scale})')
+            for index, status in [(0, "Stopped"), (2, "Waiting"), (3, "Stuck")]:
+                js(f'groupWorkProbe.ui.getState().setGroupTerminalPage("g1",{index})')
+                time.sleep(0.3)
+                shot("touch-status-" + status.lower() + "-" + str(scale))
+                assert js(f'''(() => {{
+                    const name = document.querySelector('#runtime-inspector-actor-{index + 1}');
+                    const status = Array.from(name.parentElement.children).find(e => e.textContent === {json.dumps(status)});
+                    return name.getBoundingClientRect().width >= 60 && !!status && status.getBoundingClientRect().width >= 25;
+                }})()'''), status
+                assert js('''Array.from(document.querySelectorAll('[data-runtime-actor-id] button')).filter(e=>e.getClientRects().length).every(e=>{const r=e.getBoundingClientRect();return r.right<=innerWidth && r.left>=0;})'''), status
+        js('groupWorkProbe.setTextScale(100)')
+        cdp("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        dimensions(1440)
+        js('groupWorkProbe.patchActor("actor-4",{effective_working_state:"working"})')
+        js('groupWorkProbe.ui.getState().setGroupTerminalPage("g1",0)')
+        time.sleep(0.3)
+        # No hidden messages may acquire Voice viewed observations.
+        beforeViewed = js(
+            'groupWorkProbe.requests.filter(r=>r.path.endsWith("/messages/viewed")).length'
+        )
+        time.sleep(2.6)
+        assert (
+            js(
+                'groupWorkProbe.requests.filter(r=>r.path.endsWith("/messages/viewed")).length'
+            )
+            == beforeViewed
+        )
+        messages()
+        time.sleep(2.6)
+        assert (
+            js(
+                'groupWorkProbe.requests.filter(r=>r.path.endsWith("/messages/viewed")).length'
+            )
+            > beforeViewed
+        )
+        tiled()
+        time.sleep(0.3)
+        def readonly_touch_history(actor):
+            # Use xterm's public viewport state: rendered rows can be overscanned
+            # and the fixture keeps producing live output during the gesture.
+            pane = f'[data-runtime-actor-id={actor}]'
+            js(f'void(window.touchTerminal=groupWorkProbe.terminals.find(t=>t.element?.isConnected&&t.element.closest({json.dumps(pane)})))')
+            for mode in [1000, 1002, 1003]:
+                js(f'''(async()=>{{touchTerminal.reset();
+                    await new Promise(resolve=>touchTerminal.write(Array.from({{length:200}},(_,i)=>'audit-line '+i+'\\r\\n').join('')+'\\x1b[?1006h\\x1b[?'+{mode}+'h',resolve));
+                    touchTerminal.scrollToBottom();}})()''')
+                before = js('touchTerminal.buffer.active.viewportY')
+                screen = rect(pane + ' .xterm-screen')
+                cell_height = screen["height"] / js('touchTerminal.rows')
+                start = {"x": screen["x"] + screen["width"] / 2, "y": screen["y"] + screen["height"] / 3}
+                end = {"x": start["x"], "y": start["y"] + 3 * cell_height + 0.2}
+                sent = js(f'groupWorkProbe.sockets.filter(s=>s.actor==={json.dumps(actor)}).flatMap(s=>s.frames).filter(f=>f.type===48).length')
+                cdp("Emulation.setTouchEmulationEnabled", {"enabled": True})
+                cdp("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [start]})
+                cdp("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [end]})
+                cdp("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+                wait(f'touchTerminal.buffer.active.viewportY==={before-3}')
+                assert js(f'groupWorkProbe.sockets.filter(s=>s.actor==={json.dumps(actor)}).flatMap(s=>s.frames).filter(f=>f.type===48).length') == sent
+                cdp("Emulation.setTouchEmulationEnabled", {"enabled": False})
+            print("PASS Actor read-only touch", actor, flush=True)
+
+        # Read-only mode still shows output but cannot send raw terminal input.
+        js("groupWorkProbe.setReadOnly(true)")
+        time.sleep(0.3)
+        point_click("[data-runtime-actor-id=actor-3] .xterm-screen")
+        typing("must-not-send")
+        assert not js(
+            'groupWorkProbe.sockets.some(s=>s.frames.some(f=>f.type===48&&f.text.includes("must-not-send")))'
+        )
+        readonly_touch_history("actor-3")
+        js("groupWorkProbe.setReadOnly(false)")
+        js("groupWorkProbe.setCount(8)")
+        time.sleep(0.3)
+        # An existing writer stays in control until the user explicitly takes over.
+        messages()
+        wait("groupWorkProbe.sockets.every(s=>s.readyState===3)")
+        js('groupWorkProbe.externalWriters.add("actor-1")')
+        tiled()
+        wait('!!document.querySelector(`[data-runtime-actor-id=actor-1] [aria-label="Take control"]`)')
+        point_click("[data-runtime-actor-id=actor-1] .xterm-screen")
+        typing("read-only-attachment")
+        assert not js('groupWorkProbe.sockets.filter(s=>s.readyState===1&&s.actor==="actor-1").some(s=>s.frames.some(f=>f.type===48||f.type===50))')
+        readonly_touch_history("actor-1")
+        shot("writer-preserved")
+        click('[data-runtime-actor-id=actor-1] [aria-label="Take control"]')
+        wait('!groupWorkProbe.externalWriters.has("actor-1")')
+        time.sleep(0.3)
+        point_click("[data-runtime-actor-id=actor-1] .xterm-screen")
+        typing("explicit-takeover")
+        assert js('groupWorkProbe.sockets.filter(s=>s.readyState===1&&s.actor==="actor-1").some(s=>s.frames.some(f=>f.type===48&&f.text.includes("explicit-takeover")))')
+        # A source jump explicitly returns to message history.
+        js('void groupWorkProbe.group.getState().openChatWindow("g1","g1-event-10")')
+        wait("!!groupWorkProbe.group.getState().chatByGroup.g1.chatWindow")
+        assert js("groupWorkProbe.ui.getState().chatSessions.g1.workView") == "messages"
+        js('groupWorkProbe.group.getState().closeChatWindow("g1")')
+        tiled()
+        time.sleep(0.2)
+        js("groupWorkProbe.setCount(0)")
+        time.sleep(0.2)
+        assert live() == []
+        shot("empty-group")
+        js("groupWorkProbe.setCount(8)")
+        dimensions(390, 844)
+        time.sleep(0.4)
+        click("[data-mobile-presentation-trigger]")
+        time.sleep(0.3)
+        assert js('!!document.querySelector("[data-mobile-presentation-surface]")')
+        assert live() == []
+        key("Escape")
+        time.sleep(0.4)
+        assert (
+            js("groupWorkProbe.ui.getState().chatSessions.g1.workView") == "terminals"
+        )
+        assert len(live()) == 1
+        # The shared menu remains accessible when desktop header controls collapse.
+        dimensions(900)
+        time.sleep(0.3)
+        click('header [aria-label="Menu"]')
+        wait('!!document.querySelector(".mobile-menu-panel")')
+        assert rect('.mobile-menu-panel')["width"] > 300
+        shot("compact-desktop-menu")
+        key("Escape")
+        wait('!document.querySelector(".mobile-menu-panel")')
+        print("EVIDENCE", str(OUT), flush=True)
+        print(
+            "PASS input isolation, no focus theft, maximize same xterm/socket, terminal Escape/Tab, four-pane pagination, per-group persistence, reload, responsive/locales, Presentation split/mobile, stopped/headless, read-only input, Voice viewed gating and source navigation",
+            flush=True,
+        )
+        print("ERRORS", js("groupWorkProbe.errors"), flush=True)
+        assert not js("groupWorkProbe.errors")
+    finally:
+        if sock:
+            sock.close()
+        browser.terminate()
+        try:
+            browser.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            browser.kill()
+            browser.wait(timeout=5)

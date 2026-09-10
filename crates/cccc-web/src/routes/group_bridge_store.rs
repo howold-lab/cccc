@@ -1,5 +1,6 @@
 use cccc_contracts::utc_now;
 use cccc_core::HomeLayout;
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use sha2::Digest;
 use std::io;
@@ -52,6 +53,23 @@ impl<'a> BridgeStore<'a> {
             Ok(())
         })?;
         Ok(())
+    }
+
+    pub fn repair_legacy_claim_window(&self, request_id: &str, invite_id: &str) -> io::Result<()> {
+        let mut raw = cccc_core::group_bridge_legacy::load(self.home)?;
+        if !raw.is_object() {
+            raw = json!({});
+        }
+        let state = raw.as_object_mut().expect("bridge store initialized");
+        ensure_sections(state);
+        let now = Utc::now();
+        if !migrate_legacy_claim_window(state, request_id, invite_id, now) {
+            return Ok(());
+        }
+        self.update(|state| {
+            migrate_legacy_claim_window(state, request_id, invite_id, now);
+            Ok(())
+        })
     }
 
     pub fn identity(&self) -> io::Result<Value> {
@@ -156,4 +174,18 @@ fn normalize_legacy_active_outbounds(state: &mut Map<String, Value>) -> bool {
         }
     }
     changed
+}
+
+fn migrate_legacy_claim_window(
+    state: &mut Map<String, Value>,
+    request_id: &str,
+    invite_id: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    items_mut(state, "requests")
+        .iter_mut()
+        .find(|request| request["request_id"] == request_id && request["invite_id"] == invite_id)
+        .is_some_and(|request| {
+            super::group_bridge_pairing_policy::migrate_legacy_claim_window(request, now)
+        })
 }

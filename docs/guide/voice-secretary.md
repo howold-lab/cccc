@@ -8,6 +8,25 @@ Enabling it copies the foreman's runtime settings into the dedicated
 `voice-secretary` actor; disabling it removes only that actor and leaves
 documents, transcript sidecars, and model caches intact.
 
+On screens narrower than 640 px, the composer keeps the microphone and a
+**Voice options** button in the action bar. Voice options contains capture mode,
+language, prompt polishing, and the workspace entry in a scrollable panel with
+44 px touch targets. Recording locks still disable mode and language changes. Desktop and mobile
+language controls share the same disabled state, including pending saves;
+completion or failure re-enables language selection.
+Menus close when switching Groups, when their controls become unavailable, or
+when responsive layout hides their trigger. Opening the workspace transfers
+keyboard focus into it; closing it returns focus to the Voice options button.
+Transcription and prompt-processing status appear above the input instead of
+competing with action buttons. The wider-screen controls remain inline.
+
+For an isolated browser regression, start a Vite dev server on port 15559 and run
+`python3 web/tests/browser/voice-mobile.py` (see the script for configuration).
+It checks production controls at 390×844, 844×390, and 1280×900 in English,
+Chinese and Japanese, menu lifecycle and focus, and real xterm touch protocols.
+It uses a temporary Chrome profile and synthetic HTTP, with no microphone,
+provider or daemon calls. These checks do not replace iPhone Safari QA.
+
 ## Local ASR
 
 Open **Settings > Assistants**, enable Voice Secretary, select **Local ASR**, and
@@ -68,7 +87,19 @@ failure until after recording starts.
 Disconnects finalize the last hypothesis. Stopping capture releases the
 microphone immediately, runs the installed SenseVoice model on the blocking
 worker pool, and sends `final_asr_text` before closing the recording connection.
-If final ASR fails, the live transcript remains available. For segmented
+For document capture, successful complete final ASR is also stored as a `final`
+revision that supersedes the session's `live` checkpoints. The meeting view therefore
+replaces the low-latency **Live Paraformer** cards with the higher-quality
+**Final SenseVoice** result after stop or reconnect, while the raw live rows
+remain in transcript sidecars for recovery and audit. The daemon atomically
+deduplicates this revision against existing live semantic input; a short
+recording with no live input uses the final revision as its one document input
+when automatic document input is enabled.
+Partial final ASR never supersedes the complete live transcript. If no live text
+exists, its successful partial text remains the fallback. If final persistence
+fails, the WebSocket reports that state and the browser retries the idempotent
+revision before falling back to its retained transcript. If final ASR fails,
+the live transcript remains available. For segmented
 recordings, successful segment text is retained, while any failed segment is
 reported explicitly as a partial final transcript in the Web UI. An installed
 diarization model then adds speaker ranges in the background and emits an
@@ -117,6 +148,13 @@ Both Web implementations read these records through the daemon instead of
 owning a separate browser-side transcript authority. Transcript clearing also
 uses the daemon operation so the session projection and both durable logs are
 removed under the same transcript lock.
+
+Each stored segment declares a transcript stage when the producer knows it:
+`live` for incremental Paraformer checkpoints and `final` for a complete stopped
+SenseVoice pass. A final revision records the live segment IDs it supersedes.
+Consumers project the non-superseded records, but storage keeps both stages;
+this is raw/final revision history, not destructive replacement. General LLM
+punctuation, filler removal, and prose polishing are not part of this path.
 
 Prompt refinement and document instructions are semantic inputs, not meeting
 transcripts: they never create a session entry or a per-session transcript
@@ -175,6 +213,13 @@ An active local-ASR audio stream renews its recording lease. The browser's
 HTTP heartbeat remains a cross-tab status signal, but transient heartbeat
 failures do not stop or orphan an otherwise healthy recording WebSocket. The
 explicit single-recorder lease remains authoritative.
+
+After a successful local-ASR stop, the server sends the final transcript events,
+the application `closed` event, and a WebSocket Close frame with code 1000.
+The browser processes transport errors after earlier transcript events so that
+expected shutdown cannot interrupt asynchronous transcript finalization or
+display a spurious connection-failed message. Unexpected connection failures
+still report an error.
 
 Documents use the active workspace under `docs/voice-secretary/`. Groups without
 an active workspace store the Markdown fallback under CCCC_HOME. Removing a

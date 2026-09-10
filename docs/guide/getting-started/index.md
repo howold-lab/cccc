@@ -39,8 +39,10 @@ CCCC offers two ways to get started:
 
 ## Prerequisites
 
-The website installer does not require Python or a Rust toolchain. You need a
-supported 64-bit platform and at least one AI agent CLI:
+The website installer does not require Python or a Rust toolchain. You need
+Linux x86-64 with glibc 2.28+, Apple Silicon macOS 11+, or Windows x86-64, plus
+at least one AI agent CLI. CCCC v0.4.37 is the final archived release for Intel
+Macs.
 
 - At least one AI agent CLI:
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (recommended)
@@ -51,7 +53,7 @@ supported 64-bit platform and at least one AI agent CLI:
   - [Kiro CLI](https://kiro.dev/docs/cli/)
   - [Kilo Code CLI](https://kilo.ai/docs/code-with-ai/platforms/cli)
   - [Antigravity CLI](https://antigravity.google/docs/cli-overview)
-  - [Kimi CLI](https://github.com/MoonshotAI/kimi-cli)
+  - [Kimi Code](https://github.com/MoonshotAI/kimi-code)
 - Or a ChatGPT account with remote MCP connector support for the ChatGPT Web Model runtime
 - Or a custom runtime command if you wire MCP manually
 

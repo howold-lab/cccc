@@ -8,6 +8,39 @@ const SELF_EVOLUTION_CAPABILITY_ID: &str = "skill:cccc:self-evolution";
 const LEGACY_SELF_EVOLUTION_CAPABILITY_ID: &str = "skill:agent_self_proposed:cccc-self-evolution";
 
 #[test]
+fn user_authority_gets_group_controls_without_widening_actor_core_tools() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("user control plane", "")
+        .expect("group");
+    call(
+        &home,
+        "actor_add",
+        json!({"group_id":group.group_id,"actor_id":"peer1","by":"user"}),
+    );
+
+    let user = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    let user_tools = user["visible_tools"].as_array().expect("user tools");
+    assert!(user_tools.contains(&json!("cccc_group")));
+    assert!(user_tools.contains(&json!("cccc_actor")));
+
+    let peer = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"peer1","by":"peer1"}),
+    );
+    let peer_tools = peer["visible_tools"].as_array().expect("peer tools");
+    assert!(!peer_tools.contains(&json!("cccc_group")));
+    assert!(!peer_tools.contains(&json!("cccc_actor")));
+}
+
+#[test]
 fn self_evolution_is_builtin_and_default_enabled_once() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
@@ -1399,7 +1432,6 @@ fn actor_start_applies_and_projects_role_profile_and_actor_autoload() {
                 "id":"autoload-profile",
                 "name":"Autoload Profile",
                 "runtime":"web_model",
-                "runner":"headless",
                 "command":[],
                 "submit":"enter",
                 "capability_defaults":{
@@ -1416,7 +1448,6 @@ fn actor_start_applies_and_projects_role_profile_and_actor_autoload() {
             "group_id":group_id,
             "actor_id":"lead1",
             "runtime":"web_model",
-            "runner":"headless",
             "profile_id":"autoload-profile",
             "capability_autoload":["pack:context-advanced"],
             "by":"user"
@@ -1492,7 +1523,6 @@ fn failed_actor_start_keeps_the_durable_autoload_baseline() {
             "group_id":group_id,
             "actor_id":"lead1",
             "runtime":"custom",
-            "runner":"pty",
             "command":["cccc-audit-command-that-does-not-exist"],
             "capability_autoload":["pack:space"],
             "by":"user"
@@ -1567,7 +1597,6 @@ fn actor_configured_hidden_skill_is_projected_without_being_disabled() {
             "group_id":group_id,
             "actor_id":"peer1",
             "runtime":"custom",
-            "runner":"pty",
             "command":["sh","-c","exit 0"],
             "capability_hidden":[capability_id],
             "by":"user"

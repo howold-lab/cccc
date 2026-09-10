@@ -136,6 +136,43 @@ fn user_profiles_are_isolated_for_list_get_upsert_secrets_and_delete() {
 }
 
 #[test]
+fn only_an_admin_can_copy_voice_analyst_secrets_to_a_runtime_profile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    call(
+        &home,
+        "actor_profile_upsert",
+        json!({"profile_id":"voice-profile","name":"Voice Profile"}),
+    );
+    cccc_core::codex_voice_settings::replace_private_environment(
+        &home,
+        &std::collections::BTreeMap::from([("ZAI_API_KEY".into(), "secret".into())]),
+    )
+    .expect("Voice Analyst secrets");
+
+    assert_denied(raw_call(
+        &home,
+        "actor_profile_copy_voice_analyst_secrets",
+        json!({"profile_id":"voice-profile","caller_id":"user-a","is_admin":false}),
+    ));
+    let copied = call(
+        &home,
+        "actor_profile_copy_voice_analyst_secrets",
+        json!({"profile_id":"voice-profile","is_admin":true}),
+    );
+    assert_eq!(copied.result["keys"], json!(["ZAI_API_KEY"]));
+    assert_eq!(
+        cccc_core::profiles::ProfileStore::new(home)
+            .expect("profiles")
+            .secret_values("voice-profile")
+            .expect("profile secrets")
+            .get("ZAI_API_KEY")
+            .map(String::as_str),
+        Some("secret")
+    );
+}
+
+#[test]
 fn force_delete_converts_linked_actor_with_profile_secrets_intact() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
@@ -146,7 +183,6 @@ fn force_delete_converts_linked_actor_with_profile_secrets_intact() {
             "profile_id":"detach-profile",
             "name":"Detach Profile",
             "runtime":"codex",
-            "runner":"headless"
         }),
     );
     call(
@@ -203,7 +239,7 @@ fn force_delete_converts_linked_actor_with_profile_secrets_intact() {
     assert_eq!(actor["profile_scope"], "global");
     assert_eq!(actor["profile_owner"], "");
     assert_eq!(actor["runtime"], "codex");
-    assert_eq!(actor["runner"], "headless");
+    assert_eq!(actor["runner"], "pty");
     let keys = call(
         &home,
         "actor_env_private_keys",

@@ -1,3 +1,7 @@
+use super::operation::{
+    Operation,
+    Policy::{GlobalWrite, Read, Write},
+};
 use cccc_contracts::{ActorRole, DaemonRequest, Event, GroupState};
 use cccc_core::active;
 use cccc_core::actors;
@@ -14,25 +18,29 @@ use serde_json::{Value, json};
 use crate::dispatch::{OpError, OpResult, object, required_arg, store, string_arg};
 use crate::ops::{actor_delivery, actor_runtime, group_runtime};
 
-pub fn handle(home: &HomeLayout, request: &DaemonRequest) -> Option<OpResult> {
+pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
-        "group_create" => create(home, request),
-        "group_list" | "groups" => list(home),
-        "group_show" => show(home, request),
-        "group_preamble_get" => preamble_get(home, request),
-        "group_preamble_set" => preamble_set(home, request),
-        "group_preamble_reset" => preamble_reset(home, request),
-        "group_help_get" => help_get(home, request),
-        "actor_notes_get" => actor_notes_get(home, request),
-        "actor_notes_set" => actor_notes_write(home, request, false),
-        "actor_notes_clear" => actor_notes_write(home, request, true),
-        "group_resolve" => resolve(home, request),
-        "group_update" => update(home, request),
-        "group_delete" => delete(home, request),
-        "group_reset" => super::group_reset::reset(home, request),
-        "group_set_state" => set_state(home, request),
-        "group_start" => running(home, request, true),
-        "group_stop" => running(home, request, false),
+        "group_create" => Operation::new(GlobalWrite, create),
+        "group_list" | "groups" => Operation::new(Read, |home, _request| list(home)),
+        "group_show" => Operation::new(Read, show),
+        "group_preamble_get" => Operation::new(Read, preamble_get),
+        "group_preamble_set" => Operation::new(Write, preamble_set),
+        "group_preamble_reset" => Operation::new(Write, preamble_reset),
+        "group_help_get" => Operation::new(Read, help_get),
+        "actor_notes_get" => Operation::new(Read, actor_notes_get),
+        "actor_notes_set" => Operation::new(Write, |home, request| {
+            actor_notes_write(home, request, false)
+        }),
+        "actor_notes_clear" => Operation::new(Write, |home, request| {
+            actor_notes_write(home, request, true)
+        }),
+        "group_resolve" => Operation::new(Write, resolve),
+        "group_update" => Operation::new(GlobalWrite, update),
+        "group_delete" => Operation::new(GlobalWrite, delete),
+        "group_reset" => Operation::new(Write, super::group_reset::reset),
+        "group_set_state" => Operation::new(Write, set_state),
+        "group_start" => Operation::new(Write, |home, request| running(home, request, true)),
+        "group_stop" => Operation::new(Write, |home, request| running(home, request, false)),
         _ => return None,
     })
 }
@@ -592,6 +600,10 @@ fn delete(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     authorize(&group, request)?;
     actor_delivery::shutdown_group(&group.group_id);
     actor_runtime::stop_group(&group)?;
+    for actor in &group.actors {
+        super::codex_voice_analyst::remove_claude_actor_settings(home, &group.group_id, &actor.id)
+            .map_err(OpError::io)?;
+    }
     let deleted = store(home)?.delete(&group.group_id).map_err(OpError::io)?;
     if deleted {
         super::actor_secrets::remove_group(home, &group.group_id)?;
@@ -616,7 +628,7 @@ fn set_state(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     if matches!(state, GroupState::Paused | GroupState::Stopped) {
         actor_delivery::shutdown_group(&group.group_id);
-        super::local_headless::stop_group(&group.group_id);
+        super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
         super::deepseek_runtime::stop_group(&group.group_id);
     }
     let updated = store(home)?

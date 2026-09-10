@@ -1,13 +1,19 @@
 mod cancellation;
 mod command;
+mod command_output;
 pub mod deepseek_acp;
 pub mod deepseek_supervisor;
 mod executable;
 mod history_access;
 mod manager;
+#[cfg(all(test, windows))]
+mod manager_windows_tests;
 mod output;
 mod output_reader;
 mod process_tree;
+mod pty_input;
+#[cfg(target_os = "linux")]
+mod pty_io;
 mod registry;
 mod session;
 mod session_history;
@@ -41,16 +47,18 @@ pub use command::{
     is_canonical_deepseek_config, is_canonical_deepseek_profile_manifest,
     is_canonical_deepseek_runtime_manifest,
 };
-pub use executable::resolve_executable_in_path;
+pub use command_output::{CapturedOutput, capture_command, capture_command_blocking};
+pub use executable::{prepare_pty_command, resolve_command_executable, resolve_executable_in_path};
 pub use history_access::{
     active_history_replay, active_history_since, bracketed_paste_enabled, clear, history,
     history_since, retained_history, retained_history_tail,
 };
 pub use manager::{
     reap, resize, start, start_with_history, status, stop, stop_all, stop_if_started_at, submit,
-    submit_interruptible, submit_sequence_interruptible, write,
+    submit_interruptible, submit_sequence_interruptible, wait_for_input_ready, write,
 };
 pub use output::HistoryPage;
+pub use process_tree::{OwnedProcessTree, force_terminate_owned};
 pub use session::{LaunchSpec, SessionStatus};
 pub use terminal_attach::{TerminalAttachMode, TerminalAttachment, TerminalInput, TerminalOutput};
 pub use terminal_initial_output::{TerminalInitialOutput, TerminalInitialOutputKind};

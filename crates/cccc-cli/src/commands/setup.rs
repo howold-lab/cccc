@@ -143,17 +143,31 @@ fn setup_one(
             "runtime":runtime,"mode":"manual","status":"requires_action","config":config
         }));
     }
-    if matches!(runtime, "cursor" | "kilo" | "antigravity") {
+    if matches!(runtime, "cursor" | "antigravity") {
         return Ok(json!({
             "runtime":runtime,"mode":"prompt_assisted","status":"requires_action",
             "project_path":absolute(&args.path)?,"config":config,
             "instruction":"Add or replace the stdio MCP server named cccc with this configuration, then verify it is enabled."
         }));
     }
-    if runtime == "opencode" {
+    if matches!(runtime, "claude" | "grok" | "opencode" | "kilo") {
         return Ok(json!({
-            "runtime":runtime,"mode":"runtime_env","status":"managed_by_cccc_actor","config":config
+            "runtime":runtime,
+            "mode":"managed_session",
+            "status":"ready",
+            "managed":true,
+            "mcp":"injected_per_session"
         }));
+    }
+    if runtime == "kimi" {
+        let mut environment = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        environment.insert(
+            "CCCC_HOME".into(),
+            home.root().to_string_lossy().into_owned(),
+        );
+        let path =
+            cccc_core::runtime_mcp::ensure_kimi(&absolute(&args.path)?, &environment, executable)?;
+        return Ok(json!({"runtime":runtime,"mode":"auto","status":"ready","path":path}));
     }
     let command = add_command(runtime, executable)?;
     let cwd = absolute(&args.path)?;

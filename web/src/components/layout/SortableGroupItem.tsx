@@ -15,10 +15,9 @@ import { CSS } from "@dnd-kit/utilities";
 import { GroupMeta } from "../../types";
 import { classNames } from "../../utils/classNames";
 import { getGroupStatusFromSource } from "../../utils/groupStatus";
-import { MoreIcon } from "../Icons";
-import { IconButton } from "../ui/icon-button";
 import { GroupMenuAction } from "./GroupMenuAction";
 import { GroupStatusIndicator } from "./GroupStatusIndicator";
+import { GroupItemMenuTrigger } from "./GroupItemMenuTrigger";
 
 interface SortableGroupItemProps {
   group: GroupMeta;
@@ -30,6 +29,8 @@ interface SortableGroupItemProps {
   menuActionLabel?: string;
   menuAriaLabel?: string;
   onMenuAction?: () => void;
+  /** Move this group one place up (-1) or down (1) in its section. */
+  onMoveBy?: (delta: -1 | 1) => void;
   onSelect: () => void;
   onWarm?: () => void;
 }
@@ -44,6 +45,7 @@ export function SortableGroupItem({
   menuActionLabel,
   menuAriaLabel,
   onMenuAction,
+  onMoveBy,
   onSelect,
   onWarm,
 }: SortableGroupItemProps) {
@@ -75,9 +77,8 @@ export function SortableGroupItem({
   const setItemActivatorRef = useCallback(
     (node: HTMLElement | null) => {
       setActivatorNodeRef(node);
-      refs.setReference(node);
     },
-    [refs, setActivatorNodeRef],
+    [setActivatorNodeRef],
   );
   const setFloating = useCallback((node: HTMLElement | null) => refs.setFloating(node), [refs]);
 
@@ -90,8 +91,17 @@ export function SortableGroupItem({
     setMenuOpen(true);
   };
 
+  // The row overrides dnd-kit's keyboard listener so Enter and Space keep
+  // selecting the group. Reordering from the keyboard therefore needs its own
+  // entry: Alt with an arrow moves the row one place without a pick-up phase.
+  const keyboardReorder = !!onMoveBy && !dragDisabled;
   const handleItemKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.target !== event.currentTarget) return;
+    if (keyboardReorder && event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      event.preventDefault();
+      onMoveBy(event.key === "ArrowUp" ? -1 : 1);
+      return;
+    }
     if (
       onMenuAction &&
       menuActionLabel &&
@@ -102,12 +112,10 @@ export function SortableGroupItem({
       setMenuOpen(true);
       return;
     }
-    if (event.key === "Enter" || (dragDisabled && event.key === " ")) {
+    if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       onSelect();
-      return;
     }
-    listeners?.onKeyDown?.(event);
   };
 
   const actionMenu = onMenuAction && menuActionLabel && (
@@ -148,6 +156,7 @@ export function SortableGroupItem({
           onClick={onSelect}
           onContextMenu={handleContextMenu}
           onKeyDown={handleItemKeyDown}
+          aria-keyshortcuts={keyboardReorder ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
           onMouseEnter={onWarm}
           onFocus={onWarm}
           title={group.title || gid}
@@ -179,12 +188,26 @@ export function SortableGroupItem({
       className={classNames("group/item relative", isDragging && "z-50")}
     >
       <div
+        // The row itself is the drag activator. The explicit role, tabIndex
+        // and onKeyDown below deliberately override what dnd-kit spreads
+        // here: Enter/Space keep selecting the group, and Alt+Arrow moves it.
+        // dnd-kit's own aria-roledescription and aria-describedby survive the
+        // override, so the row still announces itself as sortable.
         ref={setItemActivatorRef}
         {...attributes}
         {...listeners}
         className={classNames(
           "w-full px-3 py-3 rounded-xl transition-all min-h-[48px] flex items-center gap-2 relative",
-          !dragDisabled && "cursor-grab select-none active:cursor-grabbing",
+          // The removed grip carried select-none; the row now hosts the touch
+          // long press instead, so it needs the same protection. Without it a
+          // hold over the group title starts the browser's own text selection
+          // or iOS callout, which competes with the drag it is meant to begin.
+          "select-none [-webkit-touch-callout:none]",
+          // Without a handle, the cursor is the only affordance left that
+          // tells a mouse user the row can be dragged. `.glass-group-item`
+          // sets `cursor: pointer` from an unlayered rule, which outranks a
+          // plain utility no matter the order, so this has to be important.
+          !dragDisabled && "!cursor-grab active:!cursor-grabbing",
           isDragging && "opacity-70 shadow-lg ring-2 ring-[rgb(143,163,187)]/24",
           isActive ? "glass-group-item-active" : "glass-group-item",
           isArchived && !isActive && "opacity-90",
@@ -194,6 +217,7 @@ export function SortableGroupItem({
         onClick={onSelect}
         onContextMenu={handleContextMenu}
         onKeyDown={handleItemKeyDown}
+        aria-keyshortcuts={keyboardReorder ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
       >
         <div
           className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left"
@@ -215,27 +239,15 @@ export function SortableGroupItem({
           </div>
         </div>
         {onMenuAction && menuActionLabel && (
-          <IconButton
-            type="button"
-            variant="ghost"
-            size="sm"
+          <GroupItemMenuTrigger
+            isActive={isActive}
             label={menuAriaLabel || menuActionLabel}
-            className={classNames(
-              "shrink-0 text-[var(--color-text-tertiary)] opacity-70 hover:opacity-100 focus-visible:opacity-100 md:pointer-fine:hidden",
-              menuOpen &&
-                "bg-[var(--glass-tab-bg)] text-[var(--color-text-primary)] opacity-100 shadow-sm",
-            )}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              refs.setPositionReference(event.currentTarget);
+            open={menuOpen}
+            onToggle={(button) => {
+              refs.setPositionReference(button);
               setMenuOpen((current) => !current);
             }}
-          >
-            <MoreIcon size={16} />
-          </IconButton>
+          />
         )}
       </div>
       {actionMenu}

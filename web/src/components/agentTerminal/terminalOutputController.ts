@@ -70,8 +70,8 @@ export function createTerminalOutputController(args: {
     const writable = Boolean(result.terminal_writable);
     args.setWritable(writable);
     args.setServerResponseOwnership?.(result.terminal_response_owner === "server_v1");
-    if (args.canControl() && !writable) {
-      args.onDecoded("\r\n[terminal] read-only connection; reconnect to take control.\r\n");
+    if (args.canControl() && !writable && result.terminal_input_blocked !== true) {
+      args.onDecoded("\r\n[terminal] read-only connection.\r\n");
     }
     args.resetReady();
     if (!pendingSnapshot && replayComplete()) args.scheduleReady();

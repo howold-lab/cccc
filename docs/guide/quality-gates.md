@@ -109,10 +109,10 @@ executable in a fresh `CCCC_HOME`. It verifies daemon lifecycle, a scoped Web
 Model actor, MCP initialization, a real `cccc_code_exec` cell, and clean stop.
 
 Release verification repeats installation and same-version replacement against
-the exact Linux, Intel macOS, Apple Silicon macOS, and Windows artifacts. Linux
-artifacts must satisfy the manylinux 2.28 dependency boundary; macOS artifacts
-declare macOS 11.0; Windows builds target Server 2022. Publication requires four
-native wheels, four standalone archives, matching executable hashes, checksums,
+the exact Linux, Apple Silicon macOS, and Windows artifacts. Linux artifacts
+must satisfy the manylinux 2.28 dependency boundary; the macOS artifact declares
+macOS 11.0; Windows builds target Server 2022. Publication requires three native
+wheels, three standalone archives, matching executable hashes, checksums,
 version-bound installers, release notes, installed CLI/MCP/daemon/Web smoke, and
 platform installer verification. Each wheel must also carry `pip-v1` in the
 shared ownership marker path, replace any stale standalone marker on install,
@@ -123,6 +123,16 @@ The release workflow packages the same native executable bytes into standalone
 archives and dependency-free platform wheels. It does not build an sdist,
 universal wheel, importable CCCC Python package, fallback engine, or second Rust
 registry distribution.
+
+The Pages build uses its workflow token to resolve complete stable/RC releases,
+then publishes `releases.json` alongside the stable-pinned installers. It must
+fail before deployment if resolution fails or VitePress does not preserve that
+index. For the first rollout, deploy Pages and verify
+`https://chesterra.github.io/cccc/releases.json` before distributing the CLI that
+uses it. Subsequent successful release workflows refresh Pages automatically;
+`Deploy Docs` can also be rerun manually. Older clients blocked by API rate
+limits can upgrade through the original installation command after the fixed
+release is published. Installation and checksum verification remain unchanged.
 
 ## Design Boundary
 

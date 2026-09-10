@@ -22,7 +22,7 @@
   "chatFilters": "聊天过滤器",
   "chatMessages": "聊天消息",
   "liveWorkTitle": "实时工作",
-  "liveWorkHint": "Headless 运行中的过程输出会显示在这里，正式回复通过 message 工具发送。",
+  "liveWorkHint": "运行时的结构化过程输出会显示在这里，正式回复通过 message 工具发送。",
   "runtimeDockOpenLiveWork": "打开 {{name}} 的实时工作",
   "runtimeDockOpenTerminal": "打开 {{name}} 的终端",
   "runtimeInspectorTitle": "运行时检查器",
@@ -136,6 +136,7 @@
   "builtInAssistantsTitle": "助手",
   "builtInAssistantsHint": "当前工作组的辅助能力。",
   "builtInAssistantOpenShort": "打开",
+  "voiceSecretaryMobileOptions": "语音选项",
   "voiceSecretaryTitle": "语音小秘书",
   "voiceSecretaryManualHint": "这个面板只负责开始/停止麦克风采集和维护语音小秘书工作文档；工作组级启用和配置在 设置 > Assistants 中管理。",
   "voiceSecretaryWorkspaceHint": "采集语音、维护工作文档，并请求小秘书整理或发送内容。",
@@ -567,5 +568,21 @@
   "presentationBrowserViewerReasonUnsupportedPlatform": "当前平台不支持",
   "presentationBrowserViewerReasonStartupTimeout": "VNC 启动超时",
   "presentationBrowserViewerIsolationXvfb": "Xvfb 隔离",
-  "presentationBrowserViewerTooltipIsolationXvfb": "浏览器运行在 CCCC 专用的虚拟显示器上，而非宿主机桌面。"
+  "presentationBrowserViewerTooltipIsolationXvfb": "浏览器运行在 CCCC 专用的虚拟显示器上，而非宿主机桌面。",
+  "workView": {
+    "label": "Group 视图",
+    "messages": "消息",
+    "terminals": "终端",
+    "pages": "终端分页",
+    "previous": "上一页",
+    "next": "下一页",
+    "otherAttention": "其他页有 {{count}} 项待关注",
+    "unread": "{{count}} 条未读消息",
+    "maximize": "放大 {{actor}}",
+    "restore": "关闭放大的 Actor 视图",
+    "loading": "正在加载 Actor…",
+    "empty": "此 Group 暂无 Actor。",
+    "connecting": "连接中…",
+    "switchTo": "切换到{{view}}"
+  }
 }

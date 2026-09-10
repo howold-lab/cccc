@@ -1,10 +1,14 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import { useTranslation } from "react-i18next";
+import { useEffect, useState, type CSSProperties } from "react";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AppHeader } from "../layout/AppHeader";
 import { GroupSidebar } from "../layout/GroupSidebar";
-import { ModalFrame } from "../modals/ModalFrame";
-import { useModalA11y } from "../../hooks/useModalA11y";
+import {
+  CodexVoiceMobileDock,
+  CodexVoiceOverlays,
+} from "../../features/codexVoice/CodexVoiceShellSurfaces";
+import { useCodexVoiceShell } from "../../features/codexVoice/useCodexVoiceShell";
+import { useVoiceViewedMessages } from "../../features/codexVoice/useVoiceViewedMessages";
+import { useUIStore } from "../../stores";
 import { ActorTab } from "../../pages/ActorTab";
 import { ChatTab } from "../../pages/chat";
 import type {
@@ -15,10 +19,16 @@ import type {
   GroupRuntimeStatus,
   TextScale,
 } from "../../types";
-import { getSidebarWidthCssValue, SIDEBAR_COLLAPSED_WIDTH } from "../../stores/useUIStore";
+import {
+  getSidebarWidthCssValue,
+  SIDEBAR_COLLAPSED_WIDTH,
+  groupMessagesVisible,
+} from "../../stores/useUIStore";
 import { resolveRuntimeInspectorActor } from "./appShellRuntimeActors";
 import type { ComposerMentionKind } from "../../pages/chat/chatMentionSuggestions";
 type AppShellProps = {
+  canUseVoice?: boolean;
+  onOpenVoiceSource?: (groupId: string, eventId: string) => void;
   orderedGroups: GroupMeta[];
   archivedGroupIds: string[];
   selectedGroupId: string;
@@ -116,42 +126,9 @@ function areMountedRuntimeActorSnapshotsEqual(
   return leftIds.every((actorId) => left.actorsById[actorId] === right.actorsById[actorId]);
 }
 
-function RuntimeInspectorModal({
-  isOpen,
-  isDark,
-  onClose,
-  titleId,
-  closeAriaLabel,
-  children,
-}: {
-  isOpen: boolean;
-  isDark: boolean;
-  onClose: () => void;
-  titleId: string;
-  closeAriaLabel: string;
-  children: ReactNode;
-}) {
-  const { modalRef } = useModalA11y(isOpen, onClose);
-
-  return (
-    <ModalFrame
-      isOpen={isOpen}
-      isDark={isDark}
-      onClose={onClose}
-      titleId={titleId}
-      title=""
-      closeAriaLabel={closeAriaLabel}
-      panelClassName="h-full w-full max-w-none overflow-hidden sm:h-[92vh] sm:w-[min(1480px,98vw)] sm:max-w-[98vw]"
-      floatingCloseClassName="sm:!top-3"
-      floatingCloseButtonClassName="!min-h-[40px] !min-w-[40px] !rounded-xl"
-      modalRef={modalRef}
-    >
-      {children}
-    </ModalFrame>
-  );
-}
-
 export function AppShell({
+  canUseVoice = false,
+  onOpenVoiceSource,
   orderedGroups,
   archivedGroupIds,
   selectedGroupId,
@@ -231,14 +208,21 @@ export function AppShell({
   onTouchStart,
   onTouchEnd,
 }: AppShellProps) {
-  const { t } = useTranslation("chat");
   const shellStyle = {
     "--sidebar-width": sidebarCollapsed
       ? `${SIDEBAR_COLLAPSED_WIDTH}px`
       : getSidebarWidthCssValue(sidebarWidth),
   } as CSSProperties;
+  const [workControlsHost, setWorkControlsHost] = useState<HTMLDivElement | null>(null);
   const [mountedRuntimeActorsSnapshot, setMountedRuntimeActorsSnapshot] =
     useState<MountedRuntimeActorSnapshot>({ groupId: null, actorsById: {} });
+  const messagesVisible = useUIStore((state) => groupMessagesVisible(selectedGroupId, state));
+  const codexVoice = useCodexVoiceShell(!webReadOnly && canUseVoice);
+  useVoiceViewedMessages(
+    contentRef,
+    selectedGroupId,
+    !webReadOnly && canUseVoice && messagesVisible,
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -268,8 +252,8 @@ export function AppShell({
         isCollapsed={sidebarCollapsed}
         sidebarWidth={sidebarWidth}
         isDark={isDark}
-        isSmallScreen={isSmallScreen}
         readOnly={webReadOnly}
+        codexVoice={canUseVoice ? codexVoice : undefined}
         onSelectGroup={onSelectGroup}
         onWarmGroup={onWarmGroup}
         onCreateGroup={onCreateGroup}
@@ -283,7 +267,7 @@ export function AppShell({
 
       <main className="absolute inset-0 flex h-full min-h-0 flex-col overflow-hidden md:relative md:inset-auto bg-transparent md:bg-[var(--color-chat-bg)]">
         <AppHeader
-          isDark={isDark}
+          workControlsRef={setWorkControlsHost}
           theme={theme}
           textScale={textScale}
           onThemeChange={onThemeChange}
@@ -309,6 +293,8 @@ export function AppShell({
           onOpenMobileMenu={onOpenMobileMenu}
         />
 
+        {!webReadOnly && canUseVoice ? <CodexVoiceMobileDock voice={codexVoice} /> : null}
+
         <div
           ref={contentRef}
           className={`relative flex min-h-0 flex-1 flex-col overflow-hidden transition-opacity duration-150 ${
@@ -320,9 +306,11 @@ export function AppShell({
           <div className="absolute inset-0 flex min-h-0 flex-col">
             <ErrorBoundary>
               <ChatTab
+                workControlsHost={workControlsHost}
                 isDark={isDark}
                 isSmallScreen={isSmallScreen}
                 readOnly={webReadOnly}
+                mobileAppHeaderReserved={!webReadOnly && codexVoice.controller.isEngaged}
                 selectedGroupId={selectedGroupId}
                 selectedGroupRunning={selectedGroupRunning}
                 selectedGroupActorsHydrating={selectedGroupActorsHydrating}
@@ -330,6 +318,42 @@ export function AppShell({
                 groupLabelById={groupLabelById}
                 actors={actors}
                 runtimeActors={runtimeActors}
+                renderedActorIds={renderedActorIds}
+                renderRuntimeActor={(actorId, view) => {
+                  const mounted =
+                    mountedRuntimeActorsSnapshot.groupId === selectedGroupId
+                      ? mountedRuntimeActorsSnapshot.actorsById
+                      : {};
+                  const actor = resolveRuntimeInspectorActor(actorId, runtimeActors, mounted);
+                  return (
+                    <ActorTab
+                      actor={actor}
+                      groupId={selectedGroupId}
+                      agentState={
+                        (groupContext?.agent_states || []).find((item) => item.id === actorId) ||
+                        null
+                      }
+                      termEpoch={getTermEpoch(actorId)}
+                      busy={busy}
+                      isDark={isDark}
+                      isSmallScreen={isSmallScreen}
+                      isVisible={view.isVisible}
+                      compact={view.compact}
+                      onExpand={view.onExpand}
+                      navigation={view.navigation}
+                      suspendWhenHidden
+                      readOnly={webReadOnly}
+                      actorStatusProvisional={selectedGroupActorStatusProvisional}
+                      onToggleEnabled={(running) => actor && onToggleActorEnabled(actor, running)}
+                      onRelaunch={() => actor && onRelaunchActor(actor)}
+                      onNewSession={() => actor && onNewActorSession(actor)}
+                      onEdit={() => actor && onEditActor(actor)}
+                      onRemove={() => actor && onRemoveActor(actor, activeTab)}
+                      onInbox={() => actor && onOpenActorInbox(actor)}
+                      onStatusChange={onRefreshActors}
+                    />
+                  );
+                }}
                 activeRuntimeActorId={activeTab !== "chat" ? activeTab : undefined}
                 recipientActors={recipientActors}
                 recipientActorsBusy={recipientActorsBusy}
@@ -355,63 +379,15 @@ export function AppShell({
               />
             </ErrorBoundary>
           </div>
-
-          {renderedActorIds.map((actorId) => {
-            const mountedRuntimeActors =
-              mountedRuntimeActorsSnapshot.groupId === selectedGroupId
-                ? mountedRuntimeActorsSnapshot.actorsById
-                : {};
-            const actor = resolveRuntimeInspectorActor(
-              actorId,
-              runtimeActors,
-              mountedRuntimeActors,
-            );
-            const isVisible = activeTab === actorId && activeTab !== "chat";
-            const agentState =
-              (groupContext?.agent_states || []).find((item) => item.id === (actor?.id || "")) ||
-              null;
-
-            return (
-              <RuntimeInspectorModal
-                key={actorId}
-                isOpen={isVisible}
-                isDark={isDark}
-                onClose={() => onTabChange("chat")}
-                titleId={`runtime-inspector-${actorId}`}
-                closeAriaLabel={t("runtimeInspectorClose", {
-                  defaultValue: "Close runtime inspector",
-                })}
-              >
-                <div className="min-h-0 flex-1 overflow-hidden">
-                  <ErrorBoundary>
-                    <ActorTab
-                      actor={actor}
-                      groupId={selectedGroupId}
-                      agentState={agentState}
-                      termEpoch={actor ? getTermEpoch(actor.id) : 0}
-                      busy={busy}
-                      isDark={isDark}
-                      isSmallScreen={isSmallScreen}
-                      isVisible={isVisible}
-                      readOnly={webReadOnly}
-                      actorStatusProvisional={selectedGroupActorStatusProvisional}
-                      onToggleEnabled={(isRunning) =>
-                        actor && onToggleActorEnabled(actor, isRunning)
-                      }
-                      onRelaunch={() => actor && onRelaunchActor(actor)}
-                      onNewSession={() => actor && onNewActorSession(actor)}
-                      onEdit={() => actor && onEditActor(actor)}
-                      onRemove={() => actor && onRemoveActor(actor, activeTab)}
-                      onInbox={() => actor && onOpenActorInbox(actor)}
-                      onStatusChange={onRefreshActors}
-                    />
-                  </ErrorBoundary>
-                </div>
-              </RuntimeInspectorModal>
-            );
-          })}
         </div>
       </main>
+
+      <CodexVoiceOverlays
+        voice={codexVoice}
+        isDark={isDark}
+        isSmallScreen={isSmallScreen}
+        onOpenSource={onOpenVoiceSource}
+      />
     </div>
   );
 }

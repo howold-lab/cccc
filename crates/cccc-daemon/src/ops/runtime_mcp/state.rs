@@ -78,12 +78,6 @@ pub(super) fn json_state(
             expected,
             EntryShape::Common,
         ),
-        ActorRuntime::Kimi => entry_at(
-            &kimi_home(env).join("mcp.json"),
-            &["mcpServers", "cccc"],
-            expected,
-            EntryShape::Common,
-        ),
         _ => Report::new(State::Missing),
     }
 }
@@ -94,43 +88,6 @@ pub(super) fn command_output_state(
     expected: &[String],
 ) -> Report {
     match runtime {
-        ActorRuntime::Claude => {
-            let entry = parse_key_values(output);
-            if entry.is_empty() {
-                return Report::new(State::Missing);
-            }
-            let transport_ok = matches!(
-                entry
-                    .get("transport")
-                    .map(String::as_str)
-                    .unwrap_or("stdio"),
-                "" | "stdio" | "local"
-            );
-            let command = entry.get("command").map(String::as_str).unwrap_or_default();
-            let args = entry
-                .get("args")
-                .map(|value| {
-                    value
-                        .split_whitespace()
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let source = entry
-                .get("scope")
-                .or_else(|| entry.get("source"))
-                .cloned()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            Report {
-                state: if transport_ok && command_matches(command, &args, expected) {
-                    State::Ready
-                } else {
-                    State::Stale
-                },
-                source,
-            }
-        }
         ActorRuntime::Copilot => {
             let Ok(document) = serde_json::from_str::<Value>(output) else {
                 return Report::new(State::Missing);
@@ -221,25 +178,6 @@ pub(super) fn command_output_state(
                     State::Missing
                 },
             )
-        }
-        ActorRuntime::Grok => {
-            let Ok(entries) = serde_json::from_str::<Vec<Value>>(output) else {
-                return Report::new(State::Missing);
-            };
-            let mut state = State::Missing;
-            for entry in entries.iter().filter(|entry| entry["name"] == "cccc") {
-                let env_ok = entry
-                    .get("env")
-                    .and_then(Value::as_object)
-                    .and_then(|env| env.get("PYTHONUNBUFFERED"))
-                    .and_then(Value::as_str)
-                    == Some("1");
-                if common_matches(entry, expected) && env_ok {
-                    return Report::new(State::Ready);
-                }
-                state = State::Stale;
-            }
-            Report::new(state)
         }
         _ => Report::new(State::Missing),
     }
@@ -528,10 +466,6 @@ fn kiro_home(env: &BTreeMap<String, String>) -> PathBuf {
     configured_path(env, "KIRO_HOME").unwrap_or_else(|| home_dir(env).join(".kiro"))
 }
 
-fn kimi_home(env: &BTreeMap<String, String>) -> PathBuf {
-    configured_path(env, "KIMI_SHARE_DIR").unwrap_or_else(|| home_dir(env).join(".kimi"))
-}
-
 fn configured_path(env: &BTreeMap<String, String>, key: &str) -> Option<PathBuf> {
     match env.get(key) {
         Some(value) => (!value.trim().is_empty()).then(|| PathBuf::from(value.trim())),
@@ -597,10 +531,6 @@ mod tests {
                 "KIRO_HOME".into(),
                 home.join("kiro").to_string_lossy().into_owned(),
             ),
-            (
-                "KIMI_SHARE_DIR".into(),
-                home.join("kimi").to_string_lossy().into_owned(),
-            ),
         ]);
         let fixtures = [
             (ActorRuntime::Cline, home.join("cline.json"), true),
@@ -620,7 +550,6 @@ mod tests {
                 home.join(".augment/settings.json"),
                 false,
             ),
-            (ActorRuntime::Kimi, home.join("kimi/mcp.json"), false),
         ];
         for (runtime, path, nested_cline) in fixtures {
             std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
@@ -645,13 +574,9 @@ mod tests {
     }
 
     #[test]
-    fn cli_backed_runtime_outputs_match_python_parsers() {
+    fn cli_backed_runtime_outputs_match_supported_parsers() {
         let expected = ["/opt/cccc".into(), "mcp".into()];
         let fixtures = [
-            (
-                ActorRuntime::Claude,
-                "Transport: stdio\nCommand: /opt/cccc\nArgs: mcp\nScope: User config",
-            ),
             (
                 ActorRuntime::Copilot,
                 r#"{"cccc":{"command":"/opt/cccc","args":["mcp"],"source":"user","tools":["*"]}}"#,
@@ -659,10 +584,6 @@ mod tests {
             (
                 ActorRuntime::Devin,
                 r#"McpServer { transport: stdio, command: "/opt/cccc", args: ["mcp"] }"#,
-            ),
-            (
-                ActorRuntime::Grok,
-                r#"[{"name":"cccc","command":"/opt/cccc","args":["mcp"],"enabled":true,"env":{"PYTHONUNBUFFERED":"1"}}]"#,
             ),
         ];
         for (runtime, output) in fixtures {

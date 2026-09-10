@@ -44,10 +44,9 @@ async fn serializes_delivery_and_keeps_read_as_a_separate_fact() {
         json!({
             "group_id":group_id,
             "actor_id":"peer1",
-            "runner":"pty",
             "runtime":"custom",
             "submit":"newline",
-            "command":["sh","-c","stty -echo; IFS= read -r preamble; IFS= read -r first; IFS= read -r second; IFS= read -r third; IFS= read -r fourth; printf 'PREAMBLE:%s\\nFIRST:%s\\nSECOND:%s\\nTHIRD:%s\\nFOURTH:%s' \"$preamble\" \"$first\" \"$second\" \"$third\" \"$fourth\"; sleep 30"],
+            "command":["sh","-c","stty -echo -icanon min 1 time 0; IFS= read -r preamble; IFS= read -r first; IFS= read -r second; IFS= read -r third; IFS= read -r fourth; printf 'PREAMBLE:%s\\nFIRST:%s\\nSECOND:%s\\nTHIRD:%s\\nFOURTH:%s' \"$preamble\" \"$first\" \"$second\" \"$third\" \"$fourth\"; sleep 30"],
             "by":"user"
         }),
     )
@@ -107,12 +106,7 @@ async fn serializes_delivery_and_keeps_read_as_a_separate_fact() {
         .as_str()
         .expect("reply event id");
 
-    wait_for(
-        &client,
-        &group_id,
-        &format!("[event_id={reply_event_id} message_mode=send reply_to={first_event_id}]"),
-    )
-    .await;
+    wait_for(&client, &group_id, &format!("[event_id={reply_event_id}]")).await;
     let tail = daemon_call(
         &client,
         "terminal_tail",
@@ -122,14 +116,14 @@ async fn serializes_delivery_and_keeps_read_as_a_separate_fact() {
     let text = tail.result["text"].as_str().unwrap_or_default();
     assert!(text.contains("PREAMBLE:[CCCC] You are peer1"));
     assert!(text.contains(&format!(
-        "FIRST:[cccc] user → peer1 [event_id={first_event_id} message_mode=send]: one"
+        "FIRST:[cccc] user → peer1 [event_id={first_event_id}]: one"
     )));
     assert!(text.contains(&format!(
-        "SECOND:[cccc] user → peer1 [event_id={second_event_id} message_mode=send]: two"
+        "SECOND:[cccc] user → peer1 [event_id={second_event_id}]: two"
     )));
     assert!(text.contains("THIRD:[cccc] SYSTEM (info): notice"));
     assert!(text.contains(&format!(
-        "FOURTH:[cccc] user → peer1 (reply:{}) [event_id={reply_event_id} message_mode=send reply_to={first_event_id}]",
+        "FOURTH:[cccc] user → peer1 (reply:{}) [event_id={reply_event_id}]",
         &first_event_id[..8]
     )));
     assert!(text.contains("> \"one\": fix it"));
@@ -2159,7 +2153,7 @@ fn stopped_peer_group(home: &HomeLayout, title: &str) -> String {
         "actor_add",
         json!({
             "group_id":group_id,"actor_id":"peer1","runtime":"custom",
-            "runner":"pty","command":["sh","-c","exit 0"],"by":"user"
+            "command":["sh","-c","exit 0"],"by":"user"
         }),
     );
     group_id

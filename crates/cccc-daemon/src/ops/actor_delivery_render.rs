@@ -3,6 +3,10 @@ use cccc_core::{GroupDoc, HomeLayout};
 use serde_json::Value;
 
 mod references;
+mod reply_guidance;
+#[cfg(test)]
+#[path = "actor_delivery_render/reply_guidance_tests.rs"]
+mod reply_guidance_tests;
 mod system_notify;
 
 fn render_message(event: &Event) -> Option<String> {
@@ -39,7 +43,7 @@ pub fn render_batch(events: &[Event]) -> Option<String> {
         .iter()
         .map(render_message)
         .collect::<Option<Vec<_>>>()?;
-    match messages.as_slice() {
+    let rendered = match messages.as_slice() {
         [] => None,
         [message] => Some(message.clone()),
         _ => Some(format!(
@@ -47,7 +51,8 @@ pub fn render_batch(events: &[Event]) -> Option<String> {
             messages.len(),
             messages.join("\n\n")
         )),
-    }
+    }?;
+    Some(reply_guidance::append(events, rendered))
 }
 
 pub fn render_batch_with_mail_context(
@@ -86,12 +91,6 @@ pub fn render_batch_with_mail_context(
 
 fn protocol_lines(event: &Event) -> Vec<String> {
     let mut lines = Vec::new();
-    if text(event, "message_mode") == "request_reply" {
-        lines.push(format!(
-            "[cccc] REPLY REQUIRED (event_id={}): reply via cccc_message_reply.",
-            event.id
-        ));
-    }
     let source_group = text(event, "src_group_id");
     let source_event = text(event, "src_event_id");
     if !source_group.is_empty() && !source_event.is_empty() {
@@ -159,10 +158,6 @@ fn format_envelope(event: &Event, body: &str) -> String {
         targets.join(", ")
     };
     let reply_to = text(event, "reply_to");
-    let message_mode = match text(event, "message_mode") {
-        value if !value.is_empty() => value,
-        _ => "send".to_owned(),
-    };
     let reply = if reply_to.is_empty() {
         String::new()
     } else {
@@ -177,15 +172,12 @@ fn format_envelope(event: &Event, body: &str) -> String {
     let metadata = if event.id.trim().is_empty() {
         String::new()
     } else {
-        let parent = if reply_to.is_empty() {
-            String::new()
+        let reply_required = if text(event, "message_mode") == "request_reply" {
+            " reply_required"
         } else {
-            format!(" reply_to={reply_to}")
+            ""
         };
-        format!(
-            " [event_id={} message_mode={message_mode}{parent}]",
-            event.id
-        )
+        format!(" [event_id={}{reply_required}]", event.id)
     };
     if body.contains(['\r', '\n']) {
         format!("[cccc] {sender} → {targets}{reply}{metadata}{quote}:\n{body}")
@@ -264,14 +256,8 @@ mod tests {
         .cloned()
         .expect("object");
         let rendered = render_batch(&[event]).expect("render");
-        assert!(
-            rendered.starts_with(
-                "[cccc] user → peer1 [event_id=event-123 message_mode=request_reply]:\n"
-            )
-        );
-        assert!(
-            rendered.contains("REPLY REQUIRED (event_id=event-123): reply via cccc_message_reply.")
-        );
+        assert!(rendered.starts_with("[cccc] user → peer1 [event_id=event-123 reply_required]:\n"));
+        assert!(!rendered.contains("REPLY REQUIRED (event_id="));
         assert!(rendered.contains("task_ref: Fix send"));
         assert!(rendered.contains("cccc_file(action=\"read\", group_id=\"g_test\""));
         assert!(rendered.contains("screen.png (42 bytes) [state/blobs/abc]"));
@@ -345,75 +331,6 @@ mod tests {
             "REMOTE REPLY DEFAULT: omit to in cccc_message_reply to reply to remote group-a/actor-1, group-b/actor-2."
         ));
         assert!(!rendered.contains("omit to in cccc_message_send"));
-    }
-
-    #[test]
-    fn renders_multiple_events_as_one_delivery_batch() {
-        let mut first = Event::new("chat.message", "g_test");
-        first.id = "event-first".into();
-        first.by = "reviewer".into();
-        first.data = json!({"to":["lead"],"text":"first"})
-            .as_object()
-            .cloned()
-            .expect("event data");
-        let mut second = Event::new("chat.message", "g_test");
-        second.id = "event-second".into();
-        second.by = "backend".into();
-        second.data = json!({"to":["lead"],"text":"second"})
-            .as_object()
-            .cloned()
-            .expect("event data");
-
-        let rendered = render_batch(&[first, second]).expect("batch");
-        assert!(rendered.starts_with("[cccc] 2 new messages:"));
-        assert!(
-            rendered
-                .contains("[cccc] reviewer → lead [event_id=event-first message_mode=send]: first")
-        );
-        assert!(
-            rendered.contains(
-                "[cccc] backend → lead [event_id=event-second message_mode=send]: second"
-            )
-        );
-        assert!(!rendered.contains(cccc_core::system_prompt::MESSAGE_DELIVERY_GUIDANCE));
-    }
-
-    #[test]
-    fn does_not_repeat_system_prompt_guidance_in_each_chat_delivery() {
-        let mut event = Event::new("chat.message", "g_test");
-        event.id = "event-plain".into();
-        event.by = "user".into();
-        event.data = json!({"to":["codex-1"], "text":"你好"})
-            .as_object()
-            .cloned()
-            .expect("object");
-
-        let rendered = render_batch(&[event]).expect("rendered");
-        assert_eq!(
-            rendered,
-            "[cccc] user → codex-1 [event_id=event-plain message_mode=send]: 你好"
-        );
-    }
-
-    #[test]
-    fn keeps_current_event_and_parent_reply_id_distinct() {
-        let mut event = Event::new("chat.message", "g_test");
-        event.id = "event-current".into();
-        event.by = "peer2".into();
-        event.data = json!({
-            "to":["peer1"],
-            "text":"follow-up",
-            "message_mode":"send",
-            "reply_to":"event-parent"
-        })
-        .as_object()
-        .cloned()
-        .expect("event data");
-
-        let rendered = render_batch(&[event]).expect("rendered");
-        assert!(rendered.starts_with(
-            "[cccc] peer2 → peer1 (reply:event-pa) [event_id=event-current message_mode=send reply_to=event-parent]: follow-up"
-        ));
     }
 
     #[test]

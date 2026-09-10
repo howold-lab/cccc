@@ -1,3 +1,7 @@
+use super::operation::{
+    Operation,
+    Policy::{Read, Write},
+};
 use cccc_contracts::{DaemonRequest, Event};
 use cccc_core::{GroupDoc, HomeLayout};
 use serde_json::{Map, Value, json};
@@ -15,30 +19,34 @@ mod slash_skill;
 mod stream;
 mod tracked_send;
 
-pub fn handle(home: &HomeLayout, request: &DaemonRequest) -> Option<OpResult> {
+pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
-        "send" | "message_send" => send(home, request, "chat.message"),
-        "send_files" => send_files(home, request),
-        "send_cross_group" => send_cross_group(home, request),
-        "send_cross_group_remote_record" => send_cross_group_remote_record(home, request),
-        "tracked_send" => tracked_send::handle(home, request),
-        "slash_skill_dispatch" => slash_skill_dispatch(home, request),
-        "reply" => reply(home, request),
-        "message_upload_preflight" => message_upload_preflight(home, request),
-        "reply_request_cancel" => reply_request_cancel(home, request),
-        "message_deliver" => message_deliver(home, request),
-        "stream_emit" => stream::emit(home, request),
-        "relay_user_delegation" => delegation::relay(home, request),
-        "system_notify" => send(home, request, "system.notify"),
-        "event_append" => append_raw(home, request),
-        "ledger_tail" => super::messaging_query::tail(home, request),
-        "ledger_search" => super::messaging_query::search(home, request),
-        "ledger_window" => super::messaging_query::window(home, request),
-        "ledger_statuses" => super::messaging_status::statuses(home, request),
-        "message_read_status" => super::messaging_status::read_status(home, request),
-        "inbox_peek" => messaging_inbox::peek(home, request),
-        "inbox_read" => messaging_inbox::read(home, request),
-        "message_history" => messaging_inbox::history(home, request),
+        "send" | "message_send" => {
+            Operation::new(Write, |home, request| send(home, request, "chat.message"))
+        }
+        "send_files" => Operation::new(Write, send_files),
+        "send_cross_group" => Operation::new(Write, send_cross_group),
+        "send_cross_group_remote_record" => Operation::new(Write, send_cross_group_remote_record),
+        "tracked_send" => Operation::new(Write, tracked_send::handle),
+        "slash_skill_dispatch" => Operation::new(Write, slash_skill_dispatch),
+        "reply" => Operation::new(Write, reply),
+        "message_upload_preflight" => Operation::new(Read, message_upload_preflight),
+        "reply_request_cancel" => Operation::new(Write, reply_request_cancel),
+        "message_deliver" => Operation::new(Write, message_deliver),
+        "stream_emit" => Operation::new(Write, stream::emit),
+        "relay_user_delegation" => Operation::new(Write, delegation::relay),
+        "system_notify" => {
+            Operation::new(Write, |home, request| send(home, request, "system.notify"))
+        }
+        "event_append" => Operation::new(Write, append_raw),
+        "ledger_tail" => Operation::new(Read, super::messaging_query::tail),
+        "ledger_search" => Operation::new(Read, super::messaging_query::search),
+        "ledger_window" => Operation::new(Read, super::messaging_query::window),
+        "ledger_statuses" => Operation::new(Read, super::messaging_status::statuses),
+        "message_read_status" => Operation::new(Read, super::messaging_status::read_status),
+        "inbox_peek" => Operation::new(Write, messaging_inbox::peek),
+        "inbox_read" => Operation::new(Write, messaging_inbox::read),
+        "message_history" => Operation::new(Read, messaging_inbox::history),
         _ => return None,
     })
 }
@@ -300,6 +308,12 @@ fn send_cross_group(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
     }
     delivery_data.remove("transport");
+    if let Some(origin) = request.args.get(cccc_core::voice_notifications::ORIGIN_ARG) {
+        delivery_data.insert(
+            cccc_core::voice_notifications::ORIGIN_ARG.into(),
+            origin.clone(),
+        );
+    }
     delivery_data.remove("dst_group_id");
     delivery_data.remove("to_group_id");
     super::messaging_recipients::apply_cross_group_recipient(&destination, &mut delivery_data)?;
@@ -902,11 +916,22 @@ pub(super) fn append(
     group_id: &str,
     kind: &str,
     by: &str,
-    data: Map<String, Value>,
+    mut data: Map<String, Value>,
 ) -> Result<Event, OpError> {
+    let origin = data.remove(cccc_core::voice_notifications::ORIGIN_ARG);
     let mut event = Event::new(kind, group_id);
     event.by = by.into();
     event.data = data;
+    if let Some(origin) = origin {
+        let token = origin
+            .as_str()
+            .ok_or_else(|| OpError::new("invalid_voice_origin", "invalid Voice origin"))?;
+        // Source copies never establish a second request or notification.
+        if !event.data.contains_key("dst_group_id") {
+            cccc_core::voice_notifications::register_request(home, token, &event)
+                .map_err(OpError::io)?;
+        }
+    }
     cccc_core::ledger::append(
         &store(home)?.ledger_path(group_id).map_err(OpError::io)?,
         &event,

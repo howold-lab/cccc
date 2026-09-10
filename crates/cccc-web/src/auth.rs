@@ -38,6 +38,22 @@ impl Principal {
     pub fn allows(&self, group_id: &str) -> bool {
         self.is_admin || self.allowed_groups.iter().any(|item| item == group_id)
     }
+
+    /// Long-lived global Voice work must not outlive a revoked remote token.
+    pub(crate) fn current_voice_admin(
+        &self,
+        home: &cccc_core::HomeLayout,
+    ) -> std::io::Result<bool> {
+        if !self.is_admin {
+            return Ok(false);
+        }
+        if self.raw_token.is_empty() {
+            return Ok(self.user_id == "local");
+        }
+        Ok(AccessTokenStore::new(home.clone())?
+            .lookup(&self.raw_token)?
+            .is_some_and(|token| token.is_admin && token.user_id == self.user_id))
+    }
 }
 
 pub async fn authorize(
@@ -283,6 +299,7 @@ fn requires_admin(method: &Method, path: &str) -> bool {
         || path.starts_with("/api/v1/actor_profiles")
         || path.starts_with("/api/v1/nomcp/")
         || path.starts_with("/api/v1/web-model/")
+        || is_codex_voice_path(path)
         || path.starts_with("/api/v1/space/providers/")
         || path == "/api/v1/mcp"
         || path.starts_with("/api/v1/observability")
@@ -298,6 +315,10 @@ fn requires_admin(method: &Method, path: &str) -> bool {
         || (path == "/api/v1/groups" && *method == Method::POST)
         || (*method == Method::DELETE && group_from_path(path).is_some())
         || path.ends_with("/reset")
+}
+
+fn is_codex_voice_path(path: &str) -> bool {
+    path.starts_with("/api/v1/codex_voice/")
 }
 
 fn group_from_query(request: &Request) -> Option<String> {

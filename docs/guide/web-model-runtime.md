@@ -172,7 +172,7 @@ For a browser-delivered batch, the injected prompt already contains the messages
 
 ### Prompt and Help Layering
 
-The browser-injected prompt should stay small. Each embedded message uses the same actor-facing format as normal peers, including its current `event_id`, canonical `message_mode`, and a distinct parent `reply_to` when present. `event_id` is the value to pass to `cccc_message_reply` when answering that message. The first injected batch in a bound or newly auto-bound ChatGPT conversation also carries the normal actor system prompt plus a short Web transport note; later batches do not repeat that seed. Durable collaboration rules belong in the shared `cccc_help` path, including the Web Model Transport runtime note appended for `runtime=web_model` actors.
+The browser-injected prompt should stay small. Each embedded message uses the same actor-facing format as normal peers: sender, audience, full current `event_id`, an optional short parent correlation marker, and `reply_required` only when it changes the required action. It does not repeat the canonical storage mode or full parent id. `event_id` is the value to pass to `cccc_message_reply` when answering that message. The first injected batch in a bound or newly auto-bound ChatGPT conversation also carries the normal actor system prompt plus a short Web transport note; later batches do not repeat that seed. Durable collaboration rules belong in the shared `cccc_help` path, including the Web Model Transport runtime note appended for `runtime=web_model` actors.
 
 Use this split to avoid duplicate or drifting instructions:
 
@@ -233,10 +233,13 @@ curl -s "$CONNECTOR_URL" \
 - `web_model` does not spawn a local PTY or local headless model process.
 - Connector secrets are one-time visible; CCCC stores only a hash.
 - Connector activity is best-effort diagnostic state. `Settings > Global > ChatGPT Web Model` shows the latest remote method/tool, wait status, delivery or turn id, error, and last-seen time after ChatGPT calls the connector.
-- Unknown or malformed tool calls return JSON-RPC protocol errors. A known tool that fails execution or policy checks returns an MCP tool result with `isError: true`; the native server includes a machine-readable payload in `structuredContent` and the text content.
+- Unknown or malformed tool calls return JSON-RPC protocol errors. A known tool that fails execution or policy checks returns an MCP tool result with `isError: true`; the native server includes the daemon's machine-readable `code`, `message`, and non-empty `details` in `structuredContent.error` as well as the text content.
 - Only tools whose declared operation is read-only are annotated with `readOnlyHint: true`. Mixed-action and mutating tools remain unannotated so a client is not encouraged to bypass approval for a write path.
 - The ChatGPT Web Model `tools/list` is intentionally stable for ChatGPT registration. Direct calls remain limited to that advertised surface; hidden built-in capability-pack tools must pass through `cccc_capability_use` and its actor-role checks.
 - ChatGPT Web Model local-power tools (`cccc_repo_edit`, `cccc_shell`, `cccc_git`) are actor-bound to the single ChatGPT Web Model actor identity and constrained to the active workspace scope.
+- Local `cccc_shell`, `cccc_git`, and unified-diff `cccc_apply_patch` calls own finite commands. Timeout covers input, output, and process exit; cancelling the call ends its owned process tree. This does not undo changes already made by a command. Run persistent work in the foreground through `cccc_exec_command`, rather than leaving background children behind a completed shell.
+- Shell and Git results retain at most 2,000,000 bytes per output stream and report `stdout_truncated` / `stderr_truncated`. Excess output is drained within the same command deadline instead of accumulating in memory.
+- Local `cccc_exec_command` sessions belong to the CCCC host process and Home. Host shutdown ends those commands; closing a browser tab does not. Cleanup leaves Actor/Analyst sessions and other hosts alone.
 - ChatGPT proactive delivery depends on the shared projected browser session and an active logged-in browser profile.
 - New ChatGPT chats are supported through a saved pending target: the first successful browser delivery commits the submitted batch, then CCCC waits for ChatGPT to expose the concrete `chatgpt.com/c/...` URL before binding future deliveries to that conversation. Ordinary browser history such as `last_tab_url` is diagnostic only and is never treated as a saved target.
 - GPT-5.x is selected inside ChatGPT. CCCC treats ChatGPT Web Model as one browser-delivery/runtime path, not as a separate provider per model.

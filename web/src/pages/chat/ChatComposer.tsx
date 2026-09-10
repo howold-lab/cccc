@@ -70,7 +70,11 @@ import {
   startComposerHistory,
   type ComposerHistorySession,
 } from "./chatComposerHistory";
-import { normalizeReplyMessageMode, type ComposerMessageMode } from "../../stores/useComposerStore";
+import {
+  normalizeReplyMessageMode,
+  useComposerStore,
+  type ComposerMessageMode,
+} from "../../stores/useComposerStore";
 
 const SLASH_COMMAND_PAGE_SIZE = 8;
 const MENTION_MENU_DESKTOP_WIDTH = 320;
@@ -145,7 +149,6 @@ export interface ChatComposerProps {
 
   // Text input
   composerRef: RefObject<HTMLTextAreaElement | null>;
-  composerText: string;
   setComposerText: Dispatch<SetStateAction<string>>;
   messageMode: ComposerMessageMode;
   setMessageMode: (mode: ComposerMessageMode) => void;
@@ -201,7 +204,6 @@ export function ChatComposer({
   appendComposerFiles,
   fileInputRef,
   composerRef,
-  composerText,
   setComposerText,
   messageMode,
   setMessageMode,
@@ -221,11 +223,15 @@ export function ChatComposer({
   setComposerAgentMentionTokens,
   slashCommands,
 }: ChatComposerProps) {
+  // The draft text is owned here, not by ChatTab: only the composer needs a
+  // re-render per keystroke.
+  const composerText = useComposerStore((s) => s.composerText);
   const composerHistoryRef = useRef<ComposerHistorySession | null>(null);
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
   const [slashVisibleCount, setSlashVisibleCount] = useState(SLASH_COMMAND_PAGE_SIZE);
+  const [voiceStatusTarget, setVoiceStatusTarget] = useState<HTMLDivElement | null>(null);
   const [voiceCaptureMode, setVoiceCaptureMode] = useState<VoiceSecretaryCaptureMode>("prompt");
   const [mentionMenuLeft, setMentionMenuLeft] = useState(8);
   const [composerScrollTop, setComposerScrollTop] = useState(0);
@@ -928,8 +934,10 @@ export function ChatComposer({
   return (
     <footer
       className={classNames(
-        "relative z-40 flex-shrink-0 border-t px-2 py-1.5 safe-area-bottom-compact transition-colors sm:px-2.5 sm:py-2",
-        "border-[var(--glass-border)] bg-[var(--glass-panel-bg)] backdrop-blur-md",
+        "relative z-40 flex-shrink-0 border-t px-2 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom,0px)*0.6)] transition-colors sm:px-2.5 sm:pt-2 sm:pb-[calc(0.5rem+env(safe-area-inset-bottom,0px)*0.6)]",
+        // The panel background is 90%+ opaque: a backdrop blur under it is
+        // invisible but still re-filters the whole footer on every frame.
+        "border-[var(--glass-border)] bg-[var(--glass-panel-bg)]",
       )}
     >
       {/* Reply indicator */}
@@ -1096,6 +1104,8 @@ export function ChatComposer({
             onClearRecipients={onClearRecipients}
           />
 
+          <div ref={setVoiceStatusTarget} data-voice-mobile-status-slot />
+
           {/* Row 2 — Textarea */}
           <div className="relative min-w-0 flex-1">
             {mentionOverlay ? (
@@ -1216,11 +1226,12 @@ export function ChatComposer({
           </div>
           {/* Row 3 — Action bar */}
           <div
+            data-composer-action-bar
             className={classNames(
               "grid grid-cols-[2.75rem_minmax(0,1fr)_2.75rem_2.75rem] items-center gap-2 px-2 pb-2 pt-1 sm:flex sm:justify-between",
             )}
           >
-            <div className="contents sm:flex sm:items-center sm:gap-1.5">
+            <div className="contents sm:flex sm:min-w-0 sm:flex-1 sm:items-center sm:gap-1.5">
               <button
                 className={classNames(
                   "glass-btn flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:opacity-60 sm:h-9 sm:w-9",
@@ -1238,13 +1249,14 @@ export function ChatComposer({
                 <AttachmentIcon size={18} />
               </button>
 
-              <div className="min-w-0 sm:min-w-max">
+              <div className="min-w-0">
                 <LazyVoiceSecretaryComposerControl
                   isDark={isDark}
                   selectedGroupId={selectedGroupId}
                   busy={busy}
                   disabled={!selectedGroupId || busy === "send" || !composerGroupSettled}
                   variant="assistantRow"
+                  statusPortalTarget={voiceStatusTarget}
                   captureMode={voiceCaptureMode}
                   onCaptureModeChange={setVoiceCaptureMode}
                   composerText={composerText}

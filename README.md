@@ -79,7 +79,9 @@ python -m pip install -U "cccc-pair>=0.4.36"
 > recommended. The pip command installs the same native executable in a
 > platform wheel for package-manager compatibility; it does not install a
 > Python daemon, launcher, or fallback. Supported targets are Linux x86-64
-> (glibc 2.28+), Intel/Apple Silicon macOS 11+, and Windows x86-64.
+> (glibc 2.28+), Apple Silicon macOS 11+, and Windows x86-64. CCCC v0.4.37
+> is the final release for Intel Macs; newer releases do not publish
+> `x86_64-apple-darwin` artifacts.
 
 ### Upgrade
 
@@ -200,8 +202,8 @@ graph TB
         RG2["Another machine/team"]
     end
 
-    A1 <-->|MCP tools<br/>PTY/headless| Daemon
-    A2 <-->|MCP tools<br/>PTY/headless| Daemon
+    A1 <-->|Native terminal<br/>MCP + protocol| Daemon
+    A2 <-->|Native terminal<br/>MCP + protocol| Daemon
     A3 <-->|Browser delivery<br/>Remote MCP| Daemon
     A4 <-->|MCP tools| Daemon
     A5 <-->|MCP tools| Daemon
@@ -226,7 +228,7 @@ CCCC orchestrates agents across 17 first-class runtimes, with `custom` available
 
 | Runtime | Integration | Entrypoint / Surface |
 |---------|-------------|----------------------|
-| Claude Code | Auto MCP setup | `claude` |
+| Claude Code | Managed Agent View session + native TUI; per-session MCP | `claude` |
 | Cline CLI | Auto MCP setup | `cline` |
 | Codex CLI | Auto MCP setup | `codex` |
 | GitHub Copilot CLI | Auto MCP setup | `copilot` |
@@ -236,20 +238,20 @@ CCCC orchestrates agents across 17 first-class runtimes, with `custom` available
 | Kilo Code CLI | Prompt-assisted MCP setup | `kilo` |
 | Antigravity CLI | Prompt-assisted MCP setup | `agy` |
 | ChatGPT Web | Remote MCP + Browser Delivery | `chatgpt.com` conversation |
-| Grok Build | Auto MCP setup | `grok` |
+| Grok Build | Managed ACP session + native TUI; per-session MCP | `grok` |
 | Hermes Agent | Auto MCP setup | `hermes` |
 | Droid | Auto MCP setup | `droid` |
 | Amp | Auto MCP setup | `amp` |
 | Auggie | Auto MCP setup | `auggie` |
-| Kimi CLI | Auto MCP setup | `kimi` |
-| OpenCode | Auto MCP setup via runtime config | `opencode` |
+| Kimi Code | Auto MCP setup | `kimi` |
+| OpenCode | Managed ACP session + native TUI; per-session MCP | `opencode` |
 | Custom | Manual | Any command |
 
 These are stable runtime entrypoints or surfaces. CCCC applies runtime-specific launch defaults automatically; actor/profile commands can be reviewed and customized in settings. The [Supported Runtimes guide](https://chesterra.github.io/cccc/guide/runtimes) lists the default autonomy flags, including approval-bypass modes such as `agy --dangerously-skip-permissions`, `grok --always-approve`, and `opencode --auto`.
 
 ```bash
-cccc setup --runtime claude       # auto-configures MCP for this runtime
-cccc setup --runtime cline        # configures Cline CLI MCP for its PTY TUI
+cccc setup --runtime claude       # reports CCCC-owned per-session MCP
+cccc setup --runtime cline        # configures Cline CLI MCP for its native TUI
 cccc setup --runtime cursor       # shows the prompt-assisted MCP setup contract
 cccc setup --runtime kilo         # shows the prompt-assisted MCP setup contract
 cccc setup --runtime antigravity  # shows the prompt-assisted MCP setup contract
@@ -257,9 +259,9 @@ cccc runtime list --all           # show all available runtimes
 cccc doctor                       # verify environment and runtime availability
 ```
 
-Actors can run as **PTY** (embedded terminal) or **headless** (structured I/O without a terminal). Claude Code and Codex CLI support both modes; headless gives the daemon tighter delivery and streaming control.
+Choose a Runtime; CCCC derives its interaction surface automatically. CLI Actors expose their native writable terminal. Claude Code, Codex CLI, Grok Build, and OpenCode pair that terminal with a structured background protocol on the same provider session, so users keep direct control while CCCC receives precise lifecycle state. Actor messages enter the native terminal immediately, leaving queue-versus-steer behavior to the receiving Runtime.
 
-For setup commands, runner-mode guidance, and troubleshooting for every supported runtime, see the [Supported Runtimes guide](https://chesterra.github.io/cccc/guide/runtimes).
+For setup commands, interaction details, and troubleshooting for every supported Runtime, see the [Supported Runtimes guide](https://chesterra.github.io/cccc/guide/runtimes).
 
 ### ChatGPT Web / GPT-5.x as a local development actor
 
@@ -511,8 +513,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointMan
 
 This installs the checksum-verified native product from GitHub Releases and
 updates through the same installer. It targets glibc 2.28+ Linux x86-64 without
-a system OpenSSL dependency, macOS 11+
-on Intel or Apple Silicon, and Windows x86-64. The
+a system OpenSSL dependency, Apple Silicon macOS 11+, and Windows x86-64. The
 installer refuses to overwrite an existing `cccc` command that it does not own;
 uninstall that command deliberately or choose another `CCCC_INSTALL_DIR` first.
 Commands in other directories are left untouched. For the default install

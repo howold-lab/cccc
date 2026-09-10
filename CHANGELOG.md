@@ -7,9 +7,77 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 ## [Unreleased]
 
 ### Fixed
-- **Direct localhost Web use is passwordless again without creating a hidden administrator token.** Requests served on a loopback browser origin receive an in-memory local administrator principal, while public Host/Origin and non-local proxy sources remain behind the explicit Access Token boundary.
-- **Group Bridge v2 now proves the complete live handshake and pins both peers.** A fresh client nonce and server-signed ready transcript prevent challenge/ready replay, while the native client persists `min_session_protocol=2` and refuses later v1 fallback.
-- **Mobile Web sessions survive normal tab reclamation.** Access-token login establishes a rolling 30-day HttpOnly cookie and clears the temporary browser bearer after verification, avoiding repeated token entry without placing credentials in URLs or local storage.
+- **Grok Actors stay running after CCCC restarts.** Automatic restoration no longer shuts them down when startup finishes. Manual startup also keeps the restored session connected after its request worker exits.
+- **Enabled Reach restores after CCCC restarts.** The daemon waits for the live Web listener and restores a stopped tunnel helper with bounded account requests and retry backoff. Late responses cannot override turning Reach off, unlinking, relinking, or shutdown; running helpers are left in place.
+- **Concurrent ledger queries preserve exact committed history.** Cold rebuilds capture source versions and records together; delayed append callbacks cannot duplicate an old event or hide a later same-sized message.
+- **Auxiliary commands cannot wait forever.** DeepSeek's Node version probe and Tailscale start/stop use bounded output and deadlines, with owned child-process cleanup and explicit failure reporting.
+- **Context storage errors preserve the original state for recovery.** Malformed files fail explicitly instead of being treated as empty, and failed partial writes invalidate stale version tokens.
+- **Task permissions follow the actual batch state.** Padded task IDs and newly created or relinquished tasks cannot bypass ownership checks; rejected batches leave no partial changes.
+- **Live notifications survive ledger compaction and refill.** Daemon and Web followers recover unseen events by their ledger IDs when archive sources change, while ordinary appends retain incremental reads.
+- **Published MCP context and Space actions are callable.** Decision/handoff notes and Space sync now reach their existing handlers; context snapshots honor the archived-task option and tool descriptions match actual results.
+- **Short MCP commands stop when timed out or cancelled.** Shell/Git calls and runtime MCP setup helpers share bounded, concurrent input/output capture, so blocked pipes cannot outlive the command deadline. Shell results explicitly report truncated output; setup checks reject incomplete output.
+- **Hermes setup respects the Actor profile environment.** An explicit `HERMES_HOME` is no longer overwritten by the host default.
+- **Voice Secretary completion events now use the daemon's session update boundary.** The Web host no longer writes them directly to the ledger; transient failures and lost IPC replies can be retried without duplicate completion events.
+- **MCP host shutdown releases its local command sessions.** Cleanup is scoped to the owning Home and leaves other hosts and Actor/Analyst runtimes running. Observed command completion also releases its runtime resources.
+- **Stopping Voice during setup prevents late startup work and playback.** A call returned after cancellation is released by its exact generation, preserving newer calls and the retained Analyst session.
+- **Linux terminals remain stoppable when an Actor stops consuming input.** Pending message submission responds to cancellation, revoked terminal writers release the input lane, and an old submission cannot continue in a restarted Actor session.
+- **Actor startup and internal session callbacks remain available while global changes are queued.** MCP discovery and Bridge session coordination use their resource-owned synchronization, avoiding a lifecycle lock cycle. Catalog visibility uses one Group snapshot, and Hermes/Group Space status reads no longer take unnecessary write locks.
+- **Actor status notifications recover after temporary ledger write failures.** The next normal status tick retries the uncommitted transition without repeating successfully published state.
+- **Kilo snapshot progress no longer leaks into Actor and Voice Analyst answers.** The shared stream adapter excludes text explicitly marked as transient UI progress while preserving ordinary answer text, including synthetic content. Native snapshot behavior and strict runtime result checks remain unchanged.
+
+### Changed
+- **Evicting large history indexes no longer holds the global cache lock during deallocation.** Other Groups can continue querying while the removed index is freed.
+- **Ledger snapshots validate and hash history in one streaming pass.** Maintenance no longer builds a full-history query index, preserves canonical snapshot hashes, and rejects unreadable event objects before publishing metadata or rotating files.
+- **Delivery and reminder checks avoid copying the entire message history.** Runtime turn claims, recovery, completion checks, and queue counts borrow the existing index and retain only needed results. Reminder checks skip history when no Actor is eligible.
+- **Daemon operations declare their concurrency policy beside their handler.** This removes a separate operation whitelist and verifies documented operations through the executable resolver. Both Profile secret-key listing aliases now use read access.
+- **Terminal stream ingestion avoids re-serializing unrelated history.** Raw event replay checks compare identity before payload, preserving changed content and Group/Actor isolation.
+- **Architecture documentation describes actual process and state ownership.** It distinguishes the shared control plane from Web/MCP integration hosts and configuration, coordination, and event authorities.
+
+## [0.4.38] — 2026-09-07
+
+### Added
+- **Interactive tiled terminals show up to four Actors per page.** Each Group remembers its view and page; its header, composer, and Presentation controls remain available. Each tile supports direct input and expansion with independent focus and write ownership.
+- **Codex Voice can receive cross-Group Actor notifications.** Optional per-Group subscriptions, exact reply tracking, viewed-message suppression, and visible source/delivery states connect Actor results to the global voice conversation. Group and sender attribution accompanies each notification.
+- **Codex, Claude Code, Grok Build, OpenCode, and Kilo share managed session adapters across Actors and Voice Analyst.** Native writable TUIs and structured observation follow the same provider conversation within each role. Runtime Profiles support provider/model configuration and private environment settings.
+- **Cross-origin HTTP clients have explicit CORS configuration.** Named origins and optional wildcard mode preserve authentication, Cookie write-origin checks, and WebSocket origin checks; wildcard mode requires explicit Bearer authentication for cross-origin access.
+
+### Changed
+- **Codex Voice has a resizable Conversation/Analyst split and consolidated settings.** The Analyst uses a stable neutral workspace and may use any of the five admitted managed runtimes; Realtime audio continues to use the host's Codex login.
+- **Group and Actor toolbars prioritize frequent local actions.** Global preferences move into Settings, while Group controls remain directly accessible. Terminal History moves into the Actor's More menu.
+- **Runtime surfaces are selected automatically.** Supported CLI runtimes retain their native terminal; CCCC owns session topology, MCP identity, cancellation, and resume. Unsupported managed launch overrides fail explicitly.
+- **The native updater uses a published release index to avoid GitHub API rate limits.** Checksum verification and website-versus-pip installation ownership remain enforced.
+- **Voice Secretary preserves final transcript revisions without duplicate document input.** Complete final SenseVoice results supersede live Paraformer text while retaining revision history; mobile recording options and status are easier to reach.
+
+### Fixed
+- **Voice submission no longer waits indefinitely on stalled speech.** Context updates fit provider limits, queues and waits are bounded, and known-unsent results survive teardown, including overflow. Voice polling avoids an Actor-startup dispatcher lock cycle, and recipient aliases are resolved for tracked replies. Submission still does not guarantee complete spoken narration.
+- **Global Voice transcripts combine fragments from the same provider turn.** Opening words no longer appear as separate repeated or truncated entries in the affected event sequences.
+- **Voice Secretary completes final transcript processing before normal WebSocket closure.** Browser speech recovery is bounded and releases capture when retries are exhausted.
+- **Managed runtime startup and follow-up answers retain their session and turn identity.** Empty Codex/Claude sessions recover without synthetic prompts, initial terminal input waits for readiness, and Grok/OpenCode/Kilo result correlation handles early events and follow-up turns.
+- **Claude resumes through supported upgrades and workspace moves.** Supported launcher/Agent View worker version differences are accepted; relocated transcripts and empty sessions recover, proxy and custom CA settings are retained, and effective bypass-permissions configuration is clearer.
+- **Kimi Code setup follows its effective home and official MCP configuration.** Native trust/login prompts remain with the provider.
+- **Windows Actors launch and receive messages through native executable and npm batch paths.** Lookup respects PATHEXT order and exclusions, preserves command paths, and supports UTF-8 input. Claude settings use a private file to avoid inline JSON quoting failures; Web startup recovers from reserved-port errors and reports its effective address.
+- **Shutdown retains ownership of processes until exit is confirmed.** Forced exit terminates owned process trees, failed stops remain retryable, Windows children join their Job before execution, and daemon takeover validates the actual CLI command before targeting a PID.
+- **Runtime status bubbles no longer repeatedly display replayed output.** Buffered projections survive Group switches so snapshot deduplication cannot discard unapplied text. Broadcasts leave disabled Actors disabled.
+- **Long terminal history preserves newer lines, ANSI state, and keyboard navigation.** Truncation, loading failures, and expired snapshots are explicit. Read-only normal-buffer terminals retain local touch scrolling across mouse modes and write-permission handoffs.
+- **Group menus, sidebar ordering, and mobile controls remain in scope.** Menus do not initiate sorting, order changes render immediately, stale menus close on Group or layout changes, and nested surfaces restore keyboard focus. Composer sizing remains bounded across input methods.
+
+### Removed
+- **Intel Mac release artifacts are retired.** v0.4.37 is the final supported Intel Mac release; native packages now target Linux x86-64, Apple Silicon macOS, and Windows x86-64.
+- **The separate Claude Hook and `claude -p` session paths and Actor PTY/Headless selector are retired.** Managed runtimes use one observed provider session with a native TUI where supported.
+
+## [0.4.37] — 2026-09-01
+
+### Added
+- **Experimental Codex Voice brings one global spoken control surface to CCCC Web.** Realtime Voice handles low-latency conversation while one persistent, resumable Voice Analyst Codex thread can inspect repositories, query CCCC state, use tools, delegate work to Actors, and return results through the same conversation. The console includes audio controls, device and speaking-voice selection, and the genuine Analyst TUI without creating another Actor.
+
+### Changed
+- **Agent messages are concise without losing their reply target.** Runtime delivery keeps the full actionable event ID, removes repeated default mode and parent metadata, and gives one correct reply-tool reminder per batch. Successful MCP message operations again return the perspective-reset context, while policy failures retain structured recovery details.
+- **Direct localhost Web use is passwordless without creating a hidden administrator token.** Exact loopback browser origins receive an in-memory local administrator principal; LAN, Reach, public URL, and reverse-proxy exposure cannot be enabled until an explicit Admin Access Token exists. Authenticated browser sessions use a rolling 30-day HttpOnly cookie and discard the temporary bearer after verification.
+
+### Fixed
+- **Group Bridge v2 now proves the complete live handshake and pins both peers.** A fresh client nonce and server-signed ready transcript prevent challenge/ready replay, while the native client persists `min_session_protocol=2` and refuses later v1 fallback. Each approved, unclaimed record from before the claim-window upgrade receives one persisted ten-minute compatibility window when that record is first accessed instead of becoming permanently unclaimable.
+- **Large Web messages no longer fail with Rust HTTP 413 responses.** Same-group and remote Group Bridge bodies above 64 KiB become UTF-8 text attachments; local cross-group text stays inline under the bounded daemon IPC contract.
+- **Codex Voice turn ownership and recovery fail closed instead of misrouting work.** Voice delegations are matched to their exact Codex turn, Actor results are accepted only from the assigned recipient, stale Analyst repository bindings are replaced before reuse, and unreplayable lifecycle gaps invalidate the session rather than leaving it busy or speaking the wrong result.
 
 ## [0.4.36] — 2026-08-30
 
@@ -52,7 +120,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 ### Fixed
 - **Delivery and recovery no longer conflate runtime handoff, Inbox read state, or replies.** Claims are settled durably, Mail never wakes an actor, reply requests can be cancelled, remote Group Bridge sends preserve their source identity, and interrupted work remains recoverable without silently duplicating committed turns.
 - **DeepSeek failures now have bounded, durable recovery behavior.** Missing credentials and context overflow require an explicit restart, large histories use indexed recovery, and daemon restarts cannot turn permanent provider failures into retry loops.
-- **Oversized Web messages no longer fail with Rust HTTP 413 responses.** Same-group and remote Group Bridge bodies above 64 KiB become UTF-8 text attachments; local cross-group text stays inline and the bounded daemon IPC limit now covers the Web JSON contract.
 - **Standalone Rust self-updates now adopt their exact markerless executable safely.** The CLI passes its canonical current path into the transactional installer, while every other markerless command—including legacy launchers and version-shaped foreign programs—requires explicit replacement and remains protected by default.
 - **Remote-control boundaries now fail closed across Python and Rust.** Unauthenticated daemon IPC rejects every non-loopback TCP bind; Reach admin links use short-lived, one-time, origin-bound exchanges instead of long-lived tokens; Reach verifies the exact local CCCC Web instance before opening a tunnel; and cookie-authenticated writes require an exact allowed Origin or same-origin Referer.
 - **The Vite development proxy now preserves the browser-facing Host for terminal WebSockets.** Rust Web Origin validation no longer rejects legitimate `127.0.0.1:5555` runtime-inspector connections and leaves the xterm surface blank.

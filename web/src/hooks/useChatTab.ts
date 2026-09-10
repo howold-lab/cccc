@@ -1,3 +1,4 @@
+import { groupMessagesVisible } from "../stores/useUIStore";
 import { useMemo, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -69,6 +70,7 @@ import { prepareComposerMessage } from "./chat/prepareComposerMessage";
 import { useChatMessageActions } from "./chat/useChatMessageActions";
 import { useChatMessageView } from "./chat/useChatMessageView";
 import { useTaskReferenceIndex } from "./chat/useTaskReferenceIndex";
+import { useShallow } from "zustand/react/shallow";
 interface UseChatTabOptions {
   selectedGroupId: string;
   selectedGroupRunning: boolean;
@@ -160,7 +162,6 @@ export function useChatTab({
 
   const {
     activeGroupId,
-    composerText,
     composerFiles,
     toText,
     replyTarget,
@@ -180,10 +181,41 @@ export function useChatTab({
     upsertDraft,
     clearDraft,
     clearComposer,
-  } = useComposerStore();
+  } = useComposerStore(
+    useShallow((s) => ({
+      activeGroupId: s.activeGroupId,
+      composerFiles: s.composerFiles,
+      toText: s.toText,
+      replyTarget: s.replyTarget,
+      quotedPresentationRef: s.quotedPresentationRef,
+      quotedVoiceDocumentRef: s.quotedVoiceDocumentRef,
+      messageMode: s.messageMode,
+      destGroupId: s.destGroupId,
+      setComposerText: s.setComposerText,
+      setComposerFiles: s.setComposerFiles,
+      setToText: s.setToText,
+      setReplyToText: s.setReplyToText,
+      setReplyTarget: s.setReplyTarget,
+      setQuotedPresentationRef: s.setQuotedPresentationRef,
+      setQuotedVoiceDocumentRef: s.setQuotedVoiceDocumentRef,
+      setMessageMode: s.setMessageMode,
+      setDestGroupId: s.setDestGroupId,
+      upsertDraft: s.upsertDraft,
+      clearDraft: s.clearDraft,
+      clearComposer: s.clearComposer,
+    })),
+  );
   const composerGroupSettled = isComposerGroupSettled(activeGroupId, selectedGroupId);
-  const { setRecipientsModal, setRelayModal, openModal } = useModalStore();
-  const { setNewActorRole } = useFormStore();
+  const { setRecipientsModal, setRelayModal, openModal } = useModalStore(
+    useShallow((s) => ({
+      setRecipientsModal: s.setRecipientsModal,
+      setRelayModal: s.setRelayModal,
+      openModal: s.openModal,
+    })),
+  );
+  const { setNewActorRole } = useFormStore(
+    useShallow((s) => ({ setNewActorRole: s.setNewActorRole })),
+  );
 
   // Outbox (optimistic pending messages) — stable selector, no new array allocation.
   const outboxEntries = useChatOutboxStore(
@@ -430,8 +462,10 @@ export function useChatTab({
   });
 
   const shouldFollowCurrentSend = useCallback(
-    () => shouldFollowChatSendFromViewport(scrollRef?.current, chatMessages.length),
-    [chatMessages.length, scrollRef],
+    () =>
+      groupMessagesVisible(selectedGroupId, useUIStore.getState()) &&
+      shouldFollowChatSendFromViewport(scrollRef?.current, chatMessages.length),
+    [chatMessages.length, scrollRef, selectedGroupId],
   );
 
   useEffect(() => {
@@ -498,8 +532,13 @@ export function useChatTab({
 
   const syncMentionRecipientsFromComposerText = useCallback(
     (textOrUpdater: string | ((prev: string) => string)) => {
+      // Read the live text instead of subscribing to it: this hook feeds
+      // ChatTab, and a per-keystroke subscription here re-renders the whole
+      // message list under it.
       const text =
-        typeof textOrUpdater === "function" ? textOrUpdater(composerText) : textOrUpdater;
+        typeof textOrUpdater === "function"
+          ? textOrUpdater(useComposerStore.getState().composerText)
+          : textOrUpdater;
       setComposerGroupMentionTokens((tokens) => pruneComposerGroupMentionTokens({ text, tokens }));
       const liveAgentMentionTokens = pruneComposerAgentMentionTokens({
         text,
@@ -510,7 +549,7 @@ export function useChatTab({
       }
       setComposerText(text);
     },
-    [composerAgentMentionTokens, composerText, setComposerText],
+    [composerAgentMentionTokens, setComposerText],
   );
 
   const removeComposerFile = useCallback(
@@ -791,7 +830,8 @@ export function useChatTab({
         window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
       }
       if (selectedGroupId) {
-        setChatUnreadCount(selectedGroupId, 0);
+        if (groupMessagesVisible(selectedGroupId, useUIStore.getState()))
+          setChatUnreadCount(selectedGroupId, 0);
         setChatFilter(selectedGroupId, "all");
         setChatMobileSurface(selectedGroupId, "messages");
       }
@@ -928,7 +968,6 @@ export function useChatTab({
     hasForeman,
 
     // Composer state
-    composerText,
     setComposerText: syncMentionRecipientsFromComposerText,
     composerGroupMentionTokens,
     setComposerGroupMentionTokens,

@@ -1,40 +1,56 @@
-use super::{ActiveTurn, Session, Turn, TurnOutputState, output, poisoned, protocol};
-use cccc_contracts::{ActorRuntime, utc_now};
-use serde_json::{Value, json};
-use std::io::{self, BufRead, BufReader, Write};
-use std::sync::Arc;
+use super::{Session, block_on_managed, managed_runtime, output};
+use cccc_contracts::utc_now;
+use serde_json::Value;
+use std::io;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use tracing::Instrument;
 
 impl Session {
     pub(super) fn running(&self) -> bool {
         if self.stopped.load(Ordering::Acquire) {
             return false;
         }
-        self.child
-            .lock()
-            .ok()
-            .is_some_and(|mut child| child.try_wait().ok().flatten().is_none())
+        self.managed.process_running()
+            && (!self.has_terminal.load(Ordering::Acquire)
+                || cccc_runtime::status(&self.group_id, &self.actor_id)
+                    .is_ok_and(|status| status.running))
     }
 
-    pub(super) fn stop(&self) {
-        self.stop_after_invalidate(|| {});
-    }
-
-    pub(super) fn stop_after_invalidate(&self, after_invalidate: impl FnOnce()) {
-        let first_stop = !self.stopped.swap(true, Ordering::AcqRel);
-        after_invalidate();
-        if let Ok(mut child) = self.child.lock() {
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-            }
-            let _ = child.wait();
+    pub(super) fn stop(&self) -> io::Result<bool> {
+        let _guard = self.stop_lock.lock().map_err(|_| super::poisoned())?;
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(false);
         }
+        block_on_managed(self.managed.stop(self.managed.generation()).instrument(
+            tracing::info_span!("actor_runtime_stop", group_id = %self.group_id, actor_id = %self.actor_id),
+        ))?;
+        if self.has_terminal.load(Ordering::Acquire) {
+            match cccc_runtime::stop(&self.group_id, &self.actor_id) {
+                Ok(_) | Err(cccc_runtime::RuntimeError::NotFound(_, _)) => {}
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        }
+        self.stopped.store(true, Ordering::Release);
         self.set_status("stopped", None);
-        self.completion.1.notify_all();
-        if first_stop {
-            output::emit(self, "headless.session.stopped", serde_json::Map::new());
+        output::emit(self, "headless.session.stopped", serde_json::Map::new());
+        Ok(true)
+    }
+
+    pub(super) fn stop_after_process_exit(&self) -> bool {
+        // A dead observer is not proof that the provider job stopped. Use the
+        // same confirmed stop path as actor_stop and retain ownership on error.
+        match self.stop() {
+            Ok(first) => first,
+            Err(error) => {
+                self.set_status("error", None);
+                tracing::error!(
+                    %error,
+                    group_id = %self.group_id,
+                    actor_id = %self.actor_id,
+                    "failed to stop disconnected managed Actor; stop remains retryable"
+                );
+                false
+            }
         }
     }
 
@@ -49,198 +65,19 @@ impl Session {
         }
     }
 
-    pub(super) fn write_json(&self, value: &Value) -> io::Result<()> {
-        let mut stdin = self.stdin.lock().map_err(|_| poisoned())?;
-        serde_json::to_writer(&mut *stdin, value).map_err(io::Error::other)?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()
-    }
-
-    pub(super) fn request(
-        &self,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> io::Result<Value> {
-        let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = mpsc::sync_channel(1);
-        self.pending
-            .lock()
-            .map_err(|_| poisoned())?
-            .insert(id, sender);
-        if let Err(error) =
-            self.write_json(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-        {
-            self.pending
-                .lock()
-                .ok()
-                .and_then(|mut pending| pending.remove(&id));
-            return Err(error);
+    pub(super) fn attach_terminal(&self, pid: Option<u32>) {
+        self.has_terminal.store(true, Ordering::Release);
+        if let Ok(mut state) = self.status.lock() {
+            state.pid = pid;
+            state.updated_at = utc_now();
         }
-        let response = receiver.recv_timeout(timeout).map_err(|_| {
-            self.pending
-                .lock()
-                .ok()
-                .and_then(|mut pending| pending.remove(&id));
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("headless request timed out: {method}"),
-            )
-        })?;
-        if let Some(error) = response.get("error") {
-            return Err(io::Error::other(format!(
-                "headless request failed: {error}"
-            )));
-        }
-        Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }
-}
 
-pub(super) fn spawn_reader(
-    session: Arc<Session>,
-    stdout: impl std::io::Read + Send + 'static,
-) -> io::Result<()> {
-    std::thread::Builder::new()
-        .name(format!(
-            "cccc-headless-out:{}:{}",
-            session.group_id, session.actor_id
-        ))
-        .spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Ok(message) = serde_json::from_str::<Value>(&line) {
-                    output::handle_message(&session, message);
-                }
-            }
-            let unexpected_exit = !session.stopped.swap(true, Ordering::AcqRel);
-            if unexpected_exit {
-                invalidate_pending_claude_resume(
-                    &session,
-                    "claude headless resume process exited before completing a turn",
-                );
-            }
-            session.set_status("stopped", None);
-            session.completion.1.notify_all();
-        })?;
-    Ok(())
-}
-
-pub(super) fn invalidate_pending_claude_resume(session: &Session, error: &str) {
-    if session.runtime != ActorRuntime::Claude {
-        return;
+    pub(super) fn has_terminal(&self) -> bool {
+        self.has_terminal.load(Ordering::Acquire)
     }
-    let provider_session_id = session
-        .resumed_provider_session_id
-        .lock()
-        .ok()
-        .map(|mut session_id| std::mem::take(&mut *session_id))
-        .unwrap_or_default();
-    if provider_session_id.is_empty() {
-        return;
-    }
-    if let Err(persist_error) = super::super::runtime_session::mark_resume_failed(
-        &session.home,
-        &session.group_id,
-        &session.actor_id,
-        error,
-    ) {
-        tracing::warn!(
-            error = %persist_error,
-            group_id = %session.group_id,
-            actor_id = %session.actor_id,
-            "failed to invalidate rejected Claude resume metadata"
-        );
-    }
-    output::emit(
-        session,
-        "headless.session.resume_failed",
-        serde_json::Map::from_iter([
-            ("provider_session_id".into(), json!(provider_session_id)),
-            ("error".into(), json!(error)),
-        ]),
-    );
-}
 
-pub(super) fn spawn_stderr(
-    stderr: impl std::io::Read + Send + 'static,
-    group_id: &str,
-    actor_id: &str,
-) -> io::Result<()> {
-    let name = format!("cccc-headless-err:{group_id}:{actor_id}");
-    std::thread::Builder::new().name(name).spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            tracing::debug!(message = %line, "headless provider stderr");
-        }
-    })?;
-    Ok(())
-}
-
-pub(super) fn spawn_worker(session: Arc<Session>, receiver: Receiver<Turn>) -> io::Result<()> {
-    std::thread::Builder::new()
-        .name(format!(
-            "cccc-headless-turn:{}:{}",
-            session.group_id, session.actor_id
-        ))
-        .spawn(move || {
-            while session.running() {
-                let Ok(turn) = receiver.recv() else { break };
-                let generation = session
-                    .completion
-                    .0
-                    .lock()
-                    .map(|value| *value)
-                    .unwrap_or_default();
-                let Ok(mut active_turn) = session.active_turn.lock() else {
-                    break;
-                };
-                *active_turn = Some(ActiveTurn {
-                    event_id: turn.event_id.clone(),
-                    turn_id: String::new(),
-                    control_kind: turn.control_kind.clone(),
-                    output_state: TurnOutputState::Buffering,
-                    pending_messages: Vec::new(),
-                });
-                drop(active_turn);
-                session.set_status(
-                    "working",
-                    Some(turn.event_id.clone()).filter(|id| !id.is_empty()),
-                );
-                let result = if session.runtime == ActorRuntime::Codex {
-                    protocol::submit_codex(&session, &turn)
-                } else {
-                    protocol::submit_claude(&session, &turn)
-                };
-                let Ok(turn_id) = result else {
-                    if let Ok(mut active_turn) = session.active_turn.lock() {
-                        active_turn.take();
-                    }
-                    session.set_status("waiting", None);
-                    output::emit_turn(&session, &turn, "headless.turn.failed", "");
-                    continue;
-                };
-                if let Ok(mut active_turn) = session.active_turn.lock()
-                    && let Some(active_turn) = active_turn.as_mut()
-                {
-                    active_turn.turn_id.clone_from(&turn_id);
-                }
-                if let Ok(mut state) = session.status.lock()
-                    && state.status == "working"
-                {
-                    state.task_id = Some(turn_id.clone());
-                    state.updated_at = utc_now();
-                }
-                output::emit_turn(&session, &turn, "headless.turn.started", &turn_id);
-                output::announce_turn(&session);
-                let mut completed = match session.completion.0.lock() {
-                    Ok(value) => value,
-                    Err(_) => break,
-                };
-                while *completed == generation && session.running() {
-                    completed = match session.completion.1.wait(completed) {
-                        Ok(value) => value,
-                        Err(_) => return,
-                    };
-                }
-            }
-        })?;
-    Ok(())
+    pub(super) fn respond_error(&self, id: Value, error: Value) -> io::Result<()> {
+        managed_runtime().block_on(self.managed.respond_error(id, error))
+    }
 }

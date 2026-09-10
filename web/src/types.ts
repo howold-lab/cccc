@@ -235,24 +235,8 @@ export type HeadlessStreamEvent = {
   actor_id?: string;
   type?: string;
   data?: Record<string, unknown>;
-};
-
-export type RuntimeActivityEvent = {
-  v: number;
-  id: string;
-  ts: string;
-  group_id: string;
-  actor_id: string;
-  runtime: string;
-  activity_id: string;
-  kind: "session" | "turn" | "tool" | "subagent" | string;
-  status: "started" | "waiting" | "completed" | "failed" | "stuck" | string;
-  event_type: string;
-  session_id: string;
-  turn_id?: string | null;
-  operation_id?: string | null;
-  tool_name?: string | null;
-  duration_ms?: number | null;
+  /** Browser receipt time for live increments only; restored history has no timestamp. */
+  _receivedAt?: number;
 };
 
 export type LedgerEventStatusPayload = {
@@ -290,7 +274,7 @@ export type Actor = {
   runner?: string;
   runner_effective?: string;
   runtime?: string;
-  runtime_state_source?: "terminal" | "app_server" | string;
+  runtime_state_source?: "terminal" | "managed_session" | string;
   runtime_session_status?: string | null;
   runtime_session_resume_eligible?: boolean | null;
   runtime_session_last_resume_error?: string | null;
@@ -314,7 +298,7 @@ export type ActorProfile = {
   owner_id?: string;
   runtime: SupportedRuntime | string;
   runner: "pty" | "headless";
-  command: string[];
+  command: string[] | string;
   submit: "enter" | "newline" | "none";
   env: Record<string, string>;
   capability_defaults?: {
@@ -738,7 +722,6 @@ export type GroupSettings = {
   silence_timeout_seconds: number;
   help_nudge_interval_seconds: number;
   help_nudge_min_messages: number;
-  min_interval_seconds: number;
   mail_notice_after_seconds: number;
   reply_notice_after_seconds: number;
 
@@ -1029,6 +1012,10 @@ export type MembershipState = {
   cut?: boolean;
   disabled?: boolean;
   in_reach?: boolean;
+  reach_enabled?: boolean;
+  reach_status?: "off" | "connecting" | "online" | "offline" | "unknown";
+  checked_at?: string | null;
+  cloudflared?: { running: boolean; installed?: boolean; matches_pin?: boolean };
   reach_supported?: boolean;
   account_reachable?: boolean | null;
   account_origin?: string | null;
@@ -1483,32 +1470,29 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   amp: { label: "Amp", desc: "" },
   auggie: { label: "Auggie (Augment)", desc: "" },
   claude: { label: "Claude Code", desc: "" },
-  cline: { label: "Cline CLI", desc: "Uses Cline CLI MCP setup with the PTY TUI" },
+  cline: { label: "Cline CLI", desc: "Uses Cline's native terminal with CCCC MCP" },
   codex: { label: "Codex CLI", desc: "" },
   deepseek: {
     label: "DeepSeek Harness",
-    desc: "Experimental ACP headless runtime; CCCC installs its pinned composition on first start",
+    desc: "Experimental ACP runtime; CCCC installs its pinned composition on first start",
   },
-  copilot: { label: "GitHub Copilot CLI", desc: "Uses Copilot CLI MCP setup with the PTY runner" },
+  copilot: { label: "GitHub Copilot CLI", desc: "Uses Copilot's native terminal with CCCC MCP" },
   cursor: {
     label: "Cursor CLI",
-    desc: "Uses an idempotent MCP setup prompt inside the PTY runner",
+    desc: "Uses an idempotent MCP setup prompt in Cursor's native terminal",
   },
-  devin: { label: "Devin CLI", desc: "Uses Devin MCP CLI setup with the PTY runner" },
-  kiro: { label: "Kiro CLI", desc: "Uses Kiro MCP CLI setup with the PTY runner" },
-  kilo: {
-    label: "Kilo Code CLI",
-    desc: "Uses an idempotent MCP setup prompt inside the PTY runner",
-  },
+  devin: { label: "Devin CLI", desc: "Uses Devin's native terminal with CCCC MCP" },
+  kiro: { label: "Kiro CLI", desc: "Uses Kiro's native terminal with CCCC MCP" },
+  kilo: { label: "Kilo Code CLI", desc: "Managed delivery in the same native Kilo TUI" },
   antigravity: {
     label: "Antigravity CLI",
-    desc: "Uses an idempotent MCP setup prompt inside the PTY runner",
+    desc: "Uses an idempotent MCP setup prompt in Antigravity's native terminal",
   },
   droid: { label: "Droid", desc: "" },
-  grok: { label: "Grok Build", desc: "Uses Grok MCP CLI setup with the PTY runner" },
+  grok: { label: "Grok Build", desc: "Managed delivery in the same native Grok TUI" },
   hermes: { label: "Hermes Agent", desc: "Uses your Hermes profile with CCCC MCP" },
-  kimi: { label: "Kimi CLI", desc: "" },
-  opencode: { label: "OpenCode", desc: "Uses inline OpenCode MCP config at actor launch" },
+  kimi: { label: "Kimi Code", desc: "" },
+  opencode: { label: "OpenCode", desc: "Managed delivery in the same native OpenCode TUI" },
   web_model: {
     label: "ChatGPT Web Model",
     desc: "ChatGPT browser delivery + remote MCP connector",
