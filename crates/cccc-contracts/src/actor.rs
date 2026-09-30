@@ -58,10 +58,25 @@ pub enum ActorRuntime {
     Kimi,
     Opencode,
     WebModel,
+    GrokWebModel,
     Custom,
 }
 
 impl ActorRuntime {
+    #[must_use]
+    pub const fn web_model_provider(self) -> Option<&'static str> {
+        match self {
+            Self::WebModel => Some("chatgpt_web"),
+            Self::GrokWebModel => Some("grok_web"),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_web_model(self) -> bool {
+        self.web_model_provider().is_some()
+    }
+
     /// The runner is an implementation detail derived from the Runtime, not a
     /// user-selectable execution mode. CLI runtimes always expose their native
     /// terminal; runtimes with their own non-terminal surface keep the
@@ -69,7 +84,7 @@ impl ActorRuntime {
     #[must_use]
     pub const fn runner(self) -> RunnerKind {
         match self {
-            Self::Deepseek | Self::WebModel => RunnerKind::Headless,
+            Self::Deepseek | Self::WebModel | Self::GrokWebModel => RunnerKind::Headless,
             _ => RunnerKind::Pty,
         }
     }
@@ -140,6 +155,9 @@ pub struct Actor {
     pub profile_revision_applied: u64,
     #[serde(default)]
     pub created_at: String,
+    /// Stable for one Actor registration, replaced when that Actor is recreated.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub generation: String,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -170,6 +188,7 @@ impl Actor {
             profile_owner: String::new(),
             profile_revision_applied: 0,
             created_at: now.clone(),
+            generation: String::new(),
             updated_at: now,
         }
     }
@@ -177,7 +196,7 @@ impl Actor {
     pub fn normalize_runtime_constraints(&mut self) {
         self.runner = self.runtime.runner();
         self.runtime_state_source = self.runtime.state_source();
-        if self.runtime == ActorRuntime::WebModel {
+        if self.runtime.is_web_model() {
             self.command.clear();
         }
     }

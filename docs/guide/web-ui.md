@@ -23,23 +23,62 @@ The Web UI has these main areas:
 - **Main Area**: Group message history or a paginated terminal view
 - **Input**: Message composer with @mention support
 
+The header uses its existing Group status dot for page-connection health: red
+means disconnected, pulsing amber means reconnecting, and a connected page uses
+the normal Group lifecycle color. The badge text still describes the Group's
+runtime state (for example, Idle); hover or focus exposes connection details.
+No separate connection subtitle or extra dot is shown on desktop or mobile.
+
 ### Group message and terminal views
 
 On desktop, Group editing, search, context and runtime controls stay directly in the header.
+**Group connections** is available under the current Group’s settings and in each Group’s sidebar **⋮** menu, including remote Groups
+in CCCC Connect. The settings entry manages the current Group; the sidebar menu manages the Group
+whose menu you opened. Only incoming invitations ask which local Group should accept
+the connection.
 **Settings and more** collects theme, text size, language, account and the full settings entry.
-Appearance choices show their current values and can be selected directly. Narrow headers use
-the existing overflow menu, with the same appearance choices and access rules.
-**Pause Delivery** pauses message delivery; **Stop All Agents** stops the Actors themselves.
+Appearance choices use application menus for theme, text size and language. Selecting an
+option keeps the containing menu open and returns focus to its trigger. Arrow keys navigate
+options; Escape closes only the inner choice menu. Narrow headers use the existing overflow
+sheet with the same choices and access rules; choice panels are portalled above its scroll area.
+Message identities, recipients, references, timestamps and actions follow the text-size preference.
+Reading controls share the application theme; embedded PDFs, web pages, images and terminal
+ANSI content retain their own colors. Image and diagram viewers keep zoom buttons separate
+from native wheel scrolling and support dragging the enlarged content.
+
+In Group settings, refreshing data or saving a different section preserves edited fields and
+updates fields you have not changed. Delivery, Automation, Messaging and Transcript display
+save results in the current settings view; a failed save leaves your changes available for retry.
+Notebook refresh also preserves a pending notebook choice. Changing Groups starts from that
+Group's saved settings. Closing settings still discards unsaved form edits.
+Web Access refresh preserves the selected access goal together with edited connection fields.
+Saving or resetting one Guidance document updates that document without reloading the other
+editor; **Discard changes** remains explicit.
+
+The **Group status button** combines the status dot with run controls, without a dropdown arrow.
+When space allows, the header also shows the state text; narrow headers keep a compact button.
+The sidebar keeps a passive status dot and places run actions in each Group’s **⋮** menu
+and context menu. These actions target that exact Group without switching views. **Start Group** starts enabled
+Agents. **Pause message delivery** pauses CCCC delivery; work already in progress may continue.
+**Resume running** resumes delivery, starting enabled Agents if none are running. **Stop Group**
+stops running Agents while preserving their enabled settings. Pending operations disable run and
+delete menu actions to prevent duplicate submissions. Read-only views retain passive status
+indicators. On mobile, use the same header control; collapsed sidebar icons remain navigation.
 
 Use **Messages / Terminals** in the Group header to switch the current Group's work view.
 On narrow headers, the view icon switches between these views. Presentation also opens from
-the header. Switching views only replaces the history area; the message composer stays in place.
+the header through the bookmark icon, beside the **Files** folder icon on desktop, with its own update indicator. Tooltips and accessible names identify these controls. View, search and context controls align with the main work area as the side panel resizes. Files and Presentation
+share one side column: selecting the other swaps panels; selecting the active one closes it.
+Switching views only replaces the history area; the message composer stays in place.
 Each Group remembers its view and terminal page in this browser, including after a page reload. Message drafts and
 the message reading position survive switching between views.
 
 The terminal view shows up to four Actors per page, in the Group's existing order. Narrow areas
 show one Actor per page. Page arrows appear only when there is more than one page, in the
-Group header or the single Actor title bar on mobile. Resizing keeps the focused Actor visible,
+Group header or the single Actor title bar on mobile. The arrows have 44-pixel targets, with a
+visible page count and disabled endpoints. On touchscreens, swipe horizontally on the Actor
+title area to page; buttons, vertical gestures and the terminal body keep their own behavior.
+Resizing keeps the focused Actor visible,
 or preserves the first visible Actor when no terminal has focus. Removing Actors displays a
 valid page without discarding the saved preference during loading.
 Indicators can point to waiting or stuck Actors on other pages without moving the current page.
@@ -52,6 +91,18 @@ remain terminal keys while the terminal has focus. Existing access and single-wr
 a read-only user cannot type. Opening a view leaves any existing writer in control; use
 **Take control** to take over explicitly. An ordinary reconnect does not take control away
 from another writer. With no existing writer, the terminal accepts input immediately.
+A reconnect that resumes contiguous output keeps the existing screen visible while catching up.
+
+Switching pages, Groups, or back to Messages keeps recently visited terminals and
+their connections in memory, including scrollback and selection. Each workbench
+retains up to **32 hidden terminals for five minutes** after leaving them; visible
+terminals do not count toward that limit. The oldest hidden views are released
+first, and background output does not extend their lifetime. Unvisited Actors are
+not loaded in advance. Hidden terminals continue receiving output but cannot
+accept input, resize the remote terminal, or take control automatically. On return, a
+retained writer synchronizes the PTY with its visible dimensions, including when
+control returned while hidden. Another window can still use **Take control**. Expiry, a browser reload, or a replaced
+Actor may require a fresh terminal view; retention does not start or stop Actors.
 
 Each Actor title bar keeps its status dot, common terminal actions and maximize control together.
 Ordinary running/working states are available through the dot's label; stopped, waiting, stuck
@@ -62,17 +113,199 @@ Use **More** for history, session, configuration, inbox and lifecycle actions. U
 actions are disabled; stopping and restarting use the same operations as the expanded view.
 Different Actors have independent pending-operation indicators.
 
-Paging or hiding the terminal view detaches hidden terminal connections; it does not stop or
-restart Actors. Returning attaches to their current output. Actors without a TUI use their existing
+Once a retained view expires or is evicted, returning attaches to the Actor's current output;
+this never stops or restarts Actors. Actors without a TUI use their existing
 runtime activity display, and stopped Actors are explicitly identified. Hidden Group messages do
 not clear the message unread count or count as viewed for Voice suppression. Following a message
 source link returns to Messages and locates the original event.
+
+The Runtime Dock uses a thin violet-to-rose trailing arc for working Actors, rotating gently
+once every 3.6 seconds. Idle Actors have a quieter green ring, stopped Actors gray, and states
+needing attention rose. All rings keep the same size; reduced-motion preferences leave the working arc static. Hover or focus an Actor
+for its name and use the button's description for status details. No duration or progress is
+inferred from status timestamps. The upper-right envelope badge shows unread Mail from the
+daemon, including messages outside the loaded chat history. Browser delivery queues have a
+separate badge at the lower right; both badges appear only when their count is nonzero.
 
 The Runtime Dock's progress bubbles show the latest short live update for each Actor, with up to
 two Actors visible at once. Updates from the same Actor replace the previous excerpt. Open the
 Actor to inspect the complete output. Restoring a Group or reconnecting its activity stream
 restores history without replaying it as new bubbles; ordinary message unread indicators are
 independent of these brief progress previews. The same rules apply to every managed Runtime.
+
+### Right sidebar
+
+Files and Presentation share one resizable sidebar with matching header controls. Each Group remembers its expanded width and Presentation density. Files always opens at the expanded width; its file draft survives switching to Presentation and back.
+
+Presentation keeps four fixed slots. New Groups open a compact button rail by default; existing saved layout and window/split preferences are preserved. Open a filled slot to read its content, and use the four slot buttons to switch without returning to the list. Empty slots open the pin flow. The expanded overview uses image thumbnails and compact titled entries for other resources, without starting interactive browser/PDF sessions or clearing update indicators.
+
+Collapse returns to the compact rail; closing the sidebar only hides it and keeps its contents. The expand button restores the remembered width and opens an available slot. Dragging to the minimum width also returns to compact slots. The divider supports arrow keys, and Enter toggles density. The viewer can still open in a larger window, and phones retain full-screen surfaces.
+
+### Message search and settings
+
+Message search shows the current Group name and Actor display names. Enter or **Search** submits the keywords; changing a filter reruns the submitted query. Typing new keywords does not change existing highlights or pagination until you submit again. Initial guidance, loading, no matches and failed requests are separate states. **Open** returns to the message context; reply and copying the event ID remain available.
+
+Settings keeps **This group** and **This instance** separate. Section forms share a plain work surface, while independent configurations and authorization states retain their own boundaries. Under **Branding**, save the product name explicitly; icon uploads and resets apply immediately. The product name changes the Web sidebar, sign-in screen and browser tab, not the instance name shown in Connect.
+
+Related fields use headings and spacing rather than nested cards. Section actions stay beside their heading when space allows and wrap on narrow screens. Settings help text follows the text-size preference. Switches support keyboard focus and Space, with a larger click/touch target around the compact track. These visual conventions do not change which settings save immediately or require a Save action.
+
+### Workspace files
+
+Open **Files** in the Group header to browse the active workspace. The file tree and
+Presentation share the right-hand column. Opening a text file on desktop places its
+editor in the message area and keeps the composer available. Closing the editor returns
+to messages; covered messages do not count as viewed for unread tracking.
+
+Save with the toolbar button or `Ctrl+S` / `Cmd+S`. Unsaved edits survive closing and
+reopening files within the current Group, including internal symlinks to the same file.
+Save before leaving the workspace. Switching Groups or instances with unsaved file edits asks whether to stay or discard; refreshing or closing the page uses the browser’s unsaved-changes warning. Closing the file viewer retains its drafts while you stay in the same workspace. A scope change or loss of access initiated elsewhere still retires the old editor; drafts never authorize saving into another scope.
+Changing the active workspace clears the file view and its drafts; stale saves are rejected
+instead of writing into the newly selected workspace. If the file changed on disk since it
+was opened, saving reports a conflict. **Reload file** reads the latest contents from disk,
+including updated media at the same path. With unsaved edits, it asks before discarding them;
+canceling or a failed read keeps the draft. Edits made while the reload is waiting are also
+retained. Reload is unavailable during a save. This check does not lock out external editors
+or Actors.
+
+The tree shows workspace files by default, including untracked and Git-ignored files.
+Git's own root metadata directory remains hidden. Use **File browser options → Hide
+Git-ignored files** to reduce clutter; this preference is remembered in this browser.
+Folders load only when expanded. **Refresh directory** refreshes the tree, preserving
+expansion and file drafts; **Reload file** refreshes the open viewer.
+
+Paste a workspace-relative or absolute path into **Go to file or folder**, then press
+Enter. Files open in the viewer; folders expand and receive focus in the tree without
+closing your current file or losing its draft. Use `.` or the workspace root path to
+return to the top of the tree. Missing paths and paths outside the workspace report
+different errors. **Reveal current file** expands its parent folders
+and moves focus to its row; explicit reveal also clears the Git ignore filter so the
+target can be shown. **Collapse all folders** only folds the tree, keeping the file open.
+If you move on while a location is loading, its result does not take focus away from
+the editor, message composer, or another file selection.
+Use arrow keys to move through the tree and expand/collapse folders, and Enter to open.
+
+Each row's **…** button, right-click, or Shift+F10 opens the same actions: attach the path
+as message context, copy a relative or absolute path, download a file, or pin a supported
+file to Presentation when permitted. Attaching inserts a path into the composer; it does
+not upload the file.
+
+On desktop, **File browser options → New file / New folder / Upload files / Upload
+folder** works at the workspace root. The same actions in a folder's menu target
+that folder. File and folder menus also provide **Rename**, **Move to…**, and
+**Delete**. Move destinations include the full workspace-relative name, and their
+parent folder must already exist. Name collisions preserve the existing item.
+Deleting a folder permanently deletes its contents; the confirmation names the path
+and warns about affected unsaved edits. There is no recycle bin or undo.
+
+Drag files or folders from your computer onto the Files tree to upload them; the
+highlighted folder and drop label identify the destination. Drop on the panel
+background for the workspace root. Native folder drops preserve subdirectories and
+empty folders. The folder picker includes the browser-provided file tree; browsers
+cannot include empty folders through that picker. If directory drops are unsupported,
+use the upload menu instead. Each selection is limited to 1,000 files/folders and
+100 MiB total. Uploads stop at the first conflict or failure. **Stop upload** keeps
+completed entries; it does not roll back the batch. Git metadata cannot be uploaded.
+Dropping here does not attach files to your message.
+
+Drag one existing tree entry from the current Files panel onto a folder (or the panel background) to move it within
+the workspace. **Move to…** offers the same operation without dragging. Moves and
+renames carry unsaved drafts to the new paths; a pending save must finish first.
+Changing a file's extension also updates its preview type while keeping unsaved text.
+A destination with another unsaved draft is rejected so both drafts are retained.
+Moving files does not rewrite imports or Presentation references. Refresh or repin
+those references when needed.
+
+Files uses UTF-8 paths. A directory containing names that cannot be represented
+exactly shows an error; manage those names in the terminal. Names are never silently
+replaced with another file's path.
+
+Select **Changes** next to **Files** to inspect the active workspace's Git changes.
+The list separates working-tree modifications, staged changes, conflicts and untracked
+items. Select a tracked change to see its diff in the main area; use **Unified** or
+**Side by side** when the viewer is wide enough. Untracked files open in Files,
+untracked folders reveal their contents, and conflicts open the current file for
+inspection. The view uses saved content; unsaved drafts remain intact when switching
+views. **Refresh directory** refreshes the current Git view as well. Lists are read
+on entry and after local writes while visible, without periodic background scanning.
+
+Changes is read-only: CCCC does not stage, discard, commit or push on behalf of the
+user. These remain terminal operations because Actors may share the repository's
+index. Large lists/diffs show an explicit limit; Git failures are not shown as a
+clean workspace. Phones retain their existing read-only Files behavior and can view
+Git changes in the same full-screen surface.
+
+Symbolic links have a link icon. If the target is missing, outside the workspace,
+or inaccessible, its row explains why and disables content actions; you can still
+copy its path, or rename/remove the link on desktop without changing its target. CCCC does not repair links created by other tools or download files
+outside the workspace. After fixing a link on disk, use **Refresh directory**.
+
+An empty file panel shows **No files to display** after loading completes. If ignored
+files are hidden, use **Show git-ignored files** to reveal them. Otherwise, add files
+to the workspace and use **Refresh directory**. Loading and failed requests have separate states.
+
+A directory that cannot be loaded shows its error below the row. Use **Retry** there
+to load it again; an error does not mean the directory is empty.
+
+On phones, Files opens a read-only viewer. Binary files and files larger than 1 MiB are
+not editable here. Files stay within the active workspace, and exhibit mode does not
+expose this surface.
+
+Images open in the shared graphics viewer, including files larger than the text
+limit. Videos and audio use native browser controls, without autoplay. PDFs open
+in the browser's PDF viewer, with **Open in a new tab** and **Download file** available
+if inline viewing is disabled or unsupported. Native support depends on the browser
+and the file's encoding.
+
+Markdown renders with tables and Mermaid diagrams. CSV and TSV files open as tables,
+including quoted cells and multiline values; the preview shows up to 200 rows and
+50 columns. Text-sized SVG, Markdown, CSV/TSV and HTML offer **View source** and
+**Preview**. Switching views preserves unsaved edits, and preview uses the current
+draft. The text/source limit remains 1 MiB. Downloads always contain the saved file.
+
+HTML opens as a static, isolated document: scripts, forms, nested pages and linked
+stylesheets are disabled. Inline styles and workspace image/audio/video resources
+are supported; it is not a running website or application preview. Markdown and HTML
+resolve relative file links within the opened workspace and open them in Files.
+Section fragments such as `report.md#details` or `report.html#details` position the
+loaded preview at that section, including repeated same-file links. Positioning
+happens once per navigation; ordinary updates do not pull the reader back. PDF
+page fragments are passed to the browser viewer. HTML audio/video keep native
+controls whether the URL is on the media element or a nested `source`.
+HTML does not load external resources. Workspace paths, including percent-encoded
+names, still undergo the same permission and scope checks. Root-relative document
+links refer to the workspace root. Office documents and other unsupported formats
+can be downloaded; CCCC does not upload them to an online document viewer.
+
+Media and PDFs stream directly from the selected workspace and support byte ranges;
+CCCC does not transcode or upload files to cloud storage. Each request checks the
+Group permissions and opened workspace identity. Remote playback uses
+the instance's upload bandwidth. Public Cloudflare Tunnel access remains subject
+to Cloudflare's video/large-file distribution terms; preview support does not
+establish an exemption or add a Cloudflare Stream subscription.
+
+### Inspect images and diagrams
+
+Workspace images, expanded message images, Mermaid diagrams, Presentation images and enlarged
+quoted snapshots share a static graphics viewer. Use **Fit**, **100%**, **+** or
+**−** to change scale; dragging pans enlarged content and the wheel keeps native
+scrolling.
+Touch screens support pinch zoom. Focus the viewport for `+`/`−`, `0` (fit),
+`1` (actual size) and native arrow-key scrolling. Closing a modal restores focus
+to its opener. Regular message scrolling, PDF controls and interactive browser
+surfaces retain their own behavior. The workspace text editor is unchanged.
+Refreshing the same workspace-linked Presentation image preserves its zoom and
+position, including across a failed refresh and recovery. Image and Markdown updates replace
+content only after loading succeeds (and images decode). During a transient failure, the last
+loaded version stays visible with an update-failure notice. The next successful refresh clears
+the notice. Slow requests finish before another automatic refresh starts. First-load errors
+and confirmed missing or inaccessible resources show an error instead of stale content.
+Switching to another slot or publication clears the previous resource and starts images with
+**Fit** again.
+
+Workspace-linked PDF and HTML readers retain their current page, zoom and
+navigation state. Use **Refresh** to load edits from disk; publishing a new card
+also updates the reader. They do not reload on the automatic image/Markdown
+refresh timer.
 
 ### Codex Voice (Experimental)
 
@@ -169,6 +402,62 @@ every Group, Actor, task, ledger, or repository operation must resolve and pass 
 Repository modification remains work for the target Group's Foreman or peer rather than work rooted
 in the neutral Voice directory.
 
+An embedding application can provide optional `application_context` in
+`POST /api/v1/codex_voice/calls`: `{ "id": "work:123", "instructions": "Reply in Japanese for the current work." }`.
+The ID is 1–128 ASCII letters, digits, `-`, `_`, `.`, or `:`; instructions are
+nonempty UTF-8 text up to 24 KiB (24,576 bytes), without control characters except newline and tab.
+The same byte limit applies to assistant and persona modes. CCCC rejects oversized text
+instead of truncating it. This is a local input size limit, not a provider token limit;
+token counts vary with the text and model, and provider limits still apply.
+CCCC holds this context unchanged for that call. In assistant mode, it includes the context
+in Realtime startup instructions and every Voice Analyst delegation, and uses a context-aware greeting.
+Replaying the same client session and SDP with different context returns busy rather
+than silently reusing the old call. Omitting the field preserves the global Voice behavior.
+Context is not authentication, a selected CCCC Group, a tool permission, or an isolated
+Analyst session. The host application remains responsible for authorization, business
+records and any session reset needed when changing subjects. Do not include credentials.
+
+For host-defined roleplay, set `application_context.mode` to `"persona"`:
+
+```json
+{
+  "client_session_id": "training-call-1",
+  "offer_sdp": "<WebRTC offer>",
+  "voice": "cove",
+  "application_context": {
+    "id": "training:customer",
+    "mode": "persona",
+    "instructions": "Act as a customer in a Japanese phone-training exercise. Wait for the trainee to speak first."
+  }
+}
+```
+
+The default mode is `"assistant"`; explicitly specifying it behaves like omitting it.
+In persona mode CCCC supplies only the host's instructions, without its assistant role,
+routing instructions or saved expression preferences. It does not resolve, launch, attach
+or reset a Voice Analyst. Incoming delegation events are ignored; Actor/Group notifications
+are neither consumed nor spoken. An existing Analyst and its pending notifications remain
+available for later assistant calls. Authorization checks, the single-call microphone lease,
+heartbeats and disconnect cleanup still apply. The host decides the opening behavior in
+its instructions; CCCC sends only a neutral call-start cue.
+
+Check `GET /api/v1/codex_voice/calls/active` first: `readiness.supported_modes` advertises
+`["assistant", "persona"]`. For persona, check `realtime_credentials_available`; do not
+require `analyst_runtime_available` or configure/reset an Analyst. Credential presence is
+not a guarantee of provider availability. Old servers reject the nested `mode` field;
+never retry a rejected persona request by silently dropping it. Start and active responses
+include `call.mode`; persona has `call.analyst_generation: null` and the start response has
+`analyst: null`. The active endpoint's top-level `analyst` still describes the independently
+managed global Analyst, if one exists. A different mode with the same client session ID
+returns busy, just like a changed context or SDP. Stop the old call before changing modes.
+
+**Experimental provider boundary:** persona startup omits the quicksilver `delegation`
+configuration and CCCC enforces no local delegation execution. Omission must not be treated
+as proof that the upstream model cannot emit delegation events. [Public GPT-Live documentation](https://developers.openai.com/api/docs/guides/live-delegation#configure-responses-delegation) describes
+`delegation: null` as client mode, not as a disabling setting; CCCC's experimental quicksilver
+v2 behavior and both opening directions require real-call acceptance before production use.
+The host instructions do not override the provider's own system rules.
+
 CCCC reads the existing Codex credential only in the native process that creates the provider call;
 the browser receives the WebRTC answer and bounded session events, not the credential. Use the
 console header to mute the microphone, resume browser-blocked playback, or stop the call. The
@@ -232,6 +521,17 @@ CCCC's server log records only bounded code/type/event/parameter identifiers and
 the call generation, not the explanation or conversation content. A stopped
 audio call does not discard the warm Analyst session. Provider diagnostics do
 not retry requests or change the existing disconnect policy.
+
+For startup or later connection failures, keep the CCCC and Runtime versions
+alongside the first server-log diagnostic. Realtime startup reports its stage,
+elapsed time, and available request/TLS categories and OS error code. Managed
+Codex disconnects report the session generation, child-process state and
+WebSocket protocol category. `reset_without_close_handshake` means the local
+transport ended without a WebSocket close handshake; it does not by itself
+identify which process or network component caused the closure. A later
+`analyst_disconnected` Voice-control message can be a consequence of that first
+failure. A still-running child PID does not prove that its session is usable.
+These reports omit raw errors, credentials and conversation content.
 
 Ordinary Codex, Claude Code, Grok, OpenCode, and Kilo Actors use the same runtime-specific managed adapter
 as Voice Analyst and always attach the Runtime's native writable TUI. Actor controllers
@@ -337,6 +637,12 @@ and Google; Presentation may use its own Chromium runtime. Browser-native UI tha
 page is only visible through **Browser** (or through the physical browser window on platforms that
 expose it).
 
+In Web Model settings, **Open ChatGPT** reuses the current page without reloading it. Complete sign-in
+and any website security verification manually in that browser. **Browser connected** describes the
+viewer connection; it does not mean ChatGPT is signed in. Delivery waits for the signed-in conversation
+composer, leaving the sign-in or verification page in place. Use **Reload ChatGPT page** only when you
+intend to restart the dedicated browser; its saved profile and delivery target are retained.
+
 ## Performance behavior
 
 - Hidden tabs release their group event streams immediately. Returning to the tab reconnects and
@@ -349,43 +655,43 @@ expose it).
 
 ## Managing Groups
 
-### Creating a Group
+### Creating and editing a Group
 
-1. Click the **+** button in the sidebar
-2. Or use CLI: `cccc attach /path/to/project`
+Click **+ New** in the sidebar, select the workspace directory and create the
+Group. You can also run `cccc attach /path/to/project` on the CCCC host.
+Select a Group in the sidebar to open it; use the pencil beside its header name
+to edit its title and description.
 
-### Switching Groups
+### Group settings
 
-Click on a group in the sidebar to switch.
-
-### Group Settings
-
-1. Click the **Settings** icon in the header
-2. Configure:
-   - Group title
-   - Guidance (preamble/help)
-   - Built-in automation, rules, and snippets
-   - Delivery and messaging defaults
-   - IM Bridge settings
+Open **Settings and more**, then settings, and select **This group**. Guidance,
+automation, delivery, messaging, assistants, connections and other Group options
+remain separate from **This instance** settings.
 
 ## Managing Agents
 
-### Adding an Agent
+Use the **+** in the Agent bar near the composer to add an Agent. Choose an
+installed Runtime, set its Actor ID and review the configuration before adding it.
+Open an existing Agent to inspect its Runtime and use its available lifecycle
+actions. The Group status button controls the whole Group's enabled Agents and
+message delivery; pausing delivery does not stop work already in progress.
 
-1. Click **Add Actor** button
-2. Choose a runtime (Claude, Codex, etc.)
-3. Set actor ID and options
-4. Click **Create**
+Switch to **Terminals** for the paged multi-Agent view, or open one Agent's
+inspector from its entry. Runtime restart and session-reset actions have different
+semantics; use the action's explanation before discarding a session.
 
-### Starting/Stopping Agents
+### Claude workspace trust
 
-- Click the **Play** button to start an agent
-- Click the **Stop** button to stop
-- Use **Restart** to clear context and restart
+If managed Claude startup requires workspace trust, the Actor terminal opens
+Claude's own interactive prompt. Only Claude records the approval. Once its
+configuration changes, CCCC can retry the managed launch. Stopping, removing, or
+restarting the Actor cancels the pending recovery; an in-flight launch is cleaned
+up instead of attaching after stop. Group shutdown also includes pending trust
+prompts that do not yet have a managed session.
 
-### Viewing Agent Terminal
-
-Click on an agent's tab to see its terminal output.
+Trust-record monitoring uses the configured Claude directory and the home
+directory, falling back from `HOME` to `USERPROFILE` on Windows in both Actor
+environment overrides and the inherited environment.
 
 ## Messaging
 
@@ -394,9 +700,33 @@ Click on an agent's tab to see its terminal output.
 1. Type in the message input at the bottom
 2. Press `Ctrl+Enter` / `Cmd+Enter`, or click Send
 
-Recipient chips are one-shot: a successful send clears the selection, and switching Groups does not
-restore a previous manual recipient. Unsent message text and attachments still remain as per-Group
-drafts.
+On desktop, the input grows with its contents up to a compact height by default.
+Drag the separator above the composer to set its actual height, including for an
+empty draft. That manual height stays in place while typing or clearing the input.
+Double-click or press Enter on the focused separator to restore automatic sizing.
+Up/Down adjust by 16 base pixels; Home selects the minimum and End the maximum.
+The manual preference is stored locally in base-font pixels and scales with text
+size. Its effective height is recalculated as the panel shrinks, capped at 60% of
+the panel while reserving message space and accounting for other composer rows.
+The separator is absent below 768 px; mobile message scrolling and the existing
+input expansion control remain unchanged.
+
+On phones narrower than 640 px, the Voice Secretary sheet keeps language,
+microphone and device refresh on one row. Prompt-mode help starts collapsed;
+the Activity area uses the remaining height and scrolls independently, so the
+last reply can be read without scrolling the control header. Instruction mode
+places the compact text input and Send button side by side. Document mode stacks
+the heading, view switch, metadata and actions at full width; paths wrap, markdown
+headings use smaller phone sizes, and document content scrolls within the available
+space. Wider layouts use
+the existing workspace arrangement.
+
+Recipient selections are remembered separately for each Group while the Web page remains open.
+Sending a normal message keeps the selection; switching Groups restores that Group's selection
+and unsent draft. Use Clear recipients to return to the Group's default routing.
+Reply recipients are temporary: canceling or sending a reply restores the normal selection.
+A temporary cross-group destination does not replace the local Group's remembered recipients;
+after sending, routing returns to the local Group. Reloading the page clears this in-memory state.
 
 Broadcasts (`@all` and `@peers`, including the Group's default broadcast target) leave
 disabled Actors stopped and deliver to enabled recipients. To wake a disabled Actor,
@@ -404,7 +734,7 @@ address it explicitly; `@foreman` also wakes the coordinator. An explicit target
 wakes when combined with a broadcast. Mail leaves disabled Actors stopped.
 
 Messages larger than 64 KiB after UTF-8 encoding are sent as UTF-8 text attachments for
-same-group and remote Group Bridge targets. Local cross-group text remains inline because its two
+same-group and CCCC Connect reply targets. Local cross-group text remains inline because its two
 local ledgers cannot share one attachment path; the bounded daemon IPC limit covers that JSON route.
 This applies to typed, pasted, dictated, suggested, and restored drafts. Slash commands still require
 inline text and therefore reject an automatically attached oversized body.
@@ -440,29 +770,29 @@ For concrete delegated work that needs an owner, done criterion, evidence, hando
 
 Click the reply icon on a message to quote and reply.
 
-## Context Panel
+## Project Context
 
-The Context panel shows shared project state (v2):
+Open **Project Context** from the clipboard button in the Group header. The
+header identifies the Group being viewed.
 
-### Presence
-
-Agent runtime status and capsule (short-term memory: focus, blockers, next action).
-
-### Vision
-
-One-sentence project goal. Agents should align with this.
-
-### Overview
-
-Structured project view with manual section (roles, collaboration mode, current focus) and live daemon-computed snapshot.
-
-### Tasks
-
-Multi-level task tree. Root tasks = phases/stages. Child tasks = execution units. Each task has steps and acceptance criteria.
+- **Coordination** combines the working summary, `PROJECT.md`, coordination log
+  and task board. The summary is a short steering brief; `PROJECT.md` remains
+  the fuller repository reference. Empty summaries keep an Edit action without
+  filling the page with empty fields.
+- **Tasks** retain Planned, Active and Done columns, including empty drop targets.
+  Search and attention filters narrow the board. Open a task for requirements,
+  steps, handoffs and completion details. Missing requirements or closeout records
+  describe record completeness; they do not change an existing task's status.
+- **Agent State** shows the latest saved reports, including their timestamps and
+  staleness. Focus, next action and blockers remain visible. Expand working context
+  or recovery cues when needed. A task named in a report does not prove that its
+  Runtime is currently working on it.
+- **Self-Evolving Skills** shows candidates originating in this Group. Instance
+  capability governance has a wider scope; the two views do not replace each other.
 
 ## Settings Panel
 
-Access via the gear icon:
+Open settings from **Settings and more** in the header:
 
 ### Copy Groups
 
@@ -486,7 +816,7 @@ Use **Copy Groups** when you need to duplicate, migrate, or back up a working gr
 
 ### IM Bridge
 
-Configure Telegram, Slack, Discord, Feishu, DingTalk, or WeCom integration.
+Configure Telegram, Slack, Discord, Feishu, DingTalk, WeCom, or [Mattermost](./im-bridge/mattermost) integration.
 
 ### Group Space
 
@@ -504,7 +834,9 @@ For end-to-end setup details, see: `Group Space + NotebookLM`.
 
 ### Theme
 
-Switch between Light, Dark, or System theme.
+Switch between Light, Dark, or Automatic theme. Automatic uses light mode from 07:00 to 19:00 in the browser's local time zone and dark mode otherwise.
+
+Dark mode uses charcoal surfaces with lighter panels and visible borders. Input outlines and keyboard focus are stronger than ordinary section dividers. Text size also scales side-panel titles, file paths and settings labels; terminal text keeps its own sizing.
 
 ## Mobile Usage
 
@@ -550,7 +882,14 @@ when the reconstructed browser-facing origin is loopback. Unsafe writes and WebS
 carry the exact same loopback Origin; non-local proxy client addresses are rejected. This local
 principal is never persisted and is not valid through LAN, Reach, a public URL, or a reverse proxy.
 
-Before exposing the Web UI beyond localhost, first create an **Admin Access Token** in **Settings > Web Access**. With no administrator token, non-local clients receive only the UI shell and health/session guidance; protected APIs and business WebSockets remain locked, while direct loopback access keeps the passwordless local principal described above. Read the one-time bootstrap code from `~/.cccc/web_bootstrap_token` on the CCCC host and enter it only when creating the first administrator token; the file is mode `0600` on Unix and is deleted after successful use.
+Before exposing the Web UI beyond localhost, first create an **Admin Access Token** in **Settings > Web Access**. With no administrator token, non-local clients receive only the UI shell and health/session guidance; protected APIs and business WebSockets remain locked, while direct loopback access keeps the passwordless local principal described above. Direct local setup no longer requires copying a bootstrap code. Linking your
+account initializes an administrator Token if needed; completing that flow from
+the verified localhost Web page also signs that browser in. Enabling hosted Remote
+Access from that local page covers installations linked before this automatic
+setup existed. Existing Tokens are preserved. When first configuring through a
+remote address instead, read `web_bootstrap_token` inside the host's effective
+`CCCC_HOME` (default `~/.cccc`) and enter that one-time code. The file is mode
+`0600` on Unix and is removed once administrator setup completes.
 
 The Web Access panel keeps LAN/public `Save`, `Apply now`, and remote-endpoint copying disabled until an Admin Access Token exists. The native daemon and Web boundary enforce the same rule at remote start, apply, and listener boundaries, so direct API calls and stale saved settings cannot bypass the panel. Group-scoped tokens do not satisfy this administrator recovery requirement. Switching back to localhost-only remains available so an incomplete remote setup can be recovered safely.
 
@@ -567,7 +906,7 @@ CCCC keeps the token policy simple:
 - localhost-only: direct loopback browser requests are passwordless and use a non-persistent local administrator principal
 - LAN/private network and public URL/tunnel/reverse proxy: an Admin Access Token is mandatory before exposure
 
-`CCCC_WEB_ALLOW_UNAUTHENTICATED=1` is only an unsafe listener override; it never grants API authorization or bypasses first-admin bootstrap. Plain HTTP manual LAN exposure also requires `CCCC_REMOTE_ALLOW_INSECURE=1`; prefer an HTTPS reverse proxy, tunnel, or encrypted overlay. Neither override is offered as a Web UI toggle.
+`CCCC_WEB_ALLOW_UNAUTHENTICATED=1` is only an unsafe listener override; it never grants API authorization or bypasses first-admin bootstrap. Plain HTTP manual LAN exposure is allowed by default for private-network use, but still requires an Admin Access Token before remote APIs can be used. Prefer an HTTPS reverse proxy, tunnel, or encrypted overlay for untrusted networks.
 
 CCCC adds `frame-ancestors 'self'`, `SAMEORIGIN`, `nosniff`, `no-referrer`, a restrictive permissions policy, and HSTS on HTTPS responses. Supervised CCCC Web processes trust reverse-proxy forwarding headers automatically only while the effective listener is loopback. A supervised LAN/wildcard listener or externally managed reverse proxy must explicitly set `CCCC_WEB_TRUST_PROXY_HEADERS=1` and must overwrite—not append—client-supplied `Forwarded` and `X-Forwarded-*` headers. Direct public listeners should leave this flag unset.
 
@@ -621,22 +960,24 @@ Token for this exchange; no new long-lived token is created. A remotely signed-i
 administrator remains bound to their own active token. Revoking that token also
 invalidates outstanding links backed by it.
 
-Cookie-authenticated Rust Web writes require an exact allowed `Origin`, with a
+Cookie-authenticated Rust Web writes and WebSocket connections require an exact allowed `Origin`, with a
 same-origin `Referer` accepted only as a fallback. This check is independent of
 CORS and blocks same-site sibling domains from submitting state-changing forms.
 
 Cross-origin browser clients can opt in through `CCCC_WEB_CORS_ORIGINS`, a
 comma-separated list of exact origins (scheme, host and port). Named origins
-support credentials and are also accepted by Cookie write and WebSocket origin
-checks. Include only trusted client sites.
+support credentials and are also accepted by Cookie write and Cookie-authenticated
+WebSocket origin checks. Include only trusted client sites.
 
 `CCCC_WEB_ALLOW_ANY_ORIGIN=1` instead enables wildcard HTTP CORS without
 credentials, for clients that explicitly supply an `Authorization: Bearer ...`
 access token and omit browser credentials. It does not bypass Cookie write or
-WebSocket origin checks, create an authenticated principal, or expose the local
+Cookie-authenticated WebSocket origin checks, create an authenticated principal, or expose the local
 passwordless principal to other sites. Local passwordless reads with an Origin
 or Referer must identify the same loopback origin, just as writes do. Browser
-WebSocket clients still need a same-origin connection or a named trusted origin.
+WebSocket clients using cookies still need a same-origin connection or a named
+trusted origin. Explicit Bearer-authenticated WebSocket clients do not require an
+Origin match; token and Group permissions still apply.
 If both settings are present, wildcard HTTP CORS takes precedence; use only
 `CCCC_WEB_CORS_ORIGINS` for cross-origin Cookie sessions. Both settings are off
 by default and require restarting the Web process to change CORS responses.
@@ -645,7 +986,7 @@ by default and require restarting the Web process to change CORS responses.
 
 When a reverse proxy terminates HTTPS or exposes CCCC under another host, it
 must overwrite the browser-facing host and protocol headers. These values are
-used by every browser WebSocket (terminal, Voice Secretary, projected browser)
+used by every browser WebSocket (realtime events, terminal, Voice Secretary, projected browser)
 and by Cookie-authenticated write protection:
 
 ```nginx
@@ -661,10 +1002,54 @@ Do not pass through client-supplied `X-Forwarded-*` values. The trusted proxy
 must overwrite them. CCCC also accepts RFC 7239 `Forwarded` with `host` and
 `proto`, and handles comma-separated multi-proxy `X-Forwarded-*` chains by
 using the first browser-facing value. A mismatch is rejected with
-`origin_not_allowed` for WebSockets or `csrf_origin_invalid` for Cookie writes;
-the server log records both the received and reconstructed origins.
+`csrf_origin_invalid` for Cookie-authenticated writes and WebSockets. If a proxy
+cannot preserve the public host, configure its exact browser origin in
+`CCCC_WEB_CORS_ORIGINS` instead of disabling source protection.
 
 A token scoped to selected Groups receives global stream
 metadata only for those Groups, and the global stream never carries message
 content. Full event content remains on the per-Group stream and is subject to
 the same scope check. Administrative capability changes require an Admin token.
+
+Same-origin browser requests carrying `Sec-Fetch-Site: same-origin` satisfy the
+Cookie CSRF check even when a reverse proxy rewrites Host or terminates HTTPS.
+This does not require `CCCC_WEB_CORS_ORIGINS` or global proxy-header trust.
+Proxies should preserve this browser-generated header, never manufacture it for
+cross-origin requests. `same-site`, `cross-site`, `none`, and missing metadata
+continue through the existing Origin/Referer and configured-origin checks.
+Authentication and group permissions remain required. See the
+[Fetch Metadata specification](https://www.w3.org/TR/fetch-metadata/).
+
+Browsers send no Fetch Metadata on a WebSocket handshake, so Terminal and
+stream sockets fall back to comparing the request `Origin` against the served
+host. That comparison ignores the scheme, because TLS terminating at a reverse
+proxy makes the origin server read every `https://` page back as `http://`.
+Host and port must still match exactly — a different host, port, or subdomain
+is rejected — and the scheme alone adds nothing, since an attacker able to
+serve a page from this host would already control the site. Proxies that
+rewrite `Host` still need `CCCC_WEB_TRUST_PROXY_HEADERS=1` or an explicit
+`CCCC_WEB_CORS_ORIGINS` entry.
+
+### Shared realtime connection
+
+The Web UI uses one `/api/v1/events/ws` WebSocket per page for global metadata,
+current-Group ledger events, and headless output. Switching Groups replaces the
+subscriptions on the existing socket. Background pages release their subscriptions
+and close the socket when none remain. This avoids occupying the HTTP/1.1 pool
+with three persistent SSE requests per visible page; ordinary API requests remain
+available with several workbench windows open.
+
+Each subscription has an ID. Both sides ignore packets from retired IDs. Reconnects
+resume the ledger from its last delivered event ID and request a headless snapshot
+from the same tail that supplies subsequent deltas. Existing UI catch-up and
+coalescing continue to apply. Global events contain only permitted Group metadata.
+Token and Connect-frame authority are rechecked while connected; each Group
+subscription also validates Group access before opening its producer.
+
+The server uses a bounded eight-packet output queue and a five-second socket-write
+deadline. Heartbeats detect broken connections, and closing the socket cancels all
+its producers. A failed channel retries independently; transport failure reconnects
+with backoff. The UI does not fall back to HTTP SSE, which would recreate the
+connection-pool blockage. The existing SSE endpoints remain available for external
+clients and use the same typed event producers. Deploy the updated UI and backend
+together to enable the new endpoint.

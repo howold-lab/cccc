@@ -10,9 +10,14 @@ mod environment;
 mod persistence;
 mod reconcile;
 pub(crate) mod terminal_history;
+#[cfg(test)]
+mod untrusted_workspace_tests;
 pub use persistence::persist_lifecycle;
 pub(crate) use reconcile::record_process_exit;
 pub use reconcile::{reap_exited, reconcile_exited};
+
+/// Claude Code refused the Actor's workspace; only the operator can accept its trust prompt.
+pub(crate) const CLAUDE_WORKSPACE_UNTRUSTED: &str = "claude_workspace_untrusted";
 
 pub fn apply(
     home: &HomeLayout,
@@ -25,50 +30,54 @@ pub fn apply(
         .iter()
         .find(|actor| actor.id == actor_id)
         .ok_or_else(|| OpError::new("not_found", format!("actor not found: {actor_id}")))?;
-    let resolved_actor = if kind == "actor.stop" {
-        None
-    } else {
-        Some(actor_profile_runtime::resolve(home, stored_actor)?)
-    };
-    let actor = resolved_actor.as_ref().unwrap_or(stored_actor);
-    if kind != "actor.stop" {
-        super::capabilities::apply_actor_startup_baseline(home, group, actor);
+    // Configuration may already name a different backend. Lifecycle ownership
+    // comes from the registries, not from the next launch configuration.
+    if stored_actor.runtime.is_web_model()
+        && matches!(kind, "actor.stop" | "actor.restart" | "actor.new_session")
+    {
+        cccc_core::web_model_connectors::interrupt_automatic_pairings(
+            home,
+            &group.group_id,
+            Some(actor_id),
+        )
+        .map_err(OpError::io)?;
     }
+    if kind == "actor.stop" {
+        return stop_registered(group, actor_id);
+    }
+    let actor = actor_profile_runtime::resolve(home, stored_actor)?;
+    if !matches!(kind, "actor.restart" | "actor.new_session")
+        && actor_is_running(group, stored_actor)
+    {
+        // Saving config does not restart an existing session. Explicit restart
+        // applies it; start remains idempotent across backend changes too.
+        super::local_headless::ensure_viewer(&group.group_id, actor_id).map_err(OpError::io)?;
+        super::capabilities::apply_actor_startup_baseline(home, group, &actor);
+        return Ok(
+            if super::local_headless::running(&group.group_id, actor_id)
+                || super::deepseek_runtime::running(&group.group_id, actor_id)
+            {
+                None
+            } else {
+                status(&group.group_id, actor_id).filter(|status| status.running)
+            },
+        );
+    }
+    // Also retire a disconnected registration whose previous cleanup failed.
+    stop_registered(group, actor_id)?;
+    super::capabilities::apply_actor_startup_baseline(home, group, &actor);
     if actor.runtime == ActorRuntime::Deepseek {
-        super::deepseek_runtime::apply(home, group, actor, kind)?;
+        super::deepseek_runtime::apply(home, group, &actor, "actor.start")?;
         return Ok(None);
     }
-    if super::local_headless::supports(actor) {
-        match kind {
-            "actor.stop" => {
-                super::local_headless::stop(&group.group_id, actor_id).map_err(OpError::io)?
-            }
-            "actor.restart" | "actor.new_session" => {
-                super::local_headless::stop(&group.group_id, actor_id).map_err(OpError::io)?;
-                start_local_headless(home, group, actor)?;
-            }
-            _ if !super::local_headless::running(&group.group_id, actor_id) => {
-                start_local_headless(home, group, actor)?;
-            }
-            _ => {}
-        }
+    if super::local_headless::supports(&actor) {
+        start_local_headless(home, group, &actor)?;
         return Ok(None);
     }
-    if is_structured(actor) {
-        let _ = stop(group, actor_id)?;
+    if is_structured(&actor) {
         return Ok(None);
     }
-    match kind {
-        "actor.stop" => stop(group, actor_id),
-        "actor.restart" | "actor.new_session" => {
-            let _ = stop(group, actor_id);
-            start(home, group, actor).map(Some)
-        }
-        _ => match cccc_runtime::status(&group.group_id, actor_id) {
-            Ok(status) if status.running => Ok(Some(status)),
-            _ => start(home, group, actor).map(Some),
-        },
-    }
+    start(home, group, &actor).map(Some)
 }
 
 fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
@@ -76,12 +85,31 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
     if super::local_headless::uses_managed_provider_cli(&actor) {
-        super::runtime_mcp::prepare(home, actor.runtime, &cwd, &mut env)?;
+        super::runtime_mcp::prepare(home, actor.runtime, &actor.command, &cwd, &mut env)?;
     }
     actor.env = env;
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
-    super::local_headless::start(home, group, &actor).map_err(OpError::io)
+    super::local_headless::start(home, group, &actor).map_err(launch_error)
+}
+
+fn launch_error(error: std::io::Error) -> OpError {
+    let Some(workspace) = super::codex_voice_analyst::untrusted_claude_workspace(&error) else {
+        return OpError::io(error);
+    };
+    let mut op_error = OpError::new(CLAUDE_WORKSPACE_UNTRUSTED, error.to_string());
+    op_error
+        .details
+        .insert("workspace".into(), serde_json::json!(workspace));
+    op_error
+}
+
+/// A rollback restart refused for the same untrusted workspace is not a separate failure: the
+/// original error already names the workspace to trust, and the Actor simply stays stopped.
+pub(super) fn same_untrusted_workspace(original: &OpError, restart: &OpError) -> bool {
+    original.code == CLAUDE_WORKSPACE_UNTRUSTED
+        && restart.code == original.code
+        && restart.details.get("workspace") == original.details.get("workspace")
 }
 
 fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionStatus, OpError> {
@@ -93,7 +121,7 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
     };
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
-    super::runtime_mcp::prepare(home, actor.runtime, &cwd, &mut env)?;
+    super::runtime_mcp::prepare(home, actor.runtime, &command, &cwd, &mut env)?;
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     let command = cccc_runtime::resolve_command_executable(&command, &env);
@@ -123,6 +151,20 @@ pub(super) fn stop(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionSta
     }
 }
 
+fn stop_registered(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionStatus>, OpError> {
+    let result = (|| {
+        super::local_headless::stop(&group.group_id, actor_id).map_err(OpError::io)?;
+        super::deepseek_runtime::stop(&group.group_id, actor_id);
+        stop(group, actor_id)
+    })();
+    result.map_err(|mut error: OpError| {
+        error
+            .details
+            .insert("lifecycle_stage".into(), serde_json::json!("stop"));
+        error
+    })
+}
+
 pub fn status(group_id: &str, actor_id: &str) -> Option<SessionStatus> {
     cccc_runtime::status(group_id, actor_id).ok()
 }
@@ -130,7 +172,7 @@ pub fn status(group_id: &str, actor_id: &str) -> Option<SessionStatus> {
 #[must_use]
 pub fn is_structured(actor: &Actor) -> bool {
     !super::local_headless::uses_managed_session(actor)
-        && (actor.runner == RunnerKind::Headless || actor.runtime == ActorRuntime::WebModel)
+        && (actor.runner == RunnerKind::Headless || actor.runtime.is_web_model())
 }
 
 pub fn start_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
@@ -172,12 +214,11 @@ pub fn start_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionSta
     Ok(statuses)
 }
 
-fn actor_is_running(group: &GroupDoc, actor: &Actor) -> bool {
-    if super::local_headless::supports(actor) {
-        super::local_headless::running(&group.group_id, &actor.id)
-    } else {
-        status(&group.group_id, &actor.id).is_some_and(|status| status.running)
-    }
+pub(super) fn actor_is_running(group: &GroupDoc, actor: &Actor) -> bool {
+    super::local_headless::registered_running(&group.group_id, &actor.id).unwrap_or_else(|| {
+        super::deepseek_runtime::running(&group.group_id, &actor.id)
+            || status(&group.group_id, &actor.id).is_some_and(|status| status.running)
+    })
 }
 
 pub(crate) fn stop_all() -> Result<Vec<SessionStatus>, cccc_runtime::RuntimeError> {

@@ -4,6 +4,7 @@ interface ModalFrameProps {
   isOpen?: boolean;
   inline?: boolean;
   isDark: boolean;
+  surface?: "glass" | "solid";
   onClose: () => void;
   titleId: string;
   title: ReactNode;
@@ -22,7 +23,8 @@ interface ModalFrameProps {
 export function ModalFrame({
   isOpen = true,
   inline = false,
-  isDark,
+  isDark: _isDark,
+  surface = "glass",
   onClose,
   titleId,
   title,
@@ -41,12 +43,9 @@ export function ModalFrame({
 
   const closeButtonElement = (
     <button
+      type="button"
       onClick={onClose}
-      className={`flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl border border-[var(--glass-border-subtle)] text-[var(--color-text-muted)] transition-all duration-300 hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-primary)]/20 active:scale-[0.96] ${
-        isDark
-          ? "bg-[rgba(255,255,255,0.04)] hover:bg-[rgba(255,255,255,0.08)]"
-          : "bg-[rgba(255,255,255,0.88)] hover:bg-[rgba(255,255,255,0.98)]"
-      } ${floatingCloseButtonClassName}`}
+      className={`flex min-h-10 min-w-10 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded-lg border border-[var(--color-border-primary)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--glass-tab-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--color-border-focus)] ${floatingCloseButtonClassName}`}
       aria-label={closeAriaLabel}
     >
       {closeIcon || (
@@ -93,7 +92,7 @@ export function ModalFrame({
         className={
           inline
             ? "relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
-            : `relative flex flex-col rounded-none border shadow-2xl transition-[opacity,transform] duration-200 sm:rounded-[28px] glass-modal ${panelClassName} ${
+            : `relative flex flex-col rounded-none border shadow-2xl transition-[opacity,transform] duration-200 ${surface === "solid" ? "sm:rounded-2xl overflow-hidden border-[var(--glass-border-subtle)] bg-[var(--color-bg-primary)]" : "sm:rounded-[28px] glass-modal"} ${panelClassName} ${
                 isOpen
                   ? "opacity-100 animate-scale-in"
                   : "pointer-events-none translate-y-2 scale-[0.985] opacity-0"
@@ -106,10 +105,8 @@ export function ModalFrame({
       >
         {hasHeaderContent ? (
           <div
-            className={`flex flex-shrink-0 items-center justify-between gap-4 border-b px-5 py-4 safe-area-inset-top sm:px-6 sm:py-5 border-[var(--glass-border-subtle)] ${
-              isDark
-                ? "bg-[linear-gradient(180deg,rgba(24,26,31,0.96),var(--color-sidebar-bg))]"
-                : "bg-[linear-gradient(180deg,rgba(255,255,255,0.995),var(--color-sidebar-bg))]"
+            className={`flex flex-shrink-0 items-center justify-between gap-4 border-b safe-area-inset-top border-[var(--glass-border-subtle)] ${surface === "solid" ? "px-4 py-3 sm:px-5" : "px-5 py-4 sm:px-6 sm:py-5"} ${
+              surface === "solid" ? "bg-[var(--color-bg-primary)]" : "bg-[var(--glass-panel-bg)]"
             } ${headerClassName}`}
           >
             <div id={titleId} className="min-w-0 flex-1 pr-3">

@@ -131,8 +131,9 @@ export default defineConfig({
             { text: 'Operations Runbook', link: '/guide/operations' },
             { text: 'Web UI', link: '/guide/web-ui' },
             { text: 'Supported Runtimes', link: '/guide/runtimes' },
-            { text: 'Group Bridge', link: '/guide/group-bridge' },
+            { text: 'CCCC Connect', link: '/guide/connect' },
             { text: 'ChatGPT Web Model Runtime', link: '/guide/web-model-runtime' },
+            { text: 'Grok Bot Web Model', link: '/guide/grok-web-model-runtime' },
             { text: 'Group Space + NotebookLM', link: '/guide/group-space-notebooklm' },
             { text: 'Capability Allowlist', link: '/guide/capability-allowlist' },
             { text: 'Best Practices', link: '/guide/best-practices' },
@@ -147,6 +148,7 @@ export default defineConfig({
             { text: 'Telegram', link: '/guide/im-bridge/telegram' },
             { text: 'Slack', link: '/guide/im-bridge/slack' },
             { text: 'Discord', link: '/guide/im-bridge/discord' },
+            { text: 'Mattermost', link: '/guide/im-bridge/mattermost' },
             { text: 'Feishu', link: '/guide/im-bridge/feishu' },
             { text: 'DingTalk', link: '/guide/im-bridge/dingtalk' },
             { text: 'WeCom', link: '/guide/im-bridge/wecom' }

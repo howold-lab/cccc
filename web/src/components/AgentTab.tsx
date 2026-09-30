@@ -1,3 +1,5 @@
+import { isWebModelRuntime } from "../types";
+import { useTerminalTitlePaging } from "./agentTerminal/useTerminalTitlePaging";
 import {
   useCallback,
   useEffect,
@@ -78,7 +80,7 @@ function normalizeActorGroupRole(role: unknown): "foreman" | "peer" {
 
 function actorGroupRoleBadgeClass(role: "foreman" | "peer"): string {
   return classNames(
-    "rounded-md border px-1.5 py-0.5 text-[10px] font-medium",
+    "rounded-md border px-1.5 py-0.5 text-xs font-medium",
     role === "foreman"
       ? "border-amber-500/25 bg-amber-500/12 text-amber-700 dark:text-amber-300"
       : "border-slate-400/25 bg-slate-500/10 text-slate-600 dark:border-slate-400/20 dark:bg-slate-400/10 dark:text-slate-300",
@@ -106,9 +108,9 @@ interface AgentTabProps {
   agentState: AgentState | null;
   isVisible: boolean;
   compact?: boolean;
-  suspendWhenHidden?: boolean;
   onExpand?: () => void;
   navigation?: ReactNode;
+  onPage?: (direction: -1 | 1) => void;
   readOnly?: boolean;
   actorStatusProvisional: boolean;
   onQuit: () => void;
@@ -132,9 +134,9 @@ export function AgentTab({
   agentState,
   isVisible,
   compact = false,
-  suspendWhenHidden = false,
   onExpand,
   navigation,
+  onPage,
   readOnly,
   actorStatusProvisional,
   onQuit,
@@ -158,10 +160,7 @@ export function AgentTab({
   });
   const effectiveRunner = getEffectiveActorRunner(actor);
   const isHeadless = effectiveRunner === "headless";
-  const isWebModel =
-    String(actor.runtime || "")
-      .trim()
-      .toLowerCase() === "web_model";
+  const isWebModel = isWebModelRuntime(actor.runtime);
   const canStartNewSession = actorSupportsNewSession(actor.runtime);
   const hasRuntimeResumeFailure = actorHasRuntimeResumeFailure(actor);
   const runtimeResumeError = String(actor.runtime_session_last_resume_error || "").trim();
@@ -235,7 +234,7 @@ export function AgentTab({
   }, [canControl]);
 
   // Activate the terminal only after the user has visited this actor tab at least once.
-  // Keep the xterm instance; tiled views suspend the browser connection while hidden.
+  // The work area retains visited terminals and connections for bounded navigation reuse.
   useEffect(() => {
     if (!isVisible) return;
     const timer = window.setTimeout(() => setActivated(true), 0);
@@ -412,10 +411,10 @@ export function AgentTab({
   useEffect(() => {
     terminalOptionsSnapshotRef.current.canControl = canControl;
     if (terminalRef.current) {
-      terminalRef.current.options.disableStdin = !canControl;
-      terminalRef.current.options.cursorBlink = canControl;
+      terminalRef.current.options.disableStdin = !canControl || !isVisible;
+      terminalRef.current.options.cursorBlink = canControl && isVisible;
     }
-  }, [canControl]);
+  }, [canControl, isVisible]);
 
   useEffect(() => {
     terminalOptionsSnapshotRef.current.scrollbackLines = terminalScrollbackLines;
@@ -563,7 +562,8 @@ export function AgentTab({
     sendInterrupt,
   } = useAgentTerminalConnection({
     takeoverOnAttach: false,
-    activated: activated && (!suspendWhenHidden || isVisible),
+    activated,
+    isVisible,
     isRunning,
     isHeadless,
     groupId,
@@ -658,6 +658,8 @@ export function AgentTab({
     : 0;
   const stateNext = String(agentState?.hot?.next_action || "").trim();
   const actorGroupRole = normalizeActorGroupRole(actor.role);
+  const titlePaging = useTerminalTitlePaging(isVisible && compact ? onPage : undefined);
+
   const compactStatusText = !isRunning
     ? runtimeStatusText
     : !isHeadless && connectionStatus !== "connected"
@@ -672,6 +674,9 @@ export function AgentTab({
     <div className="@container/actor-view flex min-h-0 min-w-0 flex-col h-full">
       {compact ? (
         <div
+          {...titlePaging}
+          data-terminal-title-bar
+          style={onPage ? { touchAction: "pan-y pinch-zoom" } : undefined}
           className={classNames(
             "flex min-h-9 shrink-0 items-center border-b border-[var(--glass-border-subtle)] px-2 text-xs [@media(pointer:coarse)]:min-h-11",
             navigation
@@ -692,7 +697,7 @@ export function AgentTab({
               title={[runtimeStatusText, actor.effective_working_reason].filter(Boolean).join("\n")}
             />
             <span
-              id={`runtime-inspector-${actor.id}`}
+              id={`runtime-inspector-${groupId}-${actor.id}`}
               className="min-w-0 flex-1 truncate font-semibold"
               title={actor.title || actor.id}
             >
@@ -788,7 +793,7 @@ export function AgentTab({
               <div className="min-w-0 shrink-0">
                 <div className="flex items-center gap-2 min-w-0">
                   <span
-                    id={compact ? undefined : `runtime-inspector-${actor.id}`}
+                    id={compact ? undefined : `runtime-inspector-${groupId}-${actor.id}`}
                     className="min-w-0 truncate font-semibold text-[var(--color-text-primary)]"
                   >
                     {actor.title || actor.id}
@@ -810,7 +815,7 @@ export function AgentTab({
                 {/* Mobile-only: condensed single-line agent state */}
                 <div
                   className={classNames(
-                    "sm:hidden mt-1 text-[11px] truncate leading-tight",
+                    "sm:hidden mt-1 text-xs truncate leading-tight",
                     stateHeadline !== t("noAgentStateYet")
                       ? "text-[var(--color-text-secondary)]"
                       : "text-[var(--color-text-muted)] italic",
@@ -854,7 +859,7 @@ export function AgentTab({
                       {stateTask ? (
                         <span
                           className={classNames(
-                            "shrink-0 rounded-full bg-[var(--glass-tab-bg)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]",
+                            "shrink-0 rounded-full bg-[var(--glass-tab-bg)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)]",
                           )}
                         >
                           {t("taskShort", { id: stateTask })}
@@ -863,7 +868,7 @@ export function AgentTab({
                       {blockerCount > 0 ? (
                         <span
                           className={classNames(
-                            "shrink-0 rounded-full bg-rose-500/15 px-2 py-0.5 text-[10px] text-rose-600 dark:text-rose-300",
+                            "shrink-0 rounded-full bg-rose-500/15 px-2 py-0.5 text-xs text-rose-600 dark:text-rose-300",
                           )}
                         >
                           {t("blockersShort", { count: blockerCount })}
@@ -872,7 +877,7 @@ export function AgentTab({
                       {stateNext ? (
                         <span
                           className={classNames(
-                            "min-w-0 truncate text-[10px] leading-4",
+                            "min-w-0 truncate text-xs leading-4",
                             "text-[var(--color-text-tertiary)]",
                           )}
                           title={stateNext}
@@ -884,7 +889,7 @@ export function AgentTab({
                   ) : null}
                 </div>
                 {agentState?.updated_at ? (
-                  <div className="shrink-0 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-2 py-0.5 text-[10px] font-medium leading-4 text-[var(--color-text-tertiary)]">
+                  <div className="shrink-0 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-2 py-0.5 text-xs font-medium leading-4 text-[var(--color-text-tertiary)]">
                     {formatTime(agentState.updated_at)}
                   </div>
                 ) : null}
@@ -1186,7 +1191,7 @@ export function AgentTab({
             {unreadCount > 0 && (
               <span
                 className={classNames(
-                  "text-[10px] px-1.5 py-0.5 rounded-full font-semibold tracking-tight shadow-sm",
+                  "text-xs px-1.5 py-0.5 rounded-full font-semibold tracking-tight shadow-sm",
                   isDark ? "bg-white text-[rgb(20,20,22)]" : "bg-[rgb(35,36,37)] text-white",
                 )}
                 aria-hidden="true"
@@ -1197,12 +1202,12 @@ export function AgentTab({
           </button>
           <button
             onClick={onRemove}
-            disabled={isBusy || isRunning}
+            disabled={isBusy}
             className={classNames(
               "flex items-center gap-1.5 rounded-xl px-3 py-2.5 text-sm disabled:opacity-50 min-h-[44px] transition-colors flex-shrink-0 whitespace-nowrap",
               "text-rose-600 hover:bg-rose-500/10 dark:text-rose-400",
             )}
-            title={isRunning ? t("stopBeforeRemoving") : t("removeAgent")}
+            title={t("removeAgent")}
             aria-label={t("removeAgent")}
           >
             <TrashIcon size={16} />

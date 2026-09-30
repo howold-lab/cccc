@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act } from "react";
+import { act, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { useModalA11y } from "./useModalA11y";
@@ -8,6 +8,7 @@ import { useModalA11y } from "./useModalA11y";
   true;
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   document.body.innerHTML = "";
 });
 
@@ -18,12 +19,18 @@ function Fixture() {
       <div hidden>
         <button>hidden first</button>
       </div>
+      <fieldset disabled>
+        <button>disabled first</button>
+      </fieldset>
       <button id="first">first</button>
       <details>
         <summary tabIndex={0}>advanced</summary>
         <button>closed detail</button>
       </details>
       <button id="last">last</button>
+      <fieldset disabled>
+        <button>disabled last</button>
+      </fieldset>
       <div inert>
         <button>inert last</button>
       </div>
@@ -42,6 +49,16 @@ function Fixture() {
 
 describe("modal keyboard focus", () => {
   it("starts and wraps on visible controls, skipping hidden panels, inert content and closed details", async () => {
+    // happy-dom does not yet implement fieldset-inherited :disabled. Model
+    // that browser CSS state here; the native browser acceptance also exercises it.
+    const matches = HTMLElement.prototype.matches;
+    vi.spyOn(HTMLElement.prototype, "matches").mockImplementation(function (
+      this: HTMLElement,
+      selector: string,
+    ) {
+      if (selector === ":disabled" && this.closest("fieldset[disabled]")) return true;
+      return matches.call(this, selector);
+    });
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       callback(0);
       return 1;
@@ -73,4 +90,36 @@ describe("modal keyboard focus", () => {
     await act(async () => root.unmount());
     expect(document.body.style.overflow).toBe("");
   });
+});
+
+it("honors an initial field and lets a nested popup consume Escape before the modal", async () => {
+  const close = vi.fn();
+  function SearchFixture() {
+    const input = useRef<HTMLInputElement>(null);
+    const { modalRef } = useModalA11y(true, close, { initialFocusRef: input });
+    return (
+      <div ref={modalRef}>
+        <button>Close</button>
+        <input ref={input} />
+      </div>
+    );
+  }
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    callback(0);
+    return 1;
+  });
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => root.render(<SearchFixture />));
+  expect(document.activeElement).toBe(host.querySelector("input"));
+  const nestedEscape = (event: KeyboardEvent) => event.preventDefault();
+  document.addEventListener("keydown", nestedEscape, { capture: true });
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+  expect(close).not.toHaveBeenCalled();
+  document.removeEventListener("keydown", nestedEscape, { capture: true });
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+  expect(close).toHaveBeenCalledOnce();
+  await act(async () => root.unmount());
 });

@@ -2,9 +2,6 @@ use super::*;
 use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-mod chrome_test_guard;
-use chrome_test_guard::chrome_test_guard;
-
 macro_rules! require_chrome {
     () => {
         if !chrome_available() {
@@ -12,6 +9,24 @@ macro_rules! require_chrome {
         }
         let _chrome_guard = chrome_test_guard().await;
     };
+}
+
+async fn wait_for_fixture_document(page: &Page) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if page
+                .evaluate("location.protocol === 'http:' && ['interactive', 'complete'].includes(document.readyState)")
+                .await
+                .ok()
+                .and_then(|r| r.into_value::<bool>().ok()) == Some(true)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("fixture document ready");
 }
 
 #[test]
@@ -25,6 +40,138 @@ fn extracts_google_account_route_from_completion_url() {
         3
     );
     assert_eq!(authuser_from_url("https://notebooklm.google.com/"), 0);
+}
+
+#[tokio::test]
+async fn composer_readiness_waits_for_login_and_interactive_verification() {
+    require_chrome!();
+    let (url, server) = local_page(
+        r#"<!doctype html><button data-testid="login-button">Log in</button><textarea id="prompt-textarea">User draft</textarea>"#,
+    )
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manager = BrowserSurfaces::default();
+    let key = "readiness";
+    manager
+        .open(key, &temp.path().join("profile"), &url, 800, 600)
+        .await
+        .expect("open");
+    let page = manager
+        .sessions
+        .lock()
+        .await
+        .get(key)
+        .expect("session")
+        .page
+        .clone();
+    let guest = manager.prompt_readiness(key).await.expect("guest state");
+    assert_eq!(guest["ready"], false);
+    assert_eq!(guest["login_required"], true);
+    assert_eq!(guest["verification_required"], false);
+
+    // Background JavaScript detection also runs on ordinary provider pages.
+    page.evaluate(
+        r#"document.querySelector('button').hidden = true;
+        const background = document.createElement('script');
+        background.type = 'application/json';
+        background.src = '/cdn-cgi/challenge-platform/h/g/jsd/r/normal';
+        document.head.append(background);"#,
+    )
+    .await
+    .expect("sign in");
+    assert_eq!(
+        manager.prompt_readiness(key).await.expect("signed in")["ready"],
+        true
+    );
+    page.evaluate(
+        r#"const challenge = document.createElement('script');
+        challenge.id = 'challenge'; challenge.type = 'application/json';
+        challenge.src = '/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1';
+        document.head.append(challenge);"#,
+    )
+    .await
+    .expect("verification page");
+    let challenge = manager
+        .prompt_readiness(key)
+        .await
+        .expect("challenge state");
+    assert_eq!(challenge["ready"], false);
+    assert_eq!(challenge["verification_required"], true);
+    page.evaluate("document.querySelector('#challenge').remove()")
+        .await
+        .expect("verification complete");
+    assert_eq!(
+        manager.prompt_readiness(key).await.expect("recovered")["ready"],
+        true
+    );
+    let draft: String = page
+        .evaluate("document.querySelector('textarea').value")
+        .await
+        .expect("draft")
+        .into_value()
+        .expect("text");
+    assert_eq!(draft, "User draft");
+    manager.close(key).await.expect("close");
+    server.abort();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn interactive_system_browser_keeps_native_mode_and_reuses_its_session() {
+    require_chrome!();
+    if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        return;
+    }
+    let (url, server) = local_page("<textarea id='prompt-textarea'></textarea>").await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manager = BrowserSurfaces::default();
+    let profile = temp.path().join("profile");
+    let opened = manager
+        .ensure_open_shared_system("interactive", &profile, &url, 800, 600)
+        .await
+        .expect("system browser");
+    let page = manager
+        .sessions
+        .lock()
+        .await
+        .get("interactive")
+        .expect("session")
+        .page
+        .clone();
+    wait_for_fixture_document(&page).await;
+    let automated: bool = page
+        .evaluate("navigator.webdriver")
+        .await
+        .expect("browser mode")
+        .into_value()
+        .expect("mode");
+    assert!(
+        !automated,
+        "interactive system browser must not enable Chrome automation mode"
+    );
+    assert!(
+        opened["metadata"]["cdp_port"]
+            .as_u64()
+            .is_some_and(|port| port > 0)
+    );
+    page.evaluate(
+        "window.reuseMarker = true; document.querySelector('textarea').value = 'Keep draft'",
+    )
+    .await
+    .expect("interact");
+    let reused = manager
+        .ensure_open_shared_system("interactive", &profile, &url, 800, 600)
+        .await
+        .expect("reuse");
+    assert_eq!(opened["metadata"]["pid"], reused["metadata"]["pid"]);
+    let kept: bool = page.evaluate("window.reuseMarker === true && document.querySelector('textarea').value === 'Keep draft'").await.expect("read state").into_value().expect("state");
+    assert!(
+        kept,
+        "reopening the surface must preserve the page and draft"
+    );
+    manager.close("interactive").await.expect("close");
+    manager.shutdown_all().await.expect("shared owner cleanup");
+    server.abort();
 }
 
 #[tokio::test]
@@ -166,6 +313,9 @@ async fn info_reaps_a_finished_browser_handler_instead_of_reporting_active() {
         .await
         .get_mut(key)
         .expect("session")
+        .owner
+        .read()
+        .await
         .handler
         .abort();
     tokio::task::yield_now().await;
@@ -317,28 +467,38 @@ async fn shutdown_closes_all_browser_processes() {
     server.abort();
 }
 
-async fn local_page(body: &'static str) -> (String, JoinHandle<()>) {
+pub(super) async fn local_page(body: &'static str) -> (String, JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener");
     let address = listener.local_addr().expect("address");
     let server = tokio::spawn(async move {
+        // Chromium can preconnect without sending a request. Serve connections
+        // independently so an idle socket cannot block another browser's page.
+        // Dropping the server also aborts its connection tasks.
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            let mut request = [0_u8; 2048];
-            let _ = stream.read(&mut request).await;
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .expect("response");
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let Ok((mut stream, _)) = accepted else { return };
+                    connections.spawn(async move {
+                        let mut request = [0_u8; 2048];
+                        if !matches!(stream.read(&mut request).await, Ok(size) if size > 0) {
+                            return;
+                        }
+                        let _ = stream
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
         }
     });
     (format!("http://{address}"), server)
@@ -704,3 +864,11 @@ fn classifies_only_group_owned_browser_sessions() {
     );
     assert_eq!(session_actor("g_one::presentation"), None);
 }
+
+mod local_page_tests;
+mod resource_cleanup;
+
+mod page_enumeration;
+
+#[cfg(target_os = "linux")]
+mod shared_owner;

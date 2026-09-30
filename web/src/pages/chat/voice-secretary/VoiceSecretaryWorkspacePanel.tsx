@@ -1,5 +1,7 @@
 import type { TFunction } from "i18next";
-import { useMemo } from "react";
+import { VoiceLiveTranscript } from "./VoiceLiveTranscript";
+import type { VoiceTranscriptPreview } from "./voiceStreamModel";
+import { useMemo, type ReactNode } from "react";
 import { MarkdownDocumentSurface } from "../../../components/document/MarkdownDocumentSurface";
 import { MessageSquareQuoteIcon } from "../../../components/Icons";
 import { classNames } from "../../../utils/classNames";
@@ -7,12 +9,15 @@ import {
   isDisplayableFinalVoiceTranscriptItem,
   type VoiceTranscriptItem,
 } from "./voiceStreamModel";
+import { VoiceWorkspaceFrame } from "./VoiceWorkspaceFrame";
 import { VoiceTranscriptRecordingIndicator } from "./VoiceTranscriptRecordingIndicator";
-import { stripUncertainSpeakerPrefix } from "./voiceComposerUtils";
+import { VoiceFinalTranscriptRows } from "./VoiceFinalTranscriptRows";
 
 export type VoiceWorkspaceView = "document" | "transcript";
 
 type VoiceSecretaryWorkspacePanelProps = {
+  navigation?: ReactNode;
+  livePreview?: VoiceTranscriptPreview | null;
   activeDocumentPath: string;
   activeDocumentWritePath: string;
   actionBusy: string;
@@ -25,7 +30,8 @@ type VoiceSecretaryWorkspacePanelProps = {
   documentRemoteChanged: boolean;
   isDark: boolean;
   recording: boolean;
-  recordingAudioLevels: number[];
+  /** Per-frame microphone level getter, 0–1. */
+  recordingAudioLevel: () => number;
   t: TFunction;
   transcriptItems: VoiceTranscriptItem[];
   view: VoiceWorkspaceView;
@@ -44,6 +50,8 @@ type VoiceSecretaryWorkspacePanelProps = {
 };
 
 export function VoiceSecretaryWorkspacePanel({
+  navigation,
+  livePreview,
   activeDocumentPath,
   activeDocumentWritePath,
   actionBusy,
@@ -56,7 +64,7 @@ export function VoiceSecretaryWorkspacePanel({
   documentRemoteChanged,
   isDark,
   recording,
-  recordingAudioLevels,
+  recordingAudioLevel,
   t,
   transcriptItems,
   view,
@@ -87,21 +95,26 @@ export function VoiceSecretaryWorkspacePanel({
   );
   const transcriptCount = transcriptRows.length;
   const documentActionClassName = classNames(
-    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50",
+    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold transition-colors disabled:opacity-50",
     isDark
       ? "border-white/10 bg-white/[0.04] text-slate-300 hover:bg-white/10"
       : "border-black/10 bg-white text-gray-600 hover:bg-black/5",
   );
   return (
-    <section
-      className={classNames(
-        "flex min-h-0 flex-col rounded-[24px] border p-3",
-        isDark ? "border-white/10 bg-black/10" : "border-black/[0.06] bg-white/70",
-      )}
+    <VoiceWorkspaceFrame
+      recording={recording}
+      processing={processingRows.length > 0}
+      level={recordingAudioLevel}
+      isDark={isDark}
     >
-      <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-[var(--glass-border-subtle)] px-1 pb-3">
-        <div className="min-w-0 flex-1">
+      {navigation}
+      <div
+        data-voice-document-header
+        className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-[var(--glass-border-subtle)] px-1 pb-3"
+      >
+        <div data-voice-document-heading className="min-w-0 flex-1">
           <div
+            data-voice-document-title
             className={classNames(
               "break-words text-xl font-semibold tracking-[-0.02em]",
               isDark ? "text-slate-100" : "text-gray-900",
@@ -109,12 +122,13 @@ export function VoiceSecretaryWorkspacePanel({
           >
             {documentDisplayTitle}
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <div data-voice-document-meta className="mt-2 flex flex-wrap items-center gap-1.5">
             <div
               className={classNames(
                 "inline-flex rounded-full border p-0.5",
                 isDark ? "border-white/10 bg-white/[0.04]" : "border-black/10 bg-white",
               )}
+              data-voice-document-views
               role="group"
               aria-label={t("voiceSecretaryWorkspaceViewSelector", {
                 defaultValue: "Voice Secretary workspace view",
@@ -127,7 +141,7 @@ export function VoiceSecretaryWorkspacePanel({
                     key={nextView}
                     type="button"
                     className={classNames(
-                      "rounded-full px-2.5 py-1 text-[10px] font-semibold transition-colors",
+                      "rounded-full px-2.5 py-1 text-xs font-semibold transition-colors",
                       active
                         ? isDark
                           ? "bg-white text-slate-950"
@@ -149,7 +163,7 @@ export function VoiceSecretaryWorkspacePanel({
             {view === "transcript" ? (
               <span
                 className={classNames(
-                  "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  "rounded-full px-2 py-0.5 text-xs font-medium",
                   isDark
                     ? "bg-white/10 text-slate-100"
                     : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]",
@@ -164,7 +178,7 @@ export function VoiceSecretaryWorkspacePanel({
             {view === "document" && !activeDocumentPath ? (
               <span
                 className={classNames(
-                  "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  "rounded-full px-2 py-0.5 text-xs font-medium",
                   isDark ? "bg-slate-800 text-slate-300" : "bg-gray-100 text-gray-600",
                 )}
               >
@@ -178,7 +192,7 @@ export function VoiceSecretaryWorkspacePanel({
             activeDocumentWritePath === captureTargetDocumentPath ? (
               <span
                 className={classNames(
-                  "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  "rounded-full px-2 py-0.5 text-xs font-medium",
                   isDark
                     ? "bg-white/10 text-slate-200"
                     : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]",
@@ -221,7 +235,7 @@ export function VoiceSecretaryWorkspacePanel({
             {view === "document" && documentHasUnsavedEdits ? (
               <span
                 className={classNames(
-                  "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  "rounded-full px-2 py-0.5 text-xs font-medium",
                   isDark ? "bg-amber-500/10 text-amber-200" : "bg-amber-50 text-amber-700",
                 )}
               >
@@ -231,7 +245,7 @@ export function VoiceSecretaryWorkspacePanel({
             {view === "document" && documentRemoteChanged ? (
               <span
                 className={classNames(
-                  "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  "rounded-full px-2 py-0.5 text-xs font-medium",
                   isDark
                     ? "bg-white/10 text-slate-200"
                     : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]",
@@ -243,9 +257,10 @@ export function VoiceSecretaryWorkspacePanel({
             {view === "document" ? (
               <span
                 className={classNames(
-                  "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium",
                   isDark ? "bg-black/20 text-slate-300" : "bg-[rgb(245,245,245)] text-gray-600",
                 )}
+                data-voice-document-location
                 title={activeDocumentPath || undefined}
               >
                 <span className="shrink-0">
@@ -256,7 +271,10 @@ export function VoiceSecretaryWorkspacePanel({
                       })}
                 </span>
                 {activeDocumentPath ? (
-                  <span className="min-w-0 truncate font-normal text-[var(--color-text-muted)]">
+                  <span
+                    data-voice-document-path
+                    className="min-w-0 truncate font-normal text-[var(--color-text-muted)]"
+                  >
                     {activeDocumentPath}
                   </span>
                 ) : null}
@@ -264,12 +282,15 @@ export function VoiceSecretaryWorkspacePanel({
             ) : null}
           </div>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+        <div
+          data-voice-document-actions
+          className="flex shrink-0 flex-wrap items-center justify-end gap-2"
+        >
           {view === "document" && documentRemoteChanged ? (
             <button
               type="button"
               className={classNames(
-                "rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-60",
+                "rounded-full border px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-60",
                 isDark
                   ? "border-white/10 text-slate-300 hover:bg-white/10"
                   : "border-black/10 text-gray-700 hover:bg-black/5",
@@ -288,7 +309,7 @@ export function VoiceSecretaryWorkspacePanel({
             <button
               type="button"
               className={classNames(
-                "rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-60",
+                "rounded-full border px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-60",
                 isDark
                   ? "border-white/10 text-slate-300 hover:bg-white/10"
                   : "border-black/10 text-gray-700 hover:bg-black/5",
@@ -308,7 +329,7 @@ export function VoiceSecretaryWorkspacePanel({
                 onClick={onDownloadDocument}
                 disabled={!activeDocumentPath || documentLoading}
                 className={classNames(
-                  "rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-50",
+                  "rounded-full border px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50",
                   isDark
                     ? "border-white/10 text-slate-300 hover:bg-white/10"
                     : "border-black/10 text-gray-700 hover:bg-black/5",
@@ -321,7 +342,7 @@ export function VoiceSecretaryWorkspacePanel({
                 onClick={onToggleDocumentEditing}
                 disabled={documentLoading}
                 className={classNames(
-                  "rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-50",
+                  "rounded-full border px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50",
                   isDark
                     ? "border-white/10 text-slate-300 hover:bg-white/10"
                     : "border-black/10 text-gray-700 hover:bg-black/5",
@@ -339,7 +360,7 @@ export function VoiceSecretaryWorkspacePanel({
               onClick={onClearTranscript}
               disabled={!transcriptCount || recording}
               className={classNames(
-                "rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-50",
+                "rounded-full border px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50",
                 isDark
                   ? "border-white/10 text-slate-300 hover:bg-white/10"
                   : "border-black/10 text-gray-700 hover:bg-black/5",
@@ -393,7 +414,6 @@ export function VoiceSecretaryWorkspacePanel({
               label={t("voiceSecretaryTranscriptRecordingIndicator", {
                 defaultValue: "Recording audio. Final transcript appears after Save.",
               })}
-              levels={recordingAudioLevels}
             />
           ) : processingRows.length ? (
             <VoiceTranscriptRecordingIndicator
@@ -401,7 +421,6 @@ export function VoiceSecretaryWorkspacePanel({
               label={t("voiceSecretaryTranscriptAnalyzingAudio", {
                 defaultValue: "Analyzing final audio...",
               })}
-              levels={recordingAudioLevels}
             />
           ) : null}
           {!recording && !processingRows.length && failedRows.length ? (
@@ -421,80 +440,22 @@ export function VoiceSecretaryWorkspacePanel({
               )}
             </div>
           ) : null}
+          <VoiceLiveTranscript
+            preview={livePreview}
+            documentPath={
+              activeDocumentWritePath || activeDocumentPath || captureTargetDocumentPath
+            }
+            recording={recording}
+            label={t("voiceSecretaryLiveOriginal", { defaultValue: "Live original transcript" })}
+          />
           {transcriptRows.length ? (
-            transcriptRows.map((item) => {
-              const itemText = normalizeTranscriptText(stripUncertainSpeakerPrefix(item.text));
-              const timeLabel = formatTime(item.updatedAt);
-              const fullTimeLabel = formatFullTime(item.updatedAt);
-              const sourceLabel = String(item.sourceLabel || "").trim();
-              const sourceDetail = String(item.sourceDetail || "").trim();
-              const rawSpeakerLabel = String(item.speakerLabel || "").trim();
-              const speakerLabel = /^Speaker\s*\?$/i.test(rawSpeakerLabel) ? "" : rawSpeakerLabel;
-              return (
-                <div
-                  key={item.id}
-                  className={classNames(
-                    "rounded-lg border px-2 py-1.5",
-                    isDark ? "border-white/10 bg-white/[0.04]" : "border-black/[0.08] bg-white",
-                  )}
-                >
-                  {speakerLabel ? (
-                    <div
-                      className={classNames(
-                        "mb-0.5 text-[11px] font-semibold",
-                        isDark ? "text-sky-100" : "text-sky-800",
-                      )}
-                    >
-                      {speakerLabel}
-                    </div>
-                  ) : null}
-                  {itemText ? (
-                    <div
-                      className={classNames(
-                        "whitespace-pre-wrap break-words text-sm leading-5",
-                        isDark ? "text-slate-100" : "text-gray-900",
-                      )}
-                    >
-                      {itemText}
-                    </div>
-                  ) : null}
-                  {sourceLabel || sourceDetail || timeLabel ? (
-                    <div className="mt-1 flex min-w-0 items-center gap-2">
-                      {sourceDetail ? (
-                        <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--color-text-muted)]">
-                          {sourceDetail}
-                        </span>
-                      ) : null}
-                      {sourceLabel ? (
-                        <span
-                          className={classNames(
-                            "ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
-                            isDark
-                              ? "bg-emerald-300/10 text-emerald-100/85"
-                              : "bg-emerald-50 text-emerald-800",
-                          )}
-                          title={sourceDetail || sourceLabel}
-                        >
-                          {sourceLabel}
-                        </span>
-                      ) : null}
-                      {timeLabel ? (
-                        <time
-                          className={classNames(
-                            "shrink-0 text-[10px] tabular-nums text-[var(--color-text-muted)]",
-                            !sourceLabel && !sourceDetail && "ml-auto",
-                          )}
-                          dateTime={new Date(item.updatedAt).toISOString()}
-                          title={fullTimeLabel}
-                        >
-                          {timeLabel}
-                        </time>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })
+            <VoiceFinalTranscriptRows
+              transcriptRows={transcriptRows}
+              isDark={isDark}
+              normalizeTranscriptText={normalizeTranscriptText}
+              formatTime={formatTime}
+              formatFullTime={formatFullTime}
+            />
           ) : !recording && !processingRows.length && !failedRows.length ? (
             <div className="flex h-full min-h-[280px] items-center justify-center rounded-2xl border border-dashed border-[var(--glass-border-subtle)] px-4 text-center text-sm text-[var(--color-text-muted)]">
               {activeDocumentPath
@@ -508,6 +469,6 @@ export function VoiceSecretaryWorkspacePanel({
           ) : null}
         </div>
       )}
-    </section>
+    </VoiceWorkspaceFrame>
   );
 }

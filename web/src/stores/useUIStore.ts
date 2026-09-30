@@ -1,9 +1,11 @@
 // UI state store (tabs, sidebar, toasts, etc.).
 import { create } from "zustand";
 import {
-  clampPresentationSplitWidth,
-  PRESENTATION_SPLIT_DEFAULT_WIDTH,
-} from "../utils/presentationSplitLayout";
+  clampComposerHeight,
+  loadComposerHeight,
+  saveComposerHeight,
+} from "../utils/composerHeight";
+import { clampSidePanelWidth, SIDE_PANEL_DEFAULT_WIDTH } from "../utils/sidePanelLayout";
 
 export const SIDEBAR_COLLAPSED_WIDTH = 60;
 export const SIDEBAR_DEFAULT_WIDTH = 248;
@@ -31,6 +33,9 @@ export interface ChatScrollSnapshot {
 }
 
 export type GroupWorkView = "messages" | "terminals";
+/** Which full-screen surface a phone shows for the selected group. */
+export type MobileSurface = "messages" | "presentation" | "files";
+const MOBILE_SURFACES: MobileSurface[] = ["messages", "presentation", "files"];
 
 export interface ChatSessionState {
   workView: GroupWorkView;
@@ -39,9 +44,12 @@ export interface ChatSessionState {
   chatUnreadCount: number;
   chatFilter: ChatFilter;
   scrollSnapshot: ChatScrollSnapshot | null;
-  mobileSurface: "messages" | "presentation";
+  mobileSurface: MobileSurface;
   presentationDockOpen: boolean;
   presentationDisplayMode: "modal" | "split";
+  filesPanelOpen: boolean;
+  sidePanelWidth: number;
+  presentationCompact: boolean;
 }
 
 const DEFAULT_CHAT_SESSION: ChatSessionState = {
@@ -53,7 +61,10 @@ const DEFAULT_CHAT_SESSION: ChatSessionState = {
   scrollSnapshot: null,
   mobileSurface: "messages",
   presentationDockOpen: false,
-  presentationDisplayMode: "modal",
+  presentationDisplayMode: "split",
+  filesPanelOpen: false,
+  sidePanelWidth: SIDE_PANEL_DEFAULT_WIDTH,
+  presentationCompact: true,
 };
 
 export function getChatSession(
@@ -76,10 +87,11 @@ interface UIState {
   sidebarCollapsed: boolean; // Desktop sidebar collapsed state
   sidebarWidth: number;
   isSmallScreen: boolean;
-  presentationSplitWidth: number;
+  composerHeight: number | null;
   chatSessions: Record<string, ChatSessionState>;
   actorBusy: Record<string, number>;
   webReadOnly: boolean;
+  workspaceFileViewerGroupId: string;
   sseStatus: "connected" | "connecting" | "disconnected";
 
   // Actions
@@ -100,14 +112,17 @@ interface UIState {
   setChatUnreadCount: (groupId: string, v: number) => void;
   incrementChatUnread: (groupId: string) => void;
   setSmallScreen: (v: boolean) => void;
-  setPresentationSplitWidth: (v: number) => void;
+  setChatSidePanelLayout: (groupId: string, layout: { width?: number; compact?: boolean }) => void;
+  setComposerHeight: (v: number | null) => void;
   setChatFilter: (groupId: string, v: ChatFilter) => void;
   setChatScrollSnapshot: (groupId: string, snap: ChatScrollSnapshot | null) => void;
   setGroupWorkView: (groupId: string, view: GroupWorkView) => void;
   setGroupTerminalPage: (groupId: string, page: number) => void;
-  setChatMobileSurface: (groupId: string, v: "messages" | "presentation") => void;
+  setChatMobileSurface: (groupId: string, v: MobileSurface) => void;
   setChatPresentationDockOpen: (groupId: string, v: boolean) => void;
   setChatPresentationDisplayMode: (groupId: string, v: "modal" | "split") => void;
+  setChatFilesPanelOpen: (groupId: string, v: boolean) => void;
+  setWorkspaceFileViewerGroupId: (groupId: string) => void;
   setWebReadOnly: (v: boolean) => void;
   setSSEStatus: (v: "connected" | "connecting" | "disconnected") => void;
 }
@@ -118,7 +133,6 @@ let noticeTimeoutId: number | null = null;
 // localStorage key for sidebar collapsed state
 const SIDEBAR_COLLAPSED_KEY = "cccc-sidebar-collapsed";
 const SIDEBAR_WIDTH_KEY = "cccc-sidebar-width";
-const PRESENTATION_SPLIT_WIDTH_KEY = "cccc-presentation-split-width";
 const CHAT_SESSIONS_KEY = "cccc-chat-sessions";
 
 export function clampSidebarWidth(value: number): number {
@@ -166,36 +180,23 @@ function saveSidebarWidth(width: number): void {
   }
 }
 
-function loadPresentationSplitWidth(): number {
-  try {
-    return clampPresentationSplitWidth(Number(localStorage.getItem(PRESENTATION_SPLIT_WIDTH_KEY)));
-  } catch (e) {
-    console.warn("Failed to read presentation split width from localStorage:", e);
-    return PRESENTATION_SPLIT_DEFAULT_WIDTH;
-  }
-}
-
-function savePresentationSplitWidth(width: number): void {
-  try {
-    localStorage.setItem(PRESENTATION_SPLIT_WIDTH_KEY, String(clampPresentationSplitWidth(width)));
-  } catch (e) {
-    console.warn("Failed to persist presentation split width to localStorage:", e);
-  }
-}
-
 function sanitizeTerminalPage(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 export function groupMessagesVisible(
   groupId: string,
-  state: Pick<UIState, "activeTab" | "chatSessions" | "isSmallScreen">,
+  state: Pick<
+    UIState,
+    "activeTab" | "chatSessions" | "isSmallScreen" | "workspaceFileViewerGroupId"
+  >,
 ): boolean {
   const session = getChatSession(groupId, state.chatSessions);
   return (
     state.activeTab === "chat" &&
+    state.workspaceFileViewerGroupId !== groupId &&
     session.workView !== "terminals" &&
-    (!state.isSmallScreen || session.mobileSurface !== "presentation")
+    (!state.isSmallScreen || session.mobileSurface === "messages")
   );
 }
 
@@ -213,6 +214,9 @@ function sanitizeChatSessions(value: unknown): Record<string, ChatSessionState> 
       mobileSurface?: unknown;
       presentationDockOpen?: unknown;
       presentationDisplayMode?: unknown;
+      filesPanelOpen?: unknown;
+      sidePanelWidth?: unknown;
+      presentationCompact?: unknown;
     };
     next[gid] = {
       ...DEFAULT_CHAT_SESSION,
@@ -225,9 +229,15 @@ function sanitizeChatSessions(value: unknown): Record<string, ChatSessionState> 
           ? session.chatFilter
           : "all",
       scrollSnapshot: null,
-      mobileSurface: session.mobileSurface === "presentation" ? "presentation" : "messages",
+      mobileSurface: MOBILE_SURFACES.includes(session.mobileSurface as MobileSurface)
+        ? (session.mobileSurface as MobileSurface)
+        : "messages",
       presentationDockOpen: Boolean(session.presentationDockOpen),
-      presentationDisplayMode: session.presentationDisplayMode === "split" ? "split" : "modal",
+      presentationDisplayMode: session.presentationDisplayMode === "modal" ? "modal" : "split",
+      filesPanelOpen: Boolean(session.filesPanelOpen),
+      sidePanelWidth: clampSidePanelWidth(Number(session.sidePanelWidth)),
+      presentationCompact:
+        typeof session.presentationCompact === "boolean" ? session.presentationCompact : true,
     };
   }
   return next;
@@ -256,6 +266,9 @@ function saveChatSessions(sessions: Record<string, ChatSessionState>): void {
           mobileSurface: session.mobileSurface,
           presentationDockOpen: session.presentationDockOpen,
           presentationDisplayMode: session.presentationDisplayMode,
+          filesPanelOpen: session.filesPanelOpen,
+          sidePanelWidth: session.sidePanelWidth,
+          presentationCompact: session.presentationCompact,
         },
       ]),
     );
@@ -301,9 +314,10 @@ export const useUIStore = create<UIState>((set) => ({
   sidebarCollapsed: loadSidebarCollapsed(),
   sidebarWidth: loadSidebarWidth(),
   isSmallScreen: false,
-  presentationSplitWidth: loadPresentationSplitWidth(),
+  composerHeight: loadComposerHeight(),
   chatSessions: loadChatSessions(),
   webReadOnly: false,
+  workspaceFileViewerGroupId: "",
   sseStatus: "disconnected" as const,
 
   // Actions
@@ -393,11 +407,22 @@ export const useUIStore = create<UIState>((set) => ({
       };
     }),
   setSmallScreen: (v) => set({ isSmallScreen: v }),
-  setPresentationSplitWidth: (v) => {
-    const next = clampPresentationSplitWidth(v);
-    savePresentationSplitWidth(next);
-    set({ presentationSplitWidth: next });
+  setComposerHeight: (v) => {
+    const next = v === null ? null : clampComposerHeight(v);
+    saveComposerHeight(next);
+    set({ composerHeight: next });
   },
+  setChatSidePanelLayout: (groupId, layout) =>
+    set((state) => {
+      const previous = getChatSession(groupId, state.chatSessions);
+      const chatSessions = updateChatSession(state.chatSessions, groupId, {
+        sidePanelWidth:
+          layout.width === undefined ? previous.sidePanelWidth : clampSidePanelWidth(layout.width),
+        presentationCompact: layout.compact ?? previous.presentationCompact,
+      });
+      saveChatSessions(chatSessions);
+      return { chatSessions };
+    }),
   setChatFilter: (groupId, v) =>
     set((state) => {
       const chatSessions = updateChatSession(state.chatSessions, groupId, { chatFilter: v });
@@ -448,6 +473,13 @@ export const useUIStore = create<UIState>((set) => ({
       saveChatSessions(chatSessions);
       return { chatSessions };
     }),
+  setChatFilesPanelOpen: (groupId, v) =>
+    set((state) => {
+      const chatSessions = updateChatSession(state.chatSessions, groupId, { filesPanelOpen: v });
+      saveChatSessions(chatSessions);
+      return { chatSessions };
+    }),
+  setWorkspaceFileViewerGroupId: (groupId) => set({ workspaceFileViewerGroupId: groupId }),
   setWebReadOnly: (v) => set({ webReadOnly: v }),
   setSSEStatus: (v) => set({ sseStatus: v }),
 }));

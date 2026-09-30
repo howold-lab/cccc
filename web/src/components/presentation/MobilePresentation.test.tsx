@@ -84,7 +84,7 @@ describe("mobile presentation entry", () => {
     });
 
     const button = host.querySelector("button");
-    expect(button?.textContent).toContain("Presentation");
+    expect(button?.getAttribute("aria-label")).toContain("Presentation");
     expect(button?.getAttribute("aria-label")).toContain("slot 1: Mobile preview");
     expect(button?.hasAttribute("data-group-presentation-trigger")).toBe(true);
     expect(button?.dataset.mobilePresentationTrigger).toBe("true");
@@ -109,7 +109,7 @@ describe("mobile presentation surface", () => {
     host.remove();
   });
 
-  it("uses a safe-area full-screen portal and closes with Escape", async () => {
+  it("traps focus inside the full-screen portal and closes with Escape", async () => {
     const onClose = vi.fn();
     await act(async () => {
       root.render(
@@ -122,8 +122,6 @@ describe("mobile presentation surface", () => {
 
     const surface = document.querySelector<HTMLElement>("[data-mobile-presentation-surface]");
     expect(surface?.getAttribute("role")).toBe("dialog");
-    expect(surface?.className).toContain("fixed inset-0");
-    expect(surface?.className).toContain("safe-area-inset-top");
     expect(surface?.textContent).toContain("First");
 
     const buttons = surface?.querySelectorAll<HTMLButtonElement>("button") || [];
@@ -158,23 +156,24 @@ describe("mobile presentation surface", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("renders a clear back control and a one-column phone slot list", async () => {
+  it("closes the phone slot panel from its shared header", async () => {
+    const close = vi.fn();
     await act(async () => {
       root.render(
         <PresentationRail
-          mode="panel"
+          groupId="g1"
           presentation={presentation}
           isDark={false}
-          isOpen
           attentionSlots={{}}
-          onOpenChange={() => undefined}
+          onClose={close}
           onOpenSlot={() => undefined}
         />,
       );
     });
 
-    expect(host.querySelector("[data-mobile-presentation-close]")).not.toBeNull();
-    expect(host.querySelector(".grid")?.className).toContain("grid-cols-1");
-    expect(host.querySelector(".grid")?.className).toContain("min-[420px]:grid-cols-2");
+    await act(async () =>
+      host.querySelector<HTMLButtonElement>("[data-side-panel-header] button")!.click(),
+    );
+    expect(close).toHaveBeenCalledOnce();
   });
 });

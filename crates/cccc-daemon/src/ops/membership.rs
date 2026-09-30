@@ -1,4 +1,4 @@
-use super::operation::{Operation, Policy::GlobalWrite};
+use super::operation::{Operation, Policy::RemoteAccess};
 use cccc_contracts::DaemonRequest;
 use cccc_core::access_tokens::AccessTokenStore;
 use cccc_core::{HomeLayout, cloudflared, membership, settings};
@@ -25,13 +25,13 @@ struct PublicUrls {
 
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
-        "membership_status" => Operation::new(GlobalWrite, status),
-        "membership_login" => Operation::new(GlobalWrite, login),
-        "membership_login_poll" => Operation::new(GlobalWrite, login_poll),
-        "membership_logout" => Operation::new(GlobalWrite, logout),
-        "membership_reach_install" => Operation::new(GlobalWrite, reach_install),
-        "membership_reach_on" => Operation::new(GlobalWrite, reach_on),
-        "membership_reach_off" => Operation::new(GlobalWrite, reach_off),
+        "membership_status" => Operation::new(RemoteAccess, status),
+        "membership_login" => Operation::new(RemoteAccess, login),
+        "membership_login_poll" => Operation::new(RemoteAccess, login_poll),
+        "membership_logout" => Operation::new(RemoteAccess, logout),
+        "membership_reach_install" => Operation::new(RemoteAccess, reach_install),
+        "membership_reach_on" => Operation::new(RemoteAccess, reach_on),
+        "membership_reach_off" => Operation::new(RemoteAccess, reach_off),
         _ => return None,
     })
 }
@@ -99,6 +99,14 @@ fn login_poll(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     require_user(request)?;
     let state = membership::load(home).map_err(OpError::io)?;
     if state.logged_in && state.device_token.is_some() {
+        if !state.disabled
+            && state
+                .device_token
+                .as_ref()
+                .is_some_and(|token| !token.is_empty())
+        {
+            prepare_administrator_access(home)?;
+        }
         return object(status_payload(home)?);
     }
     let pending = state.pending_login.as_ref().and_then(Value::as_object);
@@ -115,8 +123,10 @@ fn login_poll(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let client = AccountClient::new(&origin).map_err(|error| account_fail(home, error))?;
     match client.poll_device_login(&device_code) {
         Ok(grant) => {
+            let device_token = grant.device_token.clone();
             membership::update(home, |state| {
                 state.logged_in = true;
+                state.account_label = None;
                 state.account_origin = Some(origin.clone());
                 state.device_id = Some(grant.device_id);
                 state.device_token = Some(grant.device_token);
@@ -129,6 +139,14 @@ fn login_poll(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 Ok(())
             })
             .map_err(OpError::io)?;
+            // Only a newly granted device receives an initial name. Repeated
+            // polling and reconnects must preserve the account's chosen name.
+            if let Some(name) = initial_instance_name()
+                && let Err(error) = client.rename_device(&device_token, &name)
+            {
+                tracing::warn!(code = %error.code, "Initial instance name was not saved; it can be edited in Account settings");
+            }
+            prepare_administrator_access(home)?;
         }
         Err(error) if error.retryable => {
             if error.retry_after_delta > 0 {
@@ -167,6 +185,36 @@ fn login_poll(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
     }
     object(status_payload(home)?)
+}
+
+pub(super) fn initial_instance_name() -> Option<String> {
+    #[cfg(unix)]
+    let hostname = nix::unistd::gethostname()
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(not(unix))]
+    let hostname = std::env::var("COMPUTERNAME").ok()?;
+    let name = hostname.trim();
+    if name.is_empty()
+        || name.encode_utf16().count() > 60
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+    {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+// This runs only after an explicit user login grant/replay, including the CLI.
+// Status and background directory refresh never initialize Web credentials.
+fn prepare_administrator_access(home: &HomeLayout) -> Result<(), OpError> {
+    AccessTokenStore::new(home.clone())
+        .and_then(|store| store.ensure_administrator())
+        .map_err(OpError::io)?;
+    cccc_core::web_bootstrap::ensure_web_bootstrap_token(home).map_err(OpError::io)?;
+    Ok(())
 }
 
 fn logout(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
@@ -441,6 +489,7 @@ fn status_payload(home: &HomeLayout) -> Result<Value, OpError> {
         .filter(|pending| !pending_expired(pending));
     let mut body = json!({
         "logged_in":state.logged_in,
+        "account_label":state.account_label.as_ref().filter(|_| state.logged_in && !state.disabled),
         "device_id":state.device_id,
         "hostname":urls.hostname,
         "web_url":urls.web,
@@ -510,6 +559,17 @@ fn refresh_cut_from_account(
     if remote.disabled {
         mark_cut(home, remote.device_id, remote.hostname)?;
         return Ok((None, Some(true)));
+    }
+    if state.account_label != remote.account_label {
+        membership::update(home, |current| {
+            if current.device_token == state.device_token
+                && current.account_origin == state.account_origin
+            {
+                current.account_label = remote.account_label;
+            }
+            Ok(())
+        })
+        .map_err(OpError::io)?;
     }
     Ok((remote.connection, Some(true)))
 }
@@ -736,6 +796,40 @@ mod tests {
     }
 
     #[test]
+    fn disabled_login_replay_does_not_initialize_administrator_access() {
+        let temp = tempfile::tempdir().expect("fixture operation");
+        let home = HomeLayout::from_path(temp.path()).expect("fixture operation");
+        home.initialize().expect("initialize fixture home");
+        membership::save(
+            &home,
+            &membership::MembershipState {
+                logged_in: true,
+                disabled: true,
+                device_id: Some("retired".into()),
+                device_token: Some("retired-token".into()),
+                ..Default::default()
+            },
+        )
+        .expect("fixture operation");
+        let request = DaemonRequest {
+            v: 1,
+            op: "membership_login_poll".into(),
+            args: json!({"by":"user"})
+                .as_object()
+                .expect("fixture operation")
+                .clone(),
+        };
+        login_poll(&home, &request).expect("fixture operation");
+        assert!(
+            AccessTokenStore::new(home)
+                .expect("fixture operation")
+                .list()
+                .expect("fixture operation")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn login_poll_remains_bound_to_the_issuing_account_origin() {
         let (origin, requests) = account_server(vec![
             (
@@ -746,6 +840,7 @@ mod tests {
                 200,
                 r#"{"access_token":"device-token-rust","device_id":"device-rust"}"#,
             ),
+            (200, r#"{"display_name":"Named device"}"#),
         ]);
         let temp = tempfile::tempdir().expect("tempdir");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
@@ -773,11 +868,74 @@ mod tests {
         let second = requests.recv().expect("device-token request");
         assert!(first.starts_with("POST /v1/device/code "));
         assert!(second.starts_with("POST /v1/device/token "));
+        if let Some(name) = initial_instance_name() {
+            let rename = requests.recv().expect("initial name request");
+            assert!(rename.starts_with("POST /v1/device/name "));
+            let body: Value =
+                serde_json::from_str(rename.split("\r\n\r\n").nth(1).expect("body")).expect("json");
+            assert_eq!(body["display_name"], name);
+        }
         let state = membership::load(&home).expect("membership");
         assert_eq!(state.account_origin.as_deref(), Some(origin.as_str()));
         assert_eq!(state.device_token.as_deref(), Some("device-token-rust"));
         let replayed = login_poll(&home, &poll_request).expect("replay committed login");
         assert_eq!(replayed["membership"]["logged_in"], true);
+        assert!(
+            requests.try_recv().is_err(),
+            "repeated polling must not rename a device"
+        );
+    }
+
+    #[test]
+    fn optional_initial_name_failure_does_not_undo_login_or_retry_a_rename() {
+        let (origin, requests) = account_server(vec![
+            (
+                200,
+                r#"{"access_token":"fixture-grant","device_id":"fixture-device"}"#,
+            ),
+            (503, r#"{"error":"temporarily_unavailable"}"#),
+        ]);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("home");
+        membership::update(&home, |state| {
+            state.account_origin = Some(origin.clone());
+            state.pending_login = Some(
+                json!({"device_code":"fixture-code", "account_origin":origin,
+                "expires_at": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()}),
+            );
+            Ok(())
+        })
+        .expect("pending login");
+        let request = DaemonRequest {
+            v: 1,
+            op: "membership_login_poll".into(),
+            args: Map::new(),
+        };
+        let result = login_poll(&home, &request).expect("grant remains successful");
+        assert_eq!(result["membership"]["logged_in"], true);
+        assert!(
+            membership::load(&home)
+                .expect("state")
+                .pending_login
+                .is_none()
+        );
+        assert!(
+            requests
+                .recv()
+                .expect("grant request")
+                .starts_with("POST /v1/device/token ")
+        );
+        if initial_instance_name().is_some() {
+            assert!(
+                requests
+                    .recv()
+                    .expect("name request")
+                    .starts_with("POST /v1/device/name ")
+            );
+        }
+        login_poll(&home, &request).expect("committed login replay");
+        assert!(requests.try_recv().is_err());
     }
 
     #[test]

@@ -1,6 +1,9 @@
 // Modal state store.
 import { create } from "zustand";
-import type { Actor, LedgerEvent, PresentationMessageRef } from "../types";
+import type { Actor, LedgerEvent, PresentationMessageRef, SupportedRuntime } from "../types";
+import { formatRuntimeCommand } from "../components/modals/runtimeProfileControlsModel";
+import { formatCapabilityIdInput } from "../utils/capabilityAutoload";
+import { useFormStore } from "./useFormStore";
 
 interface RelaySource {
   groupId: string;
@@ -18,6 +21,8 @@ interface PresentationViewerState {
 interface PresentationPinState {
   groupId: string;
   slotId: string;
+  /** Preselects a workspace file, so pinning from the file tree skips the picker. */
+  workspacePath?: string;
 }
 
 type PresentationAttentionState = Record<string, Record<string, boolean>>;
@@ -39,25 +44,39 @@ interface ModalState {
   relayEventId: string | null;
   relaySource: RelaySource | null;
   contextTaskId: string | null;
+  groupConnectionsId: string | null;
   presentationViewer: PresentationViewerState | null;
   presentationPin: PresentationPinState | null;
   presentationAttention: PresentationAttentionState;
   editingActor: Actor | null;
-  settingsTarget: { scope?: "group" | "global"; tab?: string; nonce: number } | null;
+  editingActorSection: "chatgpt" | null;
+  settingsTarget: {
+    scope?: "group" | "global";
+    tab?: string;
+    webModelProvider?: "chatgpt_web" | "grok_web";
+    nonce: number;
+  } | null;
 
   // Actions
   openModal: (name: keyof ModalState["modals"]) => void;
   closeModal: (name: keyof ModalState["modals"]) => void;
-  openSettingsTarget: (target: { scope?: "group" | "global"; tab?: string }) => void;
+  openSettingsTarget: (target: {
+    scope?: "group" | "global";
+    tab?: string;
+    webModelProvider?: "chatgpt_web" | "grok_web";
+  }) => void;
   clearSettingsTarget: () => void;
   setRecipientsModal: (eventId: string | null) => void;
   setRelayModal: (eventId: string | null, groupId?: string, event?: LedgerEvent | null) => void;
   openContextTask: (taskId: string) => void;
   clearContextTask: () => void;
+  setGroupConnections: (groupId: string | null) => void;
   setPresentationViewer: (viewer: PresentationViewerState | null) => void;
   setPresentationPin: (pin: PresentationPinState | null) => void;
   markPresentationSlotAttention: (groupId: string, slotId: string) => void;
   clearPresentationSlotAttention: (groupId: string, slotId: string) => void;
+  openActorEditor: (actor: Actor, section?: "chatgpt") => void;
+  // Update the open snapshot (e.g. avatar) or close without resetting its draft.
   setEditingActor: (actor: Actor | null) => void;
 }
 
@@ -77,10 +96,12 @@ export const useModalStore = create<ModalState>((set) => ({
   relayEventId: null,
   relaySource: null,
   contextTaskId: null,
+  groupConnectionsId: null,
   presentationViewer: null,
   presentationPin: null,
   presentationAttention: {},
   editingActor: null,
+  editingActorSection: null,
   settingsTarget: null,
 
   openModal: (name) => set((state) => ({ modals: { ...state.modals, [name]: true } })),
@@ -99,10 +120,12 @@ export const useModalStore = create<ModalState>((set) => ({
         scope:
           target.scope === "global" ? "global" : target.scope === "group" ? "group" : undefined,
         tab: typeof target.tab === "string" ? target.tab : undefined,
+        webModelProvider: target.webModelProvider,
         nonce: Date.now(),
       },
     })),
   clearSettingsTarget: () => set({ settingsTarget: null }),
+  setGroupConnections: (groupId) => set({ groupConnectionsId: groupId }),
 
   setRecipientsModal: (eventId) => set({ recipientsEventId: eventId }),
   setRelayModal: (eventId, groupId, event) =>
@@ -183,5 +206,19 @@ export const useModalStore = create<ModalState>((set) => ({
       }
       return { presentationAttention: nextAttention };
     }),
-  setEditingActor: (actor) => set({ editingActor: actor }),
+  openActorEditor: (actor, section) => {
+    useFormStore.setState({
+      editActorRuntime: (String(actor.runtime || "").trim() || "codex") as SupportedRuntime,
+      editActorCommand: formatRuntimeCommand(actor.command),
+      editActorTitle: actor.title || "",
+      editActorCapabilityAutoloadText: formatCapabilityIdInput(actor.capability_autoload),
+    });
+    set({ editingActor: actor, editingActorSection: section || null });
+  },
+  setEditingActor: (actor) =>
+    set((state) => ({
+      editingActor: actor,
+      editingActorSection:
+        actor && actor.id === state.editingActor?.id ? state.editingActorSection : null,
+    })),
 }));

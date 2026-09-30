@@ -4,12 +4,17 @@ use std::path::{Path, PathBuf};
 
 mod kimi;
 pub use kimi::ensure as ensure_kimi;
+mod antigravity;
+pub use antigravity::ensure as ensure_antigravity;
+mod grok;
+pub use grok::ensure as ensure_grok;
 
 #[must_use]
 pub const fn is_auto_managed(runtime: ActorRuntime) -> bool {
     matches!(
         runtime,
         ActorRuntime::Amp
+            | ActorRuntime::Antigravity
             | ActorRuntime::Auggie
             | ActorRuntime::Claude
             | ActorRuntime::Cline
@@ -47,6 +52,7 @@ pub const fn name(runtime: ActorRuntime) -> &'static str {
         ActorRuntime::Kimi => "kimi",
         ActorRuntime::Opencode => "opencode",
         ActorRuntime::WebModel => "web_model",
+        ActorRuntime::GrokWebModel => "grok_web_model",
         ActorRuntime::Custom => "custom",
     }
 }
@@ -134,6 +140,7 @@ pub fn add_command(runtime: ActorRuntime, executable: &Path) -> Option<Vec<Strin
     let cccc = executable.to_string_lossy().into_owned();
     let common = |parts: &[&str]| parts.iter().map(|part| (*part).to_owned()).collect();
     Some(match runtime {
+        ActorRuntime::Antigravity => common(&["agy", "mcp", "add", "cccc", "cccc", "mcp"]),
         ActorRuntime::Cline => {
             common(&["cline", "mcp", "add", "cccc", "--yes", "--", &cccc, "mcp"])
         }
@@ -188,6 +195,7 @@ mod tests {
     #[test]
     fn auto_managed_runtime_catalog_matches_supported_contract() {
         let runtimes = [
+            ActorRuntime::Antigravity,
             ActorRuntime::Claude,
             ActorRuntime::Cline,
             ActorRuntime::Codex,

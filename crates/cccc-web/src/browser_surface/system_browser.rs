@@ -52,7 +52,6 @@ impl SystemBrowserLaunch {
                 "Chrome, Microsoft Edge, or Chromium is required for projected browser authentication"
             )
         })?;
-        let cdp_port = initial_cdp_port()?;
         let display = VirtualDisplay::start(width, height).await?;
         #[cfg(target_os = "linux")]
         let (vnc, vnc_error) = match &display {
@@ -61,6 +60,7 @@ impl SystemBrowserLaunch {
         };
         #[cfg(not(target_os = "linux"))]
         let vnc_error = "unsupported_platform".to_owned();
+        let cdp_port = initial_cdp_port()?;
         Ok(Self {
             executable,
             channel,
@@ -327,20 +327,15 @@ async fn wait_for_browser_pid(profile: &Path, deadline: Instant) -> Result<u32> 
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn reserve_cdp_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     Ok(listener.local_addr()?.port())
 }
 
-#[cfg(target_os = "macos")]
 fn initial_cdp_port() -> Result<u16> {
+    // Port zero enables Chrome's automation mode, even in a headed browser.
+    // Interactive provider sign-in uses an ordinary system browser on every OS.
     reserve_cdp_port()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn initial_cdp_port() -> Result<u16> {
-    Ok(0)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -690,6 +685,27 @@ async fn stop_process_child(child: &mut tokio::process::Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
+    // x11vnc removes its SysV shared-memory segments in its signal handler.
+    // SIGKILL skips that cleanup and can exhaust the host's segment limit after
+    // repeated browser restarts. This is our unreaped child, so its PID is owned.
+    if let Some(pid) = child.id() {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tokio::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await;
+        if matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await,
+            Ok(Ok(_))
+        ) {
+            return;
+        }
+    }
     let _ = child.start_kill();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
 }
@@ -810,9 +826,17 @@ mod tests {
                 .await
                 .is_ok()
         );
-
+        let pid = vnc.pid().to_string();
         vnc.stop().await;
         display.stop().await;
+        let segments = std::fs::read_to_string("/proc/sysvipc/shm").expect("SysV memory table");
+        assert!(
+            segments
+                .lines()
+                .skip(1)
+                .all(|line| line.split_whitespace().nth(4) != Some(pid.as_str())),
+            "stopping VNC must release its shared-memory segments"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -937,10 +961,9 @@ mod tests {
         assert_ne!(reserve_cdp_port().expect("CDP port"), 0);
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn non_macos_browser_lets_chromium_assign_the_cdp_port_atomically() {
-        assert_eq!(initial_cdp_port().expect("initial CDP port"), 0);
+    fn interactive_browser_uses_an_explicit_cdp_port() {
+        assert_ne!(initial_cdp_port().expect("initial CDP port"), 0);
     }
 
     #[cfg(not(target_os = "macos"))]

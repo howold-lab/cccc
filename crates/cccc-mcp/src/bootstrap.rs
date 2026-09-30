@@ -93,6 +93,7 @@ fn assemble_payload(
             "help": "cccc_help()  # when a CCCC route or state boundary is unclear",
             "project_info": "cccc_capability_use(tool_name=\"cccc_project_info\", tool_arguments={})",
             "context_get": "cccc_context_get()",
+            "connect": "cccc_connect()  # discover accessible remote Groups/Actors; use both instance_id and target_group_id for an external_groups entry",
             "inbox_read": "cccc_inbox_read()",
             "memory_search": "cccc_capability_use(tool_name=\"cccc_memory\", tool_arguments={\"action\":\"search\",\"query\":\"...\"})",
         }
@@ -440,7 +441,7 @@ fn recent_notes(coordination: Option<&Map<String, Value>>, key: &str) -> Value {
 
 fn build_recovery(pack: &Value) -> Value {
     let agent_state = pack.get("agent_state").and_then(Value::as_object);
-    let mut recovery = Map::from_iter([
+    let recovery = Map::from_iter([
         (
             "coordination_brief".into(),
             pack.get("coordination_brief")
@@ -470,42 +471,7 @@ fn build_recovery(pack: &Value) -> Value {
             }),
         ),
     ]);
-    if has_recoverable_work(pack) {
-        recovery.insert(
-            "takeover_nudge".into(),
-            Value::String(cccc_core::peer_insight::BOOTSTRAP_TAKEOVER_NUDGE.into()),
-        );
-    }
     Value::Object(recovery)
-}
-
-fn has_recoverable_work(pack: &Value) -> bool {
-    let agent_state = pack.get("agent_state").and_then(Value::as_object);
-    let hot = agent_state
-        .and_then(|state| state.get("hot"))
-        .and_then(Value::as_object);
-    let warm = agent_state
-        .and_then(|state| state.get("warm"))
-        .and_then(Value::as_object);
-    let brief = pack.get("coordination_brief").and_then(Value::as_object);
-    ["active_task_id", "focus", "next_action"]
-        .into_iter()
-        .any(|field| non_blank(hot.and_then(|value| value.get(field))))
-        || non_blank(brief.and_then(|value| value.get("current_focus")))
-        || non_empty_array(hot.and_then(|value| value.get("blockers")))
-        || ["open_loops", "commitments"]
-            .into_iter()
-            .any(|field| non_empty_array(warm.and_then(|value| value.get(field))))
-        || ["assigned_active", "attention"].into_iter().any(|field| {
-            pack.get("tasks")
-                .and_then(|value| value.get(field))
-                .and_then(Value::as_array)
-                .is_some_and(|items| {
-                    items
-                        .iter()
-                        .any(|item| item.as_object().is_some_and(|item| !item.is_empty()))
-                })
-        })
 }
 
 fn build_inbox_preview(inbox: &Map<String, Value>, limit: usize) -> Value {
@@ -1034,10 +1000,7 @@ mod tests {
             recovery["task_slice"]["assigned_active"][0]["title"],
             "Verify bootstrap semantics"
         );
-        assert_eq!(
-            recovery["takeover_nudge"],
-            cccc_core::peer_insight::BOOTSTRAP_TAKEOVER_NUDGE
-        );
+        assert!(recovery.get("takeover_nudge").is_none());
         assert_eq!(
             pack["context_hygiene"]["execution_health"]["status"],
             "ready"

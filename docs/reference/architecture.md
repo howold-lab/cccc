@@ -94,8 +94,9 @@ MCP shutdown releases only those sessions, leaving other hosts and Actor/Analyst
 runtimes alone. Their process-local state does not replace Group
 configuration, message history, authorization, or delivery facts.
 
-Finite MCP shell/Git commands and daemon MCP-setup helpers share the runtime's
-bounded command capture function. It feeds stdin while draining both output
+Finite MCP shell/Git commands, optional workspace Git decorations, and daemon
+MCP-setup helpers share the runtime's bounded command capture function. It feeds
+stdin while draining both output
 streams, applies one deadline, and releases the existing process-group / Windows
 Job owner on completion or cancellation. Shell results report truncation; setup
 helpers reject oversized output rather than interpreting partial configuration.
@@ -339,7 +340,7 @@ The surface is best understood as capability groups instead of a fixed namespace
 ### Core Collaboration Capability Groups
 
 - Session and guidance: `cccc_bootstrap`, `cccc_help`, `cccc_project_info`
-- Messaging and files: `cccc_inbox_read`, `cccc_message_history`, `cccc_message_send`, `cccc_message_reply`, `cccc_file`
+- Messaging and files: `cccc_inbox_read`, `cccc_message_history`, `cccc_message_send`, `cccc_message_reply`, `cccc_file`, `cccc_file_send`
 - Group and actor control: `cccc_group`, `cccc_actor`
 - Coordination and state: `cccc_context_get`, `cccc_coordination`, `cccc_task`, `cccc_agent_state`, `cccc_context_sync`
 - Automation and memory: `cccc_automation`, `cccc_automation_manage`, `cccc_memory`, `cccc_memory_admin`

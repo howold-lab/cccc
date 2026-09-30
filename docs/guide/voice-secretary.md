@@ -20,12 +20,179 @@ keyboard focus into it; closing it returns focus to the Voice options button.
 Transcription and prompt-processing status appear above the input instead of
 competing with action buttons. The wider-screen controls remain inline.
 
-For an isolated browser regression, start a Vite dev server on port 15559 and run
-`python3 web/tests/browser/voice-mobile.py` (see the script for configuration).
-It checks production controls at 390×844, 844×390, and 1280×900 in English,
-Chinese and Japanese, menu lifecycle and focus, and real xterm touch protocols.
-It uses a temporary Chrome profile and synthetic HTTP, with no microphone,
-provider or daemon calls. These checks do not replace iPhone Safari QA.
+## Workspace modes
+
+**Doc** keeps the document list, document/transcript view and recent activity
+available together on desktop. **Ask** gives the request and its activity the
+main workspace. **Prompt** shows the current composer text, its existing
+optimization action and recent activity. Edit or send the text in the composer;
+choosing Prompt from the mode selector returns there.
+
+Open a linked document directly from Ask or Prompt activity, then use **Back to
+activity** to return without changing the capture mode or recording target.
+Doc also provides the full document list. Expanded Prompt controls and activity
+remain scrollable on short screens. Switching views preserves the
+unsaved document draft and typed Ask request; an unsaved-document notice remains
+visible outside Doc. Recording still locks mode changes and keeps its original
+target. Collapsing a section does not stop recording or background processing.
+
+## Live transcript and document actions
+
+Wide layouts show live original ASR text in the activity feed. When that feed is
+hidden on narrow screens, the Transcript view shows it below the recording
+indicator. This preview is scoped to the recording group and document;
+it is separate from saved entries and disappears on stop, when final transcript
+processing takes over. The saved-entry count continues to count final entries.
+
+The workspace outline reacts to microphone volume during recording and indicates
+processing during final audio analysis. Reading the current audio level does not
+re-render the composer for each incoming audio frame.
+
+Right-click a working-document row (or press Shift+F10 with the row focused) to
+select, archive, or delete that exact document. Archive keeps the file and marks
+the document archived. Delete removes it from the active and archived lists,
+clears its quoted references and capture target, and chooses another active
+document. A confirmation names the document before either mutation. Rename changes
+only the display title; the file keeps its path. During
+recording these menu actions are disabled; the server also rejects deletion while
+the group holds a recording lease.
+
+The row's menu button also opens with Enter or Space without selecting the
+document; Enter or Space on the row itself still selects it. Deleted index
+entries cannot be archived, so a stale client's archive request cannot make a
+deleted document available for restoration.
+Saving or appending transcript to a deleted path is also rejected before any
+Markdown, session, transcript-log, or ledger write. Clients receive a deletion
+error instead of a successful save to an invisible document.
+
+Deletion uses `POST /api/v1/groups/{group_id}/assistants/voice_secretary/documents/delete`
+with `document_path`. The document must be registered; traversal and symlink paths
+are rejected. Its Markdown file is removed from disk; the index entry is kept with
+status `deleted` so the document never reappears through workspace discovery.
+Transcripts and historical ledger events are retained. There is no recovery folder:
+the confirmation names the document because the file cannot be restored afterwards.
+An API failure keeps the document visible, its file in place, and its references intact.
+
+Internally the file is first moved to `CCCC_HOME/voice-secretary/<group_id>/trash/`
+so a failed index update or deletion-event append can be rolled back. The temporary
+copy remains until both the index and ledger writes succeed. On failure, rollback
+copies the file back without consuming its backup, restores the previous index
+(including the active document), then removes the backup. If rollback itself fails,
+the error reports the retained backup path rather than discarding the last copy.
+Only after the index and ledger commit is the file permanently removed; if that
+final cleanup fails, the copy is left behind and a warning is logged. Copying and
+rollback also work across filesystems through a synced destination-side temporary
+file.
+
+The working-document sidebar displays titles only, with full titles available on
+hover. Its footer opens the archive directory: click an archived title for a
+read-only preview, Restore to return it to its previous folder, or Delete to
+remove it from both working and archived lists. Deletion is visually separated
+from Archive in the context menu.
+
+The normal workspace poll reconciles local archive guards with server-visible
+documents. A restore by another client therefore reappears without reloading or
+switching groups. Stale or failed refresh responses cannot clear these guards.
+
+Folders are single-level, group-wide persistent organization, stored in the voice
+document index. The sidebar shows them as a tree: click a folder to expand its
+documents in place. By default, unfiled documents follow the folders. Create a
+folder from the header's folder button. Drag a document onto a folder to file it,
+or onto the unfiled area to take it out; the Move to folder menu action does the
+same without dragging. Drag a folder anywhere among the folders and unfiled
+documents; the mixed order is saved. Items absent from that saved order appear
+before ordered items, with folders first and then unfiled documents. On touch
+screens, long-press a row to start dragging. New documents are created at
+the root. Removing a folder moves its documents to the root without deleting
+them. Folder assignment survives editing, archiving and restoring; it does not
+change Markdown paths or quoted references.
+
+`GET /api/v1/groups/{group_id}/assistants/voice_secretary/documents/library`
+returns folders and non-deleted documents, including archived content. POST to
+the same endpoint accepts `create_folder`, `rename_folder`, `remove_folder`,
+`rename`, `reorder_root`, `move`, and `restore`, with `name`, `folder_id`, `document_path`,
+or `root_order` as appropriate. `root_order` is the mixed order of root items as
+`folder:<id>` / `document:<path>` keys; keys for missing items are dropped.
+Empty/duplicate names, missing folders, unauthorized writers, and attempts to
+restore a deleted document are rejected. Read responses from a previous group
+cannot overwrite the current group's library.
+
+## External realtime ASR: Bailian and Volcengine
+
+Select **Settings > Assistants > Recognition location > External provider ASR**.
+Choose a provider, configure its credentials, save the provider configuration,
+and then save the Group settings. Provider selection is Group-specific;
+credentials/model settings are shared by this CCCC service instance and can only
+be managed by administrators. Existing recordings retain the provider/model
+selected at start; changes apply to subsequent recordings.
+
+- **Alibaba Cloud Bailian**: API Key, Beijing or Singapore region, optional
+  Workspace ID, and either `fun-asr-realtime` (default) or
+  `paraformer-realtime-v2`. A Workspace ID selects the region's dedicated
+  `maas.aliyuncs.com` endpoint; leaving it empty uses the supported DashScope
+  endpoint for that region. API keys must match the selected region/workspace.
+- **Volcengine Doubao**: the optimized bidirectional `bigmodel_async` endpoint.
+  New-console accounts use **API Key**; legacy accounts use **App ID + Access
+  Token**. Select the purchased 1.0/2.0 duration/concurrent Resource ID; the
+  default is `volc.seedasr.sauc.duration`. Streaming language detection is owned
+  by the Volcengine model; the local language selection is not sent as an
+  unsupported forced-language parameter.
+
+**Test connection** checks the saved credentials/connection (and Bailian task
+admission) without sending microphone audio. It is not a recognition-accuracy
+or available-quota guarantee. Real recognition requires an enabled, funded
+provider account and network access from the CCCC server to the provider WSS
+endpoint. Audio leaves the CCCC server for the chosen provider and may incur
+provider charges.
+
+Credentials are stored separately from Group/assistant configuration, in
+`CCCC_HOME/config/voice-asr-providers.json`, using atomic owner-only writes on
+Unix. Read APIs return presence/configured flags rather than credentials.
+Blank credential inputs preserve the stored values; **Clear provider
+credentials** explicitly removes them. Browser code never receives stored keys,
+and vendor response bodies/credential headers are not relayed in errors.
+
+External recording reuses the browser's 16 kHz mono PCM16 WebSocket transport,
+recording lease and bounded segmented storage. Audio is packaged in 200 ms
+chunks. Volcengine uses incremental (`single`) utterance results, which are
+accumulated by timestamp instead of retransmitting the complete meeting on
+every update. Bailian waits for `task-started` before audio; Volcengine's optimized
+stream starts sending audio without waiting for a nonexistent task-started event.
+Stopping flushes the remaining PCM, requests the provider's final result, and
+waits for explicit completion before emitting the existing `final_asr_text` and
+`closed` events. Empty captures close without submitting an empty recognition.
+
+For document capture, the server buffers stable provider sentences and appends
+them with idempotent IDs at the configured document-update interval. Disabling
+automatic updates (`auto_document_max_window_seconds: null`) defers submission
+until recording ends; live subtitles still arrive immediately. Stop and recovery
+flush pending text regardless of the interval. The browser does not append
+duplicate cloud checkpoints. Complete final results supersede live revisions
+through the existing transcript API. Provider completion is separate from saving:
+a failed last checkpoint is retried with its original segment ID, and the final
+text is still returned with persistence status so the browser can retry saving.
+If several segments remain unconfirmed, the browser retries those segments with
+their original IDs before saving the final revision. This also recovers available
+segments from an incomplete recording without treating them as a complete final
+transcript. If a browser retry still fails, recording stops with an error and
+the remaining unconfirmed text returns to the original Group's composer for
+review; it is not automatically sent to an Actor.
+Connection failures retain known document segments and recover available text to
+the composer for non-document capture. A disconnected document recording gets a
+bounded attempt to finalize its provider stream. Lease release is fenced to its
+owner and also runs when the handler is cancelled.
+
+This initial external integration is realtime WebSocket ASR. The existing HTTP
+file-transcription endpoint remains local-ASR-only. Cloud capture does not invoke
+local SenseVoice final ASR or local speaker separation. Provider session/quota
+limits can be stricter than local recording limits; failures stop capture
+explicitly rather than silently reconnecting/replaying billable audio.
+
+Protocol references:
+- [Bailian realtime WebSocket](https://help.aliyun.com/zh/model-studio/fun-asr-realtime-websocket-api)
+- [Bailian client events](https://help.aliyun.com/zh/model-studio/fun-asr-client-events)
+- [Bailian server events](https://help.aliyun.com/zh/model-studio/fun-asr-server-events)
+- [Volcengine streaming ASR](https://www.volcengine.com/docs/6561/1354869)
 
 ## Local ASR
 
@@ -242,3 +409,21 @@ Native model installation is a Web-owned boundary: the Web UI manages the
 bundled sherpa-onnx model cache, while the daemon reports
 `assistant_voice_model_install=false` in daemon capabilities. Callers must
 inspect that capability instead of assuming a daemon operation is available.
+
+### Recognition settings save automatically
+
+Recognition backend, external provider, and document update switches save when changed.
+The document interval saves when the input loses focus or Enter is pressed. Failed
+saves show an error and restore the previous settings. These group configuration
+updates do not start the Voice Secretary actor; only an explicit enable request
+starts it. Provider credentials still use their separate save action. Changes to
+recognition settings apply to the next recording.
+
+New Volcengine configurations default to API Key authentication and ASR 2.0 hourly.
+Existing credentials, authentication modes, and resource versions are preserved.
+Choose credentials by their field names in the speech console, not by the age of
+an account: API Key and App ID + Access Token are separate authentication methods.
+Secret Key is not used by this streaming API. The selected model version and
+billing plan must be enabled for that account. Connection tests distinguish a
+known resource-not-granted rejection from authentication failure, unspecified
+access denial, and quota limits without exposing upstream response bodies.

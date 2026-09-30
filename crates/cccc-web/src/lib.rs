@@ -2,6 +2,9 @@ mod api;
 mod auth;
 mod browser_surface;
 mod codex_voice;
+#[cfg(test)]
+mod connect_browser_fixture;
+mod connect_frames;
 mod im_runtime;
 mod ledger_event_hub;
 mod local_browser_auth;
@@ -25,7 +28,7 @@ use cccc_client::DaemonClient;
 use cccc_core::HomeLayout;
 use cccc_core::access_tokens::AccessTokenStore;
 use rust_embed::RustEmbed;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,8 +85,13 @@ enum RestartBehavior {
 #[folder = "$CCCC_WEB_DIST_DIR/"]
 struct WebAssets;
 
+mod web_assets;
+pub use web_assets::{WebAssetsInfo, web_assets_info};
+
 #[derive(Clone)]
 pub(crate) struct AppState {
+    connect_frames: Arc<connect_frames::ConnectFrames>,
+    connect_http: Result<reqwest::Client, String>,
     client: DaemonClient,
     home: HomeLayout,
     browser_surfaces: Arc<browser_surface::BrowserSurfaces>,
@@ -185,6 +193,10 @@ fn app_with_shutdown(
         shutdown.subscribe(),
     );
     let state = AppState {
+        connect_frames: Arc::new(connect_frames::ConnectFrames::default()),
+        connect_http: connect_frames::http_client()
+            .build()
+            .map_err(|error| error.to_string()),
         client: DaemonClient::new(home.clone()),
         home,
         browser_surfaces: Arc::clone(&browser_surfaces),
@@ -200,7 +212,11 @@ fn app_with_shutdown(
         web_mode,
         exhibit_allow_terminal: readonly::exhibit_allow_terminal_from_env(),
     };
-    let app_state = state.clone();
+    let app = router_for_state(state.clone());
+    (app, im_workers, browser_surfaces, state)
+}
+
+fn router_for_state(state: AppState) -> Router {
     let mut app = routes::router()
         .fallback(static_asset)
         .layer(CompressionLayer::new())
@@ -228,8 +244,7 @@ fn app_with_shutdown(
     if let Some(cors) = configured_cors_layer() {
         app = app.layer(cors);
     }
-    let app = app.with_state(state);
-    (app, im_workers, browser_surfaces, app_state)
+    app.with_state(state)
 }
 
 fn spawn_codex_voice_shutdown(
@@ -286,20 +301,6 @@ fn spawn_group_resource_reaper(
                 .iter()
                 .map(|group| group.group_id.clone())
                 .collect::<HashSet<_>>();
-            let active_actors = groups
-                .into_iter()
-                .filter_map(|group| {
-                    store.load(&group.group_id).ok().map(|doc| {
-                        (
-                            group.group_id,
-                            doc.actors
-                                .into_iter()
-                                .map(|actor| actor.id)
-                                .collect::<HashSet<_>>(),
-                        )
-                    })
-                })
-                .collect::<HashMap<_, _>>();
             let stopped = im_workers.stop_missing(&active_groups).await;
             let closed_groups = browser_surfaces
                 .close_missing_groups(&active_groups)
@@ -309,7 +310,7 @@ fn spawn_group_resource_reaper(
                     0
                 });
             let closed_actors = browser_surfaces
-                .close_missing_actors(&active_actors)
+                .close_missing_actors(&store)
                 .await
                 .unwrap_or_else(|error| {
                     tracing::warn!(%error,"failed to close stale actor browser surfaces");
@@ -323,7 +324,17 @@ fn spawn_group_resource_reaper(
     });
 }
 
-async fn static_asset(uri: Uri) -> Response {
+async fn static_asset(method: axum::http::Method, uri: Uri) -> Response {
+    if uri.path().starts_with("/api/") || uri.path().starts_with("/mcp/") {
+        return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"ok":false,"error":{"code":"not_found","message":"API route not found","details":{}}}))).into_response();
+    }
+    if !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD) {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "GET, HEAD")],
+        )
+            .into_response();
+    }
     let requested = uri.path().trim_start_matches('/');
     let path = requested.strip_prefix("ui/").unwrap_or(requested);
     let path = if path.is_empty() || path == "ui" {

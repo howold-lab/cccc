@@ -1,7 +1,12 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { requestWorkspaceNavigation } from "../../stores/workspaceNavigation";
+import { WorkspaceNavigationDialog } from "../workspace/WorkspaceNavigationDialog";
+import { useState, type CSSProperties } from "react";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AppHeader } from "../layout/AppHeader";
+import { GroupConnectionsControl } from "../../features/connect/GroupConnectionsControl";
+import { useModalStore } from "../../stores/useModalStore";
 import { GroupSidebar } from "../layout/GroupSidebar";
+import type { GroupControl } from "../../utils/groupControls";
 import {
   CodexVoiceMobileDock,
   CodexVoiceOverlays,
@@ -24,9 +29,12 @@ import {
   SIDEBAR_COLLAPSED_WIDTH,
   groupMessagesVisible,
 } from "../../stores/useUIStore";
-import { resolveRuntimeInspectorActor } from "./appShellRuntimeActors";
 import type { ComposerMentionKind } from "../../pages/chat/chatMentionSuggestions";
+import type { ConnectWorkbench } from "../../features/connect/useConnectWorkbench";
 type AppShellProps = {
+  connectEmbedded?: boolean;
+  connect?: ConnectWorkbench;
+  remoteWorkspace?: React.ReactNode;
   canUseVoice?: boolean;
   onOpenVoiceSource?: (groupId: string, eventId: string) => void;
   orderedGroups: GroupMeta[];
@@ -39,7 +47,6 @@ type AppShellProps = {
   recipientActors: Actor[];
   recipientActorsBusy: boolean;
   destGroupScopeLabel: string;
-  renderedActorIds: string[];
   activeTab: string;
   busy: string;
   isTransitioning: boolean;
@@ -82,15 +89,16 @@ type AppShellProps = {
   ) => void;
   onArchiveGroup: (groupId: string) => void;
   onRestoreGroup: (groupId: string) => void;
+  onControlGroup: (groupId: string, control: GroupControl) => void;
+  onDeleteGroup: (groupId: string) => void;
   onOpenSidebar: () => void;
   onOpenGroupEdit: (() => void) | undefined;
   onOpenSearch: () => void;
   onOpenContext: () => void;
   onStartGroup: () => void;
-  onStopGroup: () => void;
-  onSetGroupState: (state: "active" | "idle" | "paused") => void;
   onOpenSettings: () => void;
   canAccessAccount: boolean;
+  accountLabel?: string | null;
   onOpenAccount: () => void;
   onOpenMobileMenu: () => void;
   onTabChange: (tab: string) => void;
@@ -113,20 +121,10 @@ type AppShellProps = {
   onTouchEnd: (event: React.TouchEvent) => void;
 };
 
-type MountedRuntimeActorSnapshot = { groupId: string | null; actorsById: Record<string, Actor> };
-
-function areMountedRuntimeActorSnapshotsEqual(
-  left: MountedRuntimeActorSnapshot,
-  right: MountedRuntimeActorSnapshot,
-): boolean {
-  if (left.groupId !== right.groupId) return false;
-  const leftIds = Object.keys(left.actorsById);
-  const rightIds = Object.keys(right.actorsById);
-  if (leftIds.length !== rightIds.length) return false;
-  return leftIds.every((actorId) => left.actorsById[actorId] === right.actorsById[actorId]);
-}
-
 export function AppShell({
+  connectEmbedded = false,
+  connect,
+  remoteWorkspace,
   canUseVoice = false,
   onOpenVoiceSource,
   orderedGroups,
@@ -139,7 +137,6 @@ export function AppShell({
   recipientActors,
   recipientActorsBusy,
   destGroupScopeLabel,
-  renderedActorIds,
   activeTab,
   busy,
   isTransitioning,
@@ -178,15 +175,16 @@ export function AppShell({
   onReorderGroupsInSection,
   onArchiveGroup,
   onRestoreGroup,
+  onControlGroup,
+  onDeleteGroup,
   onOpenSidebar,
   onOpenGroupEdit,
   onOpenSearch,
   onOpenContext,
   onStartGroup,
-  onStopGroup,
-  onSetGroupState,
   onOpenSettings,
   canAccessAccount,
+  accountLabel,
   onOpenAccount,
   onOpenMobileMenu,
   onTabChange,
@@ -213,175 +211,182 @@ export function AppShell({
       ? `${SIDEBAR_COLLAPSED_WIDTH}px`
       : getSidebarWidthCssValue(sidebarWidth),
   } as CSSProperties;
+  const setGroupConnections = useModalStore((state) => state.setGroupConnections);
   const [workControlsHost, setWorkControlsHost] = useState<HTMLDivElement | null>(null);
-  const [mountedRuntimeActorsSnapshot, setMountedRuntimeActorsSnapshot] =
-    useState<MountedRuntimeActorSnapshot>({ groupId: null, actorsById: {} });
+  const [sidePanelControlsHost, setSidePanelControlsHost] = useState<HTMLDivElement | null>(null);
   const messagesVisible = useUIStore((state) => groupMessagesVisible(selectedGroupId, state));
   const codexVoice = useCodexVoiceShell(!webReadOnly && canUseVoice);
   useVoiceViewedMessages(
     contentRef,
     selectedGroupId,
-    !webReadOnly && canUseVoice && messagesVisible,
+    !webReadOnly && canUseVoice && messagesVisible && !remoteWorkspace,
   );
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setMountedRuntimeActorsSnapshot((current) => {
-        const nextActorsById = current.groupId === selectedGroupId ? { ...current.actorsById } : {};
-        for (const actor of runtimeActors) {
-          const actorId = String(actor.id || "").trim();
-          if (actorId) nextActorsById[actorId] = actor;
-        }
-        const nextSnapshot = { groupId: selectedGroupId || null, actorsById: nextActorsById };
-        return areMountedRuntimeActorSnapshotsEqual(current, nextSnapshot) ? current : nextSnapshot;
-      });
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [runtimeActors, selectedGroupId]);
 
   return (
     <div
-      className="relative h-full min-h-0 transition-[grid-template-columns] duration-300 ease-out md:grid md:[grid-template-columns:var(--sidebar-width)_minmax(0,1fr)]"
+      className={`relative h-full min-h-0 transition-[grid-template-columns] duration-300 ease-out ${connectEmbedded ? "" : "md:grid md:[grid-template-columns:var(--sidebar-width)_minmax(0,1fr)]"}`}
       style={shellStyle}
     >
-      <GroupSidebar
-        orderedGroups={orderedGroups}
-        archivedGroupIds={archivedGroupIds}
-        selectedGroupId={selectedGroupId}
-        isOpen={sidebarOpen}
-        isCollapsed={sidebarCollapsed}
-        sidebarWidth={sidebarWidth}
-        isDark={isDark}
-        readOnly={webReadOnly}
-        codexVoice={canUseVoice ? codexVoice : undefined}
-        onSelectGroup={onSelectGroup}
-        onWarmGroup={onWarmGroup}
-        onCreateGroup={onCreateGroup}
-        onClose={onCloseSidebar}
-        onToggleCollapse={onToggleSidebar}
-        onResizeWidth={onResizeSidebar}
-        onReorderSection={onReorderGroupsInSection}
-        onArchiveGroup={onArchiveGroup}
-        onRestoreGroup={onRestoreGroup}
-      />
-
-      <main className="absolute inset-0 flex h-full min-h-0 flex-col overflow-hidden md:relative md:inset-auto bg-transparent md:bg-[var(--color-chat-bg)]">
-        <AppHeader
-          workControlsRef={setWorkControlsHost}
-          theme={theme}
-          textScale={textScale}
-          onThemeChange={onThemeChange}
-          onTextScaleChange={onTextScaleChange}
-          webReadOnly={webReadOnly}
-          selectedGroupId={selectedGroupId}
-          groupDoc={groupDoc}
-          selectedGroupRunning={selectedGroupRunning}
-          selectedGroupRuntimeStatus={selectedGroupRuntimeStatus}
-          actors={actors}
-          sseStatus={sseStatus}
-          busy={busy}
-          onOpenSidebar={onOpenSidebar}
-          onOpenGroupEdit={onOpenGroupEdit}
-          onOpenSearch={onOpenSearch}
-          onOpenContext={onOpenContext}
-          onStartGroup={onStartGroup}
-          onStopGroup={onStopGroup}
-          onSetGroupState={onSetGroupState}
-          onOpenSettings={onOpenSettings}
-          canAccessAccount={canAccessAccount}
-          onOpenAccount={onOpenAccount}
-          onOpenMobileMenu={onOpenMobileMenu}
+      {!connectEmbedded ? (
+        <GroupSidebar
+          connect={connect}
+          orderedGroups={orderedGroups}
+          archivedGroupIds={archivedGroupIds}
+          selectedGroupId={remoteWorkspace ? "" : selectedGroupId}
+          isOpen={sidebarOpen}
+          isCollapsed={sidebarCollapsed}
+          sidebarWidth={sidebarWidth}
+          isDark={isDark}
+          readOnly={webReadOnly}
+          codexVoice={canUseVoice ? codexVoice : undefined}
+          onSelectGroup={(groupId) => {
+            if (!remoteWorkspace && groupId === selectedGroupId) onSelectGroup(groupId);
+            else requestWorkspaceNavigation(() => onSelectGroup(groupId));
+          }}
+          onWarmGroup={onWarmGroup}
+          onCreateGroup={onCreateGroup}
+          onClose={onCloseSidebar}
+          onToggleCollapse={onToggleSidebar}
+          onResizeWidth={onResizeSidebar}
+          onReorderSection={onReorderGroupsInSection}
+          onArchiveGroup={onArchiveGroup}
+          onRestoreGroup={onRestoreGroup}
+          onControlGroup={webReadOnly ? undefined : onControlGroup}
+          onDeleteGroup={webReadOnly || !canAccessAccount ? undefined : onDeleteGroup}
+          onOpenGroupConnections={
+            !webReadOnly && canAccessAccount ? setGroupConnections : undefined
+          }
         />
+      ) : null}
 
-        {!webReadOnly && canUseVoice ? <CodexVoiceMobileDock voice={codexVoice} /> : null}
+      <main
+        data-group-shell
+        className="absolute inset-0 flex h-full min-h-0 flex-col overflow-hidden md:relative md:inset-auto bg-transparent md:bg-[var(--color-chat-bg)]"
+      >
+        {remoteWorkspace || (
+          <>
+            <AppHeader
+              workControlsRef={setWorkControlsHost}
+              sidePanelControlsRef={setSidePanelControlsHost}
+              theme={theme}
+              textScale={textScale}
+              onThemeChange={onThemeChange}
+              onTextScaleChange={onTextScaleChange}
+              webReadOnly={webReadOnly}
+              selectedGroupId={selectedGroupId}
+              groupDoc={groupDoc}
+              selectedGroupRunning={selectedGroupRunning}
+              selectedGroupRuntimeStatus={selectedGroupRuntimeStatus}
+              sseStatus={sseStatus}
+              onOpenSidebar={onOpenSidebar}
+              onOpenGroupEdit={onOpenGroupEdit}
+              onOpenSearch={onOpenSearch}
+              onOpenContext={onOpenContext}
+              onControlGroup={webReadOnly ? undefined : onControlGroup}
+              onOpenSettings={onOpenSettings}
+              canAccessAccount={canAccessAccount}
+              accountLabel={accountLabel}
+              onOpenAccount={onOpenAccount}
+              onOpenMobileMenu={onOpenMobileMenu}
+            />
 
-        <div
-          ref={contentRef}
-          className={`relative flex min-h-0 flex-1 flex-col overflow-hidden transition-opacity duration-150 ${
-            isTransitioning ? "opacity-0" : "opacity-100"
-          }`}
-          onTouchStart={onTouchStart}
-          onTouchEnd={onTouchEnd}
-        >
-          <div className="absolute inset-0 flex min-h-0 flex-col">
-            <ErrorBoundary>
-              <ChatTab
-                workControlsHost={workControlsHost}
-                isDark={isDark}
-                isSmallScreen={isSmallScreen}
-                readOnly={webReadOnly}
-                mobileAppHeaderReserved={!webReadOnly && codexVoice.controller.isEngaged}
-                selectedGroupId={selectedGroupId}
-                selectedGroupRunning={selectedGroupRunning}
-                selectedGroupActorsHydrating={selectedGroupActorsHydrating}
-                selectedGroupActorStatusProvisional={selectedGroupActorStatusProvisional}
-                groupLabelById={groupLabelById}
-                actors={actors}
-                runtimeActors={runtimeActors}
-                renderedActorIds={renderedActorIds}
-                renderRuntimeActor={(actorId, view) => {
-                  const mounted =
-                    mountedRuntimeActorsSnapshot.groupId === selectedGroupId
-                      ? mountedRuntimeActorsSnapshot.actorsById
-                      : {};
-                  const actor = resolveRuntimeInspectorActor(actorId, runtimeActors, mounted);
-                  return (
-                    <ActorTab
-                      actor={actor}
-                      groupId={selectedGroupId}
-                      agentState={
-                        (groupContext?.agent_states || []).find((item) => item.id === actorId) ||
-                        null
-                      }
-                      termEpoch={getTermEpoch(actorId)}
-                      busy={busy}
-                      isDark={isDark}
-                      isSmallScreen={isSmallScreen}
-                      isVisible={view.isVisible}
-                      compact={view.compact}
-                      onExpand={view.onExpand}
-                      navigation={view.navigation}
-                      suspendWhenHidden
-                      readOnly={webReadOnly}
-                      actorStatusProvisional={selectedGroupActorStatusProvisional}
-                      onToggleEnabled={(running) => actor && onToggleActorEnabled(actor, running)}
-                      onRelaunch={() => actor && onRelaunchActor(actor)}
-                      onNewSession={() => actor && onNewActorSession(actor)}
-                      onEdit={() => actor && onEditActor(actor)}
-                      onRemove={() => actor && onRemoveActor(actor, activeTab)}
-                      onInbox={() => actor && onOpenActorInbox(actor)}
-                      onStatusChange={onRefreshActors}
-                    />
-                  );
-                }}
-                activeRuntimeActorId={activeTab !== "chat" ? activeTab : undefined}
-                recipientActors={recipientActors}
-                recipientActorsBusy={recipientActorsBusy}
-                destGroupScopeLabel={destGroupScopeLabel}
-                mentionFilter={mentionFilter}
-                mentionKind={mentionKind}
-                mentionActorScope={mentionActorScope}
-                scrollRef={eventContainerRef}
-                composerRef={composerRef}
-                fileInputRef={fileInputRef}
-                chatAtBottomRef={chatAtBottomRef}
-                appendComposerFiles={appendComposerFiles}
-                onStartGroup={onStartGroup}
-                onOpenRuntimeActor={onTabChange}
-                showMentionMenu={showMentionMenu}
-                setShowMentionMenu={setShowMentionMenu}
-                mentionSelectedIndex={mentionSelectedIndex}
-                setMentionSelectedIndex={setMentionSelectedIndex}
-                setMentionFilter={setMentionFilter}
-                setMentionKind={setMentionKind}
-                setMentionActorScope={setMentionActorScope}
-                setMentionTargetGroupId={setMentionTargetGroupId}
-              />
-            </ErrorBoundary>
-          </div>
-        </div>
+            {!webReadOnly && canUseVoice ? <CodexVoiceMobileDock voice={codexVoice} /> : null}
+
+            <div
+              ref={contentRef}
+              className={`relative flex min-h-0 flex-1 flex-col overflow-hidden transition-opacity duration-150 ${
+                isTransitioning ? "opacity-0" : "opacity-100"
+              }`}
+              onTouchStart={onTouchStart}
+              onTouchEnd={onTouchEnd}
+            >
+              <div className="absolute inset-0 flex min-h-0 flex-col">
+                <ErrorBoundary>
+                  <ChatTab
+                    workControlsHost={workControlsHost}
+                    sidePanelControlsHost={sidePanelControlsHost}
+                    isDark={isDark}
+                    isSmallScreen={isSmallScreen}
+                    readOnly={webReadOnly}
+                    mobileAppHeaderReserved={!webReadOnly && codexVoice.controller.isEngaged}
+                    selectedGroupId={selectedGroupId}
+                    selectedGroupRunning={selectedGroupRunning}
+                    selectedGroupActorsHydrating={selectedGroupActorsHydrating}
+                    selectedGroupActorStatusProvisional={selectedGroupActorStatusProvisional}
+                    groupLabelById={groupLabelById}
+                    actors={actors}
+                    runtimeActors={runtimeActors}
+                    renderRuntimeActor={(actorId, view) => {
+                      const actor = runtimeActors.find((item) => item.id === actorId) || null;
+                      return (
+                        <ActorTab
+                          actor={actor}
+                          groupId={selectedGroupId}
+                          agentState={
+                            (groupContext?.agent_states || []).find(
+                              (item) => item.id === actorId,
+                            ) || null
+                          }
+                          termEpoch={getTermEpoch(actorId)}
+                          busy={busy}
+                          isDark={isDark}
+                          isSmallScreen={isSmallScreen}
+                          isVisible={view.isVisible}
+                          compact={view.compact}
+                          onExpand={view.onExpand}
+                          navigation={view.navigation}
+                          onPage={view.onPage}
+                          readOnly={webReadOnly}
+                          actorStatusProvisional={selectedGroupActorStatusProvisional}
+                          onToggleEnabled={(running) =>
+                            actor && onToggleActorEnabled(actor, running)
+                          }
+                          onRelaunch={() => actor && onRelaunchActor(actor)}
+                          onNewSession={() => actor && onNewActorSession(actor)}
+                          onEdit={() => actor && onEditActor(actor)}
+                          onRemove={() => actor && onRemoveActor(actor, activeTab)}
+                          onInbox={() => actor && onOpenActorInbox(actor)}
+                          onStatusChange={onRefreshActors}
+                        />
+                      );
+                    }}
+                    activeRuntimeActorId={activeTab !== "chat" ? activeTab : undefined}
+                    recipientActors={recipientActors}
+                    recipientActorsBusy={recipientActorsBusy}
+                    destGroupScopeLabel={destGroupScopeLabel}
+                    mentionFilter={mentionFilter}
+                    mentionKind={mentionKind}
+                    mentionActorScope={mentionActorScope}
+                    scrollRef={eventContainerRef}
+                    composerRef={composerRef}
+                    fileInputRef={fileInputRef}
+                    chatAtBottomRef={chatAtBottomRef}
+                    appendComposerFiles={appendComposerFiles}
+                    onStartGroup={onStartGroup}
+                    onOpenRuntimeActor={onTabChange}
+                    showMentionMenu={showMentionMenu}
+                    setShowMentionMenu={setShowMentionMenu}
+                    mentionSelectedIndex={mentionSelectedIndex}
+                    setMentionSelectedIndex={setMentionSelectedIndex}
+                    setMentionFilter={setMentionFilter}
+                    setMentionKind={setMentionKind}
+                    setMentionActorScope={setMentionActorScope}
+                    setMentionTargetGroupId={setMentionTargetGroupId}
+                  />
+                </ErrorBoundary>
+              </div>
+            </div>
+          </>
+        )}
       </main>
 
+      <WorkspaceNavigationDialog />
+      <GroupConnectionsControl
+        enabled={!webReadOnly && canAccessAccount}
+        groupId={selectedGroupId}
+        groups={orderedGroups}
+        onOpenAccount={onOpenAccount}
+      />
       <CodexVoiceOverlays
         voice={codexVoice}
         isDark={isDark}

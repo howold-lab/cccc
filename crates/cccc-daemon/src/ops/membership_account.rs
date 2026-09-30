@@ -1,3 +1,6 @@
+use cccc_contracts::connect::{
+    ConnectDirectory, ConnectRegistration, MEMBERSHIP_PRODUCT_VERSION_HEADER,
+};
 use reqwest::Method;
 use reqwest::blocking::Client;
 use serde_json::{Map, Value, json};
@@ -81,6 +84,7 @@ pub(super) struct DeviceStatus {
     pub hostname: Option<String>,
     pub disabled: bool,
     pub connection: Option<DeviceConnection>,
+    pub account_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -322,6 +326,7 @@ impl AccountClient {
     pub fn fetch_device(&self, device_token: &str) -> Result<DeviceStatus, AccountError> {
         let data = self.request(Method::GET, "/v1/device", None, Some(device_token))?;
         Ok(DeviceStatus {
+            account_label: non_blank(&data, "account_label"),
             device_id: non_blank(&data, "device_id"),
             hostname: non_blank(&data, "hostname")
                 .as_deref()
@@ -357,6 +362,72 @@ impl AccountClient {
         Ok(())
     }
 
+    pub fn register_connect(
+        &self,
+        device_token: &str,
+        registration: &ConnectRegistration,
+    ) -> Result<(ConnectDirectory, Option<String>), AccountError> {
+        self.connect_directory(
+            device_token,
+            Some(serde_json::to_value(registration).map_err(network_error)?),
+        )
+    }
+
+    pub fn rename_device(&self, device_token: &str, name: &str) -> Result<String, AccountError> {
+        let response = self.request(
+            Method::POST,
+            "/v1/device/name",
+            Some(json!({"display_name":name})),
+            Some(device_token),
+        )?;
+        response
+            .get("display_name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                AccountError::new(
+                    "membership_network",
+                    "account did not confirm the instance name",
+                )
+            })
+    }
+
+    pub fn connect_groups(
+        &self,
+        token: &str,
+        invalidated: &[String],
+    ) -> Result<cccc_contracts::connect_groups::ConnectGroupLinks, AccountError> {
+        let (method, payload) = if invalidated.is_empty() {
+            (Method::GET, None)
+        } else {
+            (Method::POST, Some(json!({"invalidated":invalidated})))
+        };
+        let response = self.request(method, "/v1/connect/groups", payload, Some(token))?;
+        serde_json::from_value(Value::Object(response)).map_err(network_error)
+    }
+
+    fn connect_directory(
+        &self,
+        device_token: &str,
+        registration: Option<Value>,
+    ) -> Result<(ConnectDirectory, Option<String>), AccountError> {
+        let method = if registration.is_some() {
+            Method::POST
+        } else {
+            Method::GET
+        };
+        let response = self.request(
+            method,
+            "/v1/connect/instances",
+            registration,
+            Some(device_token),
+        )?;
+        let label = non_blank(&response, "account_label");
+        serde_json::from_value(Value::Object(response))
+            .map(|directory| (directory, label))
+            .map_err(network_error)
+    }
+
     fn request(
         &self,
         method: Method,
@@ -373,7 +444,8 @@ impl AccountClient {
             .request(method, url)
             .header("Accept", "application/json")
             .header("User-Agent", USER_AGENT)
-            .header(VERSION_HEADER, CLIENT_VERSION);
+            .header(VERSION_HEADER, CLIENT_VERSION)
+            .header(MEMBERSHIP_PRODUCT_VERSION_HEADER, env!("CARGO_PKG_VERSION"));
         if let Some(payload) = payload {
             request = request.json(&payload);
         }
@@ -382,6 +454,12 @@ impl AccountClient {
         }
         let mut response = request.send().map_err(network_error)?;
         let status = response.status().as_u16();
+        if status == 404 && path == "/v1/connect/groups" {
+            return Err(AccountError::new(
+                "connect_groups_unsupported",
+                "The account service does not support Group connections yet.",
+            ));
+        }
         let mut raw = Vec::new();
         response
             .by_ref()
@@ -428,6 +506,8 @@ fn error_from_payload(status: u16, payload: &Map<String, Value>) -> AccountError
         _ => (String::new(), String::new()),
     };
     match code.as_str() {
+        "invalid_proof" => AccountError::new("connect_invalid_proof", message),
+        "instance_conflict" => AccountError::new("connect_instance_conflict", message),
         "authorization_pending" => {
             AccountError::retry(nonempty_message(message, "authorization_pending"), 0)
         }

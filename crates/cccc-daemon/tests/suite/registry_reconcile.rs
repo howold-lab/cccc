@@ -72,15 +72,55 @@ fn registry_reconcile_reports_health_and_removes_only_missing_entries() {
     assert_eq!(registry.defaults["scope-corrupt"], corrupt.group_id);
 }
 
-fn ok(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
-    let response = cccc_daemon::handle_request(
+fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
+    cccc_daemon::handle_request(
         home,
         &DaemonRequest {
             v: 1,
             op: op.into(),
             args: args.as_object().cloned().unwrap_or_else(Map::new),
         },
-    );
+    )
+}
+
+fn ok(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
+    let response = call(home, op, args);
     assert!(response.ok, "{:?}", response.error);
     response
+}
+
+#[test]
+fn web_model_registration_does_not_scan_unrelated_groups() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let active = store.create("active", "").expect("active group");
+    let missing = store.create("stale", "").expect("stale group");
+    let missing_file = store
+        .group_dir(&missing.group_id)
+        .expect("group dir")
+        .join("group.yaml");
+    std::fs::remove_file(&missing_file).expect("remove stale group file");
+    let args = |actor| json!({"group_id":active.group_id,"actor_id":actor,"runtime":"web_model","by":"user"});
+    ok(&home, "actor_add", args("web-one"));
+    assert!(
+        Registry::load(&home)
+            .expect("registry")
+            .groups
+            .contains_key(&missing.group_id),
+        "the stale entry is skipped, not reconciled"
+    );
+    let second = call(&home, "actor_add", args("web-two"));
+    assert!(second.ok, "{:?}", second.error);
+    ok(
+        &home,
+        "actor_remove",
+        json!({"group_id":active.group_id,"actor_id":"web-one","by":"user"}),
+    );
+    std::fs::write(missing_file, "not: [valid").expect("corrupt group document");
+    ok(&home, "actor_add", args("web-three"));
+    let actors = store.load(&active.group_id).expect("active group").actors;
+    assert_eq!(actors.len(), 2);
+    assert!(actors.iter().any(|a| a.id == "web-two"));
+    assert!(actors.iter().any(|a| a.id == "web-three"));
 }

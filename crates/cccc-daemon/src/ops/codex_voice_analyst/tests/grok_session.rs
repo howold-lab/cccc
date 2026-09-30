@@ -16,11 +16,99 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "grok_socket_fixture.rs"]
+mod socket_fixture;
+
 const FAKE_SESSION_ID: &str = "01a0623c-19b3-7ec3-b777-95e24279ec67";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grok_live_echo_admits_long_turns_before_the_completion_rpc() {
+    let temp = socket_fixture::tempdir();
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("initialize");
+    let executable = temp.path().join("grok");
+    // Grok 1.0.34 persists user input but only emits its live echo to clients
+    // advertising x.ai/userMessageEcho. More than 512 chunks before the RPC
+    // completes reproduced the old pre-admission buffer disconnect.
+    std::fs::write(&executable, r#"#!/usr/bin/env python3
+import json, signal, sys
+if 'leader' in sys.argv:
+    while True: signal.pause()
+def emit(value): print(json.dumps(value), flush=True)
+def update(kind, text):
+    emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'echo-session','update':{'sessionUpdate':kind,'content':{'type':'text','text':text}}}})
+echo = False
+prompt_id = None
+for line in sys.stdin:
+    r = json.loads(line); method = r['method']; params = r.get('params', {})
+    if method == 'initialize':
+        echo = params.get('clientCapabilities', {}).get('_meta', {}).get('x.ai/userMessageEcho') is True
+        result = {'protocolVersion':1,'agentCapabilities':{'loadSession':True}}
+    elif method in ['session/new', 'session/load']:
+        echo = echo and params.get('_meta', {}).get('clientUserMessageEcho') is True
+        result = {'sessionId':'echo-session'}
+    elif method == 'session/prompt':
+        prompt_id = r['id']
+        if echo: update('user_message_chunk', params['prompt'][0]['text'])
+        for _ in range(600): update('agent_message_chunk', 'partial ')
+        continue
+    elif method == 'fixture/finish':
+        emit({'jsonrpc':'2.0','id':prompt_id,'result':{'stopReason':'end_turn'}})
+        result = {}
+    else: result = {}
+    emit({'jsonrpc':'2.0','id':r['id'],'result':result})
+"#).expect("fixture");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .expect("executable");
+    for resume in [None, Some("echo-session")] {
+        let launched = launch(
+            &home,
+            temp.path(),
+            &[executable.to_string_lossy().into_owned()],
+            &BTreeMap::new(),
+            resume,
+            "live-echo",
+        )
+        .await
+        .expect("launch");
+        let mut events = launched.protocol.subscribe();
+        let turn = tokio::time::timeout(
+            Duration::from_secs(3),
+            launched
+                .protocol
+                .start_prompt("echo-session", "voice-long", "日本語の依頼"),
+        )
+        .await
+        .expect("admission must not wait for completion")
+        .expect("accepted");
+        assert_eq!(
+            next_method(&mut events, "turn/started").await.message["params"]["turn"]["id"],
+            turn
+        );
+        for _ in 0..600 {
+            assert_eq!(
+                next_method(&mut events, "item/agentMessage/delta")
+                    .await
+                    .message["params"]["delta"],
+                "partial "
+            );
+        }
+        launched
+            .protocol
+            .request("fixture/finish", json!({}), Duration::from_secs(2))
+            .await
+            .expect("transport still alive");
+        assert_eq!(
+            next_method(&mut events, "turn/completed").await.message["params"]["turn"]["status"],
+            "completed"
+        );
+        stop(launched).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grok_adapter_keeps_one_session_across_acp_tui_and_resume() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = socket_fixture::tempdir();
     let home = HomeLayout::from_path(temp.path().join("cccc-home")).expect("home");
     home.initialize().expect("initialize");
     let workspace = temp.path().join("workspace");
@@ -88,7 +176,7 @@ async fn grok_adapter_keeps_one_session_across_acp_tui_and_resume() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_tui_activity_blocks_delivery_until_it_is_idle() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = socket_fixture::tempdir();
     let home = HomeLayout::from_path(temp.path().join("cccc-home")).expect("home");
     home.initialize().expect("initialize");
     let workspace = temp.path().join("workspace");
@@ -156,7 +244,7 @@ async fn external_tui_activity_blocks_delivery_until_it_is_idle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_runtime_accepts_voice_input_for_its_native_steer_or_queue_policy() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = socket_fixture::tempdir();
     let home = HomeLayout::from_path(temp.path().join("cccc-home")).expect("home");
     home.initialize().expect("initialize");
     let workspace = temp.path().join("workspace");
@@ -241,7 +329,7 @@ async fn busy_runtime_accepts_voice_input_for_its_native_steer_or_queue_policy()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_busy_before_prompt_admission_remains_retryable() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = socket_fixture::tempdir();
     let home = HomeLayout::from_path(temp.path().join("cccc-home")).expect("home");
     home.initialize().expect("initialize");
     let workspace = temp.path().join("workspace");
@@ -290,7 +378,7 @@ async fn provider_busy_before_prompt_admission_remains_retryable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn voice_admission_falls_back_to_the_native_runtime_after_a_busy_race() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = socket_fixture::tempdir();
     let home = HomeLayout::from_path(temp.path().join("cccc-home")).expect("home");
     home.initialize().expect("initialize");
     let workspace = temp.path().join("workspace");
@@ -638,7 +726,6 @@ async fn launch(
         generation,
         SessionPurpose::VoiceAnalyst,
         resume,
-        json!({"name":"cccc-test","command":"cccc-test","args":[]}),
     )
     .await
 }
@@ -691,9 +778,11 @@ while IFS= read -r line; do
       printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":1,"agentCapabilities":{{"loadSession":true}}}}}}'
       ;;
     *'"method":"session/new"'*)
+      case "$line" in *'"mcpServers":[]'*) ;; *) exit 9 ;; esac
       printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"{FAKE_SESSION_ID}"}}}}'
       ;;
     *'"method":"session/load"'*)
+      case "$line" in *'"mcpServers":[]'*) ;; *) exit 9 ;; esac
       printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"{FAKE_SESSION_ID}"}}}}'
       ;;
     *'"method":"session/prompt"'*)

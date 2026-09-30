@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { cloneElement, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { ChevronLeft, ChevronRight, MessageSquare, LayoutGrid } from "lucide-react";
@@ -8,41 +8,43 @@ import { getChatSession } from "../../stores/useUIStore";
 import { RuntimeInspectorModal } from "../../components/modals/RuntimeInspectorModal";
 import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { terminalPageLayout } from "./groupWorkLayout";
-
-export type RuntimeActorView = {
-  isVisible: boolean;
-  compact: boolean;
-  onExpand: () => void;
-  navigation?: ReactNode;
-};
+import { useRetainedRuntimeActors, type RuntimeActorRenderer } from "./useRetainedRuntimeActors";
+export type { RuntimeActorView, RuntimeActorRenderer } from "./useRetainedRuntimeActors";
+const NOOP = () => {};
 
 type Props = {
   groupId: string;
   actors: Actor[];
-  renderedActorIds: string[];
+  availableGroupIds: string[];
+  readOnly?: boolean;
   activeActorId?: string;
   isDark: boolean;
   isVisible: boolean;
+  covered?: boolean;
   loading: boolean;
   workControlsHost: HTMLElement | null;
+  sidePanelControlsHost: HTMLElement | null;
   isSmallScreen: boolean;
-  headerEnd?: ReactNode;
+  sidePanelControls?: ReactNode;
   onInspectActor: (actorId: string) => void;
-  renderActor: (actorId: string, view: RuntimeActorView) => ReactNode;
+  renderActor: RuntimeActorRenderer;
   children: ReactNode;
 };
 
 export function GroupWorkArea({
   groupId,
   actors,
-  renderedActorIds,
+  availableGroupIds,
+  readOnly = false,
   activeActorId,
   isDark,
   isVisible,
+  covered = false,
   loading,
   workControlsHost,
+  sidePanelControlsHost,
   isSmallScreen,
-  headerEnd,
+  sidePanelControls,
   onInspectActor,
   renderActor,
   children,
@@ -53,7 +55,6 @@ export function GroupWorkArea({
   const setPage = useUIStore((state) => state.setGroupTerminalPage);
   const root = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
-  const [visited, setVisited] = useState(false);
   const tiled = session.workView === "terminals";
   const { page, pageCount, pageSize, start } = terminalPageLayout(
     actors.length,
@@ -62,21 +63,23 @@ export function GroupWorkArea({
   );
   const pageActors = actors.slice(start, start + pageSize);
   const pageIds = new Set(pageActors.map((actor) => actor.id));
-  // Retain this page across view changes and preserve the same instance on maximize.
-  // Paging disposes unseen tiles; the Actor and its input remain owned by the daemon.
-  const ids = [
-    ...new Set([
-      ...(tiled || visited ? pageActors.map((actor) => actor.id) : []),
-      ...renderedActorIds,
-      ...(activeActorId ? [activeActorId] : []),
-    ]),
-  ];
-
-  useEffect(() => {
-    if (!tiled) return;
-    const timer = window.setTimeout(() => setVisited(true), 0);
-    return () => window.clearTimeout(timer);
-  }, [tiled]);
+  const entries = useRetainedRuntimeActors({
+    groupId,
+    actors,
+    loading,
+    readOnly,
+    renderActor,
+    availableGroupIds,
+    visibleActorIds:
+      isVisible && !covered
+        ? [
+            ...new Set([
+              ...(tiled ? pageActors.map((actor) => actor.id) : []),
+              ...(activeActorId ? [activeActorId] : []),
+            ]),
+          ]
+        : [],
+  });
 
   const layoutRef = useRef({ actors, pageSize, start, loading });
   const measuredWidth = useRef(0);
@@ -117,7 +120,7 @@ export function GroupWorkArea({
   const focusActor = (actorId: string) => {
     requestAnimationFrame(() => {
       const pane = root.current?.querySelector<HTMLElement>(
-        `[data-runtime-actor-id="${CSS.escape(actorId)}"]`,
+        `[data-runtime-group-id="${CSS.escape(groupId)}"][data-runtime-actor-id="${CSS.escape(actorId)}"]`,
       );
       (pane?.querySelector<HTMLElement>(".xterm-helper-textarea") || pane)?.focus();
     });
@@ -134,31 +137,37 @@ export function GroupWorkArea({
       (actor.effective_working_state === "waiting" || actor.effective_working_state === "stuck"),
   );
   const buttonClass =
-    "inline-flex h-8 shrink-0 items-center justify-center rounded-md px-2 text-xs hover:bg-[var(--glass-tab-bg)] disabled:opacity-35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-text-secondary)]";
+    "inline-flex h-8 shrink-0 items-center justify-center rounded-md px-2 hover:bg-[var(--glass-tab-bg)] disabled:opacity-35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-text-secondary)]";
+
+  const pageButtonClass = `${buttonClass} !h-11 w-11`;
 
   const pager =
     pageCount > 1 && tiled ? (
       <nav className="flex shrink-0 items-center text-xs" aria-label={t("workView.pages")}>
         <button
           type="button"
-          className={buttonClass}
+          className={pageButtonClass}
           disabled={page === 0 || loading}
           onClick={() => setPage(groupId, page - 1)}
           aria-label={t("workView.previous")}
         >
-          <ChevronLeft size={14} />
+          <ChevronLeft size={20} />
         </button>
-        <span className="tabular-nums text-[var(--color-text-secondary)]">
+        <span
+          aria-live="polite"
+          aria-atomic="true"
+          className="min-w-8 text-center tabular-nums text-[var(--color-text-secondary)]"
+        >
           {page + 1}/{pageCount}
         </span>
         <button
           type="button"
-          className={buttonClass}
+          className={pageButtonClass}
           disabled={page + 1 === pageCount || loading}
           onClick={() => setPage(groupId, page + 1)}
           aria-label={t("workView.next")}
         >
-          <ChevronRight size={14} />
+          <ChevronRight size={20} />
         </button>
         {otherAttention.length > 0 ? (
           <button
@@ -177,19 +186,25 @@ export function GroupWorkArea({
   const unread =
     session.chatUnreadCount > 0 ? (
       <span
-        className="ml-1 text-[10px] tabular-nums"
+        className="ml-1 text-xs tabular-nums"
         aria-label={t("workView.unread", { count: session.chatUnreadCount })}
       >
         {session.chatUnreadCount > 99 ? "99+" : session.chatUnreadCount}
       </span>
     ) : null;
   return (
-    <div ref={root} className="relative flex min-h-0 min-w-0 flex-1 flex-col" data-group-work-area>
+    <div
+      ref={root}
+      inert={covered || undefined}
+      aria-hidden={covered || undefined}
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+      data-group-work-area
+    >
       {workControlsHost
         ? createPortal(
             <>
               <div
-                className="hidden shrink-0 items-center rounded-lg bg-[var(--glass-tab-bg)] p-0.5 @min-[600px]/group-header:inline-flex"
+                className="hidden shrink-0 items-center rounded-lg bg-[var(--glass-tab-bg)] p-0.5 @min-[600px]/group-work-header:inline-flex"
                 role="group"
                 aria-label={t("workView.label")}
                 data-group-view-switch
@@ -199,7 +214,7 @@ export function GroupWorkArea({
                     key={view}
                     type="button"
                     aria-pressed={session.workView === view}
-                    className={`${buttonClass} ${session.workView === view ? "bg-[var(--color-bg-primary)] font-semibold text-[var(--color-text-primary)]" : "text-[var(--color-text-tertiary)]"}`}
+                    className={`${buttonClass} text-sm ${session.workView === view ? "bg-[var(--glass-tab-bg-active)] ring-1 ring-inset ring-[var(--glass-tab-border-active)] font-semibold text-[var(--color-text-primary)]" : "text-[var(--color-text-tertiary)]"}`}
                     onClick={() => setView(groupId, view)}
                   >
                     {t(`workView.${view}`)}
@@ -209,7 +224,7 @@ export function GroupWorkArea({
               </div>
               <button
                 type="button"
-                className={`${buttonClass} @min-[600px]/group-header:hidden`}
+                className={`${buttonClass} @min-[600px]/group-work-header:hidden`}
                 data-group-view-toggle
                 aria-label={t("workView.switchTo", {
                   view: t(tiled ? "workView.messages" : "workView.terminals"),
@@ -223,12 +238,13 @@ export function GroupWorkArea({
                 {unread}
               </button>
               {!isSmallScreen ? pager : null}
-              {headerEnd}
             </>,
             workControlsHost,
           )
         : null}
+      {sidePanelControlsHost ? createPortal(sidePanelControls, sidePanelControlsHost) : null}
       <div
+        key={groupId}
         className={tiled ? "hidden" : "relative flex min-h-0 flex-1 flex-col"}
         inert={tiled ? true : undefined}
         aria-hidden={tiled ? true : undefined}
@@ -252,22 +268,27 @@ export function GroupWorkArea({
         }
         data-group-terminal-view={tiled ? "visible" : "hidden"}
       >
-        {ids.map((actorId) => {
-          const expanded = activeActorId === actorId;
-          const inPage = tiled && pageIds.has(actorId);
-          const visible = isVisible && (inPage || expanded);
+        {entries.map((entry) => {
+          const { actorId } = entry;
+          const currentGroup = entry.groupId === groupId;
+          const expanded = currentGroup && activeActorId === actorId;
+          const inPage = currentGroup && tiled && pageIds.has(actorId);
+          const visible = isVisible && !covered && (inPage || expanded);
           return (
             <div
-              key={actorId}
+              key={entry.key}
               className={
                 inPage
-                  ? "min-h-0 min-w-0 overflow-hidden rounded-lg border border-[var(--glass-border-subtle)] focus-within:border-[var(--color-text-secondary)] focus-within:ring-1 focus-within:ring-[var(--color-text-secondary)]"
+                  ? "min-h-0 min-w-0 overflow-hidden rounded-lg border border-[var(--glass-panel-border)] focus-within:border-[var(--color-text-secondary)] focus-within:ring-1 focus-within:ring-[var(--color-text-secondary)]"
                   : expanded
                     ? "contents"
                     : "hidden"
               }
               tabIndex={-1}
               data-runtime-actor-id={actorId}
+              data-runtime-group-id={entry.groupId}
+              inert={!visible || undefined}
+              aria-hidden={!visible || undefined}
             >
               <RuntimeInspectorModal
                 isOpen={visible}
@@ -277,15 +298,23 @@ export function GroupWorkArea({
                   onInspectActor("chat");
                   if (inPage) focusActor(actorId);
                 }}
-                titleId={`runtime-inspector-${actorId}`}
+                titleId={`runtime-inspector-${entry.groupId}-${actorId}`}
                 closeAriaLabel={t("workView.restore")}
               >
                 <ErrorBoundary>
-                  {renderActor(actorId, {
+                  {cloneElement(entry.element, {
                     isVisible: visible,
                     compact: !expanded,
+                    isDark,
+                    isSmallScreen,
+                    readOnly,
                     navigation: inPage && !expanded && isSmallScreen ? pager : undefined,
-                    onExpand: () => onInspectActor(actorId),
+                    onPage:
+                      inPage && !expanded && pageCount > 1 && !loading
+                        ? (direction: -1 | 1) =>
+                            setPage(groupId, Math.max(0, Math.min(pageCount - 1, page + direction)))
+                        : undefined,
+                    onExpand: visible ? () => onInspectActor(actorId) : NOOP,
                   })}
                 </ErrorBoundary>
               </RuntimeInspectorModal>

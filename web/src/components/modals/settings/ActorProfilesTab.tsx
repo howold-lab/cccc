@@ -1,3 +1,4 @@
+import { isWebModelRuntime } from "../../../types";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ActorProfile, ActorProfileUsage, RUNTIME_INFO, SUPPORTED_RUNTIMES } from "../../../types";
@@ -16,8 +17,8 @@ import {
   settingsWorkspaceBodyClass,
   settingsWorkspaceHeaderClass,
   settingsWorkspacePanelClass,
+  settingsWorkspaceSectionClass,
   settingsWorkspaceShellClass,
-  settingsWorkspaceSoftPanelClass,
 } from "./types";
 import { CapabilityPicker } from "../../CapabilityPicker";
 import { SelectCombobox } from "../../SelectCombobox";
@@ -61,10 +62,11 @@ const RUNTIME_DEFAULT_COMMANDS: Record<string, string> = {
   kimi: "kimi --yolo",
   opencode: "opencode --auto",
   web_model: "",
+  grok_web_model: "",
   custom: "",
 };
 
-const PROFILE_RUNTIME_OPTIONS = SUPPORTED_RUNTIMES.filter((runtime) => runtime !== "web_model");
+const PROFILE_RUNTIME_OPTIONS = SUPPORTED_RUNTIMES;
 
 function defaultCommandForRuntime(runtime: string): string {
   const key = String(runtime || "").trim();
@@ -159,10 +161,6 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
     () => supportsRuntimeDefaultCommand(editor.runtime),
     [editor.runtime],
   );
-  const editorIsWebModel = useMemo(
-    () => String(editor.runtime || "").trim() === "web_model",
-    [editor.runtime],
-  );
   const editorDefaultCommand = useMemo(
     () => defaultCommandForRuntime(editor.runtime),
     [editor.runtime],
@@ -226,7 +224,10 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
         </div>
         <div className={`${settingsDialogBodyClass} space-y-4`}>
           {editorErr ? (
-            <div className="rounded-lg border px-3 py-2 text-sm border-rose-500/30 bg-rose-500/10 text-rose-400">
+            <div
+              role="alert"
+              className="rounded-lg border px-3 py-2 text-sm border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+            >
               {editorErr}
             </div>
           ) : null}
@@ -245,15 +246,6 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
               <label className={labelClass()}>{t("actorProfiles.runtime")}</label>
               <SelectCombobox
                 items={[
-                  ...(editorIsWebModel
-                    ? [
-                        {
-                          value: "web_model",
-                          label: `${RUNTIME_INFO.web_model?.label || "ChatGPT Web Model"} (single actor)`,
-                          disabled: true,
-                        },
-                      ]
-                    : []),
                   ...PROFILE_RUNTIME_OPTIONS.map((rt) => ({
                     value: rt,
                     label: RUNTIME_INFO[rt]?.label || rt,
@@ -276,72 +268,72 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
                 className={inputClass()}
                 searchable
               />
-              {editorIsWebModel ? (
-                <div className="mt-1.5 text-[10px] leading-4 text-[var(--color-text-muted)]">
-                  ChatGPT Web Model is managed as one CCCC actor in Settings &gt; ChatGPT Web Model;
-                  new Runtime Profiles cannot use this runtime.
-                </div>
-              ) : null}
             </div>
           </div>
 
-          <div>
-            <label className={labelClass()}>{t("actorProfiles.commandOverrideOptional")}</label>
-            {editorSupportsDefaultCommand ? (
-              <label className="inline-flex items-center gap-2 text-xs mb-2 text-[var(--color-text-secondary)]">
-                <input
-                  type="checkbox"
-                  checked={editor.useDefaultCommand}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
+          {!isWebModelRuntime(editor.runtime) && (
+            <>
+              <div>
+                <label className={labelClass()}>{t("actorProfiles.commandOverrideOptional")}</label>
+                {editorSupportsDefaultCommand ? (
+                  <label className="inline-flex items-center gap-2 text-xs mb-2 text-[var(--color-text-secondary)]">
+                    <input
+                      type="checkbox"
+                      checked={editor.useDefaultCommand}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setEditor((prev) => ({
+                          ...prev,
+                          useDefaultCommand: checked,
+                          command: checked ? "" : prev.command,
+                        }));
+                      }}
+                    />
+                    {t("actorProfiles.useRuntimeDefaultCommand")}
+                  </label>
+                ) : null}
+                {!editorSupportsDefaultCommand || !editor.useDefaultCommand ? (
+                  <input
+                    value={editor.command}
+                    onChange={(e) => setEditor((prev) => ({ ...prev, command: e.target.value }))}
+                    className={`${inputClass()} font-mono`}
+                    placeholder={editorDefaultCommand || "codex"}
+                  />
+                ) : null}
+                {editorSupportsDefaultCommand && editorDefaultCommand ? (
+                  <div className="text-[0.625rem] mt-1 text-[var(--color-text-muted)]">
+                    {editor.useDefaultCommand
+                      ? t("actorProfiles.usingRuntimeDefaultCommand")
+                      : t("actorProfiles.default")}{" "}
+                    <code className="px-1 rounded bg-[var(--color-bg-secondary)]">
+                      {editorDefaultCommand}
+                    </code>
+                  </div>
+                ) : null}
+              </div>
+
+              <div>
+                <label className={labelClass()}>{t("actorProfiles.submit")}</label>
+                <SelectCombobox
+                  items={[
+                    { value: "enter", label: "Enter" },
+                    { value: "newline", label: "Newline" },
+                    { value: "none", label: "None" },
+                  ]}
+                  value={editor.submit}
+                  onChange={(value) =>
                     setEditor((prev) => ({
                       ...prev,
-                      useDefaultCommand: checked,
-                      command: checked ? "" : prev.command,
-                    }));
-                  }}
+                      submit: value as "enter" | "newline" | "none",
+                    }))
+                  }
+                  ariaLabel={t("actorProfiles.submit")}
+                  className={inputClass()}
                 />
-                {t("actorProfiles.useRuntimeDefaultCommand")}
-              </label>
-            ) : null}
-            {!editorSupportsDefaultCommand || !editor.useDefaultCommand ? (
-              <input
-                value={editor.command}
-                onChange={(e) => setEditor((prev) => ({ ...prev, command: e.target.value }))}
-                className={`${inputClass()} font-mono`}
-                placeholder={editorDefaultCommand || "codex"}
-              />
-            ) : null}
-            {editorSupportsDefaultCommand && editorDefaultCommand ? (
-              <div className="text-[10px] mt-1 text-[var(--color-text-muted)]">
-                {editor.useDefaultCommand
-                  ? t("actorProfiles.usingRuntimeDefaultCommand")
-                  : t("actorProfiles.default")}{" "}
-                <code className="px-1 rounded bg-[var(--color-bg-secondary)]">
-                  {editorDefaultCommand}
-                </code>
               </div>
-            ) : null}
-          </div>
-
-          <div>
-            <label className={labelClass()}>{t("actorProfiles.submit")}</label>
-            <SelectCombobox
-              items={[
-                { value: "enter", label: "Enter" },
-                { value: "newline", label: "Newline" },
-                { value: "none", label: "None" },
-              ]}
-              value={editor.submit}
-              onChange={(value) =>
-                setEditor((prev) => ({ ...prev, submit: value as "enter" | "newline" | "none" }))
-              }
-              ariaLabel={t("actorProfiles.submit")}
-              className={inputClass()}
-            />
-          </div>
-
-          <div className={settingsWorkspacePanelClass(isDark)}>
+            </>
+          )}
+          <div className={settingsWorkspaceSectionClass}>
             <div className="text-sm font-semibold text-[var(--color-text-primary)]">
               {t("actorProfiles.capabilityDefaults")}
             </div>
@@ -401,63 +393,65 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
             </div>
           </div>
 
-          <div className={settingsWorkspacePanelClass(isDark)}>
-            <div className="text-sm font-semibold text-[var(--color-text-primary)]">
-              {t("actorProfiles.env")}
-            </div>
-            <div className="text-xs mt-1 text-[var(--color-text-muted)]">
-              {t("actorProfiles.envHint")}
-            </div>
-            {duplicateSourceProfileId ? (
-              <div className="text-xs mt-1 text-[var(--color-text-tertiary)]">
-                {t("actorProfiles.duplicateSecretsHint", { source: duplicateSourceLabel })}
+          {!isWebModelRuntime(editor.runtime) && (
+            <div className={settingsWorkspaceSectionClass}>
+              <div className="text-sm font-semibold text-[var(--color-text-primary)]">
+                {t("actorProfiles.env")}
               </div>
-            ) : null}
-            {secretKeys.length ? (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {secretKeys.map((key) => (
-                  <span
-                    key={key}
-                    title={secretMasks[key] ? `${key}=${secretMasks[key]}` : key}
-                    className="px-2 py-0.5 rounded text-[11px] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
-                  >
-                    {key}
-                  </span>
-                ))}
+              <div className="text-xs mt-1 text-[var(--color-text-muted)]">
+                {t("actorProfiles.envHint")}
               </div>
-            ) : (
-              <div className="mt-2 text-xs text-[var(--color-text-muted)]">
-                {t("actorProfiles.noSecrets")}
-              </div>
-            )}
+              {duplicateSourceProfileId ? (
+                <div className="text-xs mt-1 text-[var(--color-text-tertiary)]">
+                  {t("actorProfiles.duplicateSecretsHint", { source: duplicateSourceLabel })}
+                </div>
+              ) : null}
+              {secretKeys.length ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {secretKeys.map((key) => (
+                    <span
+                      key={key}
+                      title={secretMasks[key] ? `${key}=${secretMasks[key]}` : key}
+                      className="px-2 py-0.5 rounded text-xs bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)]"
+                    >
+                      {key}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  {t("actorProfiles.noSecrets")}
+                </div>
+              )}
 
-            <div className="mt-3">
-              <label className={labelClass()}>{t("actorProfiles.setSecrets")}</label>
-              <textarea
-                value={secretSetText}
-                onChange={(e) => setSecretSetText(e.target.value)}
-                className={`${inputClass()} min-h-[90px] font-mono`}
-                placeholder={t("actorProfiles.setSecretsPlaceholder")}
-              />
+              <div className="mt-3">
+                <label className={labelClass()}>{t("actorProfiles.setSecrets")}</label>
+                <textarea
+                  value={secretSetText}
+                  onChange={(e) => setSecretSetText(e.target.value)}
+                  className={`${inputClass()} min-h-[90px] font-mono`}
+                  placeholder={t("actorProfiles.setSecretsPlaceholder")}
+                />
+              </div>
+              <div className="mt-3">
+                <label className={labelClass()}>{t("actorProfiles.unsetSecrets")}</label>
+                <textarea
+                  value={secretUnsetText}
+                  onChange={(e) => setSecretUnsetText(e.target.value)}
+                  className={`${inputClass()} min-h-[70px] font-mono`}
+                  placeholder={t("actorProfiles.unsetSecretsPlaceholder")}
+                />
+              </div>
+              <label className="mt-3 inline-flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+                <input
+                  type="checkbox"
+                  checked={secretClear}
+                  onChange={(e) => setSecretClear(e.target.checked)}
+                />
+                {t("actorProfiles.clearSecrets")}
+              </label>
             </div>
-            <div className="mt-3">
-              <label className={labelClass()}>{t("actorProfiles.unsetSecrets")}</label>
-              <textarea
-                value={secretUnsetText}
-                onChange={(e) => setSecretUnsetText(e.target.value)}
-                className={`${inputClass()} min-h-[70px] font-mono`}
-                placeholder={t("actorProfiles.unsetSecretsPlaceholder")}
-              />
-            </div>
-            <label className="mt-3 inline-flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-              <input
-                type="checkbox"
-                checked={secretClear}
-                onChange={(e) => setSecretClear(e.target.checked)}
-              />
-              {t("actorProfiles.clearSecrets")}
-            </label>
-          </div>
+          )}
         </div>
         <div className={settingsDialogFooterClass}>
           <button type="button" onClick={closeEditor} className={secondaryButtonClass()}>
@@ -466,7 +460,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
           <button
             type="button"
             onClick={() => void handleSave()}
-            disabled={editorBusy || editorIsWebModel}
+            disabled={editorBusy}
             className={primaryButtonClass(editorBusy)}
           >
             {editorBusy ? t("common:saving") : t("common:save")}
@@ -581,16 +575,6 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
   };
 
   const openDuplicate = async (profile: ActorProfile) => {
-    if (
-      String(profile.runtime || "")
-        .trim()
-        .toLowerCase() === "web_model"
-    ) {
-      setErr(
-        "ChatGPT Web Model is managed as a single actor and cannot be duplicated as a Runtime Profile. Configure it in Settings > ChatGPT Web Model.",
-      );
-      return;
-    }
     const sourceId = String(profile.id || "").trim();
     setEditor({
       ...buildEditor(profile),
@@ -739,16 +723,6 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
   };
 
   const handleSave = async () => {
-    if (
-      String(editor.runtime || "")
-        .trim()
-        .toLowerCase() === "web_model"
-    ) {
-      setEditorErr(
-        "ChatGPT Web Model is managed in Settings > ChatGPT Web Model instead of being saved as a Runtime Profile.",
-      );
-      return;
-    }
     const name = editor.name.trim();
     if (!name) {
       setEditorErr(t("actorProfiles.nameRequired"));
@@ -762,12 +736,16 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
     setEditorBusy(true);
     setEditorErr("");
     try {
-      const setParsed = parsePrivateEnvSetText(secretSetText);
+      const setParsed = parsePrivateEnvSetText(
+        isWebModelRuntime(editor.runtime) ? "" : secretSetText,
+      );
       if (!setParsed.ok) {
         setEditorErr(setParsed.error);
         return;
       }
-      const unsetParsed = parsePrivateEnvUnsetText(secretUnsetText);
+      const unsetParsed = parsePrivateEnvUnsetText(
+        isWebModelRuntime(editor.runtime) ? "" : secretUnsetText,
+      );
       if (!unsetParsed.ok) {
         setEditorErr(unsetParsed.error);
         return;
@@ -780,7 +758,10 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
         owner_id: ownerId,
         runtime: editor.runtime,
         command:
-          editorSupportsDefaultCommand && editor.useDefaultCommand ? "" : editor.command.trim(),
+          isWebModelRuntime(editor.runtime) ||
+          (editorSupportsDefaultCommand && editor.useDefaultCommand)
+            ? ""
+            : editor.command.trim(),
         submit: editor.submit,
         env: {},
         capability_defaults: {
@@ -790,6 +771,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
         },
       };
       if (
+        !isWebModelRuntime(editor.runtime) &&
         editorSupportsDefaultCommand &&
         !editor.useDefaultCommand &&
         !String(payload.command || "").trim()
@@ -804,11 +786,14 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
         setEditorErr(t("actorProfiles.customRuntimeCommandRequired"));
         return;
       }
-      const copyFromProfileId = duplicateSourceProfileId.trim();
+      const copyFromProfileId = isWebModelRuntime(editor.runtime)
+        ? ""
+        : duplicateSourceProfileId.trim();
       const hasSecretOps =
-        secretClear ||
-        Object.keys(setParsed.setVars).length > 0 ||
-        unsetParsed.unsetKeys.length > 0;
+        !isWebModelRuntime(editor.runtime) &&
+        (secretClear ||
+          Object.keys(setParsed.setVars).length > 0 ||
+          unsetParsed.unsetKeys.length > 0);
       const expectedRevision = editor.id ? editor.revision : undefined;
       const upsertResp = await api.saveProfile(payload, expectedRevision);
       if (!upsertResp.ok) {
@@ -827,6 +812,14 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
         return;
       }
 
+      // Configuration is committed even if a subsequent secret operation fails.
+      // Keep the draft, but retry against this exact Profile and revision.
+      setEditor((current) => ({
+        ...current,
+        id: profileId,
+        revision: Number(profile?.revision || 0),
+      }));
+
       if (copyFromProfileId && copyFromProfileId !== profileId) {
         const copyResp = await api.copyProfilePrivateEnvFromProfile(
           profileId,
@@ -839,6 +832,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
         }
       }
 
+      if (copyFromProfileId) setDuplicateSourceProfileId("");
       if (hasSecretOps) {
         const secretResp = await api.updateProfilePrivateEnv(
           profileId,
@@ -897,7 +891,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
             </div>
           ) : null}
 
-          <div className={settingsWorkspacePanelClass(isDark)}>
+          <div className="min-w-0">
             <div className="grid gap-3 lg:grid-cols-[minmax(0,320px)_1fr] lg:items-end">
               <div>
                 <label className={labelClass()}>{t("actorProfiles.searchPlaceholder")}</label>
@@ -926,7 +920,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
                         {profile.name || profile.id}
                       </div>
                       <span
-                        className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] ${
+                        className={`inline-flex rounded-full border px-2 py-0.5 text-xs ${
                           isDark
                             ? "border-white/10 bg-white/[0.04] text-[var(--color-text-secondary)]"
                             : "border-black/8 bg-black/[0.03] text-[var(--color-text-secondary)]"
@@ -939,17 +933,11 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
                       <code>{profile.id}</code>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <div className={settingsWorkspaceSoftPanelClass(isDark)}>
-                        <div className="text-[11px] text-[var(--color-text-muted)]">
-                          {t("actorProfiles.usageCount", {
-                            count: Number(profile.usage_count || 0),
-                          })}
-                        </div>
+                      <div className="text-xs text-[var(--color-text-muted)]">
+                        {t("actorProfiles.usageCount", { count: Number(profile.usage_count || 0) })}
                       </div>
-                      <div className={settingsWorkspaceSoftPanelClass(isDark)}>
-                        <div className="text-[11px] text-[var(--color-text-muted)]">
-                          {t("actorProfiles.revision", { revision: Number(profile.revision || 0) })}
-                        </div>
+                      <div className="text-xs text-[var(--color-text-muted)]">
+                        {t("actorProfiles.revision", { revision: Number(profile.revision || 0) })}
                       </div>
                     </div>
                   </div>
@@ -962,11 +950,6 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
                     </button>
                     <button
                       onClick={() => void openDuplicate(profile)}
-                      disabled={
-                        String(profile.runtime || "")
-                          .trim()
-                          .toLowerCase() === "web_model"
-                      }
                       className={secondaryButtonClass("sm")}
                     >
                       {t("actorProfiles.duplicate")}

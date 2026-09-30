@@ -50,6 +50,17 @@ pub fn find<'a>(group: &'a GroupDoc, actor_id: &str) -> Option<&'a Actor> {
     group.actors.iter().find(|actor| actor.id == actor_id)
 }
 
+/// The original creation time identifies Actors that predate persisted UUIDs.
+/// Reads, browser ownership and pairing must agree without changing that
+/// identity midway through a live Actor's work.
+pub fn generation_identity(actor: &Actor) -> String {
+    if actor.generation.is_empty() {
+        format!("legacy:{}", actor.created_at)
+    } else {
+        actor.generation.clone()
+    }
+}
+
 pub fn unique_available_foreman(group: &GroupDoc) -> Result<&Actor, UniqueForemanError> {
     let matches = visible(group)
         .filter(|actor| {
@@ -85,14 +96,13 @@ pub fn add(group: &mut GroupDoc, mut actor: Actor) -> io::Result<Actor> {
             actor.id
         )));
     }
-    if actor.internal_kind.is_some()
-        && serde_json::to_value(actor.runtime).ok() == Some(Value::String("web_model".into()))
-    {
+    if actor.internal_kind.is_some() && actor.runtime.is_web_model() {
         return Err(io::Error::other(
             "internal actors cannot use web_model runtime",
         ));
     }
     actor.role = None;
+    actor.generation = uuid::Uuid::new_v4().to_string();
     actor.capability_autoload = dedupe(actor.capability_autoload);
     actor.capability_hidden = dedupe(actor.capability_hidden);
     actor.updated_at = utc_now();
@@ -119,7 +129,7 @@ pub fn update(
         .as_object_mut()
         .ok_or_else(|| io::Error::other("invalid actor"))?;
     for (key, value) in patch {
-        if key != "id" && key != "created_at" && key != "role" {
+        if !matches!(key.as_str(), "id" | "created_at" | "role" | "generation") {
             object.insert(key.clone(), value.clone());
         }
     }

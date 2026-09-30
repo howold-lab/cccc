@@ -1,4 +1,4 @@
-use super::super::codex_voice_analyst::lifecycle_timing;
+use super::super::codex_voice_analyst::{AnalystSession, lifecycle_timing};
 use super::{HeadlessStatus, Session, managed_reader, poisoned, provider_cli, run_managed_launch};
 use cccc_contracts::{Actor, ActorRuntime, Event, RunnerKind, utc_now};
 use cccc_core::{GroupDoc, HomeLayout};
@@ -9,7 +9,17 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use tracing::Instrument;
 
-type Key = (String, String);
+#[cfg(all(test, unix))]
+#[path = "control_fixture.rs"]
+mod control_fixture;
+#[cfg(all(test, unix))]
+#[path = "shutdown_tests.rs"]
+mod shutdown_tests;
+#[cfg(all(test, unix))]
+#[path = "viewer_detach_tests.rs"]
+mod viewer_detach_tests;
+
+pub(super) type Key = (String, String);
 
 fn sessions() -> &'static RwLock<HashMap<Key, Arc<Session>>> {
     static SESSIONS: OnceLock<RwLock<HashMap<Key, Arc<Session>>>> = OnceLock::new();
@@ -21,12 +31,12 @@ fn starts() -> &'static (Mutex<HashSet<Key>>, Condvar) {
     STARTS.get_or_init(|| (Mutex::new(HashSet::new()), Condvar::new()))
 }
 
-struct StartGuard {
+pub(super) struct StartGuard {
     key: Key,
 }
 
 impl StartGuard {
-    fn acquire(key: &Key) -> io::Result<Self> {
+    pub(super) fn acquire(key: &Key) -> io::Result<Self> {
         let (active, changed) = starts();
         let mut active = active.lock().map_err(|_| poisoned())?;
         while active.contains(key) {
@@ -70,6 +80,21 @@ fn start_managed_agent(
     key: Key,
 ) -> io::Result<()> {
     let cwd = working_directory(group, actor)?;
+    match launch_managed(home, group, actor, &cwd) {
+        Ok(app) => attach_managed(home, group, actor, key, cwd, app),
+        Err(refusal) if super::workspace_trust::refused(actor, &refusal) => {
+            super::workspace_trust::prompt(home, group, actor, key, cwd, refusal)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn launch_managed(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    cwd: &std::path::Path,
+) -> io::Result<AnalystSession> {
     let mut env = actor.env.clone();
     env.insert(
         "CCCC_HOME".into(),
@@ -79,7 +104,7 @@ fn start_managed_agent(
     env.insert("CCCC_ACTOR_ID".into(), actor.id.clone());
     super::super::codex_mcp::configure_actor_cli(&mut env);
     let config = super::super::codex_voice_analyst::ActorLaunchConfig {
-        workdir: cwd.clone(),
+        workdir: cwd.to_path_buf(),
         group_id: group.group_id.clone(),
         actor_id: actor.id.clone(),
         runtime: actor.runtime,
@@ -87,15 +112,23 @@ fn start_managed_agent(
         environment: env,
     };
     let launch_home = home.clone();
-    let app = run_managed_launch(
-        async move {
-            super::super::codex_voice_analyst::AnalystSession::launch_actor(&launch_home, config)
-                .await
-        }
-        .instrument(tracing::info_span!(
-            "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
-        )),
-    )?;
+    run_managed_launch(
+        async move { AnalystSession::launch_actor(&launch_home, config).await }.instrument(
+            tracing::info_span!(
+                "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
+            ),
+        ),
+    )
+}
+
+pub(super) fn attach_managed(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    key: Key,
+    cwd: std::path::PathBuf,
+    app: AnalystSession,
+) -> io::Result<()> {
     let app = Arc::new(app);
     let prompt = cccc_core::system_prompt::render_session(home, group, actor);
     let item = Arc::new(Session {
@@ -104,6 +137,11 @@ fn start_managed_agent(
         actor_id: actor.id.clone(),
         managed: Arc::clone(&app),
         has_terminal: AtomicBool::new(false),
+        viewer: Mutex::new(Some(super::ViewerLaunch {
+            command: app.actor_tui_command(),
+            env: app.tui_environment(),
+            cwd: cwd.clone(),
+        })),
         status: Mutex::new(HeadlessStatus {
             status: "idle".into(),
             task_id: None,
@@ -184,34 +222,83 @@ fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Resu
     if lookup(&key).is_some_and(|item| item.running()) {
         return Ok(());
     }
-    stop(&group.group_id, &actor.id)?;
+    stop_locked(&key)?;
 
     start_managed_agent(home, group, actor, key)
 }
 
 pub fn stop(group_id: &str, actor_id: &str) -> io::Result<()> {
     let key = (group_id.to_owned(), actor_id.to_owned());
+    super::workspace_trust_recovery::cancel(&key)?;
+    let _start = StartGuard::acquire(&key)?;
+    stop_locked(&key)
+}
+
+/// A managed Actor's runtime session is only its viewer attachment (for
+/// Agent View, `claude attach <job>`), never the provider job itself. A
+/// reaped viewer exit must not reap the provider; detach the terminal and
+/// let the session keep running. The provider's own exit still arrives
+/// through the managed-session reader. Returns `false` when the actor has no
+/// tracked managed session — the exit then follows the normal record path.
+pub fn detach_after_viewer_exit(group_id: &str, actor_id: &str) -> io::Result<bool> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let _start = StartGuard::acquire(&key)?;
     let Some(item) = lookup(&key) else {
+        return Ok(false);
+    };
+    if item.detach_viewer()? {
+        super::output::emit(&item, "headless.session.viewer_detached", Map::new());
+    }
+    Ok(true)
+}
+
+/// Reopen only the native attachment to a registered, healthy provider.
+/// Called by write/control paths; status reads must never launch a viewer.
+pub fn ensure_viewer(group_id: &str, actor_id: &str) -> io::Result<()> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let _start = StartGuard::acquire(&key)?;
+    if let Some(item) = lookup(&key)
+        && item.running()
+    {
+        item.reattach_viewer()?;
+    }
+    Ok(())
+}
+
+fn stop_locked(key: &Key) -> io::Result<()> {
+    // A prompt may have been registered while stop was waiting for its start.
+    super::workspace_trust_recovery::cancel(key)?;
+    let Some(item) = lookup(key) else {
         return Ok(());
     };
     item.stop()?;
     let mut items = sessions().write().map_err(|_| poisoned())?;
     if items
-        .get(&key)
+        .get(key)
         .is_some_and(|current| Arc::ptr_eq(current, &item))
     {
-        items.remove(&key);
+        items.remove(key);
     }
     Ok(())
 }
 
-pub fn stop_group(group_id: &str) -> io::Result<()> {
-    let actor_ids = sessions()
+fn lifecycle_keys() -> io::Result<HashSet<Key>> {
+    let mut keys = sessions()
         .read()
         .map_err(|_| poisoned())?
         .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    keys.extend(starts().0.lock().map_err(|_| poisoned())?.iter().cloned());
+    keys.extend(super::workspace_trust_recovery::keys()?);
+    Ok(keys)
+}
+
+pub fn stop_group(group_id: &str) -> io::Result<()> {
+    let actor_ids = lifecycle_keys()?
+        .into_iter()
         .filter(|key| key.0 == group_id)
-        .map(|key| key.1.clone())
+        .map(|key| key.1)
         .collect::<Vec<_>>();
     for actor_id in actor_ids {
         stop(group_id, &actor_id)?;
@@ -219,19 +306,33 @@ pub fn stop_group(group_id: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Stops every managed Actor concurrently. Each stop waits for its provider
+/// to confirm (up to ~10s for Agent View), so a serial loop over a busy host
+/// outlives the launcher's forced-exit deadline and strands the remainder.
 pub fn stop_all() -> io::Result<()> {
-    let keys = sessions()
-        .read()
-        .map_err(|_| poisoned())?
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut failures = Vec::new();
-    for (group_id, actor_id) in keys {
-        if let Err(error) = stop(&group_id, &actor_id) {
-            failures.push(format!("{group_id}/{actor_id}: {error}"));
-        }
+    let keys = lifecycle_keys()?;
+    for key in &keys {
+        super::workspace_trust_recovery::cancel(key)?;
     }
+    let failures = std::thread::scope(|scope| {
+        let handles = keys
+            .iter()
+            .map(|(group_id, actor_id)| {
+                scope.spawn(move || {
+                    stop(group_id, actor_id)
+                        .map_err(|error| format!("{group_id}/{actor_id}: {error}"))
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| match handle.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(failure)) => Some(failure),
+                Err(_) => Some("stop worker panicked".into()),
+            })
+            .collect::<Vec<_>>()
+    });
     if failures.is_empty() {
         Ok(())
     } else {
@@ -242,9 +343,39 @@ pub fn stop_all() -> io::Result<()> {
     }
 }
 
+/// Sends one stop request per managed Actor and returns without waiting for
+/// confirmation. Forced launcher exit calls this because Agent View workers are
+/// not owned process trees and would otherwise keep running after the exit.
+pub async fn kill_all_requests() {
+    let items = match sessions().read() {
+        Ok(items) => items.values().cloned().collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    let mut tasks = tokio::task::JoinSet::new();
+    for item in items {
+        tasks.spawn(async move {
+            if let Err(error) = item.managed.kill_request().await {
+                tracing::warn!(
+                    %error,
+                    group_id = %item.group_id,
+                    actor_id = %item.actor_id,
+                    "forced exit could not request a managed Actor stop"
+                );
+            }
+        });
+    }
+    while tasks.join_next().await.is_some() {}
+}
+
 #[must_use]
 pub fn running(group_id: &str, actor_id: &str) -> bool {
-    lookup(&(group_id.to_owned(), actor_id.to_owned())).is_some_and(|item| item.running())
+    registered_running(group_id, actor_id).unwrap_or(false)
+}
+
+/// A failed managed session still owns its attached terminal until cleanup
+/// succeeds. Preserve that distinction from an independent PTY session.
+pub(crate) fn registered_running(group_id: &str, actor_id: &str) -> Option<bool> {
+    lookup(&(group_id.to_owned(), actor_id.to_owned())).map(|item| item.running())
 }
 
 #[must_use]
@@ -258,17 +389,6 @@ pub fn status(group_id: &str, actor_id: &str) -> Option<HeadlessStatus> {
     // A failed teardown retains an owned job whose execution is unverified.
     // Keep its error visible instead of projecting it as successfully stopped.
     Some(state.clone())
-}
-
-#[cfg(test)]
-pub fn submit(home: &HomeLayout, group: &GroupDoc, actor: &Actor, event: &Event) -> bool {
-    submit_batch(
-        home,
-        group,
-        actor,
-        std::slice::from_ref(event),
-        &AtomicBool::new(false),
-    )
 }
 
 pub fn submit_batch(
@@ -292,6 +412,15 @@ pub fn submit_batch(
     ) else {
         return false;
     };
+    if let Err(error) = item.reattach_viewer() {
+        tracing::warn!(
+            %error,
+            group_id = %group.group_id,
+            actor_id = %actor.id,
+            "failed to re-attach managed Actor viewer for delivery"
+        );
+        return false;
+    }
     if item.has_terminal() {
         return submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
             super::super::actor_delivery::submit_terminal_text(

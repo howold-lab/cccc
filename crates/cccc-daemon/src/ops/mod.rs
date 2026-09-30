@@ -24,12 +24,16 @@ mod codex_mcp;
 pub(crate) mod codex_voice_analyst;
 pub(crate) mod codex_voice_controller;
 pub(crate) mod codex_voice_lifecycle;
+mod connect;
+mod connect_messages;
+pub(crate) mod connect_outbound;
+mod connect_peer;
 mod context;
+mod direct;
+pub(crate) use connect::ConnectService;
 mod context_projection;
 mod deepseek_runtime;
 mod diagnostics;
-mod group_bridge;
-pub(crate) use group_bridge::{schedule_due_retries, schedule_pending_route_retry};
 mod group_copy;
 mod group_create_rollback;
 mod group_creation;
@@ -72,6 +76,7 @@ mod terminal;
 mod terminal_history_source;
 mod terminal_text;
 mod voice_notifications;
+mod web_model_connectors;
 mod working_state;
 #[cfg(test)]
 mod working_state_tests;
@@ -87,7 +92,6 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         groups::resolve_operation,
         hermes_runtime::resolve_operation,
         group_copy::resolve_operation,
-        group_bridge::resolve_operation,
         group_scopes::resolve_operation,
         group_space::resolve_operation,
         actors::resolve_operation,
@@ -100,12 +104,17 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         diagnostics::resolve_operation,
         remote_access::resolve_operation,
         membership::resolve_operation,
+        connect::resolve_operation,
+        connect_peer::resolve_operation,
+        direct::resolve_operation,
+        connect_outbound::resolve_operation,
         runtime_state::resolve_operation,
         maintenance::resolve_operation,
         im::resolve_operation,
         memory::resolve_operation,
         context::resolve_operation,
         settings::resolve_operation,
+        web_model_connectors::resolve_operation,
         voice_notifications::resolve_operation,
         terminal::resolve_operation,
     ] {
@@ -115,3 +124,5 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     }
     None
 }
+
+mod connect_cancellation;

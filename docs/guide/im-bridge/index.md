@@ -18,6 +18,7 @@ The IM Bridge allows you to:
 | [Telegram](./telegram) | ✅ | Edited message | Lossless 4,096-character chunks |
 | [Slack](./slack) | ✅ | `chat.update` | Lossless 4,000-character chunks |
 | [Discord](./discord) | ✅ | Edited message | Lossless 2,000-character chunks |
+| [Mattermost](./mattermost) | ✅ | Edited message | Lossless 16,383-character chunks (default) |
 | [Feishu/Lark](./feishu) | ✅ | Edited message (with `im:message:update`) | Lossless 30,720-character chunks |
 | [DingTalk](./dingtalk) | ✅ | AI Card Streaming | Lossless 4,096-character / 64-line chunks |
 | [WeCom](./wecom) | ✅ | Native stream reply | Lossless 2,048-character / 64-line chunks |
@@ -61,6 +62,8 @@ current ledger boundary, so an old setting cannot prevent IM startup after
 upgrading.
 
 Weixin currently supports direct bot chats only. Confirming the QR login immediately authorizes the scanning account; it can send plain text as soon as the bridge is running, with no `/subscribe`, binding key, or manual approval step. Worker startup and login-status recovery repair this authorization automatically. The Rust SDK callback does not expose a stable group-chat ID, so Weixin group messages are intentionally outside the supported bridge contract.
+
+Opening settings or reading a saved Weixin login does not start the bridge. Starting or regenerating a QR login in the current settings session starts the bridge once after login succeeds. Stopping, logging out, removing the configuration, switching Group or platform, or closing settings cancels that pending startup. If startup fails, the login is retained and **Start Bridge** retries the connection.
 
 If Weixin asks for a pairing code after the QR scan, enter the code shown on the phone in **Settings → IM Bridge**. The page keeps polling through the scanned and verification states, including regional endpoint redirects, until login succeeds or the QR session ends.
 
@@ -116,6 +119,7 @@ WeCom currently uses the same start/stop/status CLI controls, but credentials ar
 - [Telegram Setup](./telegram) - Quick personal setup
 - [Slack Setup](./slack) - Team collaboration
 - [Discord Setup](./discord) - Community access
+- [Mattermost Setup](./mattermost) - Self-hosted team collaboration
 - [Feishu/Lark Setup](./feishu) - Enterprise (China/Global)
 - [DingTalk Setup](./dingtalk) - Enterprise (China)
 - [WeCom Setup](./wecom) - Enterprise (China)

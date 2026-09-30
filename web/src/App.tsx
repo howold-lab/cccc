@@ -39,10 +39,20 @@ import { filterVisibleRuntimeActors } from "./utils/runtimeVisibility";
 import { getEffectiveComposerDestGroupId } from "./stores/useComposerStore";
 import { buildReplyComposerState } from "./utils/chatReply";
 import { useShallow } from "zustand/react/shallow";
+import { useConnectWorkbench } from "./features/connect/useConnectWorkbench";
+import { ConnectRemotePanel } from "./features/connect/ConnectRemotePanel";
 
 // ============ Main App Component ============
 
-export default function App() {
+export default function App({
+  connectEmbedded = false,
+  onOpenParentSidebar,
+  embeddedAccountLabel,
+}: {
+  connectEmbedded?: boolean;
+  embeddedAccountLabel?: string | null;
+  onOpenParentSidebar?: () => void;
+}) {
   // Theme
   const { theme, setTheme, isDark } = useTheme();
   const { textScale, setTextScale } = useTextScale();
@@ -212,8 +222,6 @@ export default function App() {
     chatAtBottomRef,
     actorsRef,
     allTabs,
-    renderedActorIds,
-    resetMountedActorIds,
     handleTabChange,
   } = useAppTabState({
     activeTab,
@@ -254,7 +262,7 @@ export default function App() {
   const { dropOverlayOpen, handleAppendComposerFiles, resetDragDrop, WEB_MAX_FILE_MB } =
     useDragDrop({ selectedGroupId });
 
-  const { handleStartGroup, handleStopGroup, handleSetGroupState } = useGroupActions();
+  const { handleStartGroup, handleGroupControl, handleDeleteGroup } = useGroupActions();
 
   const computedSendGroupId = getEffectiveComposerDestGroupId(
     destGroupId,
@@ -319,7 +327,7 @@ export default function App() {
     },
   });
 
-  const { canManageGroups, ccccHome, fetchDirSuggestions } = useAppChrome({
+  const { canManageGroups, ccccHome, fetchDirSuggestions, refreshWebAccessSession } = useAppChrome({
     parseUrlDeepLink,
     refreshGroups,
     setWebReadOnly,
@@ -330,6 +338,8 @@ export default function App() {
     addActorOpen,
     editingActor,
   });
+  const connect = useConnectWorkbench(!connectEmbedded && !webReadOnly, refreshWebAccessSession);
+  const remoteSelected = Boolean(connect.selected);
 
   const { handleTouchStart, handleTouchEnd } = useSwipeNavigation({
     tabs: allTabs,
@@ -360,7 +370,7 @@ export default function App() {
   const hasComposerFiles = composerFiles.length > 0;
 
   useAppGroupLifecycle({
-    selectedGroupId,
+    selectedGroupId: remoteSelected ? "" : selectedGroupId,
     destGroupId,
     sendGroupId,
     hasReplyTarget,
@@ -368,7 +378,6 @@ export default function App() {
     setDestGroupId,
     fileInputRef,
     resetDragDrop,
-    resetMountedActorIds,
     setActiveTab,
     closeChatWindow,
     loadGroup,
@@ -388,7 +397,14 @@ export default function App() {
       <AppBackground isDark={isDark} />
 
       <AppShell
-        canUseVoice={canManageGroups}
+        connectEmbedded={connectEmbedded}
+        connect={connectEmbedded ? undefined : connect}
+        remoteWorkspace={
+          remoteSelected ? (
+            <ConnectRemotePanel workbench={connect} onOpenSidebar={() => setSidebarOpen(true)} />
+          ) : undefined
+        }
+        canUseVoice={canManageGroups && !connectEmbedded}
         onOpenVoiceSource={openMessageWindow}
         orderedGroups={orderedGroups}
         archivedGroupIds={archivedGroupIds}
@@ -400,7 +416,6 @@ export default function App() {
         recipientActors={recipientActors}
         recipientActorsBusy={recipientActorsBusy}
         destGroupScopeLabel={destGroupScopeLabel}
-        renderedActorIds={renderedActorIds}
         activeTab={activeTab}
         busy={busy}
         isTransitioning={isTransitioning}
@@ -430,7 +445,10 @@ export default function App() {
         chatAtBottomRef={chatAtBottomRef}
         onThemeChange={setTheme}
         onTextScaleChange={setTextScale}
-        onSelectGroup={setSelectedGroupId}
+        onSelectGroup={(groupId) => {
+          connect.selectLocal();
+          setSelectedGroupId(groupId);
+        }}
         onWarmGroup={(gid) => void warmGroup(gid)}
         onCreateGroup={
           !webReadOnly && canManageGroups
@@ -446,7 +464,9 @@ export default function App() {
         onReorderGroupsInSection={reorderGroupsInSection}
         onArchiveGroup={archiveGroup}
         onRestoreGroup={restoreGroup}
-        onOpenSidebar={() => setSidebarOpen(true)}
+        onControlGroup={handleGroupControl}
+        onDeleteGroup={handleDeleteGroup}
+        onOpenSidebar={onOpenParentSidebar || (() => setSidebarOpen(true))}
         onOpenGroupEdit={
           canManageGroups
             ? () => {
@@ -464,10 +484,9 @@ export default function App() {
           openModal("context");
         }}
         onStartGroup={handleStartGroup}
-        onStopGroup={handleStopGroup}
-        onSetGroupState={handleSetGroupState}
         onOpenSettings={() => openModal("settings")}
         canAccessAccount={canManageGroups}
+        accountLabel={connectEmbedded ? embeddedAccountLabel : connect.accountLabel}
         onOpenAccount={() => openSettingsTarget({ scope: "global", tab: "account" })}
         onOpenMobileMenu={() => openModal("mobileMenu")}
         onTabChange={handleTabChange}
@@ -511,11 +530,10 @@ export default function App() {
             onStartReply={startReply}
             onThemeChange={setTheme}
             onTextScaleChange={setTextScale}
-            onStartGroup={handleStartGroup}
-            onStopGroup={handleStopGroup}
-            onSetGroupState={handleSetGroupState}
+            onDeleteGroup={handleDeleteGroup}
             fetchContext={fetchContext}
             canManageGroups={canManageGroups}
+            accountLabel={connectEmbedded ? embeddedAccountLabel : connect.accountLabel}
           />
         </Suspense>
       ) : null}

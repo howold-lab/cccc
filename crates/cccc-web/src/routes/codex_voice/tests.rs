@@ -24,9 +24,9 @@ fn connected_voice_principal_loses_authority_when_its_token_is_revoked() {
         is_admin: true,
         raw_token: token.token.clone(),
     };
-    assert!(principal.current_voice_admin(&home).expect("current"));
+    assert!(principal.current_admin(&home).expect("current"));
     store.delete(&token.token_id()).expect("revoke");
-    assert!(!principal.current_voice_admin(&home).expect("revoked"));
+    assert!(!principal.current_admin(&home).expect("revoked"));
     assert!(
         principal.is_admin,
         "the initial WebSocket identity alone is insufficient"
@@ -117,7 +117,8 @@ async fn scoped_users_cannot_read_or_mutate_global_voice_notification_state() {
 fn public_voice_payloads_do_not_expose_local_paths_or_codex_commands() {
     let value = info_value(SessionInfo {
         generation: "voice-1".into(),
-        analyst_generation: "analyst-1".into(),
+        analyst_generation: Some("analyst-1".into()),
+        mode: Default::default(),
         voice: "cove".into(),
         connected: true,
     });

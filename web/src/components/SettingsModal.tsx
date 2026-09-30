@@ -1,4 +1,6 @@
+import { loadedWebEntry, type RuntimeBuildInfo } from "../utils/runtimeBuildInfo";
 // SettingsModal renders the settings modal.
+import { GroupConnectionsPanel } from "../features/connect/GroupConnectionsControl";
 import { lazy, Suspense, useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -81,11 +83,6 @@ const AccountTab = lazy(() =>
 const WebAccessTab = lazy(() =>
   import("./modals/settings/WebAccessTab").then((module) => ({ default: module.WebAccessTab })),
 );
-const GroupBridgeConnectionsTab = lazy(() =>
-  import("./modals/settings/GroupBridgeConnectionsSection").then((module) => ({
-    default: module.GroupBridgeConnectionsSection,
-  })),
-);
 const WebModelConnectorsTab = lazy(() =>
   import("./modals/settings/WebModelConnectorsTab").then((module) => ({ default: module.default })),
 );
@@ -134,6 +131,7 @@ export function SettingsModal({
   const [focusReachOnOpen, setFocusReachOnOpen] = useState(false);
   const [canAccessGlobalSettings, setCanAccessGlobalSettings] = useState<boolean | null>(null);
   const [webAccessSession, setWebAccessSession] = useState<WebAccessSession | null>(null);
+  const [webModelProvider, setWebModelProvider] = useState<api.WebModelProvider>("chatgpt_web");
   const settingsTarget = useModalStore((state) => state.settingsTarget);
   const clearSettingsTarget = useModalStore((state) => state.clearSettingsTarget);
 
@@ -173,6 +171,7 @@ export function SettingsModal({
   const [imPlatform, setImPlatform] = useState<IMPlatform>("telegram");
   const [imBotTokenEnv, setImBotTokenEnv] = useState("");
   const [imAppTokenEnv, setImAppTokenEnv] = useState("");
+  const [imMattermostUrl, setImMattermostUrl] = useState("");
   // Feishu fields
   const [imFeishuDomain, setImFeishuDomain] = useState("https://open.feishu.cn");
   const [imFeishuAppId, setImFeishuAppId] = useState("");
@@ -188,9 +187,60 @@ export function SettingsModal({
   const [imWeixinAccountId, setImWeixinAccountId] = useState("");
   const [weixinLoginStatus, setWeixinLoginStatus] = useState<WeixinLoginStatus | null>(null);
   const [imBusy, setImBusy] = useState(false);
+  const [imConfigError, setImConfigError] = useState<{ groupId: string; message: string } | null>(
+    null,
+  );
   const imLoadSeq = useRef(0);
-  const weixinAutoStartRef = useRef(false);
+  const imPlatformSelectionSeq = useRef(0);
+  const imMattermostEditSeq = useRef(0);
+  const imMattermostVisitSeq = useRef(0);
+  const imActionScope = useRef({ groupId, isOpen, platform: imPlatform });
+  const imCurrentPlatform = useRef(imPlatform);
+  const imMattermostBusy = useRef(false);
+  if (
+    imActionScope.current.groupId !== groupId ||
+    imActionScope.current.isOpen !== isOpen ||
+    imActionScope.current.platform !== imPlatform
+  ) {
+    if (imActionScope.current.platform === "mattermost" || imPlatform === "mattermost") {
+      imMattermostVisitSeq.current += 1;
+    }
+    imActionScope.current = { groupId, isOpen, platform: imPlatform };
+  }
+  imCurrentPlatform.current = imPlatform;
+  useEffect(
+    () => () => {
+      // AppModals unmounts settings on close; stale management continuations must not reload or start.
+      imActionScope.current = { ...imActionScope.current };
+    },
+    [],
+  );
+  // Only a login explicitly started in this modal may continue into bridge startup.
+  const weixinLoginOwner = useRef<{ scope: typeof imActionScope.current } | null>(null);
+  const imInitiallyLoaded = useRef(false);
+  const observabilityLoaded = useRef(false);
+  const imTabActive = !settingsTarget && scope === "group" && groupTab === "im";
+  const developerTabActive = !settingsTarget && scope === "global" && globalTab === "developer";
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Weixin login and Mattermost mutations belong to the initiating Group and platform visit.
+  const currentIMAction = useCallback(() => {
+    const scope = imActionScope.current;
+    const edit = imMattermostEditSeq.current;
+    const visit = imMattermostVisitSeq.current;
+    if (imPlatform === "mattermost") imMattermostBusy.current = true;
+    const isCurrent = () =>
+      (imPlatform !== "mattermost" &&
+        imPlatform !== "weixin" &&
+        imCurrentPlatform.current !== "mattermost" &&
+        imMattermostVisitSeq.current === visit) ||
+      imActionScope.current === scope;
+    return {
+      isCurrent,
+      canReload: () =>
+        isCurrent() && (imPlatform !== "mattermost" || imMattermostEditSeq.current === edit),
+    };
+  }, [imPlatform]);
 
   // IM config drafts cache (per-platform local edits, not yet saved to server)
   const [imConfigDrafts, setImConfigDrafts] = useState<Partial<Record<IMPlatform, IMConfigDraft>>>(
@@ -210,10 +260,15 @@ export function SettingsModal({
 
   // Developer-mode debug views
   const [devActors, setDevActors] = useState<Actor[]>([]);
+  useEffect(() => {
+    setDevActors([]);
+    setTailActorId("");
+  }, [groupId]);
   const [debugSnapshot, setDebugSnapshot] = useState("");
   const [debugSnapshotErr, setDebugSnapshotErr] = useState("");
   const [debugSnapshotBusy, setDebugSnapshotBusy] = useState(false);
   const [runtimeVersion, setRuntimeVersion] = useState("");
+  const [runtimeBuildInfo, setRuntimeBuildInfo] = useState<RuntimeBuildInfo>();
   const [daemonVersion, setDaemonVersion] = useState("");
   const [runtimeInfoErr, setRuntimeInfoErr] = useState("");
 
@@ -231,21 +286,102 @@ export function SettingsModal({
   // ============ Effects ============
 
   useEffect(() => {
-    if (isOpen && settings) {
-      setMailNoticeAfterSeconds(settings.mail_notice_after_seconds ?? 1800);
-      setReplyNoticeAfterSeconds(settings.reply_notice_after_seconds ?? 900);
-      setIdleSeconds(settings.actor_idle_timeout_seconds);
-      setKeepaliveSeconds(settings.keepalive_delay_seconds);
-      setKeepaliveMax(settings.keepalive_max_per_actor ?? 3);
-      setSilenceSeconds(settings.silence_timeout_seconds);
-      setHelpNudgeIntervalSeconds(settings.help_nudge_interval_seconds ?? 600);
-      setHelpNudgeMinMessages(settings.help_nudge_min_messages ?? 10);
-      setDefaultSendTo(settings.default_send_to || "foreman");
-      setTerminalVisibility(settings.terminal_transcript_visibility || "foreman");
-      setTerminalNotifyTail(Boolean(settings.terminal_transcript_notify_tail));
-      setTerminalNotifyLines(Number(settings.terminal_transcript_notify_lines || 20));
+    setImConfigDrafts((drafts) => {
+      if (!drafts.mattermost) return drafts;
+      const next = { ...drafts };
+      delete next.mattermost;
+      return next;
+    });
+  }, [groupId]);
+
+  const previousSettings = useRef<{ groupId: string | undefined; value: GroupSettings } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!isOpen || !settings) {
+      previousSettings.current = null;
+      return;
     }
-  }, [isOpen, settings]);
+    const previous =
+      previousSettings.current && previousSettings.current.groupId === groupId
+        ? previousSettings.current.value
+        : null;
+    // Refresh clean fields; another section's save must not overwrite a local draft.
+    const sync = <T,>(current: T, before: T | undefined, next: T): T =>
+      previous === null || Object.is(current, before) ? next : current;
+    setMailNoticeAfterSeconds((current) =>
+      sync(
+        current,
+        previous?.mail_notice_after_seconds ?? 1800,
+        settings.mail_notice_after_seconds ?? 1800,
+      ),
+    );
+    setReplyNoticeAfterSeconds((current) =>
+      sync(
+        current,
+        previous?.reply_notice_after_seconds ?? 900,
+        settings.reply_notice_after_seconds ?? 900,
+      ),
+    );
+    setIdleSeconds((current) =>
+      sync(current, previous?.actor_idle_timeout_seconds, settings.actor_idle_timeout_seconds),
+    );
+    setKeepaliveSeconds((current) =>
+      sync(current, previous?.keepalive_delay_seconds, settings.keepalive_delay_seconds),
+    );
+    setKeepaliveMax((current) =>
+      sync(current, previous?.keepalive_max_per_actor ?? 3, settings.keepalive_max_per_actor ?? 3),
+    );
+    setSilenceSeconds((current) =>
+      sync(current, previous?.silence_timeout_seconds, settings.silence_timeout_seconds),
+    );
+    setHelpNudgeIntervalSeconds((current) =>
+      sync(
+        current,
+        previous?.help_nudge_interval_seconds ?? 600,
+        settings.help_nudge_interval_seconds ?? 600,
+      ),
+    );
+    setHelpNudgeMinMessages((current) =>
+      sync(
+        current,
+        previous?.help_nudge_min_messages ?? 10,
+        settings.help_nudge_min_messages ?? 10,
+      ),
+    );
+    setDefaultSendTo((current) =>
+      sync(current, previous?.default_send_to || "foreman", settings.default_send_to || "foreman"),
+    );
+    setTerminalVisibility((current) =>
+      sync(
+        current,
+        previous?.terminal_transcript_visibility || "foreman",
+        settings.terminal_transcript_visibility || "foreman",
+      ),
+    );
+    setTerminalNotifyTail((current) =>
+      sync(
+        current,
+        Boolean(previous?.terminal_transcript_notify_tail),
+        Boolean(settings.terminal_transcript_notify_tail),
+      ),
+    );
+    setTerminalNotifyLines((current) =>
+      sync(
+        current,
+        Number(previous?.terminal_transcript_notify_lines || 20),
+        Number(settings.terminal_transcript_notify_lines || 20),
+      ),
+    );
+    previousSettings.current = { groupId, value: settings };
+  }, [isOpen, groupId, settings]);
+
+  useEffect(() => {
+    if (imMattermostBusy.current || imPlatform === "mattermost") {
+      imMattermostBusy.current = false;
+      setImBusy(false);
+    }
+  }, [isOpen, groupId, imPlatform]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -254,6 +390,7 @@ export function SettingsModal({
 
   useEffect(() => {
     if (isOpen) return;
+    observabilityLoaded.current = false;
     setAccountReturnToWebAccess(false);
     setFocusReachOnOpen(false);
   }, [isOpen]);
@@ -287,10 +424,13 @@ export function SettingsModal({
   }, [isOpen, groupId]);
 
   const resetIMState = () => {
+    setImConfigError(null);
     setImStatus(null);
+    setWeixinLoginStatus(null);
     setImPlatform("telegram");
     setImBotTokenEnv("");
     setImAppTokenEnv("");
+    setImMattermostUrl("");
     setImFeishuDomain("https://open.feishu.cn");
     setImFeishuAppId("");
     setImFeishuAppSecret("");
@@ -303,27 +443,41 @@ export function SettingsModal({
   };
 
   const loadIMStatus = useCallback(
-    async (opts?: { resetFirst?: boolean }) => {
+    async (opts?: { isCurrent?: () => boolean; canReloadConfig?: () => boolean }) => {
       const gid = String(groupId || "").trim();
       const seq = ++imLoadSeq.current;
-      if (opts?.resetFirst) resetIMState();
+      const selection = imPlatformSelectionSeq.current;
+      const edit = imMattermostEditSeq.current;
+      const isCurrent = (platform?: unknown) =>
+        seq === imLoadSeq.current &&
+        opts?.isCurrent?.() !== false &&
+        (platform !== "mattermost" || selection === imPlatformSelectionSeq.current);
+      // Editing a draft blocks configuration hydration, not authoritative runtime status.
+      const canReloadConfig = () =>
+        opts?.canReloadConfig?.() !== false && imMattermostEditSeq.current === edit;
       if (!gid) return;
       try {
         const statusResp = await api.fetchIMStatus(gid);
-        if (seq !== imLoadSeq.current) return;
+        if (!isCurrent(statusResp.ok ? statusResp.result.platform : undefined)) return;
         if (statusResp.ok) {
           setImStatus(statusResp.result);
-          if (statusResp.result.platform) {
+          if (canReloadConfig() && statusResp.result.platform) {
             setImPlatform(statusResp.result.platform as IMPlatform);
           }
         }
+        if (!canReloadConfig()) return;
         const configResp = await api.fetchIMConfig(gid);
-        if (seq !== imLoadSeq.current) return;
+        if (
+          !isCurrent(configResp.ok ? configResp.result.im?.platform : undefined) ||
+          !canReloadConfig()
+        )
+          return;
         if (configResp.ok && configResp.result.im) {
           const im = configResp.result.im;
           if (im.platform) setImPlatform(im.platform);
           setImBotTokenEnv(im.bot_token_env || im.bot_token || im.token_env || im.token || "");
           setImAppTokenEnv(im.app_token_env || im.app_token || "");
+          setImMattermostUrl(im.mattermost_url || "");
           {
             const raw = String(im.feishu_domain || "https://open.feishu.cn").trim();
             const canon = raw
@@ -351,10 +505,21 @@ export function SettingsModal({
   );
 
   useEffect(() => {
-    if (!isOpen) return;
-    loadIMStatus({ resetFirst: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only load when the modal opens or groupId changes.
+    imInitiallyLoaded.current = false;
+    weixinLoginOwner.current = null;
+    setImBusy(false);
+    resetIMState();
+    return () => {
+      imLoadSeq.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Reset once per settings opening/Group, not when revisiting a draft.
   }, [isOpen, groupId]);
+
+  useEffect(() => {
+    if (!isOpen || !imTabActive || imInitiallyLoaded.current) return;
+    imInitiallyLoaded.current = true;
+    void loadIMStatus();
+  }, [isOpen, groupId, imTabActive, loadIMStatus]);
 
   const toWeixinErrorStatus = useCallback(
     (message: string): WeixinLoginStatus => ({
@@ -372,7 +537,14 @@ export function SettingsModal({
   );
 
   useEffect(() => {
-    if (!isOpen || !groupId || imPlatform !== "weixin") return;
+    if (!isOpen || !groupId || imPlatform !== "weixin" || imBusy || imStatus?.group_id !== groupId)
+      return;
+    // A scan already in progress keeps completing across settings tabs.
+    const needsPoll = shouldPollWeixinLogin({
+      running: weixinLoginStatus?.running ?? false,
+      status: weixinLoginStatus?.status ?? "",
+    });
+    if (!imTabActive && !needsPoll) return;
     let cancelled = false;
     let loading = false;
     const loadWeixinStatus = async () => {
@@ -397,10 +569,6 @@ export function SettingsModal({
       }
     };
     void loadWeixinStatus();
-    const needsPoll = shouldPollWeixinLogin({
-      running: weixinLoginStatus?.running ?? false,
-      status: weixinLoginStatus?.status ?? "",
-    });
     if (!needsPoll)
       return () => {
         cancelled = true;
@@ -416,6 +584,9 @@ export function SettingsModal({
     isOpen,
     groupId,
     imPlatform,
+    imBusy,
+    imStatus?.group_id,
+    imTabActive,
     weixinLoginStatus?.running,
     weixinLoginStatus?.status,
     t,
@@ -423,47 +594,102 @@ export function SettingsModal({
   ]);
 
   useEffect(() => {
-    if (imPlatform !== "weixin") {
-      weixinAutoStartRef.current = false;
+    if (
+      !isOpen ||
+      imPlatform !== "weixin" ||
+      weixinLoginOwner.current?.scope !== imActionScope.current
+    ) {
+      weixinLoginOwner.current = null;
       return;
     }
-    if (!groupId) return;
-    if (!weixinLoginStatus?.logged_in) return;
-    if (!imStatus?.configured || String(imStatus.platform || "") !== "weixin") return;
-    if (!imStatus.enabled) {
-      weixinAutoStartRef.current = false;
+    if (imBusy || !groupId) return;
+    if (!weixinLoginStatus?.logged_in) {
+      if (!shouldPollWeixinLogin(weixinLoginStatus)) weixinLoginOwner.current = null;
       return;
     }
-    if (imStatus.running) {
-      weixinAutoStartRef.current = false;
+    // Saving QR login configuration leaves the bridge disabled. This explicit
+    // login intent, not that saved enabled flag, authorizes one subsequent start.
+    if (!imStatus?.configured || imStatus.platform !== "weixin" || imStatus.running) {
+      weixinLoginOwner.current = null;
       return;
     }
-    if (weixinAutoStartRef.current) return;
-
-    weixinAutoStartRef.current = true;
+    const owner = weixinLoginOwner.current;
+    const { isCurrent, canReload } = currentIMAction();
     void (async () => {
       setImBusy(true);
+      setImConfigError(null);
       try {
-        const resp = await api.startIMBridge(groupId);
-        if (resp.ok) {
-          await loadIMStatus();
-        }
-      } catch (e) {
-        console.error("Failed to auto-start weixin bridge:", e);
+        await api.runIMManagement(groupId, false, async () => {
+          if (!isCurrent() || weixinLoginOwner.current !== owner) return;
+          weixinLoginOwner.current = null;
+          const resp = await api.startIMBridge(groupId);
+          if (!isCurrent()) return;
+          if (resp.ok) await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+          else
+            setImConfigError({
+              groupId,
+              message: resp.error?.message || t("imBridge.weixinBridgeStartFailed"),
+            });
+        });
+      } catch {
+        if (isCurrent())
+          setImConfigError({ groupId, message: t("imBridge.weixinBridgeStartFailed") });
       } finally {
-        setImBusy(false);
+        if (weixinLoginOwner.current === owner) weixinLoginOwner.current = null;
+        if (isCurrent()) setImBusy(false);
       }
     })();
-  }, [groupId, imPlatform, imStatus, loadIMStatus, weixinLoginStatus]);
+  }, [
+    isOpen,
+    groupId,
+    imPlatform,
+    imBusy,
+    imStatus,
+    loadIMStatus,
+    weixinLoginStatus,
+    currentIMAction,
+    t,
+  ]);
 
   useEffect(() => {
-    if (isOpen && canAccessGlobalSettings === true) loadObservability();
-  }, [isOpen, canAccessGlobalSettings]);
+    if (
+      !isOpen ||
+      !developerTabActive ||
+      canAccessGlobalSettings !== true ||
+      observabilityLoaded.current
+    )
+      return;
+    observabilityLoaded.current = true;
+    void loadObservability();
+  }, [isOpen, developerTabActive, canAccessGlobalSettings]);
 
   useEffect(() => {
-    if (isOpen && groupId) loadDevActors();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only load when the modal opens or groupId changes.
-  }, [isOpen, groupId]);
+    if (
+      !isOpen ||
+      !groupId ||
+      settingsTarget ||
+      scope !== "group" ||
+      (groupTab !== "automation" && groupTab !== "transcript")
+    )
+      return;
+    let cancelled = false;
+    void api
+      .fetchActors(groupId, false)
+      .then((resp) => {
+        if (cancelled || !resp.ok) return;
+        const actors = Array.isArray(resp.result?.actors) ? resp.result.actors : [];
+        setDevActors(actors);
+        setTailActorId((current) =>
+          actors.some((actor) => actor.id === current) ? current : actors[0]?.id || "",
+        );
+      })
+      .catch((error) => {
+        if (!cancelled) console.error("Failed to load settings actor list:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, groupId, settingsTarget, scope, groupTab]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -521,33 +747,71 @@ export function SettingsModal({
     }
   };
 
-  const loadDevActors = async () => {
-    if (!groupId) return;
+  // ============ Handlers ============
+
+  const [saveFeedback, setSaveFeedback] = useState<{
+    context: string;
+    error: boolean;
+    message: string;
+  } | null>(null);
+  const saveContext = JSON.stringify([
+    isOpen,
+    groupId,
+    scope,
+    scope === "group" ? groupTab : globalTab,
+    mailNoticeAfterSeconds,
+    replyNoticeAfterSeconds,
+    idleSeconds,
+    keepaliveSeconds,
+    keepaliveMax,
+    silenceSeconds,
+    helpNudgeIntervalSeconds,
+    helpNudgeMinMessages,
+    defaultSendTo,
+    terminalVisibility,
+    terminalNotifyTail,
+    terminalNotifyLines,
+  ]);
+  const saveContextRef = useRef(saveContext);
+  saveContextRef.current = saveContext;
+  useEffect(
+    () => () => {
+      saveContextRef.current = "";
+    },
+    [],
+  );
+  const saveGroupSettings = async (patch: Partial<GroupSettings>) => {
+    const context = saveContextRef.current;
+    setSaveFeedback(null);
     try {
-      const resp = await api.fetchActors(groupId, false);
-      if (resp.ok && resp.result?.actors) {
-        const actors = Array.isArray(resp.result.actors) ? resp.result.actors : [];
-        setDevActors(actors);
-        if (!tailActorId && actors.length > 0) {
-          setTailActorId(actors[0].id);
-        }
+      const result = await onUpdateSettings(patch);
+      if (saveContextRef.current === context) {
+        setSaveFeedback({
+          context,
+          error: result === false,
+          message: t(result === false ? "saveFeedback.failed" : "saveFeedback.saved"),
+        });
       }
-    } catch (e) {
-      console.error("Failed to load developer actor list:", e);
+    } catch (error) {
+      if (saveContextRef.current === context) {
+        setSaveFeedback({
+          context,
+          error: true,
+          message: error instanceof Error ? error.message : t("saveFeedback.failed"),
+        });
+      }
     }
   };
 
-  // ============ Handlers ============
-
   const handleSaveDeliverySettings = async () => {
-    await onUpdateSettings({
+    await saveGroupSettings({
       mail_notice_after_seconds: mailNoticeAfterSeconds,
       reply_notice_after_seconds: replyNoticeAfterSeconds,
     });
   };
 
   const handleSaveAutomationSettings = async () => {
-    await onUpdateSettings({
+    await saveGroupSettings({
       actor_idle_timeout_seconds: idleSeconds,
       keepalive_delay_seconds: keepaliveSeconds,
       keepalive_max_per_actor: keepaliveMax,
@@ -567,7 +831,7 @@ export function SettingsModal({
   };
 
   const handleSaveTranscriptSettings = async () => {
-    await onUpdateSettings({
+    await saveGroupSettings({
       terminal_transcript_visibility: terminalVisibility,
       terminal_transcript_notify_tail: terminalNotifyTail,
       terminal_transcript_notify_lines: terminalNotifyLines,
@@ -575,7 +839,7 @@ export function SettingsModal({
   };
 
   const handleSaveMessagingSettings = async () => {
-    await onUpdateSettings({ default_send_to: defaultSendTo });
+    await saveGroupSettings({ default_send_to: defaultSendTo });
   };
 
   const copyTailLastLines = async (lineCount: number) => {
@@ -650,6 +914,7 @@ export function SettingsModal({
   const getCurrentIMConfigDraft = (): IMConfigDraft => ({
     botTokenEnv: imBotTokenEnv,
     appTokenEnv: imAppTokenEnv,
+    mattermostUrl: imMattermostUrl,
     feishuDomain: imFeishuDomain,
     feishuAppId: imFeishuAppId,
     feishuAppSecret: imFeishuAppSecret,
@@ -665,6 +930,7 @@ export function SettingsModal({
   const applyIMConfigDraft = (draft: IMConfigDraft) => {
     setImBotTokenEnv(draft.botTokenEnv);
     setImAppTokenEnv(draft.appTokenEnv);
+    setImMattermostUrl(draft.mattermostUrl);
     setImFeishuDomain(draft.feishuDomain);
     setImFeishuAppId(draft.feishuAppId);
     setImFeishuAppSecret(draft.feishuAppSecret);
@@ -685,6 +951,12 @@ export function SettingsModal({
   // Handle platform change with config caching
   const handlePlatformChange = (newPlatform: IMPlatform) => {
     if (newPlatform === imPlatform) return;
+    weixinLoginOwner.current = null;
+    if (imPlatform === "weixin" || newPlatform === "weixin") setImBusy(false);
+    // User selection invalidates stale Mattermost reads; programmatic hydration is not a user edit.
+    imPlatformSelectionSeq.current += 1;
+    if (imPlatform === "mattermost" || newPlatform === "mattermost") imLoadSeq.current += 1;
+    setImConfigError(null);
 
     // 1. Save current platform config to drafts
     setImConfigDrafts((prev) => ({ ...prev, [imPlatform]: getCurrentIMConfigDraft() }));
@@ -697,6 +969,7 @@ export function SettingsModal({
       // Reset to empty if no cached draft (new platform)
       setImBotTokenEnv("");
       setImAppTokenEnv("");
+      setImMattermostUrl("");
       setImFeishuDomain("https://open.feishu.cn");
       setImFeishuAppId("");
       setImFeishuAppSecret("");
@@ -714,143 +987,269 @@ export function SettingsModal({
 
   const handleSaveIMConfig = async () => {
     if (!groupId) return;
+    const { isCurrent, canReload } = currentIMAction();
     setImBusy(true);
+    setImConfigError(null);
     try {
-      const resp = await saveIMConfigDraft(getCurrentIMSaveRequest());
-      if (resp.ok) await loadIMStatus();
+      await api.runIMManagement(groupId, imPlatform === "mattermost", async () => {
+        if (!isCurrent()) return;
+        const resp = await saveIMConfigDraft(getCurrentIMSaveRequest());
+        if (!isCurrent()) return;
+        if (resp.ok) {
+          await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        } else if (imPlatform === "mattermost") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.mattermostConfigFailed"),
+          });
+        }
+      });
     } catch (e) {
+      if (!isCurrent()) return;
+      if (imPlatform === "mattermost") {
+        setImConfigError({ groupId, message: t("imBridge.mattermostConfigFailed") });
+      }
       console.error("Failed to save IM config:", e);
     } finally {
-      setImBusy(false);
+      if (isCurrent()) {
+        imMattermostBusy.current = false;
+        setImBusy(false);
+      }
     }
   };
 
   const handleRemoveIMConfig = async () => {
     if (!groupId) return;
+    weixinLoginOwner.current = null;
+    const { isCurrent, canReload } = currentIMAction();
     setImBusy(true);
+    setImConfigError(null);
     try {
-      const resp = await api.unsetIMConfig(groupId);
-      if (resp.ok) {
-        setImBotTokenEnv("");
-        setImAppTokenEnv("");
-        setImFeishuDomain("https://open.feishu.cn");
-        setImFeishuAppId("");
-        setImFeishuAppSecret("");
-        setImDingtalkAppKey("");
-        setImDingtalkAppSecret("");
-        setImDingtalkRobotCode("");
-        setImWecomBotId("");
-        setImWecomSecret("");
-        setImWeixinAccountId("");
-        await loadIMStatus();
-      }
+      await api.runIMManagement(groupId, imPlatform === "mattermost", async () => {
+        if (!isCurrent()) return;
+        const resp = await api.unsetIMConfig(groupId);
+        if (!isCurrent()) return;
+        if (!resp.ok && imPlatform === "mattermost") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.mattermostConfigFailed"),
+          });
+        }
+        if (resp.ok) {
+          if (canReload()) {
+            setImBotTokenEnv("");
+            setImAppTokenEnv("");
+            setImMattermostUrl("");
+            setImFeishuDomain("https://open.feishu.cn");
+            setImFeishuAppId("");
+            setImFeishuAppSecret("");
+            setImDingtalkAppKey("");
+            setImDingtalkAppSecret("");
+            setImDingtalkRobotCode("");
+            setImWecomBotId("");
+            setImWecomSecret("");
+            setImWeixinAccountId("");
+          }
+          await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        }
+      });
     } catch (e) {
+      if (!isCurrent()) return;
+      if (imPlatform === "mattermost") {
+        setImConfigError({ groupId, message: t("imBridge.mattermostConfigFailed") });
+      }
       console.error("Failed to remove IM config:", e);
     } finally {
-      setImBusy(false);
+      if (isCurrent()) {
+        imMattermostBusy.current = false;
+        setImBusy(false);
+      }
     }
   };
 
   const handleStartBridge = async () => {
     if (!groupId) return;
+    weixinLoginOwner.current = null;
     if (!canStartIMBridge(imPlatform, !!weixinLoginStatus?.logged_in)) return;
+    const { isCurrent, canReload } = currentIMAction();
     setImBusy(true);
+    setImConfigError(null);
     try {
-      const resp = await saveAndStartIMBridge(getCurrentIMSaveRequest());
-      await loadIMStatus();
-      if (!resp.ok && imPlatform === "weixin") {
-        setWeixinLoginStatus(
-          toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinStartFailed")),
-        );
-      }
+      await api.runIMManagement(groupId, imPlatform === "mattermost", async () => {
+        if (!isCurrent()) return;
+        // Preserve the draft after a failed Mattermost save; reloading would replace it with the old platform/config.
+        if (imPlatform === "mattermost") {
+          const saved = await saveIMConfigDraft(getCurrentIMSaveRequest());
+          if (!isCurrent()) return;
+          if (!saved.ok) {
+            setImConfigError({
+              groupId,
+              message: saved.error?.message || t("imBridge.mattermostConfigFailed"),
+            });
+            return;
+          }
+        }
+        const resp =
+          imPlatform === "mattermost"
+            ? await api.startIMBridge(groupId)
+            : await saveAndStartIMBridge(getCurrentIMSaveRequest());
+        if (!isCurrent()) return;
+        await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        if (!isCurrent()) return;
+        if (!resp.ok && imPlatform === "mattermost") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.mattermostConfigFailed"),
+          });
+        }
+        if (!resp.ok && imPlatform === "weixin") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.weixinBridgeStartFailed"),
+          });
+        }
+      });
     } catch (e) {
-      console.error("Failed to start bridge:", e);
+      if (!isCurrent()) return;
+      if (imPlatform === "mattermost") {
+        setImConfigError({ groupId, message: t("imBridge.mattermostConfigFailed") });
+      }
+      if (imPlatform === "weixin") {
+        setImConfigError({ groupId, message: t("imBridge.weixinBridgeStartFailed") });
+      } else {
+        console.error("Failed to start bridge:", e);
+      }
     } finally {
-      setImBusy(false);
+      if (isCurrent()) {
+        imMattermostBusy.current = false;
+        setImBusy(false);
+      }
     }
   };
 
   const handleStopBridge = async () => {
     if (!groupId) return;
+    weixinLoginOwner.current = null;
+    const { isCurrent, canReload } = currentIMAction();
     setImBusy(true);
+    if (imPlatform === "mattermost") setImConfigError(null);
     try {
-      await api.stopIMBridge(groupId);
-      await loadIMStatus();
+      await api.runIMManagement(groupId, imPlatform === "mattermost", async () => {
+        if (!isCurrent()) return;
+        const resp = await api.stopIMBridge(groupId);
+        if (!isCurrent()) return;
+        if (!resp.ok && imPlatform === "mattermost") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.mattermostConfigFailed"),
+          });
+          return;
+        }
+        await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+      });
     } catch (e) {
+      if (!isCurrent()) return;
+      if (imPlatform === "mattermost") {
+        setImConfigError({ groupId, message: t("imBridge.mattermostConfigFailed") });
+      }
       console.error("Failed to stop bridge:", e);
     } finally {
-      setImBusy(false);
+      if (isCurrent()) {
+        imMattermostBusy.current = false;
+        setImBusy(false);
+      }
     }
   };
 
   const handleStartWeixinLogin = async () => {
     if (!groupId) return;
+    weixinLoginOwner.current = null;
+    const { isCurrent, canReload } = currentIMAction();
     setImBusy(true);
     try {
-      const saveResp = await saveIMConfigDraft(getCurrentIMSaveRequest());
-      if (!saveResp.ok) {
-        setWeixinLoginStatus(
-          toWeixinErrorStatus(saveResp.error?.message || t("imBridge.weixinStartFailed")),
-        );
-        return;
-      }
-      await loadIMStatus();
-      weixinAutoStartRef.current = false;
-      const resp = await api.startWeixinLogin(groupId);
-      if (resp.ok) {
-        setWeixinLoginStatus(resp.result ?? null);
-      } else {
-        setWeixinLoginStatus(
-          toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinStartFailed")),
-        );
-      }
+      await api.runIMManagement(groupId, false, async () => {
+        if (!isCurrent()) return;
+        const saveResp = await saveIMConfigDraft(getCurrentIMSaveRequest());
+        if (!isCurrent()) return;
+        if (!saveResp.ok) {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(saveResp.error?.message || t("imBridge.weixinStartFailed")),
+          );
+          return;
+        }
+        await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        if (!isCurrent()) return;
+        const resp = await api.startWeixinLogin(groupId);
+        if (!isCurrent()) return;
+        if (resp.ok) {
+          weixinLoginOwner.current = { scope: imActionScope.current };
+          setWeixinLoginStatus(resp.result ?? null);
+        } else {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinStartFailed")),
+          );
+        }
+      });
     } catch (e) {
+      if (!isCurrent()) return;
       setWeixinLoginStatus(toWeixinErrorStatus(t("imBridge.weixinStartFailed")));
       console.error("Failed to start weixin login:", e);
     } finally {
-      setImBusy(false);
+      if (isCurrent()) setImBusy(false);
     }
   };
 
   const handleLogoutWeixin = async () => {
     if (!groupId) return;
+    weixinLoginOwner.current = null;
+    const { isCurrent, canReload } = currentIMAction();
     setImBusy(true);
     try {
-      weixinAutoStartRef.current = false;
-      const resp = await api.logoutWeixin(groupId);
-      if (resp.ok) {
-        setWeixinLoginStatus(resp.result ?? null);
-        await loadIMStatus();
-      } else {
-        setWeixinLoginStatus(
-          toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinLogoutFailed")),
-        );
-      }
+      await api.runIMManagement(groupId, false, async () => {
+        if (!isCurrent()) return;
+        const resp = await api.logoutWeixin(groupId);
+        if (!isCurrent()) return;
+        if (resp.ok) {
+          setWeixinLoginStatus(resp.result ?? null);
+          await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        } else {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinLogoutFailed")),
+          );
+        }
+      });
     } catch (e) {
+      if (!isCurrent()) return;
       setWeixinLoginStatus(toWeixinErrorStatus(t("imBridge.weixinLogoutFailed")));
       console.error("Failed to logout weixin:", e);
     } finally {
-      setImBusy(false);
+      if (isCurrent()) setImBusy(false);
     }
   };
 
   const handleVerifyWeixin = async (verifyCode: string) => {
     if (!groupId) return;
+    const { isCurrent } = currentIMAction();
     setImBusy(true);
     try {
-      const resp = await api.verifyWeixinLogin(groupId, verifyCode);
-      if (resp.ok) {
-        setWeixinLoginStatus(resp.result ?? null);
-      } else {
-        setWeixinLoginStatus(
-          toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinVerifyFailed")),
-        );
-      }
+      await api.runIMManagement(groupId, false, async () => {
+        if (!isCurrent()) return;
+        const resp = await api.verifyWeixinLogin(groupId, verifyCode);
+        if (!isCurrent()) return;
+        if (resp.ok) {
+          setWeixinLoginStatus(resp.result ?? null);
+        } else {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinVerifyFailed")),
+          );
+        }
+      });
     } catch (e) {
+      if (!isCurrent()) return;
       setWeixinLoginStatus(toWeixinErrorStatus(t("imBridge.weixinVerifyFailed")));
       console.error("Failed to verify weixin login:", e);
     } finally {
-      setImBusy(false);
+      if (isCurrent()) setImBusy(false);
     }
   };
 
@@ -929,6 +1328,7 @@ export function SettingsModal({
 
   const loadRuntimeInfo = async () => {
     setRuntimeInfoErr("");
+    setRuntimeBuildInfo(undefined);
     try {
       const resp = await api.fetchPing();
       if (!resp.ok) {
@@ -944,6 +1344,15 @@ export function SettingsModal({
           : null;
       setRuntimeVersion(String(result.version || "").trim());
       setDaemonVersion(String(daemon?.version || "").trim());
+      setRuntimeBuildInfo({
+        webSource: String(result.build?.source_id || ""),
+        daemonSource: String(
+          (daemon?.build as { source_id?: string } | undefined)?.source_id || "",
+        ),
+        webAssets: String(result.web?.assets_id || ""),
+        servedEntry: String(result.web?.entry_script || ""),
+        loadedEntry: loadedWebEntry(),
+      });
     } catch {
       setRuntimeVersion("");
       setDaemonVersion("");
@@ -1106,6 +1515,7 @@ export function SettingsModal({
       setFocusReachOnOpen(false);
       if (nextTab) setGroupTab(nextTab as GroupTabId);
     }
+    if (settingsTarget.webModelProvider) setWebModelProvider(settingsTarget.webModelProvider);
     clearSettingsTarget();
   }, [clearSettingsTarget, isOpen, settingsTarget]);
 
@@ -1116,8 +1526,10 @@ export function SettingsModal({
     { id: "delivery", label: t("tabs.delivery") },
     { id: "space", label: t("tabs.space") },
     { id: "messaging", label: t("tabs.messaging") },
-    { id: "connections", label: t("tabs.connections") },
     { id: "im", label: t("tabs.im") },
+    ...(globalSettingsEnabled
+      ? [{ id: "connections" as const, label: t("layout:groupConnections.title") }]
+      : []),
     { id: "transcript", label: t("tabs.transcript") },
     { id: "copyGroups", label: t("tabs.copyGroups") },
   ];
@@ -1175,43 +1587,21 @@ export function SettingsModal({
       isDark={isDark}
       onClose={onClose}
       titleId="settings-modal-title"
+      surface="solid"
       title={
-        <div className="min-w-0">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]">
-            Workspace Settings
-          </div>
-          <h2 className="mt-1 truncate text-[1.15rem] font-semibold text-[var(--color-text-primary)]">
-            {t("title")}
-          </h2>
-          <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-            {scope === "group"
-              ? t("navigation.groupScopeContent", { scopeRoot: scopeRootUrl || groupId || "—" })
-              : globalScopeEnabled
-                ? t("navigation.globalScopeContent")
-                : t("navigation.globalLockedContent")}
-          </div>
-        </div>
+        <h2 className="truncate text-lg font-semibold text-[var(--color-text-primary)]">
+          {t("title")}
+        </h2>
       }
       closeAriaLabel={t("closeAriaLabel")}
       panelClassName="w-full h-full sm:h-[min(90dvh,920px)] sm:max-w-[min(1280px,calc(100vw-2rem))] sm:max-h-[90dvh]"
-      headerActions={
-        <div className="hidden sm:flex items-center gap-2">
-          <span className="rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]">
-            {scope === "group" ? t("navigation.thisGroup") : t("navigation.global")}
-          </span>
-          {groupDoc?.title && scope === "group" ? (
-            <span className="max-w-[18rem] truncate rounded-full border border-[var(--glass-border-subtle)] bg-transparent px-3 py-1 text-[11px] font-medium text-[var(--color-text-tertiary)]">
-              {groupDoc.title}
-            </span>
-          ) : null}
-        </div>
-      }
       modalRef={modalRef}
     >
       <div className="min-h-0 flex-1 flex flex-col sm:flex-row overflow-hidden">
         <SettingsNavigation
           isDark={isDark}
           groupId={groupId}
+          groupTitle={groupDoc?.title}
           scope={scope}
           scopeRootUrl={scopeRootUrl}
           globalEnabled={globalScopeEnabled}
@@ -1228,13 +1618,9 @@ export function SettingsModal({
         {/* Main Content Area */}
         <div
           ref={contentScrollRef}
-          className={`min-h-0 flex-1 overflow-y-auto scrollbar-subtle flex flex-col [scrollbar-gutter:stable] ${
-            isDark
-              ? "bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),transparent_32%),linear-gradient(180deg,var(--color-bg-primary),var(--color-sidebar-bg))]"
-              : "bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.96),rgba(255,255,255,0)_34%),linear-gradient(180deg,var(--color-bg-primary),var(--color-sidebar-bg))]"
-          }`}
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-subtle flex flex-col [scrollbar-gutter:stable] bg-[var(--color-bg-primary)]"
         >
-          <div className="p-4 pb-6 sm:p-5 lg:p-6 sm:pb-7 space-y-4 lg:space-y-5">
+          <div className="p-4 pb-6 sm:p-5 lg:p-6 sm:pb-7 space-y-6">
             {scope === "global" && !globalSettingsEnabled && !currentBrowserSignedIn ? (
               <div
                 className={`rounded-xl border p-6 ${isDark ? "border-amber-700/40 bg-amber-900/10 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-800"}`}
@@ -1253,6 +1639,35 @@ export function SettingsModal({
               </div>
             ) : !tabs.some((tab) => tab.id === activeTab) ? null : (
               <Suspense fallback={<SettingsTabFallback />}>
+                {scope === "group" &&
+                  activeTab === "connections" &&
+                  groupId &&
+                  globalSettingsEnabled && (
+                    <section className="space-y-4">
+                      <div>
+                        <h3 className="text-base font-semibold">
+                          {t("layout:groupConnections.title")} ·{" "}
+                          {groupDoc?.group_id === groupId ? groupDoc.title || groupId : groupId}
+                        </h3>
+                        <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                          {t("layout:groupConnections.description")}
+                        </p>
+                      </div>
+                      <GroupConnectionsPanel
+                        key={groupId}
+                        groupId={groupId}
+                        groupTitle={
+                          groupDoc?.group_id === groupId ? groupDoc.title || groupId : groupId
+                        }
+                        onOpenAccount={() => {
+                          setAccountReturnToWebAccess(false);
+                          setFocusReachOnOpen(false);
+                          setScope("global");
+                          setGlobalTab("account");
+                        }}
+                      />
+                    </section>
+                  )}
                 {activeTab === "automation" && (
                   <AutomationTab
                     isDark={isDark}
@@ -1303,12 +1718,27 @@ export function SettingsModal({
                     isDark={isDark}
                     groupId={groupId}
                     imStatus={imStatus}
+                    imConfigError={
+                      imConfigError && imConfigError.groupId === groupId
+                        ? imConfigError.message
+                        : undefined
+                    }
                     imPlatform={imPlatform}
                     onPlatformChange={handlePlatformChange}
                     imBotTokenEnv={imBotTokenEnv}
-                    setImBotTokenEnv={setImBotTokenEnv}
+                    setImBotTokenEnv={(value) => {
+                      if (imPlatform === "mattermost") {
+                        imMattermostEditSeq.current += 1;
+                      }
+                      setImBotTokenEnv(value);
+                    }}
                     imAppTokenEnv={imAppTokenEnv}
                     setImAppTokenEnv={setImAppTokenEnv}
+                    imMattermostUrl={imMattermostUrl}
+                    setImMattermostUrl={(value) => {
+                      imMattermostEditSeq.current += 1;
+                      setImMattermostUrl(value);
+                    }}
                     imFeishuAppId={imFeishuAppId}
                     setImFeishuAppId={setImFeishuAppId}
                     imFeishuAppSecret={imFeishuAppSecret}
@@ -1398,15 +1828,6 @@ export function SettingsModal({
                   />
                 )}
 
-                {activeTab === "connections" && (
-                  <GroupBridgeConnectionsTab
-                    isDark={isDark}
-                    isActive={scope === "group" && activeTab === "connections"}
-                    groupId={groupId || ""}
-                    groupTitle={groupDoc?.title || ""}
-                  />
-                )}
-
                 {activeTab === "capabilities" && (
                   <CapabilitiesTab
                     isDark={isDark}
@@ -1458,6 +1879,8 @@ export function SettingsModal({
 
                 {activeTab === "webModels" && (
                   <WebModelConnectorsTab
+                    provider={webModelProvider}
+                    onProviderChange={setWebModelProvider}
                     isDark={isDark}
                     isActive={scope === "global" && activeTab === "webModels"}
                     currentGroupId={groupId}
@@ -1470,6 +1893,7 @@ export function SettingsModal({
                     isDark={isDark}
                     groupId={groupId}
                     runtimeVersion={runtimeVersion}
+                    runtimeBuildInfo={runtimeBuildInfo}
                     daemonVersion={daemonVersion}
                     runtimeInfoErr={runtimeInfoErr}
                     developerMode={developerMode}
@@ -1511,6 +1935,14 @@ export function SettingsModal({
                   />
                 )}
               </Suspense>
+            )}
+            {saveFeedback?.context === saveContext && (
+              <p
+                role={saveFeedback.error ? "alert" : "status"}
+                className={`text-sm ${saveFeedback.error ? "text-rose-700 dark:text-rose-300" : "text-[var(--color-accent-success)]"}`}
+              >
+                {saveFeedback.message}
+              </p>
             )}
           </div>
         </div>

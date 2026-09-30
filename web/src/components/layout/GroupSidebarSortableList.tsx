@@ -1,3 +1,4 @@
+import { groupConnectionCount, type GroupConnectionSummary } from "../../features/connect/protocol";
 import {
   DndContext,
   closestCenter,
@@ -11,6 +12,7 @@ import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable"
 import { useCallback } from "react";
 import { GroupMeta } from "../../types";
 import { SortableGroupItem } from "./SortableGroupItem";
+import type { GroupMenuActionItem } from "./useGroupMenu";
 import { getSidebarSensorActivationConstraints } from "./groupSidebarModel";
 
 interface GroupSidebarSortableListProps {
@@ -21,10 +23,15 @@ interface GroupSidebarSortableListProps {
   isCollapsed: boolean;
   readOnly?: boolean;
   menuActionLabel?: string;
+  connectionsLabel?: string;
+  connectionSummary?: GroupConnectionSummary | null;
+  onOpenConnections?: (groupId: string) => void;
   menuAriaLabel?: string;
   /** Screen-reader instructions for a sortable row; replaces dnd-kit's default. */
   reorderInstructions?: string;
   onMenuAction?: (groupId: string) => void;
+  runActionsFor?: (group: GroupMeta) => GroupMenuActionItem[];
+  trailingActionsFor?: (group: GroupMeta) => GroupMenuActionItem[];
   onReorderSection: (section: "working" | "archived", fromIndex: number, toIndex: number) => void;
   onSelectGroup: (groupId: string) => void;
   onWarmGroup?: (groupId: string) => void;
@@ -39,9 +46,14 @@ export function GroupSidebarSortableList({
   isCollapsed,
   readOnly,
   menuActionLabel,
+  connectionsLabel,
+  connectionSummary,
+  onOpenConnections,
   menuAriaLabel,
   reorderInstructions,
   onMenuAction,
+  runActionsFor,
+  trailingActionsFor,
   onReorderSection,
   onSelectGroup,
   onWarmGroup,
@@ -101,10 +113,15 @@ export function GroupSidebarSortableList({
                 isArchived={isArchivedSection}
                 dragDisabled={!!readOnly}
                 menuActionLabel={menuActionLabel}
+                connectionsLabel={connectionsLabel}
+                connection={groupConnectionCount(connectionSummary, gid)}
+                onOpenConnections={onOpenConnections ? () => onOpenConnections(gid) : undefined}
                 menuAriaLabel={
                   menuAriaLabel ? `${menuAriaLabel} · ${group.title || gid}` : undefined
                 }
                 onMenuAction={onMenuAction ? () => onMenuAction(gid) : undefined}
+                runActions={runActionsFor?.(group)}
+                trailingActions={trailingActionsFor?.(group)}
                 onMoveBy={(delta) => {
                   const target = index + delta;
                   if (target < 0 || target >= groups.length) return;

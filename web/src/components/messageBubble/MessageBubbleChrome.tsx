@@ -1,9 +1,10 @@
 import { useTranslation } from "react-i18next";
-import type { LedgerEvent } from "../../types";
+import type { ChatMessageData, LedgerEvent } from "../../types";
 import { classNames } from "../../utils/classNames";
 import type { WebModelDeliveryStatus } from "../../utils/webModelDeliveryStatus";
 import { ActorAvatar } from "../ActorAvatar";
 import { InboxIcon } from "../Icons";
+import { WebModelDeliveryRecovery } from "../webModel/WebModelDeliveryRecovery";
 
 export function MessageMetadataHeader({
   mobile,
@@ -56,20 +57,23 @@ export function MessageMetadataHeader({
           isDark={isDark}
           accentRingClassName={avatarRingClassName}
           sizeClassName="h-6 w-6"
-          textClassName="text-[10px]"
+          textClassName="text-xs"
         />
-        <span className={classNames("shrink-0 text-xs font-medium", senderTextClass)}>
+        <span
+          className={classNames("min-w-0 truncate text-xs font-medium", senderTextClass)}
+          title={senderDisplayName}
+        >
           {senderDisplayName}
         </span>
         {remoteBadgeLabel ? (
           <span
-            className="shrink-0 rounded-full border border-emerald-300/70 bg-emerald-50/85 px-1.5 py-0.5 text-[9px] font-semibold leading-none text-emerald-800 dark:border-emerald-300/30 dark:bg-emerald-950/35 dark:text-emerald-100"
+            className="shrink-0 rounded-full border border-emerald-300/70 bg-emerald-50/85 px-1.5 py-0.5 text-xs font-semibold leading-none text-emerald-800 dark:border-emerald-300/30 dark:bg-emerald-950/35 dark:text-emerald-100"
             title={remoteBadgeLabel}
           >
             {remoteBadgeLabel}
           </span>
         ) : null}
-        <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">
+        <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">
           <span title={fullMessageTimestamp}>{messageTimestamp}</span>
         </span>
       </div>
@@ -80,7 +84,7 @@ export function MessageMetadataHeader({
     <div className="hidden min-w-0 items-center gap-2 px-1 sm:flex">
       <span
         className={classNames(
-          "shrink-0 text-[11px] font-semibold tracking-[0.01em]",
+          "min-w-0 truncate text-xs font-semibold tracking-[0.01em]",
           isUserMessage
             ? isDark
               ? "text-[var(--color-text-secondary)]"
@@ -96,13 +100,13 @@ export function MessageMetadataHeader({
       </span>
       {remoteBadgeLabel ? (
         <span
-          className="shrink-0 rounded-full border border-emerald-300/70 bg-emerald-50/80 px-1.5 py-0.5 text-[9px] font-semibold leading-none text-emerald-800 dark:border-emerald-300/30 dark:bg-emerald-950/35 dark:text-emerald-100"
+          className="shrink-0 rounded-full border border-emerald-300/70 bg-emerald-50/80 px-1.5 py-0.5 text-xs font-semibold leading-none text-emerald-800 dark:border-emerald-300/30 dark:bg-emerald-950/35 dark:text-emerald-100"
           title={remoteBadgeLabel}
         >
           {remoteBadgeLabel}
         </span>
       ) : null}
-      <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">
+      <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">
         <span title={fullMessageTimestamp}>{messageTimestamp}</span>
       </span>
     </div>
@@ -161,7 +165,7 @@ export function MessageFooter({
           <span className="max-w-[10ch] truncate">{displayNameMap.get(id) || id}</span>
           <span
             className={classNames(
-              "text-[10px] font-semibold tracking-tight",
+              "text-xs font-semibold tracking-tight",
               cleared
                 ? isDark
                   ? "text-emerald-400"
@@ -177,13 +181,19 @@ export function MessageFooter({
         </span>
       ))}
       {readPreviewOverflow > 0 ? (
-        <span className={classNames("text-[10px]", "text-[var(--color-text-tertiary)]")}>
+        <span className={classNames("text-xs", "text-[var(--color-text-tertiary)]")}>
           +{readPreviewOverflow}
         </span>
       ) : null}
     </div>
   );
 
+  const connectDelivery =
+    event._connect_delivery ??
+    ((event.data as ChatMessageData | undefined)?.dst_instance_id
+      ? { state: "queued" as const }
+      : undefined);
+  const connectCancellation = event._connect_cancellation;
   const deliveryLabel = webModelDeliveryStatus
     ? t(`webModelDelivery.${webModelDeliveryStatus.state}`)
     : "";
@@ -201,22 +211,24 @@ export function MessageFooter({
   return (
     <div
       className={classNames(
-        "mt-2 flex flex-wrap items-center gap-2 px-1 text-[10px] transition-opacity",
+        "mt-2 flex flex-wrap items-center gap-2 px-1 text-xs transition-opacity",
         webModelDeliveryStatus ||
+          connectDelivery ||
+          connectCancellation ||
           isMail ||
           obligationSummary ||
           visibleReadStatusEntries.length > 0 ||
           replyRequested
           ? "justify-between"
           : "justify-end",
-        "opacity-80 group-hover:opacity-100",
+
         "text-[var(--color-text-tertiary)]",
       )}
     >
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         {isMail ? (
           <span
-            className="inline-flex items-center gap-1 rounded-full border border-sky-500/20 bg-sky-500/8 px-2 py-1 text-[10px] font-semibold tracking-tight text-sky-700 dark:text-sky-300"
+            className="inline-flex items-center gap-1 rounded-full border border-sky-500/20 bg-sky-500/8 px-2 py-1 text-xs font-semibold tracking-tight text-sky-700 dark:text-sky-300"
             title={t("mailMessageHint")}
             aria-label={t("mailMessageHint")}
           >
@@ -224,10 +236,33 @@ export function MessageFooter({
             <span>{t("modeMail")}</span>
           </span>
         ) : null}
+        {connectDelivery ? (
+          <span
+            className={classNames(
+              "max-w-full rounded-full border px-2.5 py-1 text-xs font-semibold",
+              connectDelivery.state === "failed"
+                ? "border-rose-500/20 text-rose-700 dark:text-rose-300"
+                : "border-[var(--glass-border-subtle)]",
+            )}
+            title={connectDelivery.error || t(`connectDelivery.${connectDelivery.state}Hint`)}
+          >
+            {t(`connectDelivery.${connectDelivery.state}`)}
+          </span>
+        ) : null}
+        {connectCancellation ? (
+          <span
+            className="max-w-full rounded-full border border-[var(--glass-border-subtle)] px-2.5 py-1 text-xs font-semibold"
+            title={
+              connectCancellation.error || t(`connectCancellation.${connectCancellation.state}Hint`)
+            }
+          >
+            {t(`connectCancellation.${connectCancellation.state}`)}
+          </span>
+        ) : null}
         {webModelDeliveryStatus ? (
           <span
             className={classNames(
-              "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-tight",
+              "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold tracking-tight",
               deliveryToneClass,
             )}
             title={deliveryDetail || undefined}
@@ -241,6 +276,17 @@ export function MessageFooter({
             <span className="truncate">{deliveryLabel}</span>
           </span>
         ) : null}
+        {webModelDeliveryStatus ? (
+          <WebModelDeliveryRecovery
+            groupId={event.group_id}
+            status={webModelDeliveryStatus}
+            actorLabel={
+              displayNameMap.get(webModelDeliveryStatus.actorId) || webModelDeliveryStatus.actorId
+            }
+            isDark={isDark}
+            readOnly={readOnly}
+          />
+        ) : null}
         {obligationSummary ? (
           readOnly ? (
             <div
@@ -251,7 +297,7 @@ export function MessageFooter({
                   : "border-amber-500/20 bg-amber-500/5 text-amber-600 dark:text-amber-400 dark:border-amber-500/20 dark:bg-amber-500/5",
               )}
             >
-              <span className="text-[10px] font-semibold tracking-tight">
+              <span className="text-xs font-semibold tracking-tight">
                 {t("reply")} {obligationSummary.done}/{obligationSummary.total}
               </span>
             </div>
@@ -267,7 +313,7 @@ export function MessageFooter({
               onClick={onShowRecipients}
               aria-label={t("showObligationStatus")}
             >
-              <span className="text-[10px] font-semibold tracking-tight">
+              <span className="text-xs font-semibold tracking-tight">
                 {t("reply")} {obligationSummary.done}/{obligationSummary.total}
               </span>
             </button>
@@ -304,7 +350,7 @@ export function MessageFooter({
         {!obligationSummary && replyRequested ? (
           <span
             className={classNames(
-              "rounded-full border border-violet-500/20 bg-violet-500/8 px-2.5 py-1 text-[10px] font-semibold tracking-tight",
+              "rounded-full border border-violet-500/20 bg-violet-500/8 px-2.5 py-1 text-xs font-semibold tracking-tight",
               "text-violet-700 dark:text-violet-300",
             )}
           >
@@ -319,7 +365,7 @@ export function MessageFooter({
             <button
               type="button"
               className={classNames(
-                "touch-target-sm rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
+                "touch-target-sm rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
                 "text-[var(--color-text-secondary)] hover:bg-black/8 hover:text-[var(--color-text-primary)] dark:hover:bg-white/12",
               )}
               onClick={() => void onCopyMessageText()}
@@ -332,7 +378,7 @@ export function MessageFooter({
             <button
               type="button"
               className={classNames(
-                "touch-target-sm rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
+                "touch-target-sm rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
                 "text-[var(--color-text-secondary)] hover:bg-black/8 hover:text-[var(--color-text-primary)] dark:hover:bg-white/12",
               )}
               onClick={() => onCopyLink(eventId)}
@@ -345,7 +391,7 @@ export function MessageFooter({
             <button
               type="button"
               className={classNames(
-                "touch-target-sm rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
+                "touch-target-sm rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
                 "text-[var(--color-text-secondary)] hover:bg-black/8 hover:text-[var(--color-text-primary)] dark:hover:bg-white/12",
               )}
               onClick={() => onRelay(event)}
@@ -358,7 +404,7 @@ export function MessageFooter({
             <button
               type="button"
               className={classNames(
-                "touch-target-sm rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
+                "touch-target-sm rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
                 "text-[var(--color-text-secondary)] hover:bg-black/8 hover:text-[var(--color-text-primary)] dark:hover:bg-white/12",
               )}
               onClick={onReply}

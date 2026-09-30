@@ -26,6 +26,19 @@ mod protocol;
 mod tests;
 mod turns;
 
+/// The workspace Claude Code refused to launch in because its trust prompt was never accepted.
+pub(crate) fn untrusted_claude_workspace(error: &io::Error) -> Option<&std::path::Path> {
+    claude::untrusted_workspace(error)
+}
+
+#[cfg(test)]
+pub(crate) fn claude_workspace_refusal(
+    detail: &str,
+    workspace: &std::path::Path,
+) -> Option<io::Error> {
+    claude::workspace_refusal(detail, workspace)
+}
+
 pub(crate) fn remove_claude_actor_settings(
     home: &HomeLayout,
     group_id: &str,
@@ -225,6 +238,15 @@ impl ManagedProtocol {
                 Ok(())
             }
             Self::Claude(protocol) => protocol.close().await,
+        }
+    }
+
+    /// Best-effort stop request for sessions that are not owned process trees.
+    /// Codex and ACP providers are child processes and die with this process.
+    async fn kill_request(&self) -> io::Result<()> {
+        match self {
+            Self::Codex(_) | Self::Acp(_) => Ok(()),
+            Self::Claude(protocol) => protocol.kill_request().await,
         }
     }
 

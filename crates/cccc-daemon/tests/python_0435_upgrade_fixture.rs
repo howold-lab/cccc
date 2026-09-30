@@ -1,9 +1,8 @@
 use cccc_contracts::DaemonRequest;
 use cccc_core::{
     GroupStore, HomeLayout, Registry, access_tokens::AccessTokenStore, active, assistant_state,
-    group_bridge_legacy, im_state, inbox, ledger, membership, nomcp, presentation,
-    profiles::ProfileStore, settings, space_credentials, voice_recording_lease,
-    web_model_connectors,
+    im_state, inbox, ledger, membership, nomcp, presentation, profiles::ProfileStore, settings,
+    space_credentials, voice_recording_lease, web_model_connectors,
 };
 use serde_json::{Map, Value, json};
 use std::path::Path;
@@ -516,19 +515,18 @@ fn rust_reads_the_frozen_python_0435_identity_and_integration_state_without_pyth
         "existing_chat"
     );
     let connectors = web_model_connectors::load(&home).expect("Python connector store");
-    let connector = connectors
-        .iter()
-        .find(|item| item["connector_id"] == "wmc_fixture")
-        .expect("fixture connector");
-    assert!(!connector["revoked"].as_bool().unwrap_or(true));
-    assert!(web_model_connectors::secret_matches(
-        connector,
-        "wmcs_fixture_secret"
-    ));
+    assert!(
+        connectors.is_empty(),
+        "old Actor credential must not gain instance authority"
+    );
+    assert!(web_model_connectors::requires_reconfiguration(&home).expect("reconfiguration state"));
 
-    let bridge = group_bridge_legacy::load(&home).expect("Python Group Bridge state");
-    assert_eq!(bridge["trusts"][0]["status"], "active");
-    assert_eq!(bridge["deliveries"][0]["source_event_id"], "fixture-source");
+    let receipts: Value = cccc_core::fs::read_yaml(&root.join("group_bridge_receipts.yaml"))
+        .expect("original receipts");
+    assert_eq!(
+        receipts["receipts"]["reg_fixture::fixture-delivery"]["source_event_id"],
+        "fixture-source"
+    );
     let im = im_state::load(&groups, "g_python0435").expect("Python IM state");
     assert_eq!(im["config"]["platform"], "slack");
     assert!(im["config"].get("skip_pending_on_start").is_none());
@@ -721,24 +719,20 @@ fn rust_preserves_python_0435_terminal_state_and_retires_legacy_shadows() {
     assert_eq!(im["subscribers"], json!([]));
 
     let connectors = web_model_connectors::load(&home).expect("retired connector store");
-    assert_eq!(connectors.len(), 1);
-    assert_eq!(connectors[0]["connector_id"], "wmc_fixture");
-    assert_eq!(connectors[0]["revoked"], true);
-    let bridge = group_bridge_legacy::load(&home).expect("retired Group Bridge state");
-    assert_eq!(bridge["trusts"][0]["status"], "revoked");
-    assert!(
-        bridge["registrations"]
-            .as_array()
-            .is_some_and(Vec::is_empty)
-    );
-    assert!(
-        !std::fs::read_to_string(root.join("group_bridge_credentials.yaml"))
-            .expect("credential store")
-            .contains("stale-legacy-token")
+    assert!(connectors.is_empty());
+    // This frozen old receipt lacks source provenance. Retain it for inspection
+    // instead of discarding it or reviving a manual connection.
+    let receipts_before = std::fs::read(root.join("group_bridge_receipts.yaml")).expect("receipts");
+    assert!(cccc_core::group_bridge_retirement::retire(&home).is_err());
+    assert_eq!(
+        std::fs::read(root.join("group_bridge_receipts.yaml")).expect("retained"),
+        receipts_before
     );
     let global = settings::load(&home).expect("settings after legacy retirement");
-    assert!(!global.extra.contains_key("web_model_connectors"));
-    assert!(global.extra.get("group_bridge").is_none_or(Value::is_null));
+    assert!(
+        global.extra.contains_key("web_model_connectors"),
+        "legacy configuration is preserved but never accepted as authority"
+    );
 
     let nomcp = nomcp::Store::new(home.clone()).expect("No-MCP store");
     assert!(

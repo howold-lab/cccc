@@ -75,6 +75,7 @@ pub struct Preview {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RequiresReconnect {
     pub chatgpt_web_model: bool,
+    pub grok_web_model: bool,
     pub notebooklm_group_space: bool,
 }
 
@@ -398,6 +399,7 @@ fn preview_package(
         actor_count: actors.len(),
         requires_reconnect: RequiresReconnect {
             chatgpt_web_model: actors.iter().any(|actor| actor.runtime == "web_model"),
+            grok_web_model: actors.iter().any(|actor| actor.runtime == "grok_web_model"),
             notebooklm_group_space: serde_json::to_string(group)
                 .unwrap_or_default()
                 .to_ascii_lowercase()
@@ -506,6 +508,7 @@ fn excluded(relative: &str, _is_dir: bool) -> bool {
         "runners",
         "runtime_sessions",
         "web_model",
+        "grok_web_model",
     ];
     let name = parts.last().copied().unwrap_or_default();
     parts.iter().any(|part| sensitive.contains(part))
@@ -536,6 +539,7 @@ fn excluded(relative: &str, _is_dir: bool) -> bool {
         || lower == "state/unread_index.json"
         || lower == "state/assistants.json"
         || lower == "state/env_private.json"
+        || lower == "state/im_weixin_context_tokens.json"
 }
 
 fn scrub_group(group: &mut GroupDoc) {
@@ -730,6 +734,64 @@ mod tests {
     use std::fs::File;
 
     #[test]
+    fn weixin_reply_credentials_never_cross_group_copy_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = crate::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home).expect("store");
+        let group = store.create("copy", "").expect("group");
+        let state = store.state_dir(&group.group_id).expect("state");
+        fs::create_dir_all(&state).expect("state directory");
+        let credentials = b"{\"fixture-user\":\"synthetic-reply-credential\"}";
+        let relative = "state/im_weixin_context_tokens.json";
+        fs::write(state.join("im_weixin_context_tokens.json"), credentials).expect("credentials");
+        fs::write(state.join("notes.txt"), "ordinary content").expect("content");
+        let (bytes, manifest, _) = export(&store, &group.group_id).expect("export");
+        assert!(!manifest.contains_secrets);
+        let mut package = read_package(&bytes).expect("package");
+        assert!(
+            !package.files.contains_key(relative),
+            "export must exclude reply credentials"
+        );
+        assert!(package.files.contains_key("state/notes.txt"));
+
+        // Older exporters may have packaged credentials despite the manifest.
+        // Import must apply its own exclusion after validating the archive digest.
+        package.files.insert(relative.into(), credentials.to_vec());
+        package.manifest.content_digest = content_digest(&package.files);
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("manifest.json", options)
+            .expect("manifest entry");
+        writer
+            .write_all(&serde_json::to_vec(&package.manifest).expect("manifest"))
+            .expect("write manifest");
+        for (path, data) in package.files {
+            writer
+                .start_file(format!("group/{path}"), options)
+                .expect("entry");
+            writer.write_all(&data).expect("write entry");
+        }
+        let bytes = writer.finish().expect("archive").into_inner();
+        let imported = import(&store, &bytes, "", "").expect("import");
+        let directory = store
+            .group_dir(&imported.group_id)
+            .expect("imported directory");
+        assert!(
+            !directory.join(relative).exists(),
+            "import must discard reply credentials"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("state/notes.txt")).expect("content"),
+            "ordinary content"
+        );
+        assert_eq!(
+            fs::read(state.join("im_weixin_context_tokens.json")).expect("source credentials"),
+            credentials
+        );
+    }
+
+    #[test]
     fn export_collection_rejects_oversized_files_before_reading_them() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("oversized.bin");
@@ -750,6 +812,105 @@ mod tests {
             .expect_err("rollback failure");
         assert!(error.to_string().contains("rollback_failed"));
         assert!(error.to_string().contains("g_import"));
+    }
+
+    #[test]
+    fn import_allows_independent_web_model_actors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = crate::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home).expect("store");
+        let source = store.create("source", "").expect("source group");
+        let set_web_model = |present: bool| {
+            store
+                .mutate(&source.group_id, |doc| {
+                    doc.actors.clear();
+                    if present {
+                        let mut actor = cccc_contracts::Actor::new("web");
+                        actor.runtime = cccc_contracts::ActorRuntime::WebModel;
+                        doc.actors.push(actor);
+                    }
+                    Ok(())
+                })
+                .expect("mutate source group");
+        };
+        set_web_model(true);
+        let (bytes, _, _) = export(&store, &source.group_id).expect("export");
+
+        let imported = import(&store, &bytes, "", "").expect("independent Actor import");
+        assert_eq!(store.list().expect("registry").len(), 2);
+        assert_eq!(
+            store.load(&imported.group_id).expect("imported").actors[0].runtime,
+            cccc_contracts::ActorRuntime::WebModel
+        );
+        assert!(
+            crate::web_model_connectors::load(store.home())
+                .expect("connectors")
+                .is_empty(),
+            "import does not copy conversation authority"
+        );
+    }
+
+    #[test]
+    fn import_preserves_legacy_profile_without_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = crate::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        crate::fs::write_json(
+            &home.root().join("profiles.json"),
+            &serde_json::json!({"profiles":{"legacy":{"id":"legacy","env":{}}}}),
+        )
+        .expect("legacy profile");
+        let source = store.create("source", "").expect("group");
+        store
+            .mutate(&source.group_id, |doc| {
+                let mut actor = cccc_contracts::Actor::new("linked");
+                actor.profile_id = "legacy".into();
+                doc.actors.push(actor);
+                Ok(())
+            })
+            .expect("actor");
+        let (bytes, _, _) = export(&store, &source.group_id).expect("export");
+        let imported = import(&store, &bytes, "", "").expect("import legacy Profile");
+        let imported = store.load(&imported.group_id).expect("imported group");
+        assert_eq!(imported.actors[0].profile_id, "legacy");
+        assert_eq!(
+            imported.actors[0].runtime,
+            cccc_contracts::ActorRuntime::Codex
+        );
+    }
+
+    #[test]
+    fn import_checks_pending_linked_profile_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = crate::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let profiles = crate::profiles::ProfileStore::new(home).expect("profiles");
+        let upsert = |runtime: &str| {
+            profiles
+                .upsert(
+                    serde_json::json!({"id":"shared", "runtime":runtime})
+                        .as_object()
+                        .expect("profile object")
+                        .clone(),
+                    None,
+                )
+                .expect("profile")
+        };
+        upsert("codex");
+        let source = store.create("source", "").expect("group");
+        store
+            .mutate(&source.group_id, |doc| {
+                let mut actor = cccc_contracts::Actor::new("linked");
+                actor.profile_id = "shared".into();
+                doc.actors.push(actor);
+                Ok(())
+            })
+            .expect("actor");
+        let (bytes, _, _) = export(&store, &source.group_id).expect("export");
+        upsert("web_model");
+        import(&store, &bytes, "", "")
+            .expect("linked Profile does not impose an instance singleton");
+        assert_eq!(store.list().expect("registry").len(), 2);
     }
 
     #[test]

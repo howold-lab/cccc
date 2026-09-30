@@ -8,6 +8,12 @@ import type { PresentationMessageRef, ReplyTarget, VoiceDocumentMessageRef } fro
 import type { ComposerMessageMode } from "../../stores/useComposerStore";
 
 export type FailedSendComposerSnapshot = {
+  composerGroupMentionTokens?: ReturnType<
+    typeof useComposerStore.getState
+  >["composerGroupMentionTokens"];
+  composerAgentMentionTokens?: ReturnType<
+    typeof useComposerStore.getState
+  >["composerAgentMentionTokens"];
   originGroupId: string;
   composerText: string;
   composerFiles: File[];
@@ -22,7 +28,6 @@ type FailedSendComposerRestoreActions = Pick<
   ReturnType<typeof useComposerStore.getState>,
   | "setComposerText"
   | "setComposerFiles"
-  | "setToText"
   | "setReplyTarget"
   | "setQuotedPresentationRef"
   | "setQuotedVoiceDocumentRef"
@@ -45,17 +50,23 @@ export function restoreFailedSendComposerState(
     currentSelectedGroupId === originGroupId && currentActiveGroupId === originGroupId;
 
   if (stillOnOriginGroup) {
+    composerState.setComposerGroupMentionTokens(snapshot.composerGroupMentionTokens || []);
+    composerState.setComposerAgentMentionTokens(snapshot.composerAgentMentionTokens || []);
     restoreActions.setComposerText(snapshot.composerText);
     restoreActions.setComposerFiles(snapshot.composerFiles);
     restoreActions.setReplyTarget(snapshot.replyTarget);
     restoreActions.setQuotedPresentationRef(snapshot.quotedPresentationRef);
     restoreActions.setQuotedVoiceDocumentRef(snapshot.quotedVoiceDocumentRef);
     restoreActions.setMessageMode(snapshot.messageMode);
-    restoreActions.setToText(snapshot.toText);
+    // Restore the failed message's exact recipients without overwriting a
+    // normal selection the user may have changed while its request was pending.
+    useComposerStore.setState({ toText: snapshot.toText });
     return;
   }
 
   restoreActions.upsertDraft(originGroupId, () => ({
+    composerGroupMentionTokens: snapshot.composerGroupMentionTokens,
+    composerAgentMentionTokens: snapshot.composerAgentMentionTokens,
     composerText: snapshot.composerText,
     composerFiles: snapshot.composerFiles,
     toText: snapshot.toText,

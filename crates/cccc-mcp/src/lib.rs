@@ -3,12 +3,14 @@ mod argument_normalization;
 mod bootstrap;
 mod code_mode;
 mod context_projection;
+mod cross_group;
+mod file_read;
+mod local_patch;
 mod local_sessions;
 mod local_tools;
 mod mapping;
-mod remote_messages;
-mod remote_tools;
 mod repo;
+mod repo_inspect;
 mod router;
 mod tools;
 
@@ -19,30 +21,13 @@ mod repo_tests;
 
 use anyhow::Result;
 use cccc_client::DaemonClient;
-use cccc_core::HomeLayout;
+use cccc_core::{CORE_TOOL_NAMES, HomeLayout};
 use serde_json::{Map, Value, json};
 use std::fmt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const SUPPORTED_LEGACY_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
 const DEFAULT_LEGACY_PROTOCOL_VERSION: &str = SUPPORTED_LEGACY_PROTOCOL_VERSIONS[0];
-const CORE_TOOL_NAMES: &[&str] = &[
-    "cccc_help",
-    "cccc_bootstrap",
-    "cccc_capability_search",
-    "cccc_capability_use",
-    "cccc_inbox_read",
-    "cccc_message_history",
-    "cccc_message_send",
-    "cccc_message_reply",
-    "cccc_message_deliver",
-    "cccc_reply_request_cancel",
-    "cccc_file",
-    "cccc_context_get",
-    "cccc_coordination",
-    "cccc_task",
-    "cccc_agent_state",
-];
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ToolCallError {
@@ -93,11 +78,6 @@ impl ToolCallError {
 
     fn payload(&self) -> Value {
         json!({"error":self.error_value()})
-    }
-
-    #[cfg(test)]
-    fn contains(&self, pattern: &str) -> bool {
-        self.to_string().contains(pattern)
     }
 }
 
@@ -192,7 +172,60 @@ pub async fn handle_request_for_actor(
         home,
         &client,
         request,
-        Some(RequestContext { group_id, actor_id }),
+        Some(RequestContext {
+            group_id,
+            actor_id,
+            binding: None,
+        }),
+    )
+    .await
+}
+
+/// Fixed shared-connector catalog; discovery must not depend on which Actor's
+/// conversation happens to make the request.
+pub fn web_model_catalog() -> Vec<Value> {
+    let mut catalog = tools::catalog()
+        .into_iter()
+        .filter(|t| {
+            t["name"]
+                .as_str()
+                .is_some_and(|name| cccc_core::web_model_tool_names().any(|n| n == name))
+        })
+        .collect();
+    hide_disabled_code_mode_tools(&mut catalog);
+    describe_paired_identity(&mut catalog);
+    catalog
+}
+
+pub(crate) fn describe_paired_identity(catalog: &mut [Value]) {
+    for tool in catalog {
+        let actor_is_target = tool["name"] == "cccc_actor";
+        if let Some(properties) = tool["inputSchema"]["properties"].as_object_mut() {
+            if let Some(group) = properties.get_mut("group_id") {
+                group["description"] = Value::String("The paired CCCC Group is supplied by the connector. Omit this field; a caller cannot change the Group with this argument.".into());
+            }
+            if !actor_is_target && let Some(actor) = properties.get_mut("actor_id") {
+                actor["description"] = Value::String("The paired CCCC Actor is supplied by the connector. Omit this field; a caller cannot change its identity with this argument.".into());
+            }
+        }
+    }
+}
+
+pub async fn handle_request_for_binding(
+    home: &HomeLayout,
+    request: &Value,
+    binding: &Value,
+) -> Value {
+    let client = DaemonClient::new(home.clone());
+    handle(
+        home,
+        &client,
+        request,
+        Some(RequestContext {
+            group_id: binding["group_id"].as_str().unwrap_or_default(),
+            actor_id: binding["actor_id"].as_str().unwrap_or_default(),
+            binding: Some(binding),
+        }),
     )
     .await
 }
@@ -201,6 +234,7 @@ pub async fn handle_request_for_actor(
 pub(crate) struct RequestContext<'a> {
     group_id: &'a str,
     actor_id: &'a str,
+    binding: Option<&'a Value>,
 }
 
 async fn handle(
@@ -219,6 +253,7 @@ async fn handle(
             "protocolVersion": negotiated_protocol_version(request),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "cccc-mcp", "version": env!("CARGO_PKG_VERSION")},
+            "_meta": {"cccc/build": cccc_core::build_info::current()},
         }),
         "ping" => json!({}),
         "tools/list" => {
@@ -299,7 +334,16 @@ pub(crate) async fn visible_tools_for_actor(
     group_id: &str,
     actor_id: &str,
 ) -> Vec<Value> {
-    visible_tools_with_context(home, client, Some(RequestContext { group_id, actor_id })).await
+    visible_tools_with_context(
+        home,
+        client,
+        Some(RequestContext {
+            group_id,
+            actor_id,
+            binding: None,
+        }),
+    )
+    .await
 }
 
 async fn visible_tools_with_context(
@@ -392,29 +436,19 @@ fn actor_fallback_tools(
     group_id: &str,
     actor_id: &str,
 ) -> Vec<Value> {
-    let web_model = cccc_core::GroupStore::new(home.clone())
+    let actor = cccc_core::GroupStore::new(home.clone())
         .and_then(|store| store.load(group_id))
         .ok()
-        .and_then(|group| group.actors.into_iter().find(|actor| actor.id == actor_id))
-        .is_some_and(|actor| actor.runtime == cccc_contracts::ActorRuntime::WebModel);
-    if !web_model {
-        return catalog
-            .into_iter()
-            .filter(|tool| {
-                tool["name"].as_str().is_some_and(|name| {
-                    CORE_TOOL_NAMES.contains(&name)
-                        || (actor_id == "user"
-                            && cccc_core::USER_CONTROL_TOOL_NAMES.contains(&name))
-                })
-            })
-            .collect();
-    }
+        .and_then(|group| group.actors.into_iter().find(|actor| actor.id == actor_id));
+    let base = cccc_core::actor_base_tool_names(actor_id, actor.as_ref())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut output = catalog
         .into_iter()
         .filter(|tool| {
-            tool["name"]
-                .as_str()
-                .is_some_and(|name| cccc_core::WEB_MODEL_CORE_TOOL_NAMES.contains(&name))
+            tool["name"].as_str().is_some_and(|name| {
+                base.contains(name)
+                    || (actor_id == "user" && cccc_core::USER_CONTROL_TOOL_NAMES.contains(&name))
+            })
         })
         .collect::<Vec<_>>();
     hide_disabled_code_mode_tools(&mut output);
@@ -455,3 +489,6 @@ async fn write_response(output: &mut tokio::io::Stdout, response: &Value) -> Res
     output.flush().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod connect_tests;

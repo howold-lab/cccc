@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::AppState;
 use crate::api::{ApiError, ApiResult, success};
 use crate::codex_voice::StartOutcome;
+use crate::codex_voice::start_error::StartDiagnostic;
 
 mod attach_deadline;
 pub(super) mod notifications;
@@ -39,13 +40,32 @@ pub(super) async fn start(State(state): State<AppState>, Json(body): Json<Value>
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::bad("client_session_id is required"))?;
     let voice = body["voice"].as_str().unwrap_or(DEFAULT_REALTIME_VOICE);
+    let application_context = serde_json::from_value::<
+        Option<cccc_contracts::codex_voice::VoiceApplicationContext>,
+    >(body["application_context"].clone())
+    .map_err(|_| {
+        ApiError::bad(
+            "application_context must contain a valid id, mode and nonempty instructions up to 24576 UTF-8 bytes",
+        )
+    })?;
+    let started = std::time::Instant::now();
     let outcome = state
         .codex_voice
-        .start(&state.home, client_session_id, offer_sdp, voice)
+        .start(
+            &state.home,
+            client_session_id,
+            offer_sdp,
+            voice,
+            application_context,
+        )
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "Codex Voice start failed");
-            voice_start_error(&error)
+            let diagnostic =
+                StartDiagnostic::from_error(&error, started.elapsed().as_millis() as u64);
+            // The packaged cccc entrypoint has no tracing subscriber. Emit one
+            // safe line on failure without globally enabling unrelated logs.
+            eprintln!("[cccc] Codex Voice start failed: {}", diagnostic.details());
+            diagnostic.into_api_error()
         })?;
     match outcome {
         StartOutcome::Busy(info) => Err(ApiError::conflict(
@@ -60,19 +80,12 @@ pub(super) async fn start(State(state): State<AppState>, Json(body): Json<Value>
             }
             Ok(success(json!({
                 "call":payload::info_value(info),
-                "analyst":payload::analyst_info_value(started.session.analyst().info()),
+                "analyst":started.session.analyst().map(|analyst| payload::analyst_info_value(analyst.info())),
                 "answer_sdp":started.answer_sdp,
                 "experimental":true,
             })))
         }
     }
-}
-
-fn voice_start_error(_error: &anyhow::Error) -> ApiError {
-    ApiError::unavailable(
-        "codex_voice_unavailable",
-        "Codex Voice could not start. Check the Analyst Runtime Profile, Realtime Voice login, and current Voice status.",
-    )
 }
 
 pub(super) async fn reset_analyst(

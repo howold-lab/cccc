@@ -54,7 +54,11 @@ impl AnalystSession {
         process::validate_loopback_endpoint(&endpoint)?;
         let socket =
             lifecycle_timing::run("codex.connect", protocol::connect_with_retry(&endpoint)).await?;
-        let protocol = ProtocolClient::new(socket, generation.clone());
+        let protocol = ProtocolClient::new(
+            socket,
+            generation.clone(),
+            process.as_ref().map(Arc::downgrade),
+        );
         protocol
             .request(
                 "initialize",
@@ -88,6 +92,10 @@ impl AnalystSession {
         let (started, thread_resumed) = if let Some(thread_id) = requested_thread_id {
             let mut resume_params = params.clone();
             resume_params["threadId"] = json!(thread_id);
+            // Only the thread id is used. Full history arrives as one websocket
+            // frame that outgrows its size limit on long threads, and the
+            // disconnect then repeats on every reconnect.
+            resume_params["excludeTurns"] = json!(true);
             match protocol
                 .request("thread/resume", resume_params, Duration::from_secs(20))
                 .await

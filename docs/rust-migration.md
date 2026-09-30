@@ -62,6 +62,7 @@ For a website-installer distribution, inspect or apply updates with:
 ```bash
 cccc update
 cccc update --check
+cccc update --check --offline
 ```
 
 Website-script installations update through the GitHub Pages installer and
@@ -77,8 +78,15 @@ nor an authority for runtime startup in 0.4.36. `cccc status` reports the one
 installed product, daemon state, groups, and detected agent runtimes without
 implementation availability rows.
 
-Inside a pip installation, `cccc update` refuses replacement and prints the pip
-command. This keeps Windows and virtual-environment files under their package
+Online `cccc update --check` reports the latest published channel version,
+installation owner, and native platform requirements for standalone, pip-owned,
+and unmanaged executables. Failed discovery is reported as unknown with a
+nonzero exit code, while local details remain visible. `--check --offline` skips
+discovery and explicitly marks the latest version as not checked. Both checks
+leave the installation and running services alone.
+
+Inside a pip installation, `cccc update` without `--check` refuses replacement
+and prints the pip command. This keeps Windows and virtual-environment files under their package
 manager instead of attempting to infer an interpreter or overwrite a running
 executable. Standalone ownership is proven only by the complete marker beside
 that exact executable.
@@ -357,9 +365,10 @@ runtime MCP readiness contract. CLI-backed and configuration-backed runtimes
 are classified as `ready`, `missing`, or `stale`; missing or safely replaceable
 entries are installed, then verified before the provider process is created.
 This covers Cline, Copilot, Devin, Kiro, Droid, Amp, Auggie, Hermes,
-and Kimi. Codex, Claude Code, Grok, and OpenCode instead receive actor-scoped MCP servers in
-their managed sessions; none of those providers' global MCP registries is
-mutated.
+and Kimi. Codex, Claude Code, OpenCode, and Kilo receive actor-scoped MCP servers
+in their managed sessions. Grok registers only its native user-level `cccc` entry
+so ACP and native TUI reloads agree; its executable and Actor identity are
+resolved from the launching process rather than saved in that shared entry.
 More-specific stale entries
 that CCCC does not own are reported rather than overwritten. This prevents an
 old Python launcher path or dangling symlink from freezing a newly created

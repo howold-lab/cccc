@@ -16,6 +16,7 @@ import { useReachWebLogin } from "./useReachWebLogin";
 import { useWebAccessSessionSummaries } from "./useWebAccessSessionSummaries";
 import { WebAccessReachabilityActions } from "./WebAccessReachabilityActions";
 import * as api from "../../../services/api";
+import { endConnectFrame } from "../../../features/connect/protocol";
 import {
   inputClass,
   labelClass,
@@ -28,6 +29,7 @@ import {
   settingsWorkspaceBodyClass,
   settingsWorkspaceHeaderClass,
   settingsWorkspacePanelClass,
+  settingsWorkspaceSectionClass,
   settingsWorkspaceShellClass,
   settingsWorkspaceSoftPanelClass,
 } from "./types";
@@ -264,12 +266,47 @@ export function WebAccessTab({
       if (remoteResp.ok && remoteResp.result?.remote_access) {
         const state = remoteResp.result.remote_access;
         setRemoteState(state);
-        setProvider((state.provider as "off" | "manual" | "tailscale" | "reach") || "off");
-        setMode(String(state.mode || "tailnet_only"));
-        setWebHost(String(state.config?.web_host || state.diagnostics?.web_host || "127.0.0.1"));
-        setWebPort(String(state.config?.web_port || state.diagnostics?.web_port || 8848));
-        setWebPublicUrl(
-          String(state.config?.web_public_url || state.diagnostics?.web_public_url || ""),
+        // Status refreshes must not replace a pending access configuration.
+        const sync = <T,>(current: T, previous: T, next: T): T =>
+          !remoteState || Object.is(current, previous) ? next : current;
+        setProvider((current) =>
+          sync(
+            current,
+            (remoteState?.provider as "off" | "manual" | "tailscale" | "reach") || "off",
+            (state.provider as "off" | "manual" | "tailscale" | "reach") || "off",
+          ),
+        );
+        setMode((current) =>
+          sync(
+            current,
+            String(remoteState?.mode || "tailnet_only"),
+            String(state.mode || "tailnet_only"),
+          ),
+        );
+        setWebHost((current) =>
+          sync(
+            current,
+            String(
+              remoteState?.config?.web_host || remoteState?.diagnostics?.web_host || "127.0.0.1",
+            ),
+            String(state.config?.web_host || state.diagnostics?.web_host || "127.0.0.1"),
+          ),
+        );
+        setWebPort((current) =>
+          sync(
+            current,
+            String(remoteState?.config?.web_port || remoteState?.diagnostics?.web_port || 8848),
+            String(state.config?.web_port || state.diagnostics?.web_port || 8848),
+          ),
+        );
+        setWebPublicUrl((current) =>
+          sync(
+            current,
+            String(
+              remoteState?.config?.web_public_url || remoteState?.diagnostics?.web_public_url || "",
+            ),
+            String(state.config?.web_public_url || state.diagnostics?.web_public_url || ""),
+          ),
         );
       } else if (!remoteResp.ok) {
         setError(remoteResp.error?.message || t("webAccess.loadFailed"));
@@ -532,10 +569,16 @@ export function WebAccessTab({
     }
   }, [lastApplyError, provider]);
 
+  const previousSavedAccessGoal = useRef<AccessGoal | null>(null);
   useEffect(() => {
     if (!remoteState) return;
-    setSelectedAccessGoal(inferAccessGoal(savedProvider, savedWebHost, savedWebPublicUrl));
-  }, [remoteState, savedProvider, savedWebHost, savedWebPublicUrl]);
+    const previous = previousSavedAccessGoal.current;
+    // The goal is part of the connection draft, not a live status indicator.
+    setSelectedAccessGoal((current) =>
+      previous === null || current === previous ? savedAccessGoal : current,
+    );
+    previousSavedAccessGoal.current = savedAccessGoal;
+  }, [remoteState, savedAccessGoal]);
 
   const revealAdvancedDisclosure = useCallback(() => {
     window.setTimeout(() => {
@@ -606,6 +649,7 @@ export function WebAccessTab({
         : prev,
     );
     pushHint(t("webAccess.signOutSuccess"));
+    if (endConnectFrame()) return;
     window.setTimeout(() => {
       window.location.replace(
         window.location.pathname + window.location.search + window.location.hash,
@@ -737,6 +781,7 @@ export function WebAccessTab({
         return;
       }
       pushHint(t("webAccess.applying"));
+      if (endConnectFrame()) return;
       const targetUrl = resolveApplyRedirectUrl(
         resp.result.remote_access,
         resp.result.target_local_url || desiredLocalUrl,
@@ -1039,7 +1084,8 @@ export function WebAccessTab({
                         placeholder={t("webAccess.customTokenPlaceholder")}
                       />
                     </div>
-                    {session?.bootstrap_required || knownAccessTokenCount === 0 ? (
+                    {session?.principal_kind !== "local" &&
+                    (session?.bootstrap_required || knownAccessTokenCount === 0) ? (
                       <div>
                         <label className={labelClass()}>{t("webAccess.bootstrapTokenLabel")}</label>
                         <input
@@ -1341,6 +1387,7 @@ export function WebAccessTab({
         <div className={settingsWorkspaceBodyClass}>
           {(error || hint) && (
             <div
+              role={error ? "alert" : "status"}
               className={`rounded-lg border px-3 py-2 text-xs ${
                 error
                   ? "border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400"
@@ -1353,7 +1400,7 @@ export function WebAccessTab({
 
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
             <div className={settingsWorkspacePanelClass(isDark)}>
-              <div className="text-[11px] uppercase tracking-wide text-[var(--color-text-muted)]">
+              <div className="text-xs uppercase tracking-wide text-[var(--color-text-muted)]">
                 {t("webAccess.cards.reachability")}
               </div>
               <div
@@ -1367,7 +1414,7 @@ export function WebAccessTab({
             </div>
 
             <div className={settingsWorkspacePanelClass(isDark)}>
-              <div className="text-[11px] uppercase tracking-wide text-[var(--color-text-muted)]">
+              <div className="text-xs uppercase tracking-wide text-[var(--color-text-muted)]">
                 {t("webAccess.cards.accessControl")}
               </div>
               <div
@@ -1379,10 +1426,10 @@ export function WebAccessTab({
                 {accessSummary.detail}
               </div>
 
-              <div className={`mt-4 ${settingsWorkspaceSoftPanelClass(isDark)}`}>
+              <div className={`mt-4 ${settingsWorkspaceSectionClass}`}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-[11px] uppercase tracking-wide text-[var(--color-text-muted)]">
+                    <div className="text-xs uppercase tracking-wide text-[var(--color-text-muted)]">
                       {t("webAccess.currentBrowserTitle")}
                     </div>
                     <div className="mt-1 text-sm font-medium text-[var(--color-text-primary)]">
@@ -1509,14 +1556,14 @@ export function WebAccessTab({
                             {token.user_id}
                           </div>
                           <span
-                            className={`rounded-full border px-2 py-0.5 text-[11px] ${statusChipClass(isDark, token.is_admin ? "good" : "neutral")}`}
+                            className={`rounded-full border px-2 py-0.5 text-xs ${statusChipClass(isDark, token.is_admin ? "good" : "neutral")}`}
                           >
                             {token.is_admin
                               ? t("webAccess.adminBadge")
                               : t("webAccess.scopedBadge")}
                           </span>
                           <span
-                            className={`rounded-full border px-2 py-0.5 text-[11px] ${statusChipClass(isDark, "neutral")}`}
+                            className={`rounded-full border px-2 py-0.5 text-xs ${statusChipClass(isDark, "neutral")}`}
                           >
                             {token.token_preview || "****"}
                           </span>
@@ -1681,14 +1728,14 @@ export function WebAccessTab({
             membershipBusy={membershipBusy}
             membershipError={membershipError}
             membershipPollReady={membershipPollReady}
-            hasAdminToken={hasAdminToken}
+            hasAdminToken={hasAdminToken || session?.principal_kind === "local"}
             reachBusy={reachBusy}
             reachAction={reachAction}
             reachChecking={reachChecking}
             reachCheckExpired={reachCheckExpired}
             onCheckReach={checkReach}
             onConnectAccount={() => void connectMembership()}
-            onPollAccount={() => void pollMembership()}
+            onPollAccount={() => void pollMembership().then(() => load())}
             onOpenAccount={onOpenAccount}
             onCreateAdminToken={openCreateDialog}
             onCreateWebLogin={createReachWebLogin}
@@ -1733,7 +1780,7 @@ export function WebAccessTab({
                         {t(`webAccess.goals.${goal}.title`)}
                       </div>
                       {current ? (
-                        <span className="inline-flex rounded-full border border-emerald-500/30 bg-emerald-500/12 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                        <span className="inline-flex rounded-full border border-emerald-500/30 bg-emerald-500/12 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
                           {t("webAccess.goalSelected")}
                         </span>
                       ) : null}
