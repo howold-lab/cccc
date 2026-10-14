@@ -27,7 +27,7 @@
   "disconnected": "已断开",
   "dismissError": "关闭错误提示",
   "createNewGroup": "创建新工作组",
-  "newGroup": "+ 新建",
+  "newGroup": "新建",
   "workingGroups": "工作组",
   "archivedGroups": "已归档",
   "groupActions": "工作组操作",
@@ -43,6 +43,7 @@
   "searchMessagesButton": "搜索消息",
   "contextButton": "上下文",
   "settingsButton": "设置",
+  "allSettings": "全部设置",
   "lightMode": "浅色模式",
   "darkMode": "深色模式",
   "editGroupDetails": "编辑工作组详情",
@@ -249,5 +250,9 @@
     "failed": "无法更新 {{group}}，请检查连接后重试。",
     "noActors": "添加 Agent 后即可启动此 Group。"
   },
-  "connectionInterruptedHint": "页面连接已中断，正在自动重连；当前显示的信息可能尚未更新。"
+  "connectionInterruptedHint": "页面连接已中断，正在自动重连；当前显示的信息可能尚未更新。",
+  "realtimeSocketUnreachable": "实时连接不可达",
+  "realtimeSubscriptionClosed": "订阅被服务端关闭",
+  "retryingIn": "{{seconds}} 秒后重试",
+  "retryingNow": "正在重试"
 }

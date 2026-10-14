@@ -39,12 +39,22 @@ function FixtureActor({
   );
 }
 
-function Fixture({ groupId = "g1", count = 8, loading = false, covered = false }) {
+function Fixture({
+  groupId = "g1",
+  count = 8,
+  loading = false,
+  covered = false,
+  errorActorId = "",
+}) {
   const [active, setActive] = useState("chat");
   return (
     <GroupWorkArea
       groupId={groupId}
-      actors={actors.slice(0, count)}
+      actors={actors
+        .slice(0, count)
+        .map((actor) =>
+          actor.id === errorActorId ? { ...actor, effective_working_state: "error" } : actor,
+        )}
       availableGroupIds={["g1", "g2"]}
       activeActorId={active === "chat" ? undefined : active}
       isDark={false}
@@ -64,7 +74,13 @@ function Fixture({ groupId = "g1", count = 8, loading = false, covered = false }
 }
 
 async function render(
-  props: { groupId?: string; count?: number; loading?: boolean; covered?: boolean } = {},
+  props: {
+    groupId?: string;
+    count?: number;
+    loading?: boolean;
+    covered?: boolean;
+    errorActorId?: string;
+  } = {},
 ) {
   await act(async () => {
     root.render(<Fixture {...props} />);
@@ -110,11 +126,27 @@ afterEach(async () => {
 });
 
 describe("Group work area", () => {
-  it("paginates at four and keeps each group's view and page through switching", async () => {
+  it("keeps an off-page failed owner reachable and clears attention once it is in view", async () => {
+    useUIStore.getState().setGroupWorkView("g1", "terminals");
+    await render({ errorActorId: "actor-8" });
+    const attention = controlsHost.querySelector<HTMLButtonElement>(
+      '[aria-label="workView.otherAttention"]',
+    )!;
+    expect(attention).not.toBeNull();
+    await act(async () => attention.click());
+    expect(useUIStore.getState().chatSessions.g1.terminalPage).toBe(2);
+    expect(host.querySelector('[data-terminal="actor-8"][data-visible="true"]')).not.toBeNull();
+    expect(controlsHost.querySelector('[aria-label="workView.otherAttention"]')).toBeNull();
+    await click('[aria-label="workView.previous"]');
+    expect(controlsHost.querySelector('[aria-label="workView.otherAttention"]')).not.toBeNull();
+    await render();
+    expect(controlsHost.querySelector('[aria-label="workView.otherAttention"]')).toBeNull();
+  });
+  it("paginates by the columns that fit and keeps each group's view and page through switching", async () => {
     await render();
     expect(host.querySelectorAll("[data-terminal]")).toHaveLength(0);
     await click('[aria-label="workView.label"] button:last-child');
-    expect(host.querySelectorAll('[data-terminal][data-visible="true"]')).toHaveLength(4);
+    expect(host.querySelectorAll('[data-terminal][data-visible="true"]')).toHaveLength(3);
     const first = host.querySelector<HTMLTextAreaElement>('[data-terminal="actor-1"]')!;
     first.value = "retained input";
     await click('[aria-label="workView.next"]');
@@ -136,6 +168,19 @@ describe("Group work area", () => {
       first,
     );
     expect(first.value).toBe("retained input");
+  });
+
+  it("lays out a page of terminals as one row of full-height columns", async () => {
+    expect(terminalPageLayout(8, 0, 1200).pageSize).toBe(3);
+    expect(terminalPageLayout(8, 0, 1920).pageSize).toBe(4);
+    expect(terminalPageLayout(8, 0, 760).pageSize).toBe(2);
+    expect(terminalPageLayout(8, 0, 390).pageSize).toBe(1);
+    useUIStore.getState().setGroupWorkView("g1", "terminals");
+    await render({ count: 3 });
+    const grid = host.querySelector<HTMLElement>('[data-group-terminal-view="visible"]')!;
+    expect(grid.style.gridTemplateColumns).toBe("repeat(3,minmax(0,1fr))");
+    expect(grid.style.gridTemplateRows).toBe("minmax(0,1fr)");
+    expect(host.querySelectorAll('[data-terminal][data-visible="true"]')).toHaveLength(3);
   });
 
   it("maximizes and restores the same terminal, retaining input and terminal keys", async () => {
@@ -184,7 +229,8 @@ describe("Group work area", () => {
     expect(panelsHost.textContent).toContain("presentation");
     expect(controlsHost.textContent).not.toContain("presentation");
     expect(host.querySelector('[data-terminal="actor-5"]')).not.toBeNull();
-    expect(useUIStore.getState().chatSessions.g1.terminalPage).toBe(4);
+    // Page 1 of three columns began at actor-4; one column keeps that terminal in view.
+    expect(useUIStore.getState().chatSessions.g1.terminalPage).toBe(3);
   });
 });
 

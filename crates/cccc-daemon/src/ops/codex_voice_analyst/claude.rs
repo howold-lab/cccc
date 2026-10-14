@@ -13,8 +13,11 @@ use tokio::task::JoinHandle;
 
 mod command;
 mod control;
+mod resume_failure;
 mod transcript;
 mod transcript_ack;
+#[cfg(all(test, unix))]
+mod transcript_autonomous_client_tests;
 mod transcript_buffer;
 mod transcript_continuity;
 #[cfg(all(test, unix))]
@@ -23,6 +26,7 @@ mod transcript_path;
 mod workspace_trust;
 
 pub(super) use command::prepare;
+pub(super) use resume_failure::diagnostic as resume_diagnostic;
 pub(super) use workspace_trust::untrusted_workspace;
 
 #[cfg(test)]
@@ -71,6 +75,30 @@ struct Job {
     session_id: String,
     cwd: PathBuf,
     cli_version: command::Version,
+}
+
+mod secretary_owner;
+
+pub(super) fn secretary_owner_path(cwd: &Path) -> io::Result<PathBuf> {
+    secretary_owner::path(cwd)
+}
+
+pub(super) async fn cleanup_secretary_owner(
+    home: &cccc_core::HomeLayout,
+    cwd: &Path,
+) -> io::Result<()> {
+    secretary_owner::cleanup(home, cwd).await
+}
+
+pub(super) fn remove_secretary_settings(
+    home: &cccc_core::HomeLayout,
+    owner: &str,
+) -> io::Result<()> {
+    command::remove_settings_owner(home, owner)
+}
+
+pub(super) fn settings_path(home: &cccc_core::HomeLayout, owner: &str) -> PathBuf {
+    command::settings_path(home, owner)
 }
 
 pub(super) async fn launch(
@@ -122,6 +150,7 @@ async fn launch_inner(
         match purpose {
             SessionPurpose::VoiceAnalyst => "voice-analyst",
             SessionPurpose::Actor => "actor",
+            SessionPurpose::VoiceSecretary => "voice-secretary",
         },
         &generation[..generation.len().min(8)]
     );
@@ -139,6 +168,9 @@ async fn launch_inner(
         &arguments,
         &prepared.launch_environment,
     )?;
+    if purpose == SessionPurpose::VoiceSecretary {
+        secretary_owner::record(cwd, &prepared)?;
+    }
     command
         .current_dir(cwd)
         .env_clear()
@@ -210,10 +242,7 @@ async fn launch_inner(
     if let Some(expected) = requested_session_id
         && job.session_id != expected
     {
-        let error = io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Claude Agent View copied a requested session instead of resuming it exactly",
-        );
+        let error = resume_failure::Rejection::CopiedSession.error();
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
         return Err(with_optional_cleanup_error(error, rollback.err()));
     }
@@ -620,7 +649,7 @@ fn validate_worker_version(job: &Job) -> io::Result<()> {
 fn with_cleanup_error(primary: io::Error, cleanup: io::Error) -> io::Error {
     io::Error::new(
         primary.kind(),
-        format!("{primary}; cleanup also failed: {cleanup}"),
+        resume_failure::CleanupFailure { primary, cleanup },
     )
 }
 
@@ -1239,10 +1268,7 @@ impl TranscriptFollower {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Claude Agent View did not expose its durable transcript",
-                ));
+                return Err(resume_failure::Rejection::MissingHistory.error());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -2256,6 +2282,11 @@ mod tests {
         }
         assert_eq!(final_text.as_deref(), Some("managed answer"));
         if !fail_transcript {
+            transcript_autonomous_client_tests::verify_hidden_input_turn(
+                &launched.protocol,
+                &transcript_path,
+            )
+            .await;
             transcript_move_client_tests::verify_round_trip(
                 &launched.protocol,
                 &transcript_path,

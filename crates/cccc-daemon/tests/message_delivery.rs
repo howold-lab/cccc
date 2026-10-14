@@ -2287,3 +2287,452 @@ while True:
         std::panic::resume_unwind(error);
     }
 }
+
+#[test]
+fn reply_strips_forwarded_inbound_markers_so_the_event_relays_to_im() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let created = call(
+        &home,
+        "group_create",
+        json!({"title":"reply-marker-scrub","by":"user"}),
+    );
+    let gid = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id")
+        .to_owned();
+    call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":gid,"actor_id":"peer1","runtime":"custom","submit":"newline",
+            "command":["sh","-c","sleep 30"],"by":"user"
+        }),
+    );
+    // An inbound IM message carries transport/source markers in its data.
+    let source = call(
+        &home,
+        "send",
+        json!({
+            "group_id":gid,"by":"user","to":["peer1"],"text":"inbound",
+            "message_mode":"send",
+            "transport":"im","im_platform":"telegram","im_chat_id":"42",
+            "im_thread_id":"","source_platform":"telegram",
+            "source_user_id":"u1","source_message_id":"42:9"
+        }),
+    );
+    let source_id = source.result["event"]["id"].clone();
+
+    // Helpers that forward the source event's data into the reply args must
+    // not poison the outbound event: it is new traffic, not an IM echo.
+    let reply = call(
+        &home,
+        "reply",
+        json!({
+            "group_id":gid,"by":"peer1","reply_to":source_id,"text":"back",
+            "transport":"im","im_platform":"telegram","im_chat_id":"42",
+            "source_platform":"telegram","source_user_id":"u1",
+            "source_message_id":"42:9"
+        }),
+    );
+    let data = &reply.result["event"]["data"];
+    for key in [
+        "transport",
+        "im_platform",
+        "im_chat_id",
+        "im_thread_id",
+        "source_platform",
+        "source_user_id",
+        "source_message_id",
+    ] {
+        assert!(data.get(key).is_none(), "key {key} must be scrubbed");
+    }
+    assert_eq!(data["reply_to"], source_id);
+}
+
+#[test]
+fn local_cross_group_reply_routes_back_to_origin_and_threads_there() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let source = call(&home, "group_create", json!({"title":"source","by":"user"}));
+    let destination = call(
+        &home,
+        "group_create",
+        json!({"title":"destination","by":"user"}),
+    );
+    let source_id = source.result["group"]["group_id"].as_str().expect("source");
+    let destination_id = destination.result["group"]["group_id"]
+        .as_str()
+        .expect("destination");
+    for (group_id, actor_id) in [(source_id, "sender"), (destination_id, "receiver")] {
+        call(
+            &home,
+            "actor_add",
+            json!({"group_id":group_id,"actor_id":actor_id,"by":"user"}),
+        );
+    }
+    let store = GroupStore::new(home.clone()).expect("store");
+    for group_id in [source_id, destination_id] {
+        store
+            .mutate(group_id, |group| {
+                group.state = cccc_contracts::GroupState::Paused;
+                Ok(())
+            })
+            .expect("pause fixture");
+    }
+    let sent = call(
+        &home,
+        "send_cross_group",
+        json!({
+            "group_id":source_id,"dst_group_id":destination_id,"by":"sender",
+            "to":["receiver"],"text":"question","message_mode":"request_reply"
+        }),
+    );
+    let source_event_id = sent.result["source_event"]["id"].clone();
+    let delivered_id = sent.result["event"]["id"].clone();
+    let reply = call(
+        &home,
+        "reply",
+        json!({
+            "group_id":destination_id,"by":"receiver","reply_to":delivered_id,
+            "text":"answer","message_mode":"mail","client_id":"cross-reply"
+        }),
+    );
+    assert_eq!(reply.result["transport"], "local");
+    assert_eq!(reply.result["dst_event"]["group_id"], source_id);
+    assert_eq!(
+        reply.result["dst_event"]["by"],
+        format!("{destination_id}::receiver")
+    );
+    assert_eq!(reply.result["dst_event"]["data"]["to"], json!(["sender"]));
+    assert_eq!(
+        reply.result["dst_event"]["data"]["reply_to"],
+        source_event_id
+    );
+
+    assert_eq!(reply.result["event"]["group_id"], destination_id);
+    assert_eq!(reply.result["event"]["by"], "receiver");
+    assert_eq!(reply.result["event"]["data"]["reply_to"], delivered_id);
+    assert_eq!(reply.result["message_mode"], "mail");
+    let status = call(
+        &home,
+        "ledger_statuses",
+        json!({
+            "group_id":destination_id, "event_ids":[delivered_id]
+        }),
+    );
+    assert_eq!(
+        status.result["statuses"][delivered_id.as_str().expect("delivered id")]["obligation_status"]
+            ["receiver"]["replied"],
+        true
+    );
+
+    let count = |group_id| {
+        ledger::read_all(&store.ledger_path(group_id).expect("path"))
+            .expect("events")
+            .len()
+    };
+    let before = (count(source_id), count(destination_id));
+    let repeated = call(
+        &home,
+        "reply",
+        json!({
+            "group_id":destination_id, "by":"receiver", "reply_to":delivered_id,
+            "text":"answer", "message_mode":"mail", "client_id":"cross-reply"
+        }),
+    );
+    assert_eq!(repeated.result["event"], reply.result["event"]);
+    assert_eq!(repeated.result["dst_event"], reply.result["dst_event"]);
+    assert_eq!(repeated.result["duplicate"], true);
+    assert_eq!((count(source_id), count(destination_id)), before);
+    for to in [
+        json!([format!("{destination_id}::receiver")]),
+        json!([format!("{source_id}::sender"), "receiver"]),
+        json!([format!("{source_id}::sender"), "g_other::sender"]),
+    ] {
+        let rejected = call_raw(
+            &home,
+            "reply",
+            json!({
+                "group_id":destination_id,"by":"receiver","reply_to":delivered_id,
+                "text":"invalid audience","to":to,"message_mode":"mail"
+            }),
+        );
+        assert_eq!(
+            rejected.error.as_ref().map(|error| error.code.as_str()),
+            Some("invalid_recipient")
+        );
+    }
+    assert_eq!((count(source_id), count(destination_id)), before);
+
+    // Simulate failure after the local audit event was accepted. Retry must
+    // recover the remote parent from that event, without duplicating either copy.
+    let path = store.ledger_path(source_id).expect("ledger path");
+    let held = path.with_extension("retry-fixture");
+    std::fs::rename(&path, &held).expect("hold fixture ledger");
+    std::fs::create_dir(&path).expect("block fixture destination");
+    let pending = call_raw(
+        &home,
+        "reply",
+        json!({
+            "group_id":destination_id, "by":"receiver", "reply_to":delivered_id,
+            "text":"retry answer", "message_mode":"mail", "client_id":"partial-reply"
+        }),
+    );
+    std::fs::remove_dir(&path).expect("unblock fixture destination");
+    std::fs::rename(&held, &path).expect("restore fixture ledger");
+    assert!(!pending.ok);
+    assert_eq!(
+        (count(source_id), count(destination_id)),
+        (before.0, before.1 + 1)
+    );
+    let recovered = call(
+        &home,
+        "reply",
+        json!({
+            "group_id":destination_id, "by":"receiver", "reply_to":delivered_id,
+            "text":"retry answer", "message_mode":"mail", "client_id":"partial-reply"
+        }),
+    );
+    assert_eq!(recovered.result["event"]["data"]["reply_to"], delivered_id);
+    assert_eq!(
+        recovered.result["dst_event"]["data"]["reply_to"],
+        source_event_id
+    );
+    assert_eq!(
+        (count(source_id), count(destination_id)),
+        (before.0 + 1, before.1 + 1)
+    );
+}
+
+#[test]
+fn cross_group_attachments_are_rejected_without_settling_reply_obligations() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let origin = store.create("origin", "").expect("origin");
+    let receiver = store.create("receiver", "").expect("receiver");
+    call(
+        &home,
+        "actor_add",
+        json!({"group_id":receiver.group_id,"actor_id":"receiver","by":"user"}),
+    );
+    store
+        .mutate(&receiver.group_id, |group| {
+            group.state = cccc_contracts::GroupState::Paused;
+            Ok(())
+        })
+        .expect("pause fixture");
+    let sent = call(
+        &home,
+        "send_cross_group",
+        json!({
+            "group_id":origin.group_id,"dst_group_id":receiver.group_id,"by":"user",
+            "to":["receiver"],"text":"question","message_mode":"request_reply"
+        }),
+    );
+    let parent = &sent.result["dst_event"]["id"];
+    let blob = cccc_core::blobs::store(&home, &receiver.group_id, b"reply attachment")
+        .expect("local blob");
+    let read = |group_id: &str| {
+        ledger::read_all(&store.ledger_path(group_id).expect("ledger path")).expect("ledger")
+    };
+    let before = (read(&origin.group_id), read(&receiver.group_id));
+    for op in ["reply", "send_cross_group"] {
+        let mut args = json!({
+            "group_id":receiver.group_id,"dst_group_id":origin.group_id,"by":"receiver",
+            "reply_to":parent,"text":"answer","message_mode":"send",
+            "attachments":[{"path":blob.path}]
+        });
+        if op == "send_cross_group" {
+            args["to"] = json!(["user"]);
+        }
+        let rejected = call_raw(&home, op, args);
+        assert!(!rejected.ok);
+        assert_eq!(
+            read(&origin.group_id),
+            before.0,
+            "destination must not change"
+        );
+        assert_eq!(read(&receiver.group_id), before.1, "source must not change");
+        assert_eq!(
+            rejected.error.as_ref().map(|error| error.code.as_str()),
+            Some("attachments_not_supported")
+        );
+    }
+    let status = call(
+        &home,
+        "ledger_statuses",
+        json!({"group_id":receiver.group_id,"event_ids":[parent]}),
+    );
+    assert_eq!(
+        status.result["statuses"][parent.as_str().expect("parent")]["obligation_status"]["receiver"]
+            ["replied"],
+        false
+    );
+}
+
+#[test]
+fn cross_group_retries_reject_conflicting_routes_even_after_partial_delivery() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let origin = store.create("origin", "").expect("origin");
+    let receiver = store.create("receiver", "").expect("receiver");
+    let other = store.create("other", "").expect("other");
+    let parent = |group_id: &str| {
+        call(
+            &home,
+            "send_cross_group",
+            json!({
+                "group_id":group_id,"dst_group_id":receiver.group_id,"by":"user",
+                "to":["user"],"text":"question","message_mode":"send"
+            }),
+        )
+    };
+    let first = parent(&origin.group_id);
+    let second = parent(&other.group_id);
+    let local = call(
+        &home,
+        "send",
+        json!({"group_id":receiver.group_id,"text":"local","to":["user"],"message_mode":"send"}),
+    );
+    let read = |group_id: &str| {
+        ledger::read_all(&store.ledger_path(group_id).expect("ledger path")).expect("ledger")
+    };
+    for partial in [false, true] {
+        let client_id = if partial { "partial" } else { "delivered" };
+        let original_args = json!({
+            "group_id":receiver.group_id,"by":"user","reply_to":first.result["dst_event"]["id"],
+            "text":"original answer","message_mode":"send","client_id":client_id
+        });
+        let path = store.ledger_path(&origin.group_id).expect("ledger path");
+        let held = path.with_extension("retry-fixture");
+        if partial {
+            std::fs::rename(&path, &held).expect("hold fixture ledger");
+            std::fs::create_dir(&path).expect("block fixture destination");
+        }
+        let accepted = call_raw(&home, "reply", original_args.clone());
+        if partial {
+            std::fs::remove_dir(&path).expect("unblock fixture destination");
+            std::fs::rename(&held, &path).expect("restore fixture ledger");
+        }
+        assert_eq!(accepted.ok, !partial);
+        let before = (
+            read(&origin.group_id),
+            read(&receiver.group_id),
+            read(&other.group_id),
+        );
+        // A changed parent must not route the accepted reply into another Group,
+        // or turn an incomplete cross-group delivery into a local duplicate.
+        for reply_to in [
+            &second.result["dst_event"]["id"],
+            &local.result["event"]["id"],
+        ] {
+            let mut retry = original_args.clone();
+            retry["reply_to"] = reply_to.clone();
+            let rejected = call_raw(&home, "reply", retry);
+            assert!(
+                !rejected.ok,
+                "a reused client_id must keep its accepted parent"
+            );
+            assert_eq!(
+                rejected.error.as_ref().map(|error| error.code.as_str()),
+                Some("idempotency_conflict")
+            );
+        }
+        let rejected = call_raw(
+            &home,
+            "send_cross_group",
+            json!({
+                "group_id":receiver.group_id,"dst_group_id":other.group_id,"by":"user",
+                "text":"changed destination","to":["user"],"message_mode":"send","client_id":client_id
+            }),
+        );
+        assert!(!rejected.ok);
+        assert_eq!(
+            rejected.error.as_ref().map(|error| error.code.as_str()),
+            Some("idempotency_conflict")
+        );
+        assert_eq!(
+            (
+                read(&origin.group_id),
+                read(&receiver.group_id),
+                read(&other.group_id)
+            ),
+            before
+        );
+        let recovered = call(&home, "reply", original_args);
+        assert_eq!(recovered.result["dst_event"]["group_id"], origin.group_id);
+        assert_eq!(
+            recovered.result["dst_event"]["data"]["text"],
+            "original answer"
+        );
+        assert_eq!(
+            recovered.result["dst_event"]["data"]["reply_to"],
+            first.result["src_event"]["id"]
+        );
+        assert_eq!(read(&other.group_id), before.2);
+        assert_eq!(read(&receiver.group_id), before.1);
+        assert_eq!(
+            read(&origin.group_id).len(),
+            before.0.len() + usize::from(partial)
+        );
+    }
+}
+
+#[test]
+fn scope_identity_keeps_existing_git_rewrite_attachment_addressable() {
+    use sha2::{Digest, Sha256};
+    let temp = tempfile::tempdir().expect("temporary home");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).expect("project");
+    let git_config = temp.path().join("gitconfig");
+    std::fs::write(&git_config, "").expect("isolated Git config");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &git_config)
+            .output()
+            .expect("valid test fixture");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("git output")
+            .trim()
+            .to_owned()
+    };
+    git(&["init", "--quiet"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/synthetic/example.git",
+    ]);
+    git(&[
+        "config",
+        "--local",
+        "url.https://proxy.invalid/synthetic/.insteadOf",
+        "https://github.com/synthetic/",
+    ]);
+    let legacy_remote = cccc_core::scope::normalize_remote(&git(&["remote", "get-url", "origin"]));
+    let legacy_key = format!("s_{:x}", Sha256::digest(legacy_remote.as_bytes()))[..14].to_owned();
+    let mut scope = cccc_core::scope::detect(&project).expect("detect scope");
+    scope.scope_key = legacy_key.clone();
+    scope.git_remote = legacy_remote;
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("existing", "").expect("Group");
+    cccc_core::group_scope::attach(&store, &group.group_id, scope).expect("attach scope");
+    let result = call_raw(
+        &home,
+        "group_use",
+        json!({"group_id":group.group_id,"path":project,"by":"user"}),
+    );
+    assert!(
+        result.ok,
+        "The already-attached unchanged directory must remain usable: {:?}",
+        result.error
+    );
+}

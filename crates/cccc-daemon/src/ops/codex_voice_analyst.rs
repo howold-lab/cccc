@@ -1,4 +1,4 @@
-use cccc_contracts::ActorRuntime;
+use cccc_contracts::{ActorRuntime, RuntimeMode};
 use cccc_core::HomeLayout;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -8,23 +8,48 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 mod acp;
+mod antigravity;
 mod claude;
 mod control;
 mod grok;
 mod launch;
+pub(crate) use launch::ANALYST_INSTRUCTIONS;
+pub(crate) use launch_secretary::{
+    INSTRUCTIONS as SECRETARY_INSTRUCTIONS, cleanup_secretary_runtime, secretary_cleanup_pending,
+};
+mod launch_antigravity;
+mod native_acp;
+pub(crate) use native_acp::{name as native_acp_name, valid_id as valid_native_acp_id};
 mod launch_claude;
 mod launch_codex;
 mod launch_command;
 mod launch_grok;
+mod launch_native_acp;
 mod launch_opencode;
+mod launch_pi;
+mod launch_secretary;
+pub(crate) use launch_antigravity::login_antigravity;
 pub(crate) mod lifecycle_timing;
 mod native_input;
 mod opencode;
+mod pi_rpc;
 mod process;
 mod protocol;
 #[cfg(test)]
 mod tests;
 mod turns;
+
+pub(crate) fn managed_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("cccc-managed-agent")
+            .enable_all()
+            .build()
+            .expect("build shared managed Agent runtime")
+    })
+}
 
 /// The workspace Claude Code refused to launch in because its trust prompt was never accepted.
 pub(crate) fn untrusted_claude_workspace(error: &io::Error) -> Option<&std::path::Path> {
@@ -49,6 +74,7 @@ pub(crate) fn remove_claude_actor_settings(
 
 use acp::AcpClient;
 use claude::ClaudeClient;
+use pi_rpc::PiRpcClient;
 use process::ChildOwner;
 use protocol::ProtocolClient;
 
@@ -61,6 +87,7 @@ const CODEX_TURN_CORRELATION_KEY: &str = "cccc_turn_correlation_id";
 pub struct LaunchConfig {
     pub workdir: PathBuf,
     pub runtime: ActorRuntime,
+    pub runtime_mode: RuntimeMode,
     pub command: Vec<String>,
     pub environment: BTreeMap<String, String>,
     pub resume_thread_id: Option<String>,
@@ -72,6 +99,7 @@ pub(crate) struct ActorLaunchConfig {
     pub(crate) group_id: String,
     pub(crate) actor_id: String,
     pub(crate) runtime: ActorRuntime,
+    pub(crate) runtime_mode: RuntimeMode,
     pub(crate) command: Vec<String>,
     pub(crate) environment: BTreeMap<String, String>,
 }
@@ -81,6 +109,7 @@ impl LaunchConfig {
         Self {
             workdir: workdir.into(),
             runtime: ActorRuntime::Codex,
+            runtime_mode: RuntimeMode::Default,
             command: Vec::new(),
             environment: BTreeMap::new(),
             resume_thread_id: None,
@@ -104,6 +133,7 @@ pub struct AnalystEvent {
 enum SessionPurpose {
     VoiceAnalyst,
     Actor,
+    VoiceSecretary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,10 +182,70 @@ pub(crate) struct AnalystSession {
     delegations: tokio::sync::Mutex<HashMap<String, DelegationState>>,
 }
 
+/// Failed startup still owns its process until cleanup is confirmed. Keeping
+/// this error alive lets the caller retain capacity and retry cleanup at stop.
+#[derive(Clone)]
+pub(crate) struct PendingManagedStartup(Arc<ChildOwner>);
+
+impl PendingManagedStartup {
+    pub(crate) fn from_error(error: &io::Error) -> Option<Self> {
+        error
+            .get_ref()?
+            .downcast_ref::<StartupCleanupFailure>()
+            .map(|failure| failure.owner.clone())
+    }
+    pub(crate) fn stop(&self) -> io::Result<()> {
+        self.0.stop()
+    }
+    pub(crate) fn with_startup_diagnostic(
+        mut error: io::Error,
+        diagnostic: io::Error,
+    ) -> io::Error {
+        if let Some(failure) = error
+            .get_mut()
+            .and_then(|inner| inner.downcast_mut::<StartupCleanupFailure>())
+        {
+            failure.startup = diagnostic;
+        }
+        error
+    }
+}
+
+struct StartupCleanupFailure {
+    owner: PendingManagedStartup,
+    startup: io::Error,
+    cleanup: io::Error,
+}
+impl std::fmt::Debug for StartupCleanupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::fmt::Display for StartupCleanupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}; provider cleanup is unresolved: {}",
+            self.startup, self.cleanup
+        )
+    }
+}
+impl std::error::Error for StartupCleanupFailure {}
+
 enum ManagedProtocol {
     Codex(ProtocolClient),
     Acp(AcpClient),
     Claude(ClaudeClient),
+    Pi(PiRpcClient),
+}
+
+/// Select the task authority surface without putting grants in MCP descriptors.
+fn task_tool_profile(purpose: SessionPurpose, ordinary: Option<&str>) -> Option<&str> {
+    if purpose == SessionPurpose::VoiceSecretary {
+        Some("secretary-task")
+    } else {
+        ordinary
+    }
 }
 
 fn acp_mcp_server(
@@ -186,6 +276,12 @@ fn add_voice_mcp_origin(
     environment: &BTreeMap<String, String>,
     purpose: SessionPurpose,
 ) {
+    if purpose == SessionPurpose::VoiceSecretary
+        && let Some(path) = environment.get("CCCC_SECRETARY_TASK_TOKEN_FILE")
+        && let Some(env) = server["env"].as_array_mut()
+    {
+        env.push(serde_json::json!({"name":"CCCC_SECRETARY_TASK_TOKEN_FILE","value":path}));
+    }
     if purpose == SessionPurpose::VoiceAnalyst
         && let Some(origin) = environment.get(cccc_core::voice_notifications::ORIGIN_ENV)
         && let Some(env) = server["env"].as_array_mut()
@@ -202,6 +298,7 @@ impl ManagedProtocol {
             Self::Codex(protocol) => protocol.subscribe(),
             Self::Acp(protocol) => protocol.subscribe(),
             Self::Claude(protocol) => protocol.subscribe(),
+            Self::Pi(protocol) => protocol.subscribe(),
         }
     }
 
@@ -209,9 +306,9 @@ impl ManagedProtocol {
         match self {
             Self::Codex(protocol) => protocol.respond(id, result).await,
             Self::Acp(protocol) => protocol.respond(id, result).await,
-            Self::Claude(_) => Err(io::Error::new(
+            Self::Claude(_) | Self::Pi(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Claude Agent View does not expose generic JSON-RPC responses",
+                "This managed Runtime does not expose generic JSON-RPC responses",
             )),
         }
     }
@@ -220,9 +317,9 @@ impl ManagedProtocol {
         match self {
             Self::Codex(protocol) => protocol.respond_error(id, error).await,
             Self::Acp(protocol) => protocol.respond_error(id, error).await,
-            Self::Claude(_) => Err(io::Error::new(
+            Self::Claude(_) | Self::Pi(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Claude Agent View does not expose generic JSON-RPC responses",
+                "This managed Runtime does not expose generic JSON-RPC responses",
             )),
         }
     }
@@ -238,6 +335,10 @@ impl ManagedProtocol {
                 Ok(())
             }
             Self::Claude(protocol) => protocol.close().await,
+            Self::Pi(protocol) => {
+                protocol.close().await;
+                Ok(())
+            }
         }
     }
 
@@ -245,7 +346,7 @@ impl ManagedProtocol {
     /// Codex and ACP providers are child processes and die with this process.
     async fn kill_request(&self) -> io::Result<()> {
         match self {
-            Self::Codex(_) | Self::Acp(_) => Ok(()),
+            Self::Codex(_) | Self::Acp(_) | Self::Pi(_) => Ok(()),
             Self::Claude(protocol) => protocol.kill_request().await,
         }
     }
@@ -258,6 +359,10 @@ impl ManagedProtocol {
             Self::Codex(_) => Ok(()),
             Self::Acp(protocol) => protocol.register_native_input(delegation_id, text).await,
             Self::Claude(protocol) => protocol.register_native_input(delegation_id, text).await,
+            Self::Pi(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Pi RPC has no native terminal attachment",
+            )),
         }
     }
 
@@ -266,12 +371,14 @@ impl ManagedProtocol {
             Self::Codex(_) => Ok(()),
             Self::Acp(protocol) => protocol.forget_native_input(delegation_id).await,
             Self::Claude(protocol) => protocol.forget_native_input(delegation_id).await,
+            Self::Pi(_) => Ok(()),
         }
     }
 
     fn running(&self) -> bool {
         match self {
             Self::Claude(protocol) => protocol.running(),
+            Self::Pi(protocol) => protocol.running(),
             Self::Codex(_) | Self::Acp(_) => true,
         }
     }
@@ -288,6 +395,7 @@ impl ManagedProtocol {
             Self::Claude(protocol) => {
                 let _ = protocol.events.send(event);
             }
+            Self::Pi(protocol) => protocol.publish_for_test(event),
         }
     }
 }
@@ -313,5 +421,25 @@ fn required_value<'a>(value: &'a str, name: &str) -> io::Result<&'a str> {
         ))
     } else {
         Ok(value)
+    }
+}
+
+#[cfg(all(test, unix))]
+impl AnalystSession {
+    /// Exercise Actor output using the existing inert shutdown transport. The
+    /// selected runtime only chooses the actual structured projection branch.
+    pub(crate) fn for_output_test(
+        config: &std::path::Path,
+        structured: bool,
+        private: &str,
+    ) -> Self {
+        let mut session = Self::claude_for_shutdown_test(config, "abcdef01", Vec::new(), true);
+        if structured {
+            session.runtime = ActorRuntime::Antigravity;
+        }
+        session
+            .environment
+            .insert("OUTPUT_FIXTURE_PRIVATE".into(), private.into());
+        session
     }
 }

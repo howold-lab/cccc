@@ -4,6 +4,7 @@ import { act, createRef } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import type { CodexVoiceSessionController } from "../../features/codexVoice/useCodexVoiceSessionController";
+import { useModalStore } from "../../stores";
 import { CodexVoiceAnalystModal } from "./CodexVoiceAnalystModal";
 
 vi.mock("react-i18next", () => {
@@ -50,6 +51,7 @@ afterEach(() => {
 
 function controller(): CodexVoiceSessionController {
   return {
+    audioDeviceSnapshot: null,
     audioRef: createRef<HTMLAudioElement>(),
     phase: "listening",
     call: null,
@@ -68,6 +70,7 @@ function controller(): CodexVoiceSessionController {
     playbackBlocked: false,
     outputStatus: { queued: 0, blocked: null },
     error: "",
+    refreshError: "",
     isStarting: false,
     isEngaged: true,
     externalCall: false,
@@ -82,6 +85,7 @@ function controller(): CodexVoiceSessionController {
       realtime_credentials_available: true,
     },
     updatePreferences: vi.fn(),
+    updateAnalystSnapshot: vi.fn(),
     refresh: vi.fn(async () => undefined),
     start: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
@@ -144,95 +148,95 @@ describe("CodexVoiceAnalystModal settings navigation", () => {
       desktop = true;
       changed();
     });
-    await clickText("codexVoiceHideAnalyst");
     expect(terminal?.getAttribute("data-visible")).toBe("false");
     expect(host.querySelector("[data-visible]")).toBe(terminal);
     await clickText("codexVoiceShowAnalyst");
     expect(terminal?.getAttribute("data-visible")).toBe("true");
+    await clickText("codexVoiceHideAnalyst");
+    expect(terminal?.getAttribute("data-visible")).toBe("false");
     await act(async () => root.unmount());
   });
 
-  it("opens settings in the same dialog without remounting or disconnecting its terminal", async () => {
-    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-      callback(0);
-      return 1;
-    });
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: vi.fn(() => ({
-        matches: true,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
-    });
-    Object.defineProperty(navigator, "mediaDevices", {
-      configurable: true,
-      value: {
-        enumerateDevices: vi.fn(async () => []),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      },
-    });
+  it("opens the common realtime settings without starting or stopping the call", async () => {
     const host = document.createElement("div");
-    document.body.appendChild(host);
+    document.body.append(host);
     const root = createRoot(host);
+    const voice = controller();
     const onClose = vi.fn();
-
-    await act(async () => {
+    await act(async () =>
       root.render(
         <CodexVoiceAnalystModal
           isOpen
           isDark={false}
           isSmallScreen={false}
-          controller={controller()}
+          controller={voice}
           onClose={onClose}
         />,
-      );
-    });
-    const terminalBefore = host.querySelector("[data-visible='true']");
-    expect(terminalBefore).not.toBeNull();
-
-    const settingsButton = buttonByLabel(host, "codexVoiceSettings");
-    await act(async () => settingsButton.click());
-
-    const panel = host.querySelector("[data-codex-voice-settings-panel='true']");
-    const consoleSurface = host.querySelector("[data-codex-voice-console='true']");
-    expect(panel).not.toBeNull();
-    expect(host.querySelectorAll('[role="dialog"]')).toHaveLength(1);
-    expect(consoleSurface?.hasAttribute("hidden")).toBe(true);
-    expect(consoleSurface?.hasAttribute("inert")).toBe(true);
-    expect(consoleSurface?.getAttribute("aria-hidden")).toBe("true");
-    expect(host.querySelector("[data-visible='true']")).toBe(terminalBefore);
-    expect(document.activeElement?.id).toBe("codex-voice-settings-audio-tab");
-
-    const analystTab = host.querySelector("#codex-voice-settings-analyst-tab");
-    if (!(analystTab instanceof HTMLButtonElement)) throw new Error("analyst tab not found");
-    await act(async () => analystTab.click());
-    expect(analystTab.getAttribute("aria-selected")).toBe("true");
-    expect(host.querySelector("[data-analyst-settings-active='true']")).not.toBeNull();
-
-    const done = [...host.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "codexVoiceBackToConversation",
+      ),
     );
-    if (!(done instanceof HTMLButtonElement)) throw new Error("done button not found");
-    await act(async () => done.click());
-
-    expect(host.querySelector("#codex-voice-settings-page")?.hasAttribute("hidden")).toBe(true);
-    expect(consoleSurface?.hasAttribute("inert")).toBe(false);
-    expect(host.querySelector("[data-visible='true']")).toBe(terminalBefore);
-    expect(document.activeElement).toBe(settingsButton);
-
-    await act(async () => settingsButton.click());
-    expect(analystTab.getAttribute("aria-selected")).toBe("true");
-    await act(async () => settingsButton.click());
-    expect(host.querySelector("#codex-voice-settings-page")?.hasAttribute("hidden")).toBe(true);
-
-    await act(async () => settingsButton.click());
-    await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
-    expect(host.querySelector("#codex-voice-settings-page")?.hasAttribute("hidden")).toBe(true);
+    await act(async () => buttonByLabel(host, "codexVoiceSettings").click());
+    expect(useModalStore.getState().modals.settings).toBe(true);
+    expect(useModalStore.getState().settingsTarget).toMatchObject({
+      scope: "global",
+      tab: "voice",
+      voiceSection: "realtime",
+    });
+    expect(useModalStore.getState().settingsTarget?.voiceAnalyst).toBeUndefined();
+    expect(host.querySelector("[data-codex-voice-settings-panel]")).toBeNull();
+    expect(voice.start).not.toHaveBeenCalled();
+    expect(voice.disconnect).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
-
     await act(async () => root.unmount());
   });
+
+  it.each(["", "codexVoiceAnalystRuntimeMissing"])(
+    "takes an Analyst setup problem directly to settings after error=%s without changing the gear",
+    async (error) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const voice = {
+        ...controller(),
+        phase: error ? ("failed" as const) : ("idle" as const),
+        error,
+        isEngaged: false,
+        owned: false,
+        analyst: null,
+        readiness: {
+          analyst_runtime: "codex",
+          analyst_runtime_available: false,
+          supported_modes: ["assistant", "persona"] as ("assistant" | "persona")[],
+          realtime_credentials_available: true,
+        },
+      };
+      await act(async () =>
+        root.render(
+          <CodexVoiceAnalystModal
+            isOpen
+            isDark={false}
+            isSmallScreen={false}
+            controller={voice}
+            onClose={vi.fn()}
+          />,
+        ),
+      );
+      const settings = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "codexVoiceOpenSettings",
+      );
+      expect(settings).toBeDefined();
+      if (error) expect(host.textContent?.split(error)).toHaveLength(2);
+      await act(async () => settings!.click());
+      expect(useModalStore.getState().settingsTarget).toMatchObject({
+        scope: "global",
+        tab: "voice",
+        voiceSection: "realtime",
+        voiceAnalyst: true,
+      });
+      await act(async () => buttonByLabel(host, "codexVoiceSettings").click());
+      expect(useModalStore.getState().settingsTarget?.voiceAnalyst).toBeUndefined();
+      expect(voice.start).not.toHaveBeenCalled();
+      expect(voice.disconnect).not.toHaveBeenCalled();
+      await act(async () => root.unmount());
+    },
+  );
 });

@@ -22,6 +22,7 @@ function controller(
   overrides: Partial<CodexVoiceSessionController> = {},
 ): CodexVoiceSessionController {
   return {
+    audioDeviceSnapshot: null,
     audioRef: createRef<HTMLAudioElement>(),
     phase: "idle",
     call: null,
@@ -34,6 +35,7 @@ function controller(
     playbackBlocked: false,
     outputStatus: { queued: 0, blocked: null },
     error: "",
+    refreshError: "",
     isStarting: false,
     isEngaged: false,
     externalCall: false,
@@ -48,6 +50,7 @@ function controller(
       realtime_credentials_available: true,
     },
     updatePreferences: vi.fn(),
+    updateAnalystSnapshot: vi.fn(),
     refresh: vi.fn(async () => undefined),
     start: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
@@ -69,6 +72,52 @@ const readyAnalyst = {
 };
 
 describe("CodexVoiceAnalystModal", () => {
+  it("shows ACP setup guidance for first use instead of a missing native runtime", () => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceAnalystModal
+        isOpen
+        isDark={false}
+        isSmallScreen={false}
+        controller={controller({
+          readiness: {
+            supported_modes: ["assistant", "persona"],
+            analyst_runtime: "antigravity",
+            analyst_runtime_available: false,
+            analyst_runtime_setup_required: true,
+            realtime_credentials_available: true,
+          },
+        })}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(html).toContain("codexVoiceAntigravityAcpSetupRequired");
+    expect(html).not.toContain("codexVoiceAnalystRuntimeMissing");
+  });
+
+  it("shows the setup instruction once after a blocked start", () => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceAnalystModal
+        isOpen
+        isDark={false}
+        isSmallScreen
+        controller={controller({
+          phase: "failed",
+          error: "codexVoiceAntigravityAcpSetupRequired",
+          readiness: {
+            supported_modes: ["assistant", "persona"],
+            analyst_runtime: "antigravity",
+            analyst_runtime_available: false,
+            analyst_runtime_setup_required: true,
+            realtime_credentials_available: true,
+          },
+        })}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(html.match(/codexVoiceAntigravityAcpSetupRequired/g)).toHaveLength(1);
+    expect(html).toContain('role="alert"');
+  });
+
   it("does not connect the hidden terminal below the lg breakpoint", () => {
     vi.stubGlobal("window", {
       matchMedia: vi.fn(() => ({
@@ -112,7 +161,34 @@ describe("CodexVoiceAnalystModal", () => {
     expect(html).not.toContain("codexVoiceOpenTerminal");
   });
 
-  it("puts owned call controls in the header and embeds the Analyst terminal", () => {
+  it("names call and Analyst readiness separately with one settings action", () => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceAnalystModal
+        isOpen
+        isDark={false}
+        isSmallScreen={false}
+        controller={controller({
+          readiness: {
+            supported_modes: ["assistant", "persona"],
+            analyst_runtime: "claude",
+            analyst_runtime_available: true,
+            realtime_credentials_available: false,
+          },
+        })}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(html).toContain("codexVoiceCallBlocked");
+    expect(html).not.toContain("codexVoicePhase.idle");
+    expect(html).toMatch(/aria-live="polite"[^>]*>codexVoiceCallBlocked</);
+    expect(html).toContain("data-codex-voice-readiness");
+    expect(html).toContain("codexVoiceCodexLoginRequired");
+    expect(html).toContain("codexVoiceReadinessOk");
+    expect(html.match(/codexVoiceOpenSettings/g)).toHaveLength(1);
+    expect(html).not.toContain("codexVoiceAnalystNotReady");
+  });
+
+  it("keeps the embedded Analyst terminal collapsed and disconnected by default", () => {
     const html = renderToStaticMarkup(
       <CodexVoiceAnalystModal
         isOpen
@@ -131,7 +207,9 @@ describe("CodexVoiceAnalystModal", () => {
     expect(html).toContain('aria-label="codexVoiceMute"');
     expect(html).toContain("codexVoiceStop");
     expect(html).toContain("embedded-analyst-terminal");
-    expect(html).toContain('data-visible="true"');
+    expect(html).toContain('data-visible="false"');
+    expect(html).toContain("data-codex-voice-analyst-bar");
+    expect(html).not.toContain("codexVoiceHideAnalyst");
     expect(html).not.toContain("External terminal diagnostics");
     expect(html).not.toContain("Alpha");
   });

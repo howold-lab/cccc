@@ -49,6 +49,8 @@ mod terminal_ws;
 mod terminal_ws_bootstrap;
 mod terminal_ws_flow;
 mod terminal_ws_protocol;
+mod voice_secretary;
+mod voice_secretary_terminal;
 mod web_model_browser;
 mod web_model_connector_activity;
 mod web_model_connector_provisioning;
@@ -58,6 +60,7 @@ mod web_model_connectors;
 mod web_model_delivery;
 mod web_model_delivery_completion;
 mod web_model_delivery_state;
+mod web_model_dots;
 mod web_model_pairing;
 mod web_model_shared_browser;
 mod web_model_supervisor;
@@ -89,6 +92,7 @@ pub fn router() -> Router<AppState> {
         .merge(group_copy::routes())
         .merge(actors::routes())
         .merge(assistants::routes())
+        .merge(voice_secretary::routes())
         .merge(group_space::routes())
         .merge(group_space_provider::routes())
         .merge(group_workspace::routes())
@@ -99,6 +103,7 @@ pub fn router() -> Router<AppState> {
         .merge(presentation::routes())
         .merge(presentation_browser::routes())
         .merge(web_model_connectors::routes())
+        .merge(web_model_dots::routes())
         .merge(web_model_browser::routes())
         .merge(web_model_pairing::routes())
         .merge(web_model_shared_browser::routes())
@@ -116,4 +121,5 @@ pub fn router() -> Router<AppState> {
         .merge(terminal::routes())
 }
 
+pub(crate) use web_model_dots::spawn as spawn_dots_events;
 pub(crate) use web_model_supervisor::spawn as spawn_web_model_supervisor;

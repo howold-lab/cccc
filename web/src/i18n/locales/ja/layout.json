@@ -27,7 +27,7 @@
   "disconnected": "接続なし",
   "dismissError": "エラーを閉じる",
   "createNewGroup": "新しい作業グループを作成",
-  "newGroup": "+ 新規",
+  "newGroup": "新規",
   "workingGroups": "作業グループ",
   "archivedGroups": "アーカイブ",
   "groupActions": "グループ操作",
@@ -43,6 +43,7 @@
   "searchMessagesButton": "メッセージ検索",
   "contextButton": "コンテキスト",
   "settingsButton": "設定",
+  "allSettings": "すべての設定",
   "lightMode": "ライトモード",
   "darkMode": "ダークモード",
   "editGroupDetails": "グループ詳細を編集",
@@ -249,5 +250,9 @@
     "failed": "{{group}} を更新できませんでした。接続を確認して再試行してください。",
     "noActors": "Agent を追加すると、このグループを起動できます。"
   },
-  "connectionInterruptedHint": "ページの接続が切れました。自動的に再接続します。表示情報は最新でない可能性があります。"
+  "connectionInterruptedHint": "ページの接続が切れました。自動的に再接続します。表示情報は最新でない可能性があります。",
+  "realtimeSocketUnreachable": "リアルタイム接続に到達できません",
+  "realtimeSubscriptionClosed": "サーバーが購読を閉じました",
+  "retryingIn": "{{seconds}}秒後に再試行",
+  "retryingNow": "再試行中"
 }

@@ -1,10 +1,10 @@
 use super::processing_reactions::TelegramReactions;
 use super::telegram_inbound::{has_attachments, materialize_attachments};
-use super::telegram_outbound::TelegramOutbound;
+use super::telegram_outbound::{SendOutcome, TelegramOutbound};
 use super::worker::Stopper;
 use super::{
-    InboundDecision, InboundMetadata, completes_processing, dispatch_inbound_with,
-    inbound_decision_for_thread, is_outbound_or_stream, processing_reply_to,
+    InboundDecision, InboundMetadata, bridge_log_line, bridge_status_update, completes_processing,
+    dispatch_inbound_with, inbound_decision_for_thread, is_outbound_or_stream, processing_reply_to,
     resolve_config_credential, spawn_outbound_matching, target_key,
 };
 use cccc_client::DaemonClient;
@@ -16,6 +16,11 @@ use teloxide::types::{MessageEntityKind, MessageEntityRef};
 use tokio::task::JoinHandle;
 
 const PLATFORM: &str = "telegram";
+/// Bound long polling and individual API calls, with a separate total send deadline.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+/// API reachability only: getMe does not prove that getUpdates is succeeding.
+const API_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) async fn start(
     home: HomeLayout,
@@ -25,7 +30,12 @@ pub(super) async fn start(
     ledger_events: crate::ledger_event_hub::LedgerEventHub,
 ) -> Result<(Vec<JoinHandle<()>>, Stopper), String> {
     let token = resolve_config_credential(config, "bot_token", "bot_token_env")?;
-    let bot = Bot::new(token);
+    let http_client = reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("Telegram HTTP client setup failed: {error}"))?;
+    let bot = Bot::with_client(token, http_client);
     let bot_username = bot
         .get_me()
         .await
@@ -133,7 +143,68 @@ pub(super) async fn start(
     });
 
     let reaction_cleanup = reactions.cleanup_task();
+    let probe = {
+        let bot = bot.clone();
+        let home = home.clone();
+        let group_id = group_id.to_owned();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(API_PROBE_INTERVAL);
+            let mut was_ok = true;
+            loop {
+                interval.tick().await;
+                let now = Value::from(cccc_contracts::utc_now());
+                match bot.get_me().await {
+                    Ok(_) => {
+                        if !was_ok {
+                            was_ok = true;
+                            bridge_log_line(
+                                &home,
+                                &group_id,
+                                PLATFORM,
+                                "INFO",
+                                "telegram api reachable again",
+                                Map::new(),
+                            );
+                        }
+                        bridge_status_update(
+                            &home,
+                            &group_id,
+                            Map::from_iter([
+                                ("last_api_ok_at".into(), now),
+                                ("last_api_error".into(), Value::Null),
+                            ]),
+                        );
+                    }
+                    Err(error) => {
+                        let error = error.to_string();
+                        if was_ok {
+                            // Log the failure transition once instead of every cycle.
+                            bridge_log_line(
+                                &home,
+                                &group_id,
+                                PLATFORM,
+                                "WARN",
+                                "telegram api reachability check failed",
+                                Map::from_iter([("error".into(), Value::from(error.clone()))]),
+                            );
+                        }
+                        was_ok = false;
+                        bridge_status_update(
+                            &home,
+                            &group_id,
+                            Map::from_iter([
+                                ("last_api_error".into(), Value::from(error)),
+                                ("last_api_error_at".into(), now),
+                            ]),
+                        );
+                    }
+                }
+            }
+        })
+    };
     let outbound_reactions = reactions;
+    let outbound_home = home.clone();
+    let outbound_group = group_id.to_owned();
     let outbound_sender = TelegramOutbound::new(home.clone(), group_id, bot);
     let outbound = spawn_outbound_matching(
         home,
@@ -144,23 +215,89 @@ pub(super) async fn start(
         is_outbound_or_stream,
         move |sender, targets, event| {
             let reactions = outbound_reactions.clone();
+            let home = outbound_home.clone();
+            let group_id = outbound_group.clone();
             async move {
                 let completes_processing = completes_processing(&event);
                 let reply_to = processing_reply_to(&event).map(str::to_owned);
                 for target in targets {
-                    if let Err(error) = sender.send_target(&target, &event).await {
-                        tracing::warn!(%error, "failed to send Telegram IM message");
-                        if completes_processing {
-                            reactions.complete(&target.key(), reply_to.as_deref()).await;
-                        }
-                    } else if completes_processing {
+                    let result = match tokio::time::timeout(
+                        SEND_TIMEOUT,
+                        sender.send_target(&target, &event),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(format!(
+                            "telegram send timed out after {}s",
+                            SEND_TIMEOUT.as_secs()
+                        )),
+                    };
+                    record_send_result(&home, &group_id, &target.key(), &event.id, result);
+                    if completes_processing {
                         reactions.complete(&target.key(), reply_to.as_deref()).await;
                     }
                 }
             }
         },
     );
-    Ok((vec![inbound, outbound, reaction_cleanup], stopper))
+    Ok((vec![inbound, outbound, reaction_cleanup, probe], stopper))
+}
+
+pub(super) fn record_send_result(
+    home: &HomeLayout,
+    group_id: &str,
+    target_key: &str,
+    event_id: &str,
+    result: Result<SendOutcome, String>,
+) {
+    let now = Value::from(cccc_contracts::utc_now());
+    match result {
+        Err(error) => {
+            tracing::warn!(%error, "failed to send Telegram IM message");
+            bridge_status_update(
+                home,
+                group_id,
+                Map::from_iter([
+                    ("last_error".into(), Value::from(error.clone())),
+                    ("last_error_at".into(), now),
+                ]),
+            );
+            bridge_log_line(
+                home,
+                group_id,
+                PLATFORM,
+                "WARN",
+                "outbound send failed",
+                Map::from_iter([
+                    ("chat_key".into(), Value::from(target_key.to_owned())),
+                    ("error".into(), Value::from(error)),
+                ]),
+            );
+        }
+        Ok(SendOutcome::Delivered) => {
+            bridge_status_update(
+                home,
+                group_id,
+                Map::from_iter([
+                    ("last_send_ok_at".into(), now),
+                    ("last_error".into(), Value::Null),
+                ]),
+            );
+            bridge_log_line(
+                home,
+                group_id,
+                PLATFORM,
+                "INFO",
+                "outbound send delivered",
+                Map::from_iter([
+                    ("chat_key".into(), Value::from(target_key.to_owned())),
+                    ("event_id".into(), Value::from(event_id)),
+                ]),
+            );
+        }
+        Ok(SendOutcome::Skipped) => {}
+    }
 }
 
 fn accepts_inbound_message(message: &Message, bot_username: &str) -> bool {

@@ -35,7 +35,7 @@ pub(super) fn submit_terminal_text(
     if raw.is_empty() {
         return false;
     }
-    if super::local_headless::supports(actor)
+    if super::local_headless::running(group_id, &actor.id)
         && !cccc_runtime::wait_for_input_ready(
             group_id,
             &actor.id,
@@ -103,12 +103,16 @@ pub(super) struct DeliveryJob {
     pub event: Event,
 }
 
+/// A delivery outcome whose ledger record is still pending. It holds the
+/// in-flight slot until recorded, so the event is never dispatched again.
 pub(super) struct DeliveryCompletion {
     pub group_id: String,
     pub actor_id: String,
     pub actor_created_at: String,
     pub event_id: String,
     pub transport: String,
+    /// Set for a withdrawn delivery (never sent); otherwise it was accepted.
+    pub withdrawn_reason: Option<String>,
 }
 
 struct DeliveryWorker {
@@ -194,6 +198,7 @@ pub(super) fn complete_job(job: &DeliveryJob) {
                 actor_created_at: job.actor.created_at.clone(),
                 event_id: job.event.id.clone(),
                 transport: transport.into(),
+                withdrawn_reason: None,
             });
         }
     }
@@ -234,7 +239,38 @@ fn fail_job(job: &DeliveryJob, reason: &str) {
     release_in_flight(job);
 }
 
-fn fail_jobs(jobs: &[DeliveryJob], reason: &str) {
+/// Close deliveries that were never sent and must not be retried. A failed
+/// record is queued like an accepted one: only the record is retried, never
+/// the submission, and the event keeps its in-flight slot meanwhile.
+pub(super) fn withdraw_jobs(jobs: &[DeliveryJob], reason: &str) {
+    for job in jobs {
+        let transport = delivery_transport(&job.home, &job.group, &job.actor);
+        match crate::ops::runtime_delivery::append_state(
+            &job.home,
+            &job.group.group_id,
+            &job.actor.id,
+            &job.actor.created_at,
+            &job.event.id,
+            transport,
+            crate::ops::runtime_delivery::DeliveryOutcome::Withdrawn(reason),
+        ) {
+            Ok(_) => release_in_flight(job),
+            Err(error) => {
+                tracing::warn!(message = %error.message, event_id = %job.event.id, "withdrawn delivery record is pending");
+                record_completion(DeliveryCompletion {
+                    group_id: job.group.group_id.clone(),
+                    actor_id: job.actor.id.clone(),
+                    actor_created_at: job.actor.created_at.clone(),
+                    event_id: job.event.id.clone(),
+                    transport: transport.into(),
+                    withdrawn_reason: Some(reason.into()),
+                });
+            }
+        }
+    }
+}
+
+pub(super) fn fail_jobs(jobs: &[DeliveryJob], reason: &str) {
     for job in jobs {
         fail_job(job, reason);
     }
@@ -325,7 +361,7 @@ fn dispatch_to_inner(
         }
         let actor_online = if actor.runtime == ActorRuntime::Deepseek {
             crate::ops::deepseek_runtime::running(&group.group_id, &actor.id)
-        } else if crate::ops::local_headless::supports(actor) {
+        } else if crate::ops::local_headless::uses_managed_delivery(&group.group_id, actor) {
             crate::ops::local_headless::running(&group.group_id, &actor.id)
         } else {
             cccc_runtime::status(&group.group_id, &actor.id).is_ok_and(|status| status.running)
@@ -444,12 +480,12 @@ pub(super) fn delivery_transport(
 ) -> &'static str {
     if actor.runtime == ActorRuntime::Deepseek {
         "deepseek"
+    } else if actor.runtime == ActorRuntime::ChatgptDots {
+        "web_model_pull"
     } else if actor.runtime.is_web_model() {
         web_model_delivery_transport(home, group, actor)
-    } else if crate::ops::local_headless::uses_managed_session(actor) {
+    } else if crate::ops::local_headless::uses_managed_delivery(&group.group_id, actor) {
         "managed_session"
-    } else if crate::ops::local_headless::supports(actor) {
-        "local_headless"
     } else {
         "pty"
     }
@@ -629,14 +665,22 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                 }
             }
             let mut delivered = false;
+            let mut terminal_reason = None;
             for attempt in 0..3 {
-                if actor_delivery_worker::process_batch(
-                    &batch,
+                match actor_delivery_worker::process_batch(
+                    &mut batch,
                     &mut preamble_session,
                     &thread_cancelled,
                 ) {
-                    delivered = true;
-                    break;
+                    actor_delivery_worker::BatchOutcome::Delivered => {
+                        delivered = true;
+                        break;
+                    }
+                    actor_delivery_worker::BatchOutcome::Terminal(reason) => {
+                        terminal_reason = Some(reason);
+                        break;
+                    }
+                    actor_delivery_worker::BatchOutcome::Retry => {}
                 }
                 if thread_cancelled.load(Ordering::Acquire) {
                     break;
@@ -648,7 +692,10 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                     break;
                 }
             }
-            if !delivered {
+            if let Some(reason) = terminal_reason {
+                fail_jobs(&batch, &reason);
+                deferred_failures = 0;
+            } else if !delivered {
                 deferred = batch;
                 deferred_failures = deferred_failures.saturating_add(1);
             } else {
@@ -685,6 +732,76 @@ fn deferred_retry_delay(failures: u32) -> std::time::Duration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scopeless_worker_records_failure_and_releases_claim() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("scopeless worker", "").expect("group");
+        let actor = Actor::new("peer1");
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = json!({"to":["peer1"],"text":"work","message_mode":"send"})
+            .as_object()
+            .expect("data")
+            .clone();
+        let job = DeliveryJob {
+            home: home.clone(),
+            group: group.clone(),
+            actor: actor.clone(),
+            event: event.clone(),
+        };
+        let key = (group.group_id.clone(), actor.id.clone(), event.id.clone());
+        in_flight().lock().expect("claims").insert(key.clone());
+        crate::ops::runtime_delivery::append_state(
+            &home,
+            &group.group_id,
+            &actor.id,
+            &actor.created_at,
+            &event.id,
+            delivery_transport(&home, &group, &actor),
+            crate::ops::runtime_delivery::DeliveryOutcome::Claimed,
+        )
+        .expect("claim");
+        let worker = spawn_worker(&(group.group_id.clone(), actor.id.clone()));
+        worker
+            .sender
+            .as_ref()
+            .expect("sender")
+            .send(job)
+            .expect("enqueue");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let state = crate::ops::runtime_delivery::latest_state(
+                &home,
+                &group.group_id,
+                &actor.id,
+                &event.id,
+            )
+            .expect("state");
+            if state.is_some_and(|(state, _)| state == "failed") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "delivery must fail without retrying forever"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        worker.shutdown();
+        assert!(!in_flight().lock().expect("claims").contains(&key));
+        let events =
+            ledger::read_all(&store.ledger_path(&group.group_id).expect("ledger")).expect("events");
+        let states: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "runtime.delivery")
+            .filter_map(|event| event.data.get("state").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(states, ["claimed", "failed"]);
+    }
+
     #[test]
     fn configured_browser_transport_does_not_require_a_completed_pairing() {
         let temp = tempfile::tempdir().expect("temp");

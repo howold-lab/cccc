@@ -7,13 +7,35 @@ use std::time::Duration;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Grok ACP does not apply CLI model defaults to every new session, and load
+/// restores the saved effort. Apply explicit launch choices before any prompt.
+/// Unspecified choices remain owned by the runtime/session.
+pub(super) async fn apply_preferences(
+    protocol: &AcpClient,
+    session_id: &str,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> io::Result<()> {
+    for (config_id, value) in [("model", model), ("reasoning_effort", reasoning_effort)] {
+        if let Some(value) = value {
+            protocol
+                .request(
+                    "session/set_config_option",
+                    json!({"sessionId":session_id,"configId":config_id,"value":value}),
+                    HANDSHAKE_TIMEOUT,
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn initialize(
     protocol: &AcpClient,
     cwd: &Path,
     purpose: SessionPurpose,
     configured_rules: &str,
     resume_session_id: Option<&str>,
-    allow_fresh_after_resume_failure: bool,
 ) -> io::Result<(String, bool)> {
     let rules = match purpose {
         SessionPurpose::VoiceAnalyst if configured_rules.trim().is_empty() => {
@@ -23,6 +45,7 @@ pub(super) async fn initialize(
             format!("{ANALYST_INSTRUCTIONS}\n\n{configured_rules}")
         }
         SessionPurpose::Actor => configured_rules.to_owned(),
+        SessionPurpose::VoiceSecretary => super::super::launch_secretary::INSTRUCTIONS.to_owned(),
     };
     let cwd = cwd.to_string_lossy().into_owned();
     let session_params = |method: &str, session_id: Option<&str>| {
@@ -55,9 +78,6 @@ pub(super) async fn initialize(
             .await
         {
             Ok(_) => return Ok((session_id.to_owned(), true)),
-            Err(error) if allow_fresh_after_resume_failure => {
-                tracing::warn!(%error, session_id, "Grok managed session resume failed; starting fresh");
-            }
             Err(error) => return Err(error),
         }
     }

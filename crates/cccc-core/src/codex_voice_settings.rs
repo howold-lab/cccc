@@ -15,6 +15,8 @@ mod validation;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedAgentRuntime {
     pub runtime: ActorRuntime,
+    #[serde(skip_serializing_if = "cccc_contracts::RuntimeMode::is_default")]
+    pub runtime_mode: cccc_contracts::RuntimeMode,
     pub command: Vec<String>,
     pub environment: BTreeMap<String, String>,
 }
@@ -28,6 +30,22 @@ impl ResolvedAgentRuntime {
 
     #[must_use]
     pub fn identity_fingerprint(&self) -> String {
+        if self.runtime == ActorRuntime::Pi {
+            let encoded =
+                serde_json::to_vec(&(self, identity_fingerprint(self.runtime, &self.environment)))
+                    .expect("Pi identity serializes");
+            return format!("{:x}", Sha256::digest(encoded));
+        }
+        if self.runtime.supports_acp_mode() {
+            let encoded = serde_json::to_vec(&(
+                self.runtime,
+                self.runtime_mode,
+                &self.command,
+                &self.environment,
+            ))
+            .expect("ACP identity serializes");
+            return format!("{:x}", Sha256::digest(encoded));
+        }
         if self.runtime == ActorRuntime::Claude {
             // Claude Agent View persists launch flags and provider environment
             // in the background job. Resuming the exact session cannot apply
@@ -48,6 +66,34 @@ impl ResolvedAgentRuntime {
             serde_json::to_vec(&(self, files)).expect("resolved Claude runtime serializes");
         Ok(format!("{:x}", Sha256::digest(encoded)))
     }
+}
+
+/// Structured adapters shared by Voice Analyst and the global ASR Secretary.
+/// Native-terminal-only runtimes and native ACP providers in TUI mode are excluded.
+#[must_use]
+pub fn supports_structured_runtime(
+    runtime: ActorRuntime,
+    mode: cccc_contracts::RuntimeMode,
+) -> bool {
+    matches!(
+        runtime,
+        ActorRuntime::Antigravity
+            | ActorRuntime::Auggie
+            | ActorRuntime::Copilot
+            | ActorRuntime::Devin
+            | ActorRuntime::Cursor
+            | ActorRuntime::Claude
+            | ActorRuntime::Codex
+            | ActorRuntime::Grok
+            | ActorRuntime::Opencode
+            | ActorRuntime::Kilo
+            | ActorRuntime::Kimi
+            | ActorRuntime::Kiro
+            | ActorRuntime::Hermes
+            | ActorRuntime::Droid
+            | ActorRuntime::Pi
+    ) && mode.validate(runtime).is_ok()
+        && (!runtime.supports_acp_mode() || mode == cccc_contracts::RuntimeMode::Acp)
 }
 
 pub fn load(home: &HomeLayout) -> io::Result<CodexVoiceAnalystSettings> {
@@ -73,7 +119,7 @@ pub fn resolve(
     custom_environment: &BTreeMap<String, String>,
 ) -> io::Result<ResolvedAgentRuntime> {
     let settings = normalize(settings.clone())?;
-    let resolved = if settings.uses_profile() {
+    let mut resolved = if settings.uses_profile() {
         let profile = ProfileStore::new(home.clone())?
             .runtime_ref(
                 &settings.profile_id,
@@ -88,24 +134,30 @@ pub fn resolve(
             })?;
         ResolvedAgentRuntime {
             runtime: profile.runtime,
+            runtime_mode: profile.runtime_mode,
             command: profile.command,
             environment: profile.environment,
         }
     } else {
         ResolvedAgentRuntime {
             runtime: settings.runtime,
+            runtime_mode: settings.runtime_mode,
             command: settings.command,
             environment: custom_environment.clone(),
         }
     };
-    if !matches!(
-        resolved.runtime,
-        ActorRuntime::Claude
-            | ActorRuntime::Codex
-            | ActorRuntime::Grok
-            | ActorRuntime::Opencode
-            | ActorRuntime::Kilo
-    ) {
+    resolved
+        .runtime_mode
+        .validate(resolved.runtime)
+        .map_err(io::Error::other)?;
+    if resolved.runtime.supports_acp_mode()
+        && resolved.runtime_mode != cccc_contracts::RuntimeMode::Acp
+    {
+        return Err(io::Error::other(
+            "This Voice Analyst Runtime requires runtime_mode=acp",
+        ));
+    }
+    if !supports_structured_runtime(resolved.runtime, resolved.runtime_mode) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
@@ -113,6 +165,15 @@ pub fn resolve(
                 resolved.runtime
             ),
         ));
+    }
+    if resolved.runtime == ActorRuntime::Antigravity {
+        resolved.environment.insert(
+            "GEMINI_HOME".into(),
+            home.root()
+                .join("state/antigravity-acp/home/.gemini")
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     validation::validate_private_environment(&resolved.environment)?;
     Ok(resolved)
@@ -198,6 +259,7 @@ fn identity_fingerprint(runtime: ActorRuntime, environment: &BTreeMap<String, St
     let provider_keys: &[&str] = match runtime {
         ActorRuntime::Claude => unreachable!("Claude fingerprints the full resolved launch"),
         ActorRuntime::Grok => &["GROK_HOME", "HOME", "USERPROFILE"],
+        ActorRuntime::Pi => &["PI_CODING_AGENT_DIR", "HOME", "USERPROFILE"],
         ActorRuntime::Kilo => &[
             "HOME",
             "USERPROFILE",

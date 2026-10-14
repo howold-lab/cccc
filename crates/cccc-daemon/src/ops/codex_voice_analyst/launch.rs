@@ -2,7 +2,7 @@ use super::*;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub(super) const ANALYST_INSTRUCTIONS: &str = r#"You are the Voice Analyst behind CCCC Realtime Voice. In delegated speech, references such as 'the analyst', 'ask the analyst', or 'have the analyst check' refer to you: perform that investigation directly with your own tools. Never use runtime collaboration or sub-agent tools in this role. When additional execution is genuinely needed, coordinate an existing CCCC Group Foreman or peer through CCCC tools instead of creating an untracked second analyst. Investigate material claims with tools before answering.
+pub(crate) const ANALYST_INSTRUCTIONS: &str = r#"You are the Voice Analyst behind CCCC Realtime Voice. In delegated speech, references such as 'the analyst', 'ask the analyst', or 'have the analyst check' refer to you: perform that investigation directly with your own tools. Never use runtime collaboration or sub-agent tools in this role. When additional execution is genuinely needed, coordinate an existing CCCC Group Foreman or peer through CCCC tools instead of creating an untracked second analyst. Investigate material claims with tools before answering.
 
 The host starts you in a neutral CCCC-owned working directory. It is not a Working Group, repository scope, or implicit target. Every CCCC operation concerning a Group, Actor, task, message, ledger, or repository must use an explicit group_id and any required target identity. When the user asks about all Groups or names another Group, use CCCC tools to list or resolve live state. Never infer live state from CCCC_HOME directories or describe one Group snapshot as global state. Before repository investigation, resolve the intended Group and attached root, read the applicable repository instructions, and operate only on that explicit target. Delegate repository modification or durable work to the existing Group Foreman or peer instead of treating this neutral cwd as the project.
 
@@ -14,6 +14,16 @@ impl AnalystSession {
     pub(crate) async fn launch(home: &HomeLayout, mut config: LaunchConfig) -> io::Result<Self> {
         let binding = bind_workspace(&config.workdir)?;
         cccc_core::codex_voice_settings::validate_private_environment(&config.environment)?;
+        config
+            .runtime_mode
+            .validate(config.runtime)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        if config.runtime.supports_acp_mode() && config.runtime_mode != RuntimeMode::Acp {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "This Voice Analyst Runtime requires ACP mode",
+            ));
+        }
         let origin = cccc_core::voice_notifications::origin_for_launch(
             home,
             config.runtime,
@@ -24,6 +34,50 @@ impl AnalystSession {
             origin.clone(),
         );
         let session = match config.runtime {
+            ActorRuntime::Antigravity => {
+                Self::launch_antigravity(
+                    home,
+                    binding,
+                    config.command,
+                    config.environment,
+                    config.resume_thread_id,
+                    SessionPurpose::VoiceAnalyst,
+                    None,
+                )
+                .await
+            }
+            ActorRuntime::Copilot
+            | ActorRuntime::Devin
+            | ActorRuntime::Cursor
+            | ActorRuntime::Auggie
+            | ActorRuntime::Kimi
+            | ActorRuntime::Kiro
+            | ActorRuntime::Hermes
+            | ActorRuntime::Droid => {
+                Self::launch_native_acp(
+                    home,
+                    binding,
+                    config.runtime,
+                    config.command,
+                    config.environment,
+                    config.resume_thread_id,
+                    SessionPurpose::VoiceAnalyst,
+                    None,
+                )
+                .await
+            }
+            ActorRuntime::Pi => {
+                Self::launch_pi(
+                    home,
+                    binding,
+                    config.command,
+                    config.environment,
+                    config.resume_thread_id,
+                    SessionPurpose::VoiceAnalyst,
+                    None,
+                )
+                .await
+            }
             cccc_contracts::ActorRuntime::Codex => {
                 let mut env = config.environment;
                 let prepared = super::launch_command::prepare(&config.command, &env)?;
@@ -105,6 +159,47 @@ impl AnalystSession {
         config: ActorLaunchConfig,
     ) -> io::Result<Self> {
         let binding = bind_workspace(&config.workdir)?;
+        config
+            .runtime_mode
+            .validate(config.runtime)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        if config.runtime == ActorRuntime::Antigravity && config.runtime_mode == RuntimeMode::Acp {
+            return Self::launch_antigravity(
+                home,
+                binding,
+                config.command,
+                config.environment,
+                None,
+                SessionPurpose::Actor,
+                Some((&config.group_id, &config.actor_id)),
+            )
+            .await;
+        }
+        if config.runtime.is_headless_acp(config.runtime_mode) {
+            return Self::launch_native_acp(
+                home,
+                binding,
+                config.runtime,
+                config.command,
+                config.environment,
+                None,
+                SessionPurpose::Actor,
+                Some((&config.group_id, &config.actor_id)),
+            )
+            .await;
+        }
+        if config.runtime == ActorRuntime::Pi {
+            return Self::launch_pi(
+                home,
+                binding,
+                config.command,
+                config.environment,
+                None,
+                SessionPurpose::Actor,
+                Some((&config.group_id, &config.actor_id)),
+            )
+            .await;
+        }
         if config.runtime == cccc_contracts::ActorRuntime::Claude {
             return Self::launch_claude(
                 home,
@@ -158,7 +253,7 @@ impl AnalystSession {
         let prepared = super::launch_command::prepare(&config.command, &env)?;
         let session_command = prepared.app_server.clone();
         let identity_environment = env.clone();
-        let resume_thread_id = lifecycle_timing::run_sync("codex.resume_lookup", || {
+        let resume_attempt = lifecycle_timing::run_sync("codex.resume_lookup", || {
             super::super::runtime_session::prepare_codex_app_thread(
                 home,
                 &config.group_id,
@@ -187,10 +282,18 @@ impl AnalystSession {
             prepared.remote_tui_prefix,
             command,
             env,
-            resume_thread_id,
+            resume_attempt
+                .as_ref()
+                .map(|attempt| attempt.session_id.clone()),
             SessionPurpose::Actor,
         )
-        .await?;
+        .await;
+        let session = super::super::runtime_session::resume_failure::finish_launch(
+            home,
+            Some((&config.group_id, &config.actor_id)),
+            resume_attempt.as_ref(),
+            session,
+        )?;
         if let Err(error) = lifecycle_timing::run_sync("codex.resume_record", || {
             super::super::runtime_session::record_codex_app_thread(
                 home,
@@ -246,6 +349,9 @@ impl AnalystSession {
     }
 
     pub(crate) fn tui_command(&self) -> Vec<String> {
+        if self.structured_only() {
+            return Vec::new();
+        }
         if let Some(command) = &self.native_tui_command {
             return command.clone();
         }
@@ -268,8 +374,46 @@ impl AnalystSession {
         self.environment.clone()
     }
 
+    pub(crate) fn safe_diagnostic(&self, error: &io::Error) -> String {
+        let mut message = error.to_string();
+        let mut values = self
+            .environment
+            .values()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        for value in values {
+            message = message.replace(value, "[redacted]");
+        }
+        message.chars().take(1600).collect()
+    }
+
     pub(crate) fn tui_ready(&self) -> bool {
-        true
+        !self.structured_only()
+    }
+
+    pub(crate) fn structured_only(&self) -> bool {
+        self.runtime.supports_acp_mode() || self.runtime == ActorRuntime::Pi
+    }
+
+    pub(crate) fn resumable(&self) -> bool {
+        match &self.protocol {
+            ManagedProtocol::Acp(protocol) => protocol.resumable(),
+            ManagedProtocol::Pi(protocol) => protocol.resumable(),
+            _ => true,
+        }
+    }
+
+    pub(crate) fn runtime(&self) -> ActorRuntime {
+        self.runtime
+    }
+
+    pub(crate) fn runtime_mode(&self) -> RuntimeMode {
+        if self.runtime.supports_acp_mode() {
+            RuntimeMode::Acp
+        } else {
+            RuntimeMode::Default
+        }
     }
 
     pub(crate) fn process_running(&self) -> bool {

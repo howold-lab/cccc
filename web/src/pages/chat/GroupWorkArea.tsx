@@ -134,7 +134,9 @@ export function GroupWorkArea({
   const otherAttention = actors.filter(
     (actor) =>
       !pageIds.has(actor.id) &&
-      (actor.effective_working_state === "waiting" || actor.effective_working_state === "stuck"),
+      (actor.effective_working_state === "waiting" ||
+        actor.effective_working_state === "stuck" ||
+        actor.effective_working_state === "error"),
   );
   const buttonClass =
     "inline-flex h-8 shrink-0 items-center justify-center rounded-md px-2 hover:bg-[var(--glass-tab-bg)] disabled:opacity-35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-text-secondary)]";
@@ -257,12 +259,8 @@ export function GroupWorkArea({
         style={
           tiled
             ? {
-                gridTemplateColumns:
-                  pageSize === 1 || pageActors.length < 2
-                    ? "minmax(0,1fr)"
-                    : "repeat(2,minmax(0,1fr))",
-                gridTemplateRows:
-                  pageActors.length > 2 ? "repeat(2,minmax(0,1fr))" : "minmax(0,1fr)",
+                gridTemplateColumns: `repeat(${Math.max(1, pageActors.length)},minmax(0,1fr))`,
+                gridTemplateRows: "minmax(0,1fr)",
               }
             : undefined
         }

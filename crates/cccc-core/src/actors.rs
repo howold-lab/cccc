@@ -88,7 +88,17 @@ pub fn effective_role(group: &GroupDoc, actor_id: &str) -> Option<ActorRole> {
 }
 
 pub fn add(group: &mut GroupDoc, mut actor: Actor) -> io::Result<Actor> {
+    if actor.id == "voice-secretary" {
+        return Err(io::Error::other(
+            "Voice Secretary is an instance service, not a Group Actor",
+        ));
+    }
+
     actor.id = validate_actor_id(&actor.id)?;
+    actor
+        .runtime_mode
+        .validate(actor.runtime)
+        .map_err(io::Error::other)?;
     actor.normalize_runtime_constraints();
     if find(group, &actor.id).is_some() {
         return Err(io::Error::other(format!(
@@ -133,9 +143,20 @@ pub fn update(
             object.insert(key.clone(), value.clone());
         }
     }
+    if patch
+        .get("runtime")
+        .is_some_and(|runtime| runtime != &serde_json::json!(group.actors[index].runtime))
+        && !patch.contains_key("runtime_mode")
+    {
+        object.insert("runtime_mode".into(), Value::String("default".into()));
+    }
     object.insert("updated_at".into(), Value::String(utc_now()));
     let mut actor: Actor = serde_json::from_value(value).map_err(io::Error::other)?;
     actor.role = None;
+    actor
+        .runtime_mode
+        .validate(actor.runtime)
+        .map_err(io::Error::other)?;
     actor.normalize_runtime_constraints();
     group.actors[index] = actor.clone();
     actor.role = effective_role(group, actor_id);

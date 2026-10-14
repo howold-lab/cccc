@@ -1,4 +1,5 @@
 import { openEventStream, type EventStreamSource } from "../services/realtime/eventStream";
+import { readRetryDetail } from "./useSseErrorDetailText";
 // Ledger and headless subscriptions on the shared realtime connection.
 import { useEffect, useRef } from "react";
 import { useGroupStore, useUIStore, useModalStore } from "../stores";
@@ -69,6 +70,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
 
   const incrementChatUnread = useUIStore((s) => s.incrementChatUnread);
   const setSSEStatus = useUIStore((s) => s.setSSEStatus);
+  const setSSEError = useUIStore((s) => s.setSSEError);
   const markPresentationSlotAttention = useModalStore((s) => s.markPresentationSlotAttention);
   const clearPresentationSlotAttention = useModalStore((s) => s.clearPresentationSlotAttention);
 
@@ -184,7 +186,11 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     });
   }
 
-  function flushPendingHeadlessMessages(targetGroupId?: string, targetActorId?: string) {
+  function flushPendingHeadlessMessages(
+    targetGroupId?: string,
+    targetActorId?: string,
+    targetStreamId?: string,
+  ) {
     if (targetGroupId == null && targetActorId == null) {
       pendingHeadlessMessageFlushRef.current = null;
     }
@@ -194,6 +200,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     for (const [key, entry] of pendingEntries.entries()) {
       if (targetGroupId && entry.groupId !== targetGroupId) continue;
       if (targetActorId && entry.actorId !== targetActorId) continue;
+      if (targetStreamId && entry.streamId !== targetStreamId) continue;
       const streamingEvents =
         useGroupStore.getState().chatByGroup[entry.groupId]?.streamingEvents || [];
       const placeholder = entry.pendingEventId
@@ -298,7 +305,11 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     });
   }
 
-  function flushPendingHeadlessActivities(targetGroupId?: string, targetActorId?: string) {
+  function flushPendingHeadlessActivities(
+    targetGroupId?: string,
+    targetActorId?: string,
+    targetStreamId?: string,
+  ) {
     if (targetGroupId == null && targetActorId == null) {
       pendingHeadlessActivityFlushRef.current = null;
     }
@@ -308,6 +319,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     for (const [key, entry] of pendingEntries.entries()) {
       if (targetGroupId && entry.groupId !== targetGroupId) continue;
       if (targetActorId && entry.actorId !== targetActorId) continue;
+      if (targetStreamId && entry.match.streamId !== targetStreamId) continue;
       for (const activity of entry.activities.values()) {
         upsertStreamingActivity(entry.actorId, entry.match, activity, entry.groupId);
       }
@@ -323,19 +335,27 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     });
   }
 
-  function clearPendingHeadlessBuffers(groupId: string, actorId: string) {
+  function clearPendingHeadlessBuffers(groupId: string, actorId: string, streamId?: string) {
     const targetGroupId = String(groupId || "").trim();
     const targetActorId = String(actorId || "").trim();
     if (!targetGroupId || !targetActorId) return;
 
     for (const [key, entry] of pendingHeadlessMessagesRef.current.entries()) {
-      if (key.startsWith(`${targetGroupId}:`) && entry.actorId === targetActorId) {
+      if (
+        key.startsWith(`${targetGroupId}:`) &&
+        entry.actorId === targetActorId &&
+        (!streamId || entry.streamId === streamId)
+      ) {
         pendingHeadlessMessagesRef.current.delete(key);
       }
     }
 
     for (const [key, entry] of pendingHeadlessActivitiesRef.current.entries()) {
-      if (entry.groupId === targetGroupId && entry.actorId === targetActorId) {
+      if (
+        entry.groupId === targetGroupId &&
+        entry.actorId === targetActorId &&
+        (!streamId || entry.match.streamId === streamId)
+      ) {
         pendingHeadlessActivitiesRef.current.delete(key);
       }
     }
@@ -412,7 +432,68 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       if (!actorId || !eventType) return;
       appendHeadlessEvent({ ...ev, _receivedAt: live ? Date.now() : undefined }, groupId);
 
+      // Status freshness and output settlement are separate: a newer daemon
+      // snapshot must not suppress cleanup of the matching terminated stream.
+      // Parse RFC3339 timestamps rather than comparing text.
+      let projectsCurrentRuntime = live;
+      const projectsRuntime =
+        eventType.startsWith("headless.turn.") ||
+        eventType.startsWith("headless.control.") ||
+        eventType.startsWith("headless.thread.") ||
+        eventType.startsWith("headless.session.");
+      if (live && projectsRuntime) {
+        const actor = useGroupStore.getState().actors.find((item) => item.id === actorId);
+        if (!actor) {
+          void refreshActors(groupId);
+          return;
+        }
+        const eventTime = Date.parse(ev.ts || "");
+        const stateTime = Date.parse(actor?.effective_working_updated_at || "");
+        const terminal = [
+          "headless.turn.completed",
+          "headless.turn.failed",
+          "headless.turn.cancelled",
+        ].includes(eventType);
+        const activeTurn = actor?.effective_active_task_id;
+        const stoppedWithoutTimestamp =
+          actor.running === false && !actor.effective_working_updated_at;
+        projectsCurrentRuntime = !(
+          stoppedWithoutTimestamp ||
+          (Number.isFinite(eventTime) && Number.isFinite(stateTime) && eventTime < stateTime) ||
+          ((terminal || eventType === "headless.session.stopped") && actor.running === false) ||
+          (terminal && activeTurn && data.turn_id && data.turn_id !== activeTurn)
+        );
+        if (stoppedWithoutTimestamp) void refreshActors(groupId);
+        if (!projectsCurrentRuntime) {
+          const stoppedSession =
+            eventType === "headless.session.stopped" && actor.running === false;
+          const matchingOutput =
+            terminal &&
+            streamId &&
+            (useGroupStore
+              .getState()
+              .chatByGroup[groupId]?.streamingEvents.some(
+                (event) =>
+                  event.by === actorId &&
+                  event._streaming &&
+                  (event.data as { stream_id?: unknown })?.stream_id === streamId,
+              ) ||
+              pendingHeadlessMessagesRef.current.get(`${groupId}:${streamId}`)?.actorId ===
+                actorId ||
+              [...pendingHeadlessActivitiesRef.current.values()].some(
+                (entry) =>
+                  entry.groupId === groupId &&
+                  entry.actorId === actorId &&
+                  entry.match.streamId === streamId,
+              ));
+          if (!stoppedSession && !matchingOutput) return;
+        }
+      }
+
       function updateHeadlessActorRuntime(update: ActorActivityUpdate) {
+        // Journal replay restores history, not current runtime authority.
+        // Native successful turns may update daemon status without a journal event.
+        if (!projectsCurrentRuntime) return;
         const storeState = useGroupStore.getState();
         const actorsSnapshot = storeState.actors;
         updateActorActivity([update], groupId);
@@ -538,49 +619,73 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
         return;
       }
 
-      if (eventType === "headless.turn.completed" || eventType === "headless.turn.failed") {
+      // A terminal turn retires its live output without claiming that the
+      // provider process stopped. Cancellation is a deliberate interruption;
+      // only a failed turn leaves the owned session in an error state.
+      if (
+        eventType === "headless.turn.completed" ||
+        eventType === "headless.turn.failed" ||
+        eventType === "headless.turn.cancelled"
+      ) {
         const failed = eventType === "headless.turn.failed";
         const turnId = typeof data.turn_id === "string" ? data.turn_id.trim() : "";
         const errorMessage = formatHeadlessErrorMessage(data.error);
-        flushPendingHeadlessActivities(groupId, actorId);
-        flushPendingHeadlessMessages(groupId, actorId);
-        clearPendingHeadlessBuffers(groupId, actorId);
-        completeStreamingEventsForActor(actorId, groupId);
-        clearTransientStreamingEventsForActor(actorId, groupId);
+        const terminalStreamId = streamId || undefined;
+        flushPendingHeadlessActivities(groupId, actorId, terminalStreamId);
+        flushPendingHeadlessMessages(groupId, actorId, terminalStreamId);
+        clearPendingHeadlessBuffers(groupId, actorId, terminalStreamId);
+        completeStreamingEventsForActor(actorId, groupId, terminalStreamId);
+        clearTransientStreamingEventsForActor(actorId, groupId, terminalStreamId);
         updateHeadlessActorRuntime({
           id: actorId,
           running: true,
           idle_seconds: null,
-          effective_working_state: "idle",
-          effective_working_reason: failed ? "headless_turn_failed" : "headless_turn_idle",
+          effective_working_state: failed ? "error" : "idle",
+          effective_working_reason: failed
+            ? errorMessage || "headless_turn_failed"
+            : "headless_turn_idle",
           effective_working_updated_at: typeof ev.ts === "string" ? ev.ts : null,
           effective_active_task_id: null,
         });
         if (failed) {
-          clearStreamingEventsForActor(actorId, groupId);
+          clearStreamingEventsForActor(actorId, groupId, terminalStreamId);
+          const activityTs = typeof ev.ts === "string" ? ev.ts : new Date().toISOString();
+          const activity: StreamingActivity = {
+            id: `error:${pendingEventId || turnId || actorId}`,
+            kind: "error",
+            status: "completed",
+            summary: translateActorLabel("headlessTurnFailed", "Model request failed"),
+            detail:
+              errorMessage ||
+              translateActorLabel(
+                "headlessTurnFailedFallback",
+                "The model runtime reported an error.",
+              ),
+            ts: activityTs,
+            raw_item_type: "turn_error",
+          };
           if (pendingEventId) {
             upsertStreamingActivity(
               actorId,
               { pendingEventId, streamId: streamId || turnId },
-              {
-                id: `error:${pendingEventId || turnId || actorId}`,
-                kind: "error",
-                status: "completed",
-                summary: translateActorLabel("headlessTurnFailed", "Model request failed"),
-                detail:
-                  errorMessage ||
-                  translateActorLabel(
-                    "headlessTurnFailedFallback",
-                    "The model runtime reported an error.",
-                  ),
-                ts: typeof ev.ts === "string" ? ev.ts : new Date().toISOString(),
-                raw_item_type: "turn_error",
-              },
+              activity,
               groupId,
             );
+          } else if (streamId || turnId) {
+            reconcileStreamingMessage({
+              actorId,
+              streamId: streamId || turnId,
+              ts: activityTs,
+              fullText: "",
+              eventText: "",
+              activities: [activity],
+              completed: true,
+              transientStream: false,
+              groupId,
+            });
           }
         } else {
-          clearEmptyStreamingEventsForActor(actorId, groupId);
+          clearEmptyStreamingEventsForActor(actorId, groupId, terminalStreamId);
         }
         return;
       }
@@ -868,6 +973,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     if (!shouldStartGroupStreams(document.hidden)) {
       needsVisibilityCatchupRef.current = true;
       setSSEStatus("disconnected");
+      setSSEError(null);
       return;
     }
 
@@ -882,6 +988,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     es.onopen = () => {
       if (!sseRegistryRef.current.isCurrent(ledgerToken)) return;
       setSSEStatus("connected");
+      setSSEError(null);
       hasConnectedOnceRef.current = true;
       needsVisibilityCatchupRef.current = false;
       // Group scope changes may have happened before this subscription opened.
@@ -903,6 +1010,12 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
       // Keep this logical subscription alive: the shared transport reconnects
       // with its delivered cursor so Rust can replay the missed ledger events.
     };
+
+    es.addEventListener("retry", (e) => {
+      if (!sseRegistryRef.current.isCurrent(ledgerToken)) return;
+      const detail = readRetryDetail(e);
+      if (detail) setSSEError(detail);
+    });
 
     es.addEventListener("ledger", (e) => {
       if (!sseRegistryRef.current.isCurrent(ledgerToken)) return;
@@ -983,6 +1096,7 @@ export function useSSE({ activeTabRef, chatAtBottomRef, actorsRef }: UseSSEOptio
     if (options?.resetConnected !== false) {
       hasConnectedOnceRef.current = false;
       needsVisibilityCatchupRef.current = false;
+      setSSEError(null);
     } else {
       needsVisibilityCatchupRef.current = true;
     }

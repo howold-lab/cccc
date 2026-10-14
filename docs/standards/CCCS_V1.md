@@ -128,7 +128,10 @@ When a send request omits recipients or supplies an empty list, the daemon MUST 
 - `@foreman`: foreman actor(s)
 - `@user`: the human user (UI recipient)
 
-Internal assistants such as Voice Secretary are not members of `@all`, `@peers`, or `@foreman`; they MUST be addressed by their explicit actor ID.
+Internal assistant Actors are not members of `@all`, `@peers`, or `@foreman`.
+The global Voice Secretary and Voice Analyst are services, not chat recipients or
+Group Actors. Their dedicated operations define their inputs; confirmed Secretary
+handoffs use `by="user"` and retain the original Group/scope through normal peer delivery.
 
 Selector membership describes the logical audience, not permission to start a runtime.
 A user broadcast to `@all` or `@peers` MUST NOT re-enable disabled actors. Explicitly
@@ -320,7 +323,7 @@ data: {
   actor_id: string
   source_event_id: string
   delivery_id: string
-  state: "claimed" | "accepted" | "failed" | "ambiguous"
+  state: "claimed" | "accepted" | "failed" | "ambiguous" | "withdrawn"
   transport: string
   reason?: string | null
 }
@@ -331,7 +334,10 @@ data: {
 - `delivery_id` MUST be deterministic for one source event, actor generation,
   and recipient actor. A retry reuses that identity.
 - The daemon MUST append `claimed` before performing external runtime I/O and
-  then append exactly one observable result state for that attempt.
+  then append one initial observable result state for that attempt. A later
+  verified receipt MAY append a reconciliation observation, such as changing an
+  ambiguous handoff to accepted, without performing another submission. This
+  does not authorize automatic retry.
 - A concurrent claimant that observes `claimed` MUST treat the delivery as in
   progress; it MUST NOT reinterpret or retry the active attempt.
 - During daemon startup, a latest `claimed` state left by the previous daemon
@@ -342,6 +348,10 @@ data: {
 - `failed` means the adapter established that handoff did not occur.
 - `ambiguous` means external side effects may have occurred but cannot be
   proven. Automatic retry MUST NOT follow `accepted` or `ambiguous`.
+- `withdrawn` means the source became obsolete before handoff, and the owner
+  established that no external submission occurred. It is terminal and MUST NOT
+  be automatically retried. A claim without its active projection is not proof
+  of non-submission; uncertain external I/O remains `ambiguous`.
 - A normal `mail` append creates no `runtime.delivery`. An explicit manual
   delivery of that existing message may create one without appending a second
   `chat.message`.
@@ -508,6 +518,16 @@ To relay a message from group A into group B:
 - If either `src_group_id` or `src_event_id` is set, both MUST be set.
 - UIs SHOULD provide “Open source message” (jump-to) affordances.
 - If the source is unavailable due to permissions or retention, clients MUST show a clear “source unavailable” state (not silent failure).
+
+For replies over the local cross-group transport, each copy's `reply_to` MUST
+identify the parent in that copy's Group. The source audit record retains
+`dst_reply_to` for the destination parent, so a partially delivered reply can be
+retried without changing either thread or its destination Group. A conflicting
+retry MUST be rejected before any additional ledger write. Unsupported local
+cross-group attachments MUST be rejected before recording a reply or settling
+its obligation. The local reply fulfills the addressed
+Actor's existing reply obligation. The `reply` result exposes the caller's local
+event, not the destination copy.
 
 ### 9.2 Optional Send Record
 

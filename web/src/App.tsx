@@ -5,6 +5,7 @@ const AppModals = lazy(() =>
 );
 import { AppBackground } from "./components/app/AppBackground";
 import { AppFeedback } from "./components/app/AppFeedback";
+import { useCodexVoiceShell } from "./features/codexVoice/useCodexVoiceShell";
 import { AppShell } from "./components/app/AppShell";
 import { useTextScale } from "./hooks/useTextScale";
 import { useTheme } from "./hooks/useTheme";
@@ -18,7 +19,11 @@ import { useSwipeNavigation } from "./hooks/useSwipeNavigation";
 import { useCrossGroupRecipients } from "./hooks/useCrossGroupRecipients";
 import { useDeepLink } from "./hooks/useDeepLink";
 import { useGlobalEvents } from "./hooks/useGlobalEvents";
-import { useViewportHeight } from "./hooks/useViewportHeight";
+import {
+  VISUAL_VIEWPORT_BOX,
+  VISUAL_VIEWPORT_BOX_ATTRIBUTE,
+  useViewportHeight,
+} from "./hooks/useViewportHeight";
 import { useAppChrome } from "./hooks/useAppChrome";
 import { useAppGroupLifecycle } from "./hooks/useAppGroupLifecycle";
 import { useAppTabState } from "./hooks/useAppTabState";
@@ -223,6 +228,7 @@ export default function App({
     actorsRef,
     allTabs,
     handleTabChange,
+    onDotsActorCreated,
   } = useAppTabState({
     activeTab,
     runtimeActors: visibleRuntimeActors,
@@ -385,18 +391,18 @@ export default function App({
     cleanupSSE,
   });
 
+  const codexVoice = useCodexVoiceShell(!webReadOnly && canManageGroups && !connectEmbedded);
+
   return (
     <div
       className="relative min-h-0 w-full overflow-hidden bg-[var(--color-body-bg)] text-[var(--color-text-primary)]"
-      style={{
-        height: "var(--app-viewport-height, 100dvh)",
-        maxHeight: "var(--app-viewport-height, 100dvh)",
-        top: "var(--app-viewport-offset-top, 0px)",
-      }}
+      style={VISUAL_VIEWPORT_BOX}
+      {...{ [VISUAL_VIEWPORT_BOX_ATTRIBUTE]: "" }}
     >
       <AppBackground isDark={isDark} />
 
       <AppShell
+        codexVoice={codexVoice}
         connectEmbedded={connectEmbedded}
         connect={connectEmbedded ? undefined : connect}
         remoteWorkspace={
@@ -521,6 +527,7 @@ export default function App({
       {shouldRenderAppModals ? (
         <Suspense fallback={null}>
           <AppModals
+            codexVoice={codexVoice}
             isDark={isDark}
             theme={theme}
             textScale={textScale}
@@ -528,6 +535,7 @@ export default function App({
             ccccHome={ccccHome}
             composerRef={composerRef}
             onStartReply={startReply}
+            onDotsActorCreated={onDotsActorCreated}
             onThemeChange={setTheme}
             onTextScaleChange={setTextScale}
             onDeleteGroup={handleDeleteGroup}

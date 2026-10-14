@@ -10,6 +10,8 @@ pub fn detect(path: &Path) -> io::Result<Scope> {
     let root = git_output(&absolute, &["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
         .unwrap_or_else(|| absolute.clone());
+    // Scope keys also address persisted defaults and ledger history. Preserve
+    // the established Git URL resolution when deriving their identity.
     let remote = git_output(&root, &["remote", "get-url", "origin"])
         .map(|value| normalize_remote(&value))
         .unwrap_or_default();

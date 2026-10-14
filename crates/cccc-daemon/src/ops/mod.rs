@@ -34,6 +34,7 @@ pub(crate) use connect::ConnectService;
 mod context_projection;
 mod deepseek_runtime;
 mod diagnostics;
+pub(crate) mod dots_events;
 mod group_copy;
 mod group_create_rollback;
 mod group_creation;
@@ -55,6 +56,7 @@ mod memory;
 mod message_idempotency;
 mod message_metadata;
 mod messaging;
+pub(crate) use messaging::reply_crosses_groups;
 mod messaging_inbox;
 mod messaging_query;
 mod messaging_query_status;
@@ -76,6 +78,7 @@ mod terminal;
 mod terminal_history_source;
 mod terminal_text;
 mod voice_notifications;
+pub(crate) mod voice_secretary;
 mod web_model_connectors;
 mod working_state;
 #[cfg(test)]
@@ -109,6 +112,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         direct::resolve_operation,
         connect_outbound::resolve_operation,
         runtime_state::resolve_operation,
+        dots_events::resolve_operation,
         maintenance::resolve_operation,
         im::resolve_operation,
         memory::resolve_operation,
@@ -116,6 +120,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         settings::resolve_operation,
         web_model_connectors::resolve_operation,
         voice_notifications::resolve_operation,
+        voice_secretary::resolve_operation,
         terminal::resolve_operation,
     ] {
         if let Some(operation) = resolver(request) {

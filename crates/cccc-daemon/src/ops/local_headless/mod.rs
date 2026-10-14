@@ -1,8 +1,11 @@
+#[cfg(all(test, unix))]
+mod claude_resume_tests;
 mod events;
 mod events_migration;
 #[cfg(test)]
 mod events_migration_tests;
 mod managed_reader;
+mod notice_gate;
 mod output;
 mod provider_cli;
 mod session;
@@ -20,20 +23,37 @@ pub(crate) use events::{
     contains_dedupe as contains_event_dedupe,
 };
 pub(crate) use supervisor::registered_running;
+pub(crate) use supervisor::{
+    cancel_turn, respond_interaction, respond_permission, structured_state,
+};
 
 use cccc_core::HomeLayout;
 use serde::Serialize;
 use std::future::Future;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Mutex, OnceLock};
 
 pub use supervisor::{
-    detach_after_viewer_exit, ensure_viewer, kill_all_requests, running, start, status, stop,
-    stop_all, stop_group, submit_batch, supports,
+    detach_after_viewer_exit, ensure_viewer, kill_all_requests, ready_for_mail_notice, running,
+    start, status, stop, stop_all, stop_group, submit_batch, supports,
 };
 
 pub(super) fn uses_managed_session(actor: &cccc_contracts::Actor) -> bool {
     supervisor::uses_managed_session(actor)
+}
+
+pub(crate) fn waiting_for_workspace_trust(group_id: &str, actor_id: &str) -> std::io::Result<bool> {
+    workspace_trust_recovery::registered(&(group_id.to_owned(), actor_id.to_owned()))
+}
+
+/// Delivery follows the current owner; saved settings apply on the next launch.
+/// A temporary Claude trust terminal belongs to recovery, not native task input.
+pub(super) fn uses_managed_delivery(group_id: &str, actor: &cccc_contracts::Actor) -> bool {
+    registered_running(group_id, &actor.id).is_some()
+        || workspace_trust_recovery::registered(&(group_id.to_owned(), actor.id.clone()))
+            .unwrap_or(true)
+        || (supports(actor)
+            && !cccc_runtime::status(group_id, &actor.id).is_ok_and(|status| status.running))
 }
 
 pub(super) fn uses_managed_provider_cli(actor: &cccc_contracts::Actor) -> bool {
@@ -46,6 +66,21 @@ pub struct HeadlessStatus {
     pub task_id: Option<String>,
     pub updated_at: String,
     pub pid: Option<u32>,
+    /// Provider-reported cause for a non-nominal status (a failed turn).
+    /// None for every state whose meaning is already carried by `status`.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchSubmission {
+    Deferred,
+    Accepted,
+    Unconfirmed,
+    /// Early Mail notices the Actor is no longer ready for. Nothing was sent;
+    /// the unread tick re-issues them once the Actor is idle and the Mail is
+    /// still unread, so they are withdrawn rather than retried.
+    Withheld,
 }
 
 #[derive(Debug)]
@@ -81,15 +116,7 @@ fn poisoned() -> std::io::Error {
 }
 
 fn managed_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("cccc-managed-agent")
-            .enable_all()
-            .build()
-            .expect("build shared managed Agent runtime")
-    })
+    super::codex_voice_analyst::managed_runtime()
 }
 
 fn run_managed_launch<F, T>(future: F) -> std::io::Result<T>

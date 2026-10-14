@@ -29,6 +29,7 @@ export interface GroupState {
   groupSettings: GroupSettings | null;
   groupPresentation: GroupPresentation | null;
   runtimes: RuntimeInfo[];
+  runtimeDetectionStatus: "idle" | "loading" | "ready" | "error";
   selectedGroupActorsHydrating: boolean;
   selectedGroupActorStatusProvisional: boolean;
   hasMoreHistory: boolean;
@@ -93,10 +94,14 @@ export interface GroupState {
     phase?: string;
     groupId?: string;
   }) => void;
-  completeStreamingEventsForActor: (actorId: string, groupId?: string) => void;
-  clearStreamingEventsForActor: (actorId: string, groupId?: string) => void;
-  clearEmptyStreamingEventsForActor: (actorId: string, groupId?: string) => void;
-  clearTransientStreamingEventsForActor: (actorId: string, groupId?: string) => void;
+  completeStreamingEventsForActor: (actorId: string, groupId?: string, streamId?: string) => void;
+  clearStreamingEventsForActor: (actorId: string, groupId?: string, streamId?: string) => void;
+  clearEmptyStreamingEventsForActor: (actorId: string, groupId?: string, streamId?: string) => void;
+  clearTransientStreamingEventsForActor: (
+    actorId: string,
+    groupId?: string,
+    streamId?: string,
+  ) => void;
   clearStreamingPlaceholder: (actorId: string, pendingEventId: string, groupId?: string) => void;
   prependEvents: (events: LedgerEvent[], groupId?: string) => void;
   setChatWindow: (w: GroupState["chatWindow"], groupId?: string) => void;
@@ -123,6 +128,7 @@ export interface GroupState {
   setGroupSettings: (settings: GroupSettings | null) => void;
   setGroupPresentation: (presentation: GroupPresentation | null) => void;
   setRuntimes: (runtimes: RuntimeInfo[]) => void;
+  refreshRuntimes: () => Promise<void>;
   updateReadStatus: (eventId: string, actorId: string, groupId?: string) => void;
   updateObligationStatus: (eventId: string, patch: ObligationStatusPatch, groupId?: string) => void;
   setHasMoreHistory: (v: boolean, groupId?: string) => void;

@@ -57,19 +57,19 @@ CCCC 只需一条安装命令，无需单独运维数据库、消息队列或 Do
 | **多运行时编排** | 同一 Group 可混用受支持的编码智能体运行时；其它命令行智能体可使用 `custom` |
 | **CCCC Connect** | 连接自己的实例、不同会员的指定 Group，或免账号直连两个 Group |
 | **工作区工具** | 浏览和编辑文件、查看 Git 变更、在 Presentation 固定文档，并操作平铺原生终端 |
-| **语音工作流** | Voice Secretary 将语音整理为文档或输入框草稿；实验性 Codex Voice 将实时对话与 Runtime 驱动的 Analyst 配合使用 |
+| **语音工作流** | 全局语音秘书在共享会话中处理各 Group 的语音、文档和输入框草稿；实验性 Codex Voice 使用独立的实时语音 Analyst |
 | **角色化协调** | Foreman + Peer 角色模型，权限边界清晰，收件人路由精确（`@all`、`@peers`、`@foreman`） |
 | **本地优先的运行时状态** | 运行时数据保存在 `CCCC_HOME` 而不是代码仓库里，同时仍可通过 Web Access 与 IM 做远程运维 |
 
-## 0.4.41 要点
+## 0.4.42 要点
 
-- **多个 ChatGPT Actor**：共享一次专用浏览器登录和一个连接器，每个 Actor 保持独立窗口及已验证的会话。
-- **Grok Bot Web Model**：将已有 Bot URL 连接到 Actor，共享 Grok 登录，并通过各 Actor 的凭据路由 MCP 调用，无需配对消息。
-- **更稳妥的浏览器投递和更简单的设置**：保护草稿、识别手动发送的消息、保持慢加载窗口可访问；Grok URL 与 Actor 设置一起保存，也支持关联 Profile。
-- **语音文档库**：持久化文件夹、拖拽排序、重命名、归档预览与恢复，以及更清晰的实时转写和错误反馈。
-- **日常可靠性**：按 Group 保留收件人、原生 MCP 图片/PDF/PPTX 传递、修正本地工具超时与编辑行为、改善运行时启动，并保护微信回复凭据。
+- **可选官方 ACP**：Antigravity、GitHub Copilot、Devin CLI 和 Cursor 支持没有原生终端的结构化 Actor 与 Voice Analyst。默认仍是 TUI，保存的模式变更在重启或下次启动时生效。
+- **语音调查与宿主人设**：ACP 调查展示任务状态、人工决策和结果；绑定通话的已完成结果回传到该通话的 Realtime 上下文。宿主 API 可发起不使用 Analyst、也不插入 Actor 通知的 persona 通话。
+- **会话恢复**：Claude 对无法验证的恢复暂停自动启动，显示诊断并提供明确恢复操作；Codex 恢复长会话时不再向 CCCC 传输完整历史。关闭托管终端保留健康的供应商会话。
+- **更清晰的日常控制**：细活动环、准确的未读 Mail 角标、按 Group 保留收件人、安装检测，以及更可预测的 Actor/Profile 保存行为。
+- **Grok 与生命周期可靠性**：必填 Bot URL 支持关联 Profile，登录窗口可独立关闭，Unix 进程清理在崩溃后仍保留未解决的所有权记录。
 
-旧的 Actor 专属 ChatGPT 连接器需要更换为共享连接器并重新连接会话，历史记录保留。升级步骤与验证边界见 [0.4.41 英文发布说明](docs/release/v0.4.41_release_notes.md)。
+设置、升级步骤与验证边界见 [0.4.42 英文发布说明](docs/release/v0.4.42_release_notes.md)。从更早的 Actor 专属 ChatGPT 连接器升级时，请遵循 [0.4.41 说明](docs/release/v0.4.41_release_notes.md)中的共享连接器迁移步骤。
 
 ## 快速上手
 
@@ -240,7 +240,7 @@ graph TB
 
 ## 支持的运行时
 
-CCCC 内置 19 种运行时接入，另支持通过 `custom` 启动其它命令行智能体。同一 Group 的 Actor 可使用不同运行时，其交互方式与配置要求也有所区别：
+CCCC 内置 20 种运行时接入，另支持通过 `custom` 启动其它命令行智能体。同一 Group 的 Actor 可使用不同运行时，其交互方式与配置要求也有所区别：
 
 | 运行时 | 接入方式 | 入口 |
 |---------|----------|-------------|
@@ -251,18 +251,19 @@ CCCC 内置 19 种运行时接入，另支持通过 `custom` 启动其它命令�
 | GitHub Copilot CLI | 自动 MCP 配置 | `copilot` |
 | Cursor CLI | 提示词辅助 MCP 配置 | `cursor-agent` |
 | Devin CLI | 自动 MCP 配置 | `devin` |
-| Kiro CLI | 自动 MCP 配置 | `kiro-cli` |
+| Kiro CLI | 原生 TUI 或官方 ACP；ACP 按会话注入 MCP | `kiro-cli` |
 | Kilo Code CLI | 托管 ACP 会话 + 原生 TUI；按会话注入 MCP | `kilo` |
 | Antigravity CLI | 自动 MCP 配置 | `agy` |
 | ChatGPT Web | 远程 MCP + 浏览器投递 | `chatgpt.com` 对话 |
 | Grok Bot Web Model | 远程 MCP + 浏览器投递；按 Actor 凭据路由 | 必填 `grok.com/bot/<UUID>` URL |
 | Grok Build | 托管 ACP 会话 + 原生 TUI；自动配置原生 MCP | `grok` |
-| Hermes Agent | 自动 MCP 配置 | `hermes` |
-| Droid | 自动 MCP 配置 | `droid` |
+| Hermes Agent | 原生 TUI 或官方 ACP；ACP 按会话注入 MCP | `hermes` |
+| Droid | 原生 TUI 或官方 ACP；ACP 按会话注入 MCP | `droid` |
 | Amp | 自动 MCP 配置 | `amp` |
-| Auggie | 自动 MCP 配置 | `auggie` |
-| Kimi Code | 自动 MCP 配置 | `kimi` |
+| Auggie | 原生 TUI 或官方 ACP；ACP 按会话注入 MCP | `auggie` |
+| Kimi Code | 原生 TUI 或官方 ACP；ACP 按会话注入 MCP | `kimi` |
 | OpenCode | 托管 ACP 会话 + 原生 TUI；按会话注入 MCP | `opencode` |
+| Pi | 官方 RPC；按会话注入 MCP；无原生终端附件 | `pi` |
 | Custom | 手动配置 | 任意命令 |
 
 表中列出了运行时命令或浏览器入口。CCCC 会自动套用各运行时的启动默认设置；Actor / Profile 的命令可在设置中查看和自定义。[支持的运行时指南](https://chesterra.github.io/cccc/guide/runtimes)列出了默认自主执行参数，包括 `agy --dangerously-skip-permissions`、`grok --always-approve`、`opencode --auto` 等跳过审批模式。
@@ -279,7 +280,11 @@ cccc doctor                       # 检查环境和运行时可用性
 
 Antigravity 配置还会在其用户设置中关闭原生评分问卷，避免问卷消耗自动投递的终端输入。其它偏好保持不变；同一用户独立运行的 AGY 也会关闭问卷。
 
-用户只需选择 Runtime，CCCC 会自动确定交互方式。Claude Code、Codex CLI、Grok Build、OpenCode 和 Kilo 在同一个 provider session 上配对原生可写终端与后台结构化协议。消息进入原生终端后，由接收 Runtime 决定是 steer 还是 queue。DeepSeek Harness 使用结构化 ACP，不提供原生终端；ChatGPT Web 和 Grok Bot Web Model 使用浏览器投递和远程 MCP。
+GitHub Copilot、Devin CLI、Cursor、Kimi Code、Auggie、Kiro V3、Hermes、Droid 也支持可选的**官方纯 ACP 模式**，可用于 Actor、Voice Analyst 与语音秘书，默认原生 TUI 保留。ACP 使用本机 CLI 登录，为每个 Actor 注入独立 CCCC 身份，并显示输入队列、取消和单次权限确认。Cursor 的问题与计划即使在 YOLO 下也必须由用户明确决定。详情见[运行时指南](https://chesterra.github.io/cccc/guide/runtimes#native-tui-or-official-acp)。
+
+Antigravity 还支持可选的**官方 ACP 模式**，可用于 Actor 与 Voice Analyst，以结构化工作区代替终端。在 Actor／Profile 设置中选择 ACP，并运行一次 `cccc setup --runtime antigravity --runtime-mode acp --login`，完成独立的 CCCC 登录。忙时输入排队和单次权限确认均在工作区中显示。详情见[运行时指南](https://chesterra.github.io/cccc/guide/runtimes#antigravity-tui-or-official-acp)。
+
+用户只需选择 Runtime，CCCC 会自动确定交互方式。Claude Code、Codex CLI、Grok Build、OpenCode 和 Kilo 在同一个 provider session 上配对原生可写终端与后台结构化协议。消息进入原生终端后，由接收 Runtime 决定是 steer 还是 queue。Pi 使用官方 RPC，没有原生终端附件，要求 Pi 1.1.0 或更新版本（`@earendil-works/pi-coding-agent`）。DeepSeek Harness 使用结构化 ACP，不提供原生终端；ChatGPT Web 和 Grok Bot Web Model 使用浏览器投递和远程 MCP。
 
 每个支持 Runtime 的 setup 命令、交互说明和排障方式，见[支持的运行时指南](https://chesterra.github.io/cccc/guide/runtimes)。
 
@@ -358,7 +363,7 @@ CCCC 实现的是 IM 级消息语义，而不是"往终端里粘贴一段文字"
 - **Project Context** — 共享协调、任务、Agent 状态与自演化技能
 - **Group Space** — NotebookLM 集成，共享知识管理
 - **ChatGPT Web Model 设置** — 将一个 ChatGPT Web 对话接入为 CCCC Actor
-- **Voice Secretary 与 Codex Voice** — 语音转文档／输入框草稿，以及带持久 Analyst 的实验性实时语音
+- **Voice Secretary 与 Codex Voice** — 全局秘书可直接配置 Runtime 或关联 Profile，在共享会话中串行处理任务，并保持每个任务原有的 Group 归属。实验性实时语音保留独立 Analyst。两套功能共用语音设置入口和音频设备偏好；各组保留文档、请求和采集偏好，不再创建秘书 Actor。
 - **CCCC Connect 设置** — 账户发现、指定 Group 连接与 Direct 配对
 - **IM 桥接配置** — Telegram、Slack、Discord、Mattermost、飞书、钉钉、企业微信和微信
 - **设置** — 消息策略、投递调优、终端日志控制

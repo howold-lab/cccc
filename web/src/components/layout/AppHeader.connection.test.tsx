@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { AppHeader, type AppHeaderProps } from "./AppHeader";
+import { useUIStore } from "../../stores/useUIStore";
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string) => key,
@@ -33,9 +34,10 @@ let root: ReturnType<typeof createRoot>;
 afterEach(async () => {
   await act(async () => root?.unmount());
   host?.remove();
+  useUIStore.setState({ sseError: null });
 });
 it.each([false, true])(
-  "uses the existing badge for connection changes (controls=%s)",
+  "names an interrupted connection in the existing badge (controls=%s)",
   async (controls) => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
     host = document.createElement("div");
@@ -55,9 +57,13 @@ it.each([false, true])(
       expect(badge).toBeTruthy();
       expect(host.querySelectorAll('[role="status"]')).toHaveLength(1);
       expect(host.querySelector("h1")?.parentElement?.querySelector("p")).toBeNull();
-      expect(host.textContent).not.toContain("disconnected");
-      expect(host.textContent).not.toContain("reconnecting");
-      expect(badge.textContent).toBe("statusIdle");
+      // The visible text says what the dot says: the run state while connected,
+      // the connection while the page is cut off and its run state may be stale.
+      expect(badge.textContent).toBe(
+        { connected: "statusIdle", connecting: "reconnecting", disconnected: "disconnected" }[
+          status
+        ],
+      );
       const dot = badge.firstElementChild!;
       if (status === "connected") {
         expect(dot.classList.contains("bg-rose-500")).toBe(false);
@@ -68,7 +74,7 @@ it.each([false, true])(
           dot.classList.contains(status === "connecting" ? "animate-pulse" : "bg-rose-500"),
         ).toBe(true);
         expect(badge.getAttribute("aria-label")).toContain(
-          status === "connecting" ? "reconnecting" : "disconnected",
+          `statusIdle · ${status === "connecting" ? "reconnecting" : "disconnected"}`,
         );
         if (controls)
           expect(
@@ -78,3 +84,18 @@ it.each([false, true])(
     }
   },
 );
+it("shows which call failed and the retry countdown when disconnected", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  useUIStore.setState({ sseError: { cause: "socket", nextRetryAt: Date.now() + 7000 } });
+  await act(async () => root.render(<AppHeader {...props} sseStatus="disconnected" />));
+  const badge = host.querySelector("[data-connection-state]")!;
+  const label = badge.getAttribute("aria-label") || "";
+  expect(label).toContain("disconnected · realtimeSocketUnreachable · retryingIn");
+  // connected clears the detail text again
+  useUIStore.setState({ sseError: null });
+  await act(async () => root.render(<AppHeader {...props} sseStatus="connected" />));
+  expect(badge.getAttribute("aria-label")).not.toContain("realtimeSocketUnreachable");
+});

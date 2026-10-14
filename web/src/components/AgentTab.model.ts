@@ -1,7 +1,12 @@
 import type { Actor } from "../types";
+import { supportsAcpMode } from "../types";
 
-export function actorSupportsNewSession(runtime: Actor["runtime"]): boolean {
-  return ["claude", "codex", "grok"].includes(
+export function actorSupportsNewSession(
+  runtime: Actor["runtime"],
+  mode?: Actor["runtime_mode"],
+): boolean {
+  if (supportsAcpMode(runtime) && mode === "acp") return true;
+  return ["claude", "codex", "grok", "pi", "opencode", "kilo"].includes(
     String(runtime || "")
       .trim()
       .toLowerCase(),

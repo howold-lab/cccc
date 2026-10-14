@@ -1,13 +1,7 @@
+import { supportsAcpMode } from "../../types";
 import { GrokActorSetup } from "../webModel/GrokActorSetup";
 import { isWebModelRuntime } from "../../types";
-import {
-  type Actor,
-  ActorProfile,
-  RuntimeInfo,
-  SupportedRuntime,
-  SUPPORTED_RUNTIMES,
-  RUNTIME_INFO,
-} from "../../types";
+import { type Actor, ActorProfile, RuntimeInfo, SupportedRuntime } from "../../types";
 import { useTranslation } from "react-i18next";
 import { BASIC_MCP_CONFIG_SNIPPET } from "../../utils/mcpConfigSnippets";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -19,7 +13,6 @@ import { formatRuntimeCommand } from "./runtimeProfileControlsModel";
 import { CapabilityPicker } from "../CapabilityPicker";
 import { RolePresetPicker } from "../RolePresetPicker";
 import { ActorAvatarField } from "../ActorAvatarField";
-import { SelectCombobox } from "../SelectCombobox";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Surface } from "../ui/surface";
@@ -40,7 +33,8 @@ import {
   type ActorSecretSaveChanges,
 } from "./actorSecretManagerModel";
 import { WebModelActorSetup } from "../webModel/WebModelActorSetup";
-import { useModalStore } from "../../stores";
+import { DotsActorPanel } from "../webModel/DotsActorPanel";
+import { useModalStore, useUIStore } from "../../stores";
 import { isGrokBotUrl } from "../../utils/webModelTargetDraft";
 import { ModalFrame } from "./ModalFrame";
 
@@ -49,11 +43,16 @@ import { ModalFrame } from "./ModalFrame";
 const ACTOR_MODAL_PANEL_CLASS =
   "w-full h-full sm:h-auto sm:w-[min(100vw-2rem,72rem)] sm:max-w-[72rem] sm:max-h-[calc(100dvh-6rem)]";
 
+import { AcpRuntimeMode } from "./AcpRuntimeMode";
+import { RuntimeSelector } from "./RuntimeSelector";
+import type { RuntimeMode } from "../../types";
+
 type ConfigMode = "custom" | "profile";
 type AdvancedTabId = "connection" | "environment" | "capabilities" | "profile";
 
 export interface EditActorSavePayload {
   mode: ConfigMode;
+  runtimeMode?: RuntimeMode;
   setVars: Record<string, string>;
   unsetKeys: string[];
   clear: boolean;
@@ -81,6 +80,7 @@ interface ActorConfigBaseProps {
   onRequestActorProfiles?: () => Promise<void> | void;
   onSaveAsProfile: (
     secrets?: ActorSecretSaveChanges,
+    runtimeMode?: RuntimeMode,
   ) => Promise<SaveActorProfileResult | void> | void;
   onCancel: () => void;
 }
@@ -145,7 +145,7 @@ export interface CreateActorConfigProps extends ActorConfigBaseProps {
   onChangeError: (message: string) => void;
   canSubmit: boolean;
   submitDisabledReason: string;
-  onCreate: (avatarFile?: File | null) => Promise<boolean> | boolean;
+  onCreate: (avatarFile?: File | null, runtimeMode?: RuntimeMode) => Promise<boolean> | boolean;
 }
 
 export type ActorConfigModalProps = EditActorConfigProps | CreateActorConfigProps;
@@ -270,6 +270,7 @@ function CreateActorConfigModal({
 }: CreateActorConfigProps) {
   const { t } = useTranslation("actors");
   const { modalRef } = useModalA11y(isOpen, onCancel);
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("default");
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [capabilitiesPrimed, setCapabilitiesPrimed] = useState(false);
   const [advancedTab, setAdvancedTab] = useState<AdvancedTabId>("environment");
@@ -277,6 +278,10 @@ function CreateActorConfigModal({
     () => (avatarFile ? URL.createObjectURL(avatarFile) : null),
     [avatarFile],
   );
+
+  useEffect(() => {
+    if (!isOpen) setRuntimeMode("default");
+  }, [isOpen]);
 
   useEffect(() => {
     return () => {
@@ -301,7 +306,6 @@ function CreateActorConfigModal({
   );
   const selectedProfileRuntime = String(selectedProfile?.runtime || "").trim() as SupportedRuntime;
   const runtimeInfo = runtimes.find((r) => r.name === runtime);
-  const runtimeAvailable = runtimeInfo?.available ?? false;
   const defaultCommand = runtimeInfo?.recommended_command || "";
   const previewRuntime = useProfile ? selectedProfileRuntime || null : runtime;
   const previewTitle = String(actorId || "").trim() || suggestedActorId;
@@ -328,7 +332,9 @@ function CreateActorConfigModal({
 
   const handleSubmit = async () => {
     try {
-      const ok = await Promise.resolve(onCreate(avatarFile));
+      const ok = await Promise.resolve(
+        onCreate(avatarFile, supportsAcpMode(runtime) ? runtimeMode : "default"),
+      );
       if (ok) setAvatarFile(null);
     } catch (e) {
       onChangeError(e instanceof Error ? e.message : t("failedToAddAgent"));
@@ -549,9 +555,11 @@ function CreateActorConfigModal({
                       <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
                         {t("runtime")}
                       </label>
-                      <SelectCombobox
+                      <RuntimeSelector
                         className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)]"
                         value={runtime}
+                        runtimeMode={runtimeMode}
+                        disabled={busy === "actor-add"}
                         onChange={(value) => {
                           const next = value as SupportedRuntime;
                           onChangeRuntime(next);
@@ -561,38 +569,17 @@ function CreateActorConfigModal({
                           onChangeCommand(String(nextInfo?.recommended_command || "").trim());
                         }}
                         ariaLabel={t("runtime")}
-                        items={SUPPORTED_RUNTIMES.map((rt) => {
-                          const info = RUNTIME_INFO[rt];
-                          const rtInfoLocal = runtimes.find((r) => r.name === rt);
-                          const available = rtInfoLocal?.available ?? false;
-                          return {
-                            value: rt,
-                            label: `${info?.label || rt}${!available && rt !== "custom" ? ` ${t("notInstalled")}` : ""}`,
-                            disabled: !available && rt !== "custom",
-                          };
-                        })}
-                        searchable
                       />
                       <OpenCodeManagedModelHint runtime={runtime} />
+                      {supportsAcpMode(runtime) && (
+                        <AcpRuntimeMode
+                          runtime={runtime}
+                          value={runtimeMode}
+                          onChange={setRuntimeMode}
+                          disabled={busy === "actor-add"}
+                        />
+                      )}
                     </div>
-
-                    {runtime ? (
-                      <Surface
-                        className="px-3 py-2 text-xs text-[var(--color-text-secondary)]"
-                        variant="subtle"
-                        radius="md"
-                        padding="none"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <span>
-                            {runtimeAvailable
-                              ? t("available")
-                              : t("notAvailable", { defaultValue: "Not available" })}
-                          </span>
-                          <span>{runtime === "custom" ? t("custom") : defaultCommand || "—"}</span>
-                        </div>
-                      </Surface>
-                    ) : null}
 
                     <RuntimeCommandControl
                       runtime={runtime}
@@ -609,17 +596,21 @@ function CreateActorConfigModal({
                         <div className="font-medium">
                           {runtime === "grok_web_model"
                             ? "Grok Bot Web Model"
-                            : t("webModelActorBoundConnectorTitle", {
-                                defaultValue: "ChatGPT Web Model",
-                              })}
+                            : runtime === "chatgpt_dots"
+                              ? "ChatGPT Dots"
+                              : t("webModelActorBoundConnectorTitle", {
+                                  defaultValue: "ChatGPT Web Model",
+                                })}
                         </div>
                         <div className="mt-1">
                           {runtime === "grok_web_model"
                             ? t("settings:grokActor.hint")
-                            : t("webModelActorBoundConnectorHint", {
-                                defaultValue:
-                                  "Use shared login and one connector in global Web Model settings. After saving this Actor, pair its own conversation below.",
-                              })}
+                            : runtime === "chatgpt_dots"
+                              ? t("settings:dotsActor.createHint")
+                              : t("webModelActorBoundConnectorHint", {
+                                  defaultValue:
+                                    "Use shared login and one connector in global Web Model settings. After saving this Actor, pair its own conversation below.",
+                                })}
                         </div>
                       </div>
                     ) : null}
@@ -727,7 +718,12 @@ function CreateActorConfigModal({
                               <Button
                                 type="button"
                                 variant="secondary"
-                                onClick={() => void onSaveAsProfile()}
+                                onClick={() =>
+                                  void onSaveAsProfile(
+                                    undefined,
+                                    supportsAcpMode(runtime) ? runtimeMode : "default",
+                                  )
+                                }
                                 disabled={busy === "actor-profile-save" || busy === "actor-add"}
                               >
                                 {busy === "actor-profile-save"
@@ -798,8 +794,10 @@ function EditActorConfigModal({
 }: EditActorConfigProps) {
   const { t } = useTranslation("actors");
   const conversationRef = useRef<HTMLDivElement>(null);
+  const sharedSettingsTriggerRef = useRef<HTMLElement | null>(null);
   const settingsOpen = useModalStore((state) => state.modals.settings);
   const openSettingsTarget = useModalStore((state) => state.openSettingsTarget);
+  const canAccessGlobalSettings = useUIStore((state) => state.canAccessGlobalSettings !== false);
   const [sharedSettingsRequested, setSharedSettingsRequested] = useState(false);
   const suspended = sharedSettingsRequested && settingsOpen;
   const focusConversation = initialSection === "chatgpt" && isWebModelRuntime(savedRuntime);
@@ -809,12 +807,47 @@ function EditActorConfigModal({
   useEffect(() => {
     setSharedSettingsRequested(false);
   }, [groupId, actorId, isOpen]);
+  useEffect(() => {
+    if (!isOpen || suspended || !sharedSettingsRequested) return;
+    const modal = modalRef.current;
+    const overlay = modal?.parentElement;
+    let restored = false;
+    let focusFrame = 0;
+    const restoreFocus = () => {
+      const trigger = sharedSettingsTriggerRef.current;
+      if (restored || !modal || !trigger || !modal.contains(trigger)) return;
+      // The overlay can remain hidden throughout its visibility transition.
+      if (getComputedStyle(modal).visibility !== "visible") return;
+      restored = true;
+      overlay?.removeEventListener("transitionend", onTransitionEnd);
+      trigger.focus();
+    };
+    const onTransitionEnd = (event: Event) => {
+      if (event.target !== overlay) return;
+      cancelAnimationFrame(focusFrame);
+      focusFrame = requestAnimationFrame(restoreFocus);
+    };
+    overlay?.addEventListener("transitionend", onTransitionEnd);
+    focusFrame = requestAnimationFrame(restoreFocus);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      overlay?.removeEventListener("transitionend", onTransitionEnd);
+    };
+  }, [actorId, groupId, isOpen, modalRef, sharedSettingsRequested, suspended]);
   const openSharedSettings = () => {
+    const trigger = document.activeElement;
+    sharedSettingsTriggerRef.current =
+      trigger instanceof HTMLElement && modalRef.current?.contains(trigger) ? trigger : null;
     setSharedSettingsRequested(true);
     openSettingsTarget({
       scope: "global",
       tab: "webModels",
-      webModelProvider: conversationRuntime === "grok_web_model" ? "grok_web" : "chatgpt_web",
+      webModelProvider:
+        conversationRuntime === "grok_web_model"
+          ? "grok_web"
+          : conversationRuntime === "chatgpt_dots"
+            ? "dots"
+            : "chatgpt_web",
     });
   };
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
@@ -825,6 +858,7 @@ function EditActorConfigModal({
   const [secretsRefreshing, setSecretsRefreshing] = useState(false);
   const [secretKeysLoadFailed, setSecretKeysLoadFailed] = useState(false);
   const [attachProfileId, setAttachProfileId] = useState("");
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("default");
   const [editMode, setEditMode] = useState<ConfigMode>("custom");
   const [pendingConvertToCustom, setPendingConvertToCustom] = useState(false);
   const [grokBotUrl, setGrokBotUrl] = useState<string | undefined>();
@@ -921,6 +955,8 @@ function EditActorConfigModal({
     (editMode === "custom" &&
       (linked ||
         runtime !== savedRuntime ||
+        (supportsAcpMode(runtime) ? runtimeMode : "default") !==
+          (savedActor?.runtime_mode || "default") ||
         (!isWebModelRuntime(runtime) &&
           (command.trim() !== baseline.current.command.trim() ||
             launchChanges.clear ||
@@ -1085,6 +1121,7 @@ function EditActorConfigModal({
       return;
     }
     initializedDraftIdentityRef.current = identity;
+    setRuntimeMode(savedActor?.runtime_mode || "default");
     secretFetchSeqRef.current += 1;
     setEditMode(hasLinked ? "profile" : "custom");
     setPendingConvertToCustom(false);
@@ -1104,7 +1141,14 @@ function EditActorConfigModal({
     setSecretMasks({});
     setSecretChanges(emptyActorSecretChanges());
     setSecretKeys([]);
-  }, [identity, isOpen, linkedProfileId, linkedProfileOwner, linkedProfileScope]);
+  }, [
+    identity,
+    isOpen,
+    linkedProfileId,
+    linkedProfileOwner,
+    linkedProfileScope,
+    savedActor?.runtime_mode,
+  ]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1134,7 +1178,7 @@ function EditActorConfigModal({
     !effectiveLinked &&
     editMode === "custom" &&
     !isWebModelRuntime(runtime) &&
-    (runtime === "custom" || !available);
+    (runtime === "custom" || (!available && !(runtime === "antigravity" && runtimeMode === "acp")));
   const selectAdvancedTab = (id: string) => {
     const next = id as AdvancedTabId;
     setAdvancedTab(next);
@@ -1147,6 +1191,7 @@ function EditActorConfigModal({
     setLocalNotice("");
     setPendingConvertToCustom(true);
     setEditMode("custom");
+    setRuntimeMode(savedActor?.runtime_mode || "default");
   };
 
   const saveAsProfile = async () => {
@@ -1157,6 +1202,7 @@ function EditActorConfigModal({
         buildActorSecretSaveChanges(
           isWebModelRuntime(runtime) ? emptyActorSecretChanges() : secretChanges,
         ),
+        supportsAcpMode(runtime) ? runtimeMode : "default",
       );
       const profileId = String(result?.profileId || "").trim();
       if (profileId && result?.useNow) {
@@ -1267,6 +1313,7 @@ function EditActorConfigModal({
     try {
       await callback({
         mode: "custom",
+        runtimeMode: supportsAcpMode(runtime) ? runtimeMode : "default",
         setVars: secretSaveChanges.setVars,
         unsetKeys: secretSaveChanges.unsetKeys,
         clear: secretSaveChanges.clear,
@@ -1543,9 +1590,11 @@ function EditActorConfigModal({
                       <label className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]">
                         {t("runtime")}
                       </label>
-                      <SelectCombobox
+                      <RuntimeSelector
                         className="w-full rounded-xl border px-4 py-2.5 text-sm min-h-[44px] transition-colors glass-input text-[var(--color-text-primary)]"
                         value={runtime}
+                        runtimeMode={runtimeMode}
+                        disabled={busy === "actor-update"}
                         onChange={(value) => {
                           const next = value as SupportedRuntime;
                           onChangeRuntime(next);
@@ -1554,20 +1603,16 @@ function EditActorConfigModal({
                           onChangeCommand(nextDefault);
                         }}
                         ariaLabel={t("runtime")}
-                        items={SUPPORTED_RUNTIMES.map((rt) => {
-                          const info = RUNTIME_INFO[rt];
-                          const rtInfoLocal = runtimes.find((r) => r.name === rt);
-                          const runtimeAvailable = rtInfoLocal?.available ?? false;
-                          const selectable = runtimeAvailable || rt === "custom";
-                          return {
-                            value: rt,
-                            label: `${info?.label || rt}${!runtimeAvailable && rt !== "custom" ? ` ${t("notInstalled")}` : ""}`,
-                            disabled: !selectable,
-                          };
-                        })}
-                        searchable
                       />
                       <OpenCodeManagedModelHint runtime={runtime} />
+                      {supportsAcpMode(runtime) && (
+                        <AcpRuntimeMode
+                          runtime={runtime}
+                          value={runtimeMode}
+                          onChange={setRuntimeMode}
+                          disabled={busy === "actor-update"}
+                        />
+                      )}
                     </div>
 
                     {isWebModelRuntime(runtime) ? (
@@ -1575,17 +1620,21 @@ function EditActorConfigModal({
                         <div className="font-medium">
                           {runtime === "grok_web_model"
                             ? "Grok Bot Web Model"
-                            : t("webModelActorBoundConnectorTitle", {
-                                defaultValue: "ChatGPT Web Model",
-                              })}
+                            : runtime === "chatgpt_dots"
+                              ? "ChatGPT Dots"
+                              : t("webModelActorBoundConnectorTitle", {
+                                  defaultValue: "ChatGPT Web Model",
+                                })}
                         </div>
                         <div className="mt-1">
                           {runtime === "grok_web_model"
                             ? t("settings:grokActor.hint")
-                            : t("webModelActorBoundConnectorHint", {
-                                defaultValue:
-                                  "Use shared login and one connector in global Web Model settings. After saving this Actor, pair its own conversation below.",
-                              })}
+                            : runtime === "chatgpt_dots"
+                              ? t("settings:dotsActor.createHint")
+                              : t("webModelActorBoundConnectorHint", {
+                                  defaultValue:
+                                    "Use shared login and one connector in global Web Model settings. After saving this Actor, pair its own conversation below.",
+                                })}
                         </div>
                       </div>
                     ) : null}
@@ -1656,10 +1705,25 @@ function EditActorConfigModal({
               aria-label={t(
                 conversationRuntime === "grok_web_model"
                   ? "settings:grokActor.title"
-                  : "settings:webModelActor.title",
+                  : conversationRuntime === "chatgpt_dots"
+                    ? "settings:dotsActor.title"
+                    : "settings:webModelActor.title",
               )}
             >
-              {conversationRuntime === "grok_web_model" ? (
+              {conversationRuntime === "chatgpt_dots" ? (
+                <DotsActorPanel
+                  key={`${groupId}/${actorId}/dots`}
+                  groupId={groupId}
+                  actorId={actorId}
+                  isVisible={!suspended}
+                  isRunning={isRunning}
+                  canAccessConnection={canAccessGlobalSettings}
+                  setup
+                  onOpenSharedSettings={openSharedSettings}
+                  onBusyChange={setConnectionBusy}
+                  saving={secretsBusy || busy === "actor-update"}
+                />
+              ) : conversationRuntime === "grok_web_model" ? (
                 <GrokActorSetup
                   key={`${groupId}/${actorId}/grok`}
                   groupId={groupId}

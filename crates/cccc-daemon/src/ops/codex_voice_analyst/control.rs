@@ -5,6 +5,74 @@ use std::time::Duration;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl AnalystSession {
+    pub(crate) async fn cancel_pending_input(
+        &self,
+        generation: &str,
+        delegation_id: &str,
+    ) -> io::Result<()> {
+        self.require_generation(generation)?;
+        let delegation_id = required_value(delegation_id, "delegation_id")?;
+        match &self.protocol {
+            ManagedProtocol::Acp(protocol) if self.structured_only() => protocol
+                .cancel_input(&self.thread_id, Some(delegation_id))
+                .await
+                .map(|_| ()),
+            ManagedProtocol::Pi(protocol) => protocol
+                .cancel_input(&self.thread_id, Some(delegation_id))
+                .await
+                .map(|_| ()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Runtime does not support pending managed input cancellation",
+            )),
+        }
+    }
+
+    pub(crate) fn permissions(&self) -> Vec<Value> {
+        match &self.protocol {
+            ManagedProtocol::Acp(protocol) if self.structured_only() => protocol.permissions(),
+            ManagedProtocol::Pi(protocol) => protocol.permissions(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) async fn respond_permission(
+        &self,
+        generation: &str,
+        request_id: &str,
+        allow: bool,
+    ) -> io::Result<()> {
+        self.require_generation(generation)?;
+        match &self.protocol {
+            ManagedProtocol::Acp(protocol) if self.structured_only() => {
+                protocol.respond_permission(request_id, allow).await
+            }
+            ManagedProtocol::Pi(protocol) => protocol.respond_permission(request_id, allow).await,
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "This Runtime handles permissions in its native terminal",
+            )),
+        }
+    }
+    pub(crate) async fn respond_interaction(
+        &self,
+        generation: &str,
+        request_id: &str,
+        reply: Value,
+    ) -> io::Result<()> {
+        self.require_generation(generation)?;
+        match &self.protocol {
+            ManagedProtocol::Acp(protocol) if self.structured_only() => {
+                protocol.respond_interaction(request_id, reply).await
+            }
+            ManagedProtocol::Pi(protocol) => protocol.respond_interaction(request_id, reply).await,
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Runtime does not expose managed interactions",
+            )),
+        }
+    }
+
     pub(crate) async fn register_native_input(
         &self,
         expected_generation: &str,
@@ -55,7 +123,7 @@ impl AnalystSession {
                 io::ErrorKind::Unsupported,
                 "this managed Runtime does not support safe in-turn steering",
             )),
-            ManagedProtocol::Claude(_) => Err(io::Error::new(
+            ManagedProtocol::Claude(_) | ManagedProtocol::Pi(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "this managed Runtime does not support safe in-turn steering",
             )),
@@ -80,6 +148,7 @@ impl AnalystSession {
                 .map(|_| ()),
             ManagedProtocol::Acp(protocol) => protocol.cancel(&self.thread_id).await,
             ManagedProtocol::Claude(protocol) => protocol.cancel(turn_id).await,
+            ManagedProtocol::Pi(protocol) => protocol.cancel(&self.thread_id, turn_id).await,
         }
     }
 
@@ -136,7 +205,14 @@ impl AnalystSession {
             process.stop()?;
         }
         for path in &self.cleanup_paths {
-            match std::fs::remove_file(path) {
+            let removed = if path.is_dir() {
+                // Owned launch directories follow their individual files in
+                // this list. Unexpected contents remain an explicit failure.
+                std::fs::remove_dir(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            match removed {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
@@ -145,7 +221,7 @@ impl AnalystSession {
         Ok(())
     }
 
-    pub(super) fn require_generation(&self, expected: &str) -> io::Result<()> {
+    pub(crate) fn require_generation(&self, expected: &str) -> io::Result<()> {
         if expected == self.generation {
             Ok(())
         } else {

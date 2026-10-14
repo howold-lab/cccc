@@ -103,6 +103,7 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
             task_id: None,
             updated_at: String::new(),
             pid: attached.pid,
+            reason: None,
         }),
         stopped: AtomicBool::new(false),
         stop_lock: Mutex::new(()),
@@ -189,8 +190,9 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
     })
     .await
     .expect("delivery task");
-    assert!(
+    assert_eq!(
         delivered,
+        super::super::BatchSubmission::Accepted,
         "delivery reconnects the same provider's input channel"
     );
     crate::ops::actor_runtime::reconcile_exited(&home, vec![exited]).expect("late delivery reap");
@@ -230,7 +232,10 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
         &environment,
     )
     .expect("prepare durable resume");
-    assert_eq!(resumed.as_deref(), Some(session_id));
+    assert_eq!(
+        resumed.as_ref().map(|attempt| attempt.session_id.as_str()),
+        Some(session_id)
+    );
     assert_eq!(operations.lock().expect("operations").as_slice(), ["list"]);
     let events =
         cccc_core::ledger::read_all(&store.ledger_path(&group.group_id).expect("ledger path"))
@@ -281,7 +286,17 @@ async fn attach_request(
     .expect("attach timeout")
     .expect("response");
     let response = serde_json::from_str(&line).expect("attachment response");
-    drop(client);
-    server.await.expect("server task").expect("server stream");
+    // End input while retaining the read half until the server finishes its
+    // initial terminal output. Dropping both halves races that output write.
+    client
+        .get_mut()
+        .shutdown()
+        .await
+        .expect("end fixture input");
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("detach timeout")
+        .expect("server task")
+        .expect("server stream");
     response
 }

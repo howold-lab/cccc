@@ -31,8 +31,10 @@ import {
 } from "./LazyVoiceSecretaryComposerControl";
 import { SlashCommandMenu } from "./SlashCommandMenu";
 import { useGroupStore } from "../../stores";
+import { getChatSession, useUIStore } from "../../stores/useUIStore";
 import {
   filterSlashCommands,
+  normalizeSlashCommandInput,
   getVisibleSlashCommandPage,
   type SlashCommandItem,
 } from "../../utils/slashCommands";
@@ -231,7 +233,15 @@ export function ChatComposer({
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
   const [slashVisibleCount, setSlashVisibleCount] = useState(SLASH_COMMAND_PAGE_SIZE);
   const [voiceStatusTarget, setVoiceStatusTarget] = useState<HTMLDivElement | null>(null);
-  const [voiceCaptureMode, setVoiceCaptureMode] = useState<VoiceSecretaryCaptureMode>("prompt");
+  const voiceCaptureMode = useUIStore(
+    (state) => getChatSession(selectedGroupId, state.chatSessions).voiceCaptureMode,
+  );
+  const setVoiceCaptureMode = useCallback(
+    (mode: VoiceSecretaryCaptureMode) => {
+      useUIStore.getState().setChatVoicePreferences(selectedGroupId, { voiceCaptureMode: mode });
+    },
+    [selectedGroupId],
+  );
   const [mentionMenuLeft, setMentionMenuLeft] = useState(8);
   const [composerScrollTop, setComposerScrollTop] = useState(0);
   const [sessionConsumedSuggestedUserMessageIds, setSessionConsumedSuggestedUserMessageIds] =
@@ -528,7 +538,10 @@ export function ChatComposer({
   // Handle text changes.
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     exitComposerHistory();
-    const val = e.target.value;
+    // Rewriting the value mid-composition would break the IME; normalize once committed.
+    const val = (e.nativeEvent as InputEvent).isComposing
+      ? e.target.value
+      : normalizeSlashCommandInput(e.target.value);
     if (showSuggestedUserMessage && val.trim()) {
       markSuggestedUserMessageConsumed();
     }
@@ -540,7 +553,9 @@ export function ChatComposer({
       pruneComposerAgentMentionTokens({ text: val, tokens }),
     );
     const slashModeActive =
-      val === val.trimStart() && val.startsWith("/") && !val.slice(1).includes(" ");
+      val === val.trimStart() &&
+      normalizeSlashCommandInput(val).startsWith("/") &&
+      !val.slice(1).includes(" ");
     // A user's `#<group>` token is a local-group agent delegation hint, not a
     // cross-group route: keep the destination pinned to the local group so the
     // message is never sent directly to the referenced group. The token itself
@@ -885,6 +900,16 @@ export function ChatComposer({
     ],
   );
 
+  const focusComposerAfterSpeech = useCallback(() => {
+    requestAnimationFrame(() => {
+      const textarea = composerRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+    });
+  }, [composerRef]);
+
   const fillPromptDraftFromSpeech = useCallback(
     (draft: string, opts?: { mode?: "replace" | "append" }) => {
       const text = String(draft || "").trim();
@@ -894,15 +919,9 @@ export function ChatComposer({
         if (opts?.mode === "replace" || !existing.trim()) return text;
         return `${existing.replace(/\s+$/g, "")}\n\n${text}`;
       });
-      requestAnimationFrame(() => {
-        const textarea = composerRef.current;
-        if (!textarea) return;
-        textarea.focus();
-        const end = textarea.value.length;
-        textarea.setSelectionRange(end, end);
-      });
+      focusComposerAfterSpeech();
     },
-    [composerRef, setComposerText],
+    [focusComposerAfterSpeech, setComposerText],
   );
 
   const fileDisabledReason = (() => {
@@ -1281,6 +1300,7 @@ export function ChatComposer({
                     composerContext={composerAssistantContext}
                     onQuoteDocument={onQuoteVoiceDocumentRef}
                     onPromptDraft={fillPromptDraftFromSpeech}
+                    onFocusComposer={focusComposerAfterSpeech}
                   />
                 </div>
               </div>

@@ -23,6 +23,7 @@ const SUPPORTED: &[&str] = &[
     "hermes",
     "kimi",
     "opencode",
+    "pi",
     "deepseek",
     "custom",
 ];
@@ -30,6 +31,40 @@ const SUPPORTED: &[&str] = &[
 pub fn run(home: &HomeLayout, args: SetupArgs) -> Result<()> {
     let executable = public_executable()?;
     let runtime = args.runtime.as_deref().map(str::trim).unwrap_or("");
+    if args.login && (runtime != "antigravity" || args.runtime_mode != "acp") {
+        bail!("--login requires --runtime antigravity --runtime-mode acp");
+    }
+    if args.runtime_mode == "acp" && runtime != "antigravity" {
+        if !matches!(
+            runtime,
+            "auggie" | "copilot" | "devin" | "cursor" | "kimi" | "kiro" | "hermes" | "droid"
+        ) {
+            bail!("--runtime-mode acp requires a Runtime with official optional ACP support");
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "runtime":runtime, "runtime_mode":"acp", "mode":"managed_session",
+                "status":"ready", "managed":true, "mcp":"injected_per_session",
+                "note":"Install and authenticate the official CLI before starting a session; setup does not verify provider credentials."
+            }))?
+        );
+        return Ok(());
+    }
+    if args.runtime_mode == "acp" {
+        let install = cccc_daemon::antigravity_acp_setup::ensure(home)?;
+        if args.login {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(cccc_daemon::antigravity_acp_setup::login(home))?;
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &json!({"runtime":"antigravity","runtime_mode":"acp","status":if args.login {"authenticated"} else {"installed"},"version":cccc_daemon::antigravity_acp_setup::VERSION,"provider_home":install.provider_home,"login_command":"cccc setup --runtime antigravity --runtime-mode acp --login"})
+            )?
+        );
+        return Ok(());
+    }
     let config = json!({
         "mcpServers":{"cccc":{"command":executable,"args":["mcp"],"env":{"CCCC_HOME":home.root()}}}
     });
@@ -193,7 +228,7 @@ fn setup_one(
             "note":"Only Grok's cccc MCP entry is managed. Other imported MCP servers remain available; standalone Grok also uses this native entry."
         }));
     }
-    if matches!(runtime, "claude" | "opencode" | "kilo") {
+    if matches!(runtime, "claude" | "opencode" | "kilo" | "pi") {
         return Ok(json!({
             "runtime":runtime,
             "mode":"managed_session",

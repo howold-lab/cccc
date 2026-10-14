@@ -55,8 +55,10 @@ const TranscriptTab = lazy(() =>
 const GuidanceTab = lazy(() =>
   import("./modals/settings/GuidanceTab").then((module) => ({ default: module.GuidanceTab })),
 );
-const AssistantsTab = lazy(() =>
-  import("./modals/settings/AssistantsTab").then((module) => ({ default: module.AssistantsTab })),
+const VoiceSettingsTab = lazy(() =>
+  import("./modals/settings/VoiceSettingsTab").then((module) => ({
+    default: module.VoiceSettingsTab,
+  })),
 );
 const GroupSpaceTab = lazy(() =>
   import("./modals/settings/GroupSpaceTab").then((module) => ({ default: module.GroupSpaceTab })),
@@ -91,6 +93,7 @@ const DeveloperTab = lazy(() =>
 );
 
 interface SettingsModalProps {
+  codexVoice: import("../features/codexVoice/useCodexVoiceShell").CodexVoiceShellState;
   isOpen: boolean;
   onClose: () => void;
   settings: GroupSettings | null;
@@ -111,6 +114,7 @@ function SettingsTabFallback() {
 }
 
 export function SettingsModal({
+  codexVoice,
   isOpen,
   onClose,
   settings,
@@ -122,7 +126,16 @@ export function SettingsModal({
   groupDoc,
 }: SettingsModalProps) {
   const { t } = useTranslation("settings");
-  const { modalRef } = useModalA11y(isOpen, onClose);
+  const [voiceSection, setVoiceSection] = useState<"secretary" | "realtime">("secretary");
+  const [voiceAudioRequest, setVoiceAudioRequest] = useState(0);
+  const [voiceFeatureRequest, setVoiceFeatureRequest] = useState(0);
+  const [voiceAnalystRequest, setVoiceAnalystRequest] = useState(0);
+  const voiceBeforeLeave = useRef<() => boolean>(() => true);
+  const requestClose = () => {
+    if (voiceBeforeLeave.current()) onClose();
+  };
+  const initialVoiceFocus = useRef<HTMLElement | null>(null);
+  const { modalRef } = useModalA11y(isOpen, requestClose, { initialFocusRef: initialVoiceFocus });
   const [initialLocation] = useState(() => readSettingsLastLocation(Boolean(groupId)));
   const [scope, setScope] = useState<SettingsScope>(() => initialLocation.scope);
   const [groupTab, setGroupTab] = useState<GroupTabId>(() => initialLocation.groupTab);
@@ -131,12 +144,13 @@ export function SettingsModal({
   const [focusReachOnOpen, setFocusReachOnOpen] = useState(false);
   const [canAccessGlobalSettings, setCanAccessGlobalSettings] = useState<boolean | null>(null);
   const [webAccessSession, setWebAccessSession] = useState<WebAccessSession | null>(null);
-  const [webModelProvider, setWebModelProvider] = useState<api.WebModelProvider>("chatgpt_web");
+  const [webModelProvider, setWebModelProvider] = useState<api.WebModelView>("chatgpt_web");
   const settingsTarget = useModalStore((state) => state.settingsTarget);
   const clearSettingsTarget = useModalStore((state) => state.clearSettingsTarget);
 
   // Automation + delivery settings state
   const [mailNoticeAfterSeconds, setMailNoticeAfterSeconds] = useState(1800);
+  const [mailNoticeIdleAfterSeconds, setMailNoticeIdleAfterSeconds] = useState(60);
   const [replyNoticeAfterSeconds, setReplyNoticeAfterSeconds] = useState(900);
   const [idleSeconds, setIdleSeconds] = useState(0);
   const [keepaliveSeconds, setKeepaliveSeconds] = useState(120);
@@ -316,6 +330,13 @@ export function SettingsModal({
         settings.mail_notice_after_seconds ?? 1800,
       ),
     );
+    setMailNoticeIdleAfterSeconds((current) =>
+      sync(
+        current,
+        previous?.mail_notice_idle_after_seconds ?? 60,
+        settings.mail_notice_idle_after_seconds ?? 60,
+      ),
+    );
     setReplyNoticeAfterSeconds((current) =>
       sync(
         current,
@@ -390,6 +411,9 @@ export function SettingsModal({
 
   useEffect(() => {
     if (isOpen) return;
+    initialVoiceFocus.current = null;
+    setVoiceAudioRequest(0);
+    setVoiceFeatureRequest(0);
     observabilityLoaded.current = false;
     setAccountReturnToWebAccess(false);
     setFocusReachOnOpen(false);
@@ -760,6 +784,7 @@ export function SettingsModal({
     scope,
     scope === "group" ? groupTab : globalTab,
     mailNoticeAfterSeconds,
+    mailNoticeIdleAfterSeconds,
     replyNoticeAfterSeconds,
     idleSeconds,
     keepaliveSeconds,
@@ -806,6 +831,7 @@ export function SettingsModal({
   const handleSaveDeliverySettings = async () => {
     await saveGroupSettings({
       mail_notice_after_seconds: mailNoticeAfterSeconds,
+      mail_notice_idle_after_seconds: mailNoticeIdleAfterSeconds,
       reply_notice_after_seconds: replyNoticeAfterSeconds,
     });
   };
@@ -1466,6 +1492,7 @@ export function SettingsModal({
             { id: "account" as const, label: t("tabs.account") },
             { id: "capabilities" as const, label: t("tabs.capabilities") },
             { id: "actorProfiles" as const, label: t("tabs.actorProfiles") },
+            { id: "voice" as const, label: t("tabs.voice") },
           ]
         : []),
       // Non-admin signed-in users see My Profiles; admin already has Actor Profiles covering all
@@ -1497,6 +1524,10 @@ export function SettingsModal({
 
   useEffect(() => {
     if (!isOpen || !settingsTarget) return;
+    if (!voiceBeforeLeave.current()) {
+      clearSettingsTarget();
+      return;
+    }
     const nextScope =
       settingsTarget.scope === "global"
         ? "global"
@@ -1515,13 +1546,18 @@ export function SettingsModal({
       setFocusReachOnOpen(false);
       if (nextTab) setGroupTab(nextTab as GroupTabId);
     }
+    if (settingsTarget.voiceSection) setVoiceSection(settingsTarget.voiceSection);
+    setVoiceAudioRequest(settingsTarget.voiceAudio ? settingsTarget.nonce : 0);
+    setVoiceAnalystRequest(settingsTarget.voiceAnalyst ? settingsTarget.nonce : 0);
+    setVoiceFeatureRequest(
+      settingsTarget.voiceSection && !settingsTarget.voiceAudio ? settingsTarget.nonce : 0,
+    );
     if (settingsTarget.webModelProvider) setWebModelProvider(settingsTarget.webModelProvider);
     clearSettingsTarget();
   }, [clearSettingsTarget, isOpen, settingsTarget]);
 
   const groupTabs: { id: GroupTabId; label: string }[] = [
     { id: "guidance", label: t("tabs.guidance") },
-    { id: "assistants", label: t("tabs.assistants") },
     { id: "automation", label: t("tabs.automation") },
     { id: "delivery", label: t("tabs.delivery") },
     { id: "space", label: t("tabs.space") },
@@ -1585,7 +1621,7 @@ export function SettingsModal({
   return (
     <ModalFrame
       isDark={isDark}
-      onClose={onClose}
+      onClose={requestClose}
       titleId="settings-modal-title"
       surface="solid"
       title={
@@ -1608,11 +1644,15 @@ export function SettingsModal({
           tabs={tabs}
           activeTab={activeTab}
           onScopeChange={(nextScope) => {
+            if (nextScope !== scope && !voiceBeforeLeave.current()) return;
             setAccountReturnToWebAccess(false);
             setFocusReachOnOpen(false);
             setScope(nextScope);
           }}
-          onTabChange={(tab) => setActiveTab(tab as GroupTabId | GlobalTabId)}
+          onTabChange={(tab) => {
+            if (tab !== activeTab && !voiceBeforeLeave.current()) return;
+            setActiveTab(tab as GroupTabId | GlobalTabId);
+          }}
         />
 
         {/* Main Content Area */}
@@ -1620,7 +1660,7 @@ export function SettingsModal({
           ref={contentScrollRef}
           className="min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-subtle flex flex-col [scrollbar-gutter:stable] bg-[var(--color-bg-primary)]"
         >
-          <div className="p-4 pb-6 sm:p-5 lg:p-6 sm:pb-7 space-y-6">
+          <div className="px-4 pt-5 pb-4 sm:px-8 sm:pt-7 lg:px-10 space-y-6">
             {scope === "global" && !globalSettingsEnabled && !currentBrowserSignedIn ? (
               <div
                 className={`rounded-xl border p-6 ${isDark ? "border-amber-700/40 bg-amber-900/10 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-800"}`}
@@ -1697,6 +1737,8 @@ export function SettingsModal({
                     busy={busy}
                     mailNoticeAfterSeconds={mailNoticeAfterSeconds}
                     setMailNoticeAfterSeconds={setMailNoticeAfterSeconds}
+                    mailNoticeIdleAfterSeconds={mailNoticeIdleAfterSeconds}
+                    setMailNoticeIdleAfterSeconds={setMailNoticeIdleAfterSeconds}
                     replyNoticeAfterSeconds={replyNoticeAfterSeconds}
                     setReplyNoticeAfterSeconds={setReplyNoticeAfterSeconds}
                     onSave={handleSaveDeliverySettings}
@@ -1803,15 +1845,6 @@ export function SettingsModal({
 
                 {activeTab === "guidance" && <GuidanceTab isDark={isDark} groupId={groupId} />}
 
-                {activeTab === "assistants" && (
-                  <AssistantsTab
-                    isDark={isDark}
-                    groupId={groupId}
-                    isActive={scope === "group" && activeTab === "assistants"}
-                    busy={busy}
-                  />
-                )}
-
                 {activeTab === "space" && (
                   <GroupSpaceTab
                     isDark={isDark}
@@ -1841,6 +1874,31 @@ export function SettingsModal({
                     isDark={isDark}
                     isActive={scope === "global" && activeTab === "actorProfiles"}
                     scope="global"
+                  />
+                )}
+
+                {activeTab === "voice" && scope === "global" && globalSettingsEnabled && (
+                  <VoiceSettingsTab
+                    voice={codexVoice}
+                    section={voiceSection}
+                    audioRequest={voiceAudioRequest}
+                    featureRequest={voiceFeatureRequest}
+                    // A fresh target wins on the first render after reopening;
+                    // the persisted request is updated by the parent effect.
+                    analystRequest={
+                      settingsTarget
+                        ? settingsTarget.voiceAnalyst
+                          ? settingsTarget.nonce
+                          : 0
+                        : voiceAnalystRequest
+                    }
+                    initialFocusRef={initialVoiceFocus}
+                    onSectionChange={setVoiceSection}
+                    isDark={isDark}
+                    isActive={isOpen}
+                    onBeforeLeaveChange={(guard) => {
+                      voiceBeforeLeave.current = guard;
+                    }}
                   />
                 )}
 

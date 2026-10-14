@@ -10,6 +10,7 @@ function controller(
   overrides: Partial<CodexVoiceSessionController> = {},
 ): CodexVoiceSessionController {
   return {
+    audioDeviceSnapshot: null,
     audioRef: createRef<HTMLAudioElement>(),
     phase: "idle",
     call: null,
@@ -22,6 +23,7 @@ function controller(
     playbackBlocked: false,
     outputStatus: { queued: 0, blocked: null },
     error: "",
+    refreshError: "",
     isStarting: false,
     isEngaged: false,
     externalCall: false,
@@ -36,6 +38,7 @@ function controller(
       realtime_credentials_available: true,
     },
     updatePreferences: vi.fn(),
+    updateAnalystSnapshot: vi.fn(),
     refresh: vi.fn(async () => undefined),
     start: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
@@ -49,6 +52,61 @@ function controller(
 }
 
 describe("CodexVoiceDock", () => {
+  it("shows stale status instead of advertising ready after a failed snapshot read", () => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceDock
+        controller={controller({ refreshError: "read failed" })}
+        onOpen={vi.fn()}
+        onStart={vi.fn()}
+      />,
+    );
+    expect(html).toContain("modals:codexVoiceStatusStaleLabel");
+    expect(html).not.toContain("modals:codexVoicePhase.failed");
+    expect(html).not.toContain("modals:codexVoicePhase.idle");
+  });
+
+  it("does not advertise Ready when Realtime credentials are unavailable", () => {
+    const state = controller();
+    state.readiness = { ...state.readiness!, realtime_credentials_available: false };
+    const html = renderToStaticMarkup(
+      <CodexVoiceDock controller={state} onOpen={vi.fn()} onStart={vi.fn()} />,
+    );
+    expect(html).toContain("modals:codexVoiceCallBlocked");
+    expect(html).not.toContain("modals:codexVoicePhase.idle");
+  });
+
+  it("shows a queued or running warm investigation instead of Analyst ready", () => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceDock
+        controller={controller({
+          analyst: {
+            generation: "A",
+            phase: "ready",
+            tui_ready: false,
+            last_result: "",
+            warning: "",
+          },
+          analystWorking: true,
+        })}
+        onOpen={vi.fn()}
+        onStart={vi.fn()}
+      />,
+    );
+    expect(html).toContain("modals:codexVoiceAnalystPhase.working");
+    expect(html).not.toContain("layout:codexVoiceAnalystReady");
+  });
+
+  it("waits for readiness rather than claiming Ready before the first snapshot", () => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceDock
+        controller={controller({ readiness: null })}
+        onOpen={vi.fn()}
+        onStart={vi.fn()}
+      />,
+    );
+    expect(html).toContain("modals:codexVoiceChecking");
+    expect(html).not.toContain("modals:codexVoicePhase.idle");
+  });
   it("keeps two stable global actions: open console and start voice", () => {
     const html = renderToStaticMarkup(
       <CodexVoiceDock controller={controller()} onOpen={vi.fn()} onStart={vi.fn()} />,

@@ -57,20 +57,20 @@ CCCC installs with one command and needs no separately operated database, messag
 | **Multi-runtime orchestration** | Mix supported coding-agent runtimes in one Group, with `custom` for other command-line agents |
 | **CCCC Connect** | Connect your own instances, selected Groups across member accounts, or two Groups directly without an account |
 | **Workspace tools** | Browse and edit files, inspect Git changes, pin documents in Presentation, and operate tiled native terminals |
-| **Voice workflows** | Voice Secretary turns speech into documents or composer drafts; experimental Codex Voice pairs realtime conversation with a Runtime-backed Analyst |
+| **Voice workflows** | One global Voice Secretary handles speech, documents and composer drafts for all Groups in a shared conversation; experimental Codex Voice uses a separate Realtime Analyst |
 | **Role-based coordination** | Foreman + peer model with permission boundaries and recipient routing (`@all`, `@peers`, `@foreman`) |
 | **Local-first runtime state** | Runtime data stays in `CCCC_HOME`, not your repo, while Web Access and IM bridges cover remote operations |
 
 
-## 0.4.41 Highlights
+## 0.4.42 Highlights
 
-- **Multiple ChatGPT Actors:** one dedicated login and one shared connector, with a separate persistent window and verified conversation for each Actor.
-- **Grok Bot Web Model:** connect an existing Bot URL to an Actor, share Grok login, and route MCP calls with per-Actor credentials without a pairing message.
-- **Safer browser delivery and simpler settings:** protect drafts, recover manually sent messages, keep slow-loading windows accessible, and save Grok URLs with Actor settings, including linked Profiles.
-- **Voice document library:** persistent folders, drag-and-drop ordering, renaming, archive previews and restoration, plus clearer live transcription and failure feedback.
-- **Everyday reliability:** retained per-Group recipients, native MCP image/PDF/PPTX handoff, corrected local-tool deadlines and editing, managed startup fixes, and protected Weixin reply credentials.
+- **Optional official ACP:** Antigravity, GitHub Copilot, Devin CLI and Cursor support structured Actors and Voice Analyst without a native terminal. TUI remains the default; saved mode changes apply on restart or next start.
+- **Voice investigations and host personas:** ACP investigations show task status, decisions and results; completed call-bound work returns to that call's Realtime context. Host APIs can request persona calls without an Analyst or Actor notifications.
+- **Conversation recovery:** Claude pauses unverifiable resumes with visible diagnostics and explicit recovery; Codex resumes long conversations without transferring their full history to CCCC. Closing a managed terminal preserves its healthy provider session.
+- **Clearer daily controls:** thin activity rings, accurate unread Mail badges, retained per-Group recipients, installation detection and more predictable Actor/Profile saves.
+- **Grok and lifecycle reliability:** required Bot URLs work with linked Profiles, browser login windows close independently, and Unix process cleanup retains unresolved ownership records across crashes.
 
-Existing Actor-specific ChatGPT connectors need to be replaced with the shared connector and conversations reconnected; history is preserved. See the [0.4.41 release notes](docs/release/v0.4.41_release_notes.md) for upgrade steps and validation limits.
+See the [0.4.42 release notes](docs/release/v0.4.42_release_notes.md) for setup, upgrade steps and validation limits. When upgrading an older Actor-specific ChatGPT connector setup, follow the shared-connector migration in the [0.4.41 notes](docs/release/v0.4.41_release_notes.md).
 
 ## Quick Start
 
@@ -248,7 +248,7 @@ graph TB
 
 ## Supported Runtimes
 
-CCCC supports 19 built-in runtime integrations, plus `custom` for other command-line agents. Each actor in a Group can use a different runtime. Integration surfaces and setup requirements vary:
+CCCC supports 20 built-in runtime integrations, plus `custom` for other command-line agents. Each actor in a Group can use a different runtime. Integration surfaces and setup requirements vary:
 
 | Runtime | Integration | Entrypoint / Surface |
 |---------|-------------|----------------------|
@@ -259,18 +259,19 @@ CCCC supports 19 built-in runtime integrations, plus `custom` for other command-
 | GitHub Copilot CLI | Auto MCP setup | `copilot` |
 | Cursor CLI | Prompt-assisted MCP setup | `cursor-agent` |
 | Devin CLI | Auto MCP setup | `devin` |
-| Kiro CLI | Auto MCP setup | `kiro-cli` |
+| Kiro CLI | Native TUI or official ACP; session MCP | `kiro-cli` |
 | Kilo Code CLI | Managed ACP session + native TUI; per-session MCP | `kilo` |
 | Antigravity CLI | Auto MCP setup | `agy` |
 | ChatGPT Web | Remote MCP + Browser Delivery | `chatgpt.com` conversation |
 | Grok Bot Web Model | Remote MCP + Browser Delivery; per-Actor routing credential | Required `grok.com/bot/<UUID>` URL |
 | Grok Build | Managed ACP session + native TUI; automatic native MCP setup | `grok` |
-| Hermes Agent | Auto MCP setup | `hermes` |
-| Droid | Auto MCP setup | `droid` |
+| Hermes Agent | Native TUI or official ACP; session MCP | `hermes` |
+| Droid | Native TUI or official ACP; session MCP | `droid` |
 | Amp | Auto MCP setup | `amp` |
-| Auggie | Auto MCP setup | `auggie` |
-| Kimi Code | Auto MCP setup | `kimi` |
+| Auggie | Native TUI or official ACP; session MCP | `auggie` |
+| Kimi Code | Native TUI or official ACP; session MCP | `kimi` |
 | OpenCode | Managed ACP session + native TUI; per-session MCP | `opencode` |
+| Pi | Official RPC; per-session MCP; no native attachment | `pi` |
 | Custom | Manual | Any command |
 
 These are stable runtime entrypoints or surfaces. CCCC applies runtime-specific launch defaults automatically; actor/profile commands can be reviewed and customized in settings. The [Supported Runtimes guide](https://chesterra.github.io/cccc/guide/runtimes) lists the default autonomy flags, including approval-bypass modes such as `agy --dangerously-skip-permissions`, `grok --always-approve`, and `opencode --auto`.
@@ -287,7 +288,11 @@ cccc doctor                       # verify environment and runtime availability
 
 Antigravity setup also disables native feedback surveys in its user settings, because the rating prompt can consume automated terminal input. Other preferences are preserved; this also applies to standalone AGY sessions under the same user.
 
-Choose a Runtime; CCCC derives its interaction surface automatically. Claude Code, Codex CLI, Grok Build, OpenCode and Kilo pair a native writable terminal with a structured background protocol on the same provider session. Messages enter that terminal, leaving queue-versus-steer behavior to the receiving Runtime. DeepSeek Harness uses structured ACP without a native terminal; ChatGPT Web and Grok Bot Web Model use browser delivery and remote MCP.
+GitHub Copilot, Devin CLI, Cursor, Kimi Code, Auggie, Kiro V3, Hermes and Droid also support optional **official headless ACP** for Actors, Voice Analyst and Voice Secretary, while native TUI remains their default. ACP reuses native CLI login, injects an independent CCCC identity per Actor, and exposes serialized input, cancellation and one-time approvals. Cursor questions and plans require explicit user decisions even with YOLO. See the [Runtime guide](https://chesterra.github.io/cccc/guide/runtimes#native-tui-or-official-acp).
+
+Antigravity also supports an optional **official ACP mode** for Actors and Voice Analyst, with a structured workspace instead of a terminal. Select ACP in Actor/Profile settings and run `cccc setup --runtime antigravity --runtime-mode acp --login` once for its separate CCCC login. Busy inputs and one-time permission requests are visible in the workspace. See the [runtime guide](https://chesterra.github.io/cccc/guide/runtimes#antigravity-tui-or-official-acp).
+
+Choose a Runtime; CCCC derives its interaction surface automatically. Claude Code, Codex CLI, Grok Build, OpenCode and Kilo pair a native writable terminal with a structured background protocol on the same provider session. Messages enter that terminal, leaving queue-versus-steer behavior to the receiving Runtime. Pi uses official RPC without a native terminal attachment and requires Pi 1.1.0 or newer (`@earendil-works/pi-coding-agent`). DeepSeek Harness uses structured ACP without a native terminal; ChatGPT Web and Grok Bot Web Model use browser delivery and remote MCP.
 
 For setup commands, interaction details, and troubleshooting for every supported Runtime, see the [Supported Runtimes guide](https://chesterra.github.io/cccc/guide/runtimes).
 
@@ -366,7 +371,7 @@ The built-in Web UI at `http://127.0.0.1:8848` provides:
 - **Project Context** — shared coordination, tasks, Agent state and self-evolving skills
 - **Group Space** — NotebookLM integration for shared knowledge management
 - **ChatGPT Web Model setup** — connect one ChatGPT Web conversation as a CCCC actor
-- **Voice Secretary & Codex Voice** — speech-to-document/composer workflows and experimental realtime Voice with a retained Analyst
+- **Voice Secretary & Codex Voice** — a global Secretary with Custom runtime settings or a linked Profile, processing tasks sequentially in a shared conversation while preserving each task's Group destination. Experimental realtime Voice keeps a separate Analyst. Both workflows share voice settings and audio device preferences; each Group retains its documents, requests and capture choices, without a per-Group secretary Actor.
 - **CCCC Connect settings** — account discovery, selected Group connections and Direct pairing
 - **IM bridge configuration** — Telegram, Slack, Discord, Mattermost, Feishu, DingTalk, WeCom and Weixin
 - **Settings** — messaging policies, delivery tuning, terminal transcript controls

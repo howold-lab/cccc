@@ -15,6 +15,8 @@ mod command;
 mod launch_tests;
 mod lifecycle;
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod model_sync_tests;
 mod session;
 pub(super) mod stream;
@@ -85,10 +87,19 @@ pub(super) async fn launch(
         require_supported_version(&prepared.launch_prefix[0], cwd, &base_environment).await?;
     }
     if purpose == SessionPurpose::VoiceAnalyst {
-        command::write_voice_analyst_agent(
+        command::write_voice_agent(
             cwd,
             super::launch::ANALYST_INSTRUCTIONS,
             prepared.runtime,
+            command::VOICE_ANALYST_AGENT,
+        )?;
+    }
+    if purpose == SessionPurpose::VoiceSecretary {
+        command::write_voice_agent(
+            cwd,
+            super::launch_secretary::INSTRUCTIONS,
+            prepared.runtime,
+            command::VOICE_SECRETARY_AGENT,
         )?;
     }
     let mut last_error = None;
@@ -183,6 +194,8 @@ pub(super) async fn launch(
         drop(initialized);
         let desired_agent = if purpose == SessionPurpose::VoiceAnalyst {
             Some(command::VOICE_ANALYST_AGENT)
+        } else if purpose == SessionPurpose::VoiceSecretary {
+            Some(command::VOICE_SECRETARY_AGENT)
         } else {
             prepared.agent.as_deref()
         };
@@ -191,7 +204,6 @@ pub(super) async fn launch(
             cwd,
             resume_session_id,
             mcp_server,
-            purpose == SessionPurpose::Actor,
             prepared.model.as_deref(),
             desired_agent,
         )

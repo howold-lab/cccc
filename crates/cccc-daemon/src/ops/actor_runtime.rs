@@ -6,18 +6,22 @@ use std::path::PathBuf;
 use crate::dispatch::OpError;
 use crate::ops::actor_profile_runtime;
 
+mod attributed_reap;
 mod environment;
 mod persistence;
 mod reconcile;
 pub(crate) mod terminal_history;
 #[cfg(test)]
 mod untrusted_workspace_tests;
+pub(crate) use attributed_reap::reap_group;
 pub use persistence::persist_lifecycle;
 pub(crate) use reconcile::record_process_exit;
 pub use reconcile::{reap_exited, reconcile_exited};
 
 /// Claude Code refused the Actor's workspace; only the operator can accept its trust prompt.
 pub(crate) const CLAUDE_WORKSPACE_UNTRUSTED: &str = "claude_workspace_untrusted";
+pub(crate) const CLAUDE_RESUME_FAILED: &str = "claude_resume_failed";
+pub(crate) const RUNTIME_RESUME_FAILED: &str = "runtime_resume_failed";
 
 pub fn apply(
     home: &HomeLayout,
@@ -32,7 +36,11 @@ pub fn apply(
         .ok_or_else(|| OpError::new("not_found", format!("actor not found: {actor_id}")))?;
     // Configuration may already name a different backend. Lifecycle ownership
     // comes from the registries, not from the next launch configuration.
+    if matches!(kind, "actor.stop" | "actor.restart" | "actor.new_session") {
+        super::dots_events::invalidate(home, group, actor_id)?;
+    }
     if stored_actor.runtime.is_web_model()
+        && stored_actor.runtime != ActorRuntime::ChatgptDots
         && matches!(kind, "actor.stop" | "actor.restart" | "actor.new_session")
     {
         cccc_core::web_model_connectors::interrupt_automatic_pairings(
@@ -46,13 +54,28 @@ pub fn apply(
         return stop_registered(group, actor_id);
     }
     let actor = actor_profile_runtime::resolve(home, stored_actor)?;
-    if !matches!(kind, "actor.restart" | "actor.new_session")
-        && actor_is_running(group, stored_actor)
-    {
+    apply_resolved(home, group, &actor, kind)
+}
+
+/// Restore policy and startup must use the same effective Profile snapshot.
+pub(super) fn apply_resolved(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    kind: &str,
+) -> Result<Option<SessionStatus>, OpError> {
+    let actor_id = &actor.id;
+    if actor_id == "voice-secretary" || actor.internal_kind.as_deref() == Some("voice_secretary") {
+        return Err(OpError::new(
+            "global_secretary_owner",
+            "This Group's secretary is managed by the global Voice Secretary; it is not an Actor runtime",
+        ));
+    }
+    if !matches!(kind, "actor.restart" | "actor.new_session") && actor_is_running(group, actor) {
         // Saving config does not restart an existing session. Explicit restart
         // applies it; start remains idempotent across backend changes too.
         super::local_headless::ensure_viewer(&group.group_id, actor_id).map_err(OpError::io)?;
-        super::capabilities::apply_actor_startup_baseline(home, group, &actor);
+        super::capabilities::apply_actor_startup_baseline(home, group, actor);
         return Ok(
             if super::local_headless::running(&group.group_id, actor_id)
                 || super::deepseek_runtime::running(&group.group_id, actor_id)
@@ -65,19 +88,25 @@ pub fn apply(
     }
     // Also retire a disconnected registration whose previous cleanup failed.
     stop_registered(group, actor_id)?;
-    super::capabilities::apply_actor_startup_baseline(home, group, &actor);
+    if kind == "actor.new_session" {
+        // Pending trust recovery holds the start guard until its launch is
+        // attached or discarded. Retire its ownership before removing the
+        // receipt, so a late old launch cannot undo the explicit reset.
+        super::runtime_session::remove(home, &group.group_id, actor_id).map_err(OpError::io)?;
+    }
+    super::capabilities::apply_actor_startup_baseline(home, group, actor);
     if actor.runtime == ActorRuntime::Deepseek {
-        super::deepseek_runtime::apply(home, group, &actor, "actor.start")?;
+        super::deepseek_runtime::apply(home, group, actor, "actor.start")?;
         return Ok(None);
     }
-    if super::local_headless::supports(&actor) {
-        start_local_headless(home, group, &actor)?;
+    if super::local_headless::supports(actor) {
+        start_local_headless(home, group, actor)?;
         return Ok(None);
     }
-    if is_structured(&actor) {
+    if is_structured(actor) {
         return Ok(None);
     }
-    start(home, group, &actor).map(Some)
+    start(home, group, actor).map(Some)
 }
 
 fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
@@ -94,6 +123,12 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
 }
 
 fn launch_error(error: std::io::Error) -> OpError {
+    if super::runtime_session::resume_failure::is_blocked(&error) {
+        return OpError::new(RUNTIME_RESUME_FAILED, error.to_string());
+    }
+    if super::runtime_session::is_claude_resume_blocked(&error) {
+        return OpError::new(CLAUDE_RESUME_FAILED, error.to_string());
+    }
     let Some(workspace) = super::codex_voice_analyst::untrusted_claude_workspace(&error) else {
         return OpError::io(error);
     };
@@ -226,7 +261,8 @@ pub(crate) fn stop_all() -> Result<Vec<SessionStatus>, cccc_runtime::RuntimeErro
     cccc_runtime::stop_all()
 }
 
-pub fn stop_group(group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
+pub fn stop_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
+    super::dots_events::invalidate_group(home, group)?;
     super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
     super::deepseek_runtime::stop_group(&group.group_id);
     let mut stopped = Vec::new();

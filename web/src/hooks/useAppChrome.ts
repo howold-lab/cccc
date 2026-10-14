@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../services/api";
-import { useGroupStore, useObservabilityStore } from "../stores";
+import { useGroupStore, useObservabilityStore, useUIStore } from "../stores";
 import type { DirSuggestion } from "../types";
 import { MOBILE_VIEWPORT_MEDIA_QUERY } from "../utils/responsiveLayout";
 
@@ -35,7 +35,8 @@ export function useAppChrome({
   editingActor,
 }: UseAppChromeOptions): UseAppChromeResult {
   const [ccccHome, setCcccHome] = useState("");
-  const [canAccessGlobalSettings, setCanAccessGlobalSettings] = useState<boolean | null>(null);
+  const canAccessGlobalSettings = useUIStore((state) => state.canAccessGlobalSettings);
+  const setCanAccessGlobalSettings = useUIStore((state) => state.setCanAccessGlobalSettings);
 
   const refreshWebAccessSession = useCallback(async () => {
     try {
@@ -58,7 +59,7 @@ export function useAppChrome({
       setCanAccessGlobalSettings(null);
       return null;
     }
-  }, []);
+  }, [setCanAccessGlobalSettings]);
 
   useEffect(() => {
     void refreshWebAccessSession();
@@ -96,18 +97,9 @@ export function useAppChrome({
   }, [setSmallScreen]);
 
   const ensureRuntimesLoaded = useCallback(async () => {
-    if (useGroupStore.getState().runtimes.length > 0) return;
-    try {
-      const resp = await api.fetchRuntimes();
-      if (resp.ok) {
-        useGroupStore.getState().setRuntimes(resp.result.runtimes || []);
-        return;
-      }
-      showError(resp.error?.message || "Failed to load runtimes");
-    } catch {
-      showError("Failed to load runtimes");
-    }
-  }, [showError]);
+    const state = useGroupStore.getState();
+    if (state.runtimeDetectionStatus === "idle") await state.refreshRuntimes();
+  }, []);
 
   const fetchDirSuggestions = useCallback(async () => {
     try {

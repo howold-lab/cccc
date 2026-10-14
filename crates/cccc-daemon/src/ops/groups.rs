@@ -563,8 +563,12 @@ fn group_update_patch(request: &DaemonRequest) -> Result<serde_json::Map<String,
 fn delete(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     authorize(&group, request)?;
+    super::voice_secretary::cancel_group(home, &group.group_id).map_err(OpError::io)?;
     actor_delivery::shutdown_group(&group.group_id);
-    actor_runtime::stop_group(&group)?;
+    actor_runtime::stop_group(home, &group)?;
+    // Complete the authorized stop before fallible settings/directory cleanup.
+    // Escaped children must not survive a later filesystem error.
+    let reaped = actor_runtime::reap_group(home, &group.group_id);
     for actor in &group.actors {
         super::codex_voice_analyst::remove_claude_actor_settings(home, &group.group_id, &actor.id)
             .map_err(OpError::io)?;
@@ -572,11 +576,16 @@ fn delete(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let deleted = store(home)?.delete(&group.group_id).map_err(OpError::io)?;
     if deleted {
         super::actor_secrets::remove_group(home, &group.group_id)?;
+        super::voice_secretary::purge_deleted_group(home, &group.group_id).map_err(OpError::io)?;
     }
     if active::get(home).map_err(OpError::io)?.as_deref() == Some(&group.group_id) {
         active::clear(home).map_err(OpError::io)?;
     }
-    object(json!({"group_id": group.group_id, "deleted": deleted}))
+    object(json!({
+        "group_id": group.group_id,
+        "deleted": deleted,
+        "reaped_processes": reaped,
+    }))
 }
 
 fn set_state(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
@@ -592,6 +601,7 @@ fn set_state(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             .map_err(OpError::io)?;
     }
     if matches!(state, GroupState::Paused | GroupState::Stopped) {
+        super::dots_events::invalidate_group(home, &group)?;
         if group.actors.iter().any(|a| a.runtime.is_web_model()) {
             cccc_core::web_model_connectors::interrupt_automatic_pairings(
                 home,
@@ -642,7 +652,7 @@ fn running(home: &HomeLayout, request: &DaemonRequest, value: bool) -> OpResult 
             .map_err(OpError::io)?;
         }
         actor_delivery::shutdown_group(&group.group_id);
-        actor_runtime::stop_group(&group)?
+        actor_runtime::stop_group(home, &group)?
     };
     let updated = store(home)?
         .mutate(&group.group_id, |doc| {

@@ -9,6 +9,193 @@ use cccc_core::access_tokens::AccessTokenStore;
 use serde_json::json;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn antigravity_voice_readiness_reports_setup_without_creating_runtime_state() {
+    for linked_profile in [false, true] {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = HomeLayout::from_path(temp.path()).expect("home");
+        home.initialize().expect("initialize");
+        let settings = if linked_profile {
+            cccc_core::profiles::ProfileStore::new(home.clone())
+                .expect("profiles")
+                .upsert(
+                    json!({"id":"agy-acp","runtime":"antigravity","runtime_mode":"acp","command":["agy"]})
+                        .as_object().expect("profile").clone(),
+                    None,
+                )
+                .expect("save profile");
+            cccc_contracts::CodexVoiceAnalystSettings {
+                profile_id: "agy-acp".into(),
+                ..Default::default()
+            }
+        } else {
+            cccc_contracts::CodexVoiceAnalystSettings {
+                runtime: cccc_contracts::ActorRuntime::Antigravity,
+                runtime_mode: cccc_contracts::RuntimeMode::Acp,
+                command: vec!["agy".into()],
+                ..Default::default()
+            }
+        };
+        cccc_core::codex_voice_settings::save(&home, &settings).expect("settings");
+        let token = AccessTokenStore::new(home.clone())
+            .expect("tokens")
+            .create("admin", vec![], true, None)
+            .expect("admin");
+        let router = app_with_mode(home.clone(), WebMode::Normal);
+        for _ in 0..2 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/codex_voice/calls/active")
+                        .header(header::AUTHORIZATION, format!("Bearer {}", token.token))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+            assert_eq!(
+                body["result"]["readiness"]["analyst_runtime"],
+                "antigravity"
+            );
+            assert_eq!(
+                body["result"]["readiness"]["analyst_runtime_available"],
+                false
+            );
+            assert_eq!(
+                body["result"]["readiness"]["analyst_runtime_setup_required"],
+                true
+            );
+            assert!(body["result"]["analyst"].is_null());
+            assert!(body["result"]["call"].is_null());
+        }
+        assert!(!home.root().join("runtimes/antigravity-acp").exists());
+        assert!(!home.root().join("state/antigravity-acp").exists());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn optional_acp_voice_readiness_uses_the_selected_cli_for_empty_commands() {
+    use cccc_contracts::{ActorRuntime, CodexVoiceAnalystSettings, RuntimeMode};
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
+
+    for (runtime, name, program) in [
+        (ActorRuntime::Kiro, "kiro", "kiro-cli"),
+        (ActorRuntime::Hermes, "hermes", "hermes"),
+        (ActorRuntime::Droid, "droid", "droid"),
+    ] {
+        for selected_cli_available in [true, false] {
+            let temp = tempfile::tempdir().expect("isolated readiness fixture");
+            let home = HomeLayout::from_path(temp.path().join("cccc")).expect("home");
+            home.initialize().expect("initialize");
+            let provider_home = temp.path().join("provider");
+            let bin = provider_home.join("bin");
+            std::fs::create_dir_all(&bin).expect("fixture PATH");
+            let executable = bin.join(if selected_cli_available {
+                program
+            } else {
+                "codex"
+            });
+            std::fs::write(
+                &executable,
+                b"#!/bin/sh\nprintf invoked > \"$0.invoked\"\nexit 99\n",
+            )
+            .expect("owned CLI fixture");
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+                .expect("executable fixture");
+            let settings = CodexVoiceAnalystSettings {
+                runtime,
+                runtime_mode: RuntimeMode::Acp,
+                command: vec![],
+                ..Default::default()
+            };
+            cccc_core::codex_voice_settings::save(&home, &settings).expect("settings");
+            let environment = BTreeMap::from([
+                ("PATH".into(), bin.to_string_lossy().into_owned()),
+                ("HOME".into(), provider_home.to_string_lossy().into_owned()),
+                (
+                    "USERPROFILE".into(),
+                    provider_home.to_string_lossy().into_owned(),
+                ),
+                (
+                    "CODEX_HOME".into(),
+                    provider_home.join("codex").to_string_lossy().into_owned(),
+                ),
+                (
+                    "KIRO_HOME".into(),
+                    provider_home.join("kiro").to_string_lossy().into_owned(),
+                ),
+                (
+                    "HERMES_HOME".into(),
+                    provider_home.join("hermes").to_string_lossy().into_owned(),
+                ),
+            ]);
+            cccc_core::codex_voice_settings::replace_private_environment(&home, &environment)
+                .expect("isolated provider environment");
+            let settings_path = home.root().join("settings.yaml");
+            let environment_path = home.root().join("state/secrets/codex_voice_analyst.json");
+            let saved_settings = std::fs::read(&settings_path).expect("saved settings");
+            let saved_environment = std::fs::read(&environment_path).expect("saved environment");
+            let token = AccessTokenStore::new(home.clone())
+                .expect("tokens")
+                .create("admin", vec![], true, None)
+                .expect("admin");
+            let router = app_with_mode(home.clone(), WebMode::Normal);
+            for _ in 0..2 {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/codex_voice/calls/active")
+                            .header(header::AUTHORIZATION, format!("Bearer {}", token.token))
+                            .body(Body::empty())
+                            .expect("readiness request"),
+                    )
+                    .await
+                    .expect("readiness response");
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("response body");
+                let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+                assert_eq!(body["result"]["readiness"]["analyst_runtime"], name);
+                assert_eq!(
+                    body["result"]["readiness"]["analyst_runtime_available"],
+                    selected_cli_available,
+                    "{name}: availability must use the selected Runtime, not Codex"
+                );
+                assert_eq!(
+                    body["result"]["readiness"]["analyst_runtime_setup_required"],
+                    false
+                );
+                assert!(body["result"]["analyst"].is_null());
+                assert!(body["result"]["call"].is_null());
+            }
+            assert!(
+                !executable.with_extension("invoked").exists(),
+                "readiness GET must not run any CLI"
+            );
+            assert!(std::fs::read(&settings_path).expect("retained settings") == saved_settings);
+            assert!(
+                std::fs::read(&environment_path).expect("retained environment")
+                    == saved_environment
+            );
+            assert!(
+                !home
+                    .root()
+                    .join("state/codex_voice/analyst-workdir")
+                    .exists()
+            );
+        }
+    }
+}
+
 #[test]
 fn connected_voice_principal_loses_authority_when_its_token_is_revoked() {
     let temp = tempfile::tempdir().expect("temp");
@@ -123,6 +310,13 @@ fn public_voice_payloads_do_not_expose_local_paths_or_codex_commands() {
         connected: true,
     });
     let analyst = analyst_info_value(AnalystInfo {
+        structured: false,
+        queued_inputs: 0,
+        permissions: vec![],
+        progress: String::new(),
+        last_error: String::new(),
+        manual_task_id: None,
+        manual_tasks: vec![],
         generation: "analyst-1".into(),
         tui_ready: true,
         phase: "ready".into(),

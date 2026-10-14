@@ -8,11 +8,101 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ### Added
 
+- Runtime Profile summaries distinguish native TUI, ACP and Pi RPC. OpenCode and Kilo expose their existing New session action in the Actor pane.
+- Pi official RPC support across Actors, Runtime Profiles, Voice Analyst and Voice Secretary, with session-local MCP, verified resume, precise cancellation and explicit extension interactions. Pi requires 1.1.0 or newer and has a structured workspace rather than a native terminal attachment.
+- Optional official ACP modes for Kimi Code, Auggie, Kiro V3, Hermes and Droid, sharing the existing managed lifecycle and Voice adapters while retaining native TUI defaults. Model and permission settings apply on new and resumed sessions; saved settings do not change a running surface before restart. Hermes cancellation retires its process while retaining the conversation, preventing interrupted input from being replayed into a subsequent task.
+- Chinese and Japanese CLI quick-start guides, with language links and navigation alongside English.
+- Per-chat IM relay modes for all traffic, user-facing messages, or explicitly user-addressed messages; Web and IM verbose controls use the same delivery setting.
+- Voice Secretary now uses one global runtime and a resident conversation, started by the first task and retained while idle. Tasks from all Groups run sequentially in that shared conversation, with their original destinations enforced by CCCC. Secretary supports the same structured adapters as Voice Analyst: Codex, Claude Code, Grok Build, OpenCode, Kilo, and Pi RPC, and official ACP modes for Antigravity, Auggie, Copilot, Devin, Cursor, Kimi Code, Kiro, Hermes and Droid. Native permissions follow each Runtime; the shared conversation does not isolate confidential Group context.
+- Instance administrators can open the Secretary's native terminal or ACP output from its existing workspace, including while idle. Supported native terminals accept keyboard and mouse input; queued tasks wait for manual turns to finish. Viewing never starts a model task, and hiding the terminal does not stop the session. Results return to the original document, question or composer; ordinary terminal conversation has no automatic Group destination.
+- Secretary tasks retain explicit results, cancellation and unconfirmed outcomes. Document edits use a working copy and a version-checked atomic commit; conflicts retain the candidate for review. Peer messages are proposals until the user confirms forwarding.
+- Shared Voice settings bring Secretary configuration, Realtime preferences and Analyst settings, ASR credentials and local models together. Recognition and processing defaults are global; document/request workspaces stay local; Secretary and Analyst keep independent configuration, context and results.
+
+### Changed
+
+- Share labelled controls, compact page layouts and save actions across settings pages. The settings menu groups appearance and presentation controls and provides an explicit All settings entry.
+- Notify idle managed Actors immediately when concrete Mail is written, preserving the configured disable switches and ordinary delay for busy or unknown states. Broadcast Mail does not accelerate other pending Mail, and Mail consumption remains explicit.
+- Simplify the Group header and sidebar, and give terminal panels full-height columns with fewer simultaneous panels on narrow screens.
+- Share browser microphone/speaker preferences across Voice Secretary and Codex Voice through one device editor. Capture mode, recognition language and automatic polishing are remembered separately for each Group in that browser; active recordings and calls retain their starting settings.
+- Merge Dictation into Prompt, the default and first capture mode. Prompt defaults to dictation only; the compact **Polish after recording** checkbox enables optional model refinement. Manual polishing remains available for typed or dictated text. Selecting Prompt, Doc or Ask closes the menu; the checkbox changes only the Prompt preference.
+- Voice settings have two feature tabs, Voice Secretary and Codex Voice. Both services support Custom runtime configuration or linked Profiles through the same form, with independent credentials. Recognition and call preferences autosave separately from runtime, secret and work-rule drafts. Group Voice settings and enable toggles are removed.
+- Secretary's workspace focuses on documents and questions; capture mode and workspace view no longer control each other. Results use their original destination, with recent task history ordered newest first. Codex Voice keeps its Analyst collapsed by default and reports call and Analyst readiness separately. Shared dialogs preserve keyboard focus and return paths.
+- Daemon startup retires obsolete Group secretary Actors through the ordinary lifecycle while retaining documents and transcripts. Their execution path and three old MCP tools are removed; old Actor inputs are not automatically replayed.
+
+### Fixed
+
+- Correct Hermes native MCP setup argument order and confirmations, and verify the saved entry is enabled before reporting success. ACP startup and prompt errors identify the failed request and retain bounded, redacted Hermes diagnostic details.
+- Keep Kiro V3 ACP authentication with its native CLI login. Surface unconfirmed ACP prompt submission errors in the Actor execution record with safe diagnostics and RPC codes, preserving ambiguous delivery and preventing automatic replay.
+- Keep Guidance reads and mutations tied to their original Group, and constrain expanded-editor keyboard focus to its own dialog. Connector setup checks the configured Web address before creation, warns for known local HTTPS addresses and does not claim verified connectivity.
+- Codex, Grok, OpenCode and Kilo retain a saved Actor conversation after failed resume, show a safe diagnostic and stop automatic startup retries. Explicit Start/Restart retries the same conversation; New session starts fresh without deleting provider history.
+- Keep Start idempotent for healthy ACP and native Actors even when an old native conversation has a failed resume receipt. Explicit recovery only retries the selected Runtime; Pi session identities include inherited provider-home settings and respect explicit overrides, preserving provider history.
+- Preserve valid large OpenCode and Kilo lifecycle events, including inline image tool results, with a 16 MiB encoded-line limit. Count each line separately across fragmented or coalesced HTTP reads while retaining the existing explicit failure for malformed or oversized streams.
+- Distinguish saved Voice Secretary configuration from admission readiness, with localized guidance for missing configuration, invalid settings and an unavailable owner. Preserve saved input and keep provider process state separate from configuration.
+- Open Voice Analyst settings directly from its startup failure, and mark ACP snapshots as stale after repeated read failures while retaining existing results and controls.
+- Keep slow Codex Voice status reads useful during focus and visibility refreshes. Separate read failures from execution errors, clear recovered read warnings, and preserve confirmed investigation controls against older snapshots.
+- Keep Runtime Profile private-environment metadata tied to the current editor visit, so delayed reads cannot populate a different Profile or a new draft.
+- Preserve browser delivery ownership across idle heartbeats; obsolete Mail notices with uncertain submission remain ambiguous, and verified late receipts cannot replace a newer active turn.
+- Preserve message scroll position during virtualized history loading, and keep Group menus and mentions usable in constrained viewport heights.
+- Keep Voice Secretary documents current during slow reads and rapid selection changes, and prevent older reads from replacing accepted edits or loading another document into the editor.
+- Preserve Context task IDs after deletion and failed writes, so old message references and delayed updates cannot target newly created work. Keep valid canonical relationships during legacy ID collisions; recover verified missing references and report ambiguous recovery without changing existing files.
+- Check the complete Context task subtree before deletion; a peer cannot remove another owner's descendants, and a denied batch leaves state and history unchanged.
+- Apply existing Group administration permissions to scope attachment, selection and removal before changing configuration or history.
+- Keep Voice Secretary startup and queued-configuration failures visible in status reads, identifying unreadable records without exposing their contents or private environment values.
+- Detect Claude autonomous replies that race an accepted controlled prompt before its transcript receipt; report ambiguous ownership instead of leaving that delivery pending behind unrelated work.
+- Align the English, Chinese and Japanese CLI quick starts with current daemon startup, Group selection and message-viewing behavior; clarify that inbox reads consume Mail and remove obsolete environment settings from the CLI reference.
+- Resolve relative project paths in `cccc attach` and `cccc group use` from the invoking terminal, so the daemon cannot bind them to its own working directory.
+- Keep managed Claude sessions connected when hidden scheduled or peer input starts an autonomous turn, while preserving session and resume checks.
+- Accept Codex resume previews within the existing 64 MiB message limit, including replies sent as one frame.
+- End automatic delivery retries for missing or invalid project scopes, preserving explicit recovery after configuration repair.
+- Route replies to locally forwarded Group messages back to their source, with correct thread references and reply status in both Groups. Reject unsupported attachments before recording a reply, and prevent retries from changing its destination or parent.
+- Show realtime reconnect feedback from the actual transport and subscription retry state.
+- Bound Telegram sends, preserve native reply threading, and separate API reachability diagnostics from delivery errors. Skipped or throttled sends no longer clear delivery failures or report recovery.
+- Preserve complete coordination constraints within the bootstrap budget, with an explicit full-context lookup when whole entries are omitted.
+- Extend headless browser discovery without overriding the configured browser.
+- Missing Group files in the registry no longer prevent the global Voice Secretary from starting. Deferred Prompt input shows its saved state and blocking reason instead of claiming active refinement; startup diagnostics remain visible even when no task was created.
+- Normalize Browser ASR system-language preferences to recognition locales, preserving explicit regions. New recordings read current recognition settings, and composer errors remain visible without claiming reconnection after recording stops.
+- Settle blocking ACP permission requests and Cursor interactions as Secretary tasks needing user input, cleaning up the blocked session before allowing subsequent work. Prompt refinement requests the supported `draft` action, and task completion requires the matching result receipt.
+- Late Prompt results cannot overwrite newer composer text; conflicting drafts remain available for explicit review. Pending Ask and Prompt requests no longer appear complete or stop being observed merely because time has elapsed. Accepted Ask requests survive bounded history cleanup.
+- Secretary progress redacts secrets even when they span streaming chunks. Task and runtime polling no longer starve on slow responses, and leaving a view during an action cannot leave its controls permanently disabled.
+- Keep Ask progress tied to its current task when the workspace is hidden. Its composer hint can open existing details or be hidden without cancelling work, clearing history or losing new replies; older replies cannot settle a retried task.
+
+## [0.4.42]
+
+### Added
+
+- Add optional official Antigravity ACP for Actors and Voice Analyst: separate managed login, per-session MCP routing, validated resume, structured output, one-time approvals and visible serialized input. Native TUI remains the default.
+
+- Add optional official headless ACP for GitHub Copilot, Devin CLI and Cursor across Actors, Runtime Profiles and Voice Analyst, retaining native TUI defaults. Share the existing FIFO, cancellation and unconfirmed-delivery handling; isolate CCCC MCP identity without rewriting native login/configuration. Track first prompt attempts durably so empty sessions can restart while uncertain work cannot silently replay. Cursor questions and plans require explicit user responses even with YOLO.
+
+- Voice Analyst's structured ACP console pairs manual investigations with their status and results. Tasks submitted during an attached assistant call send completed results to that call's Realtime context; standalone tasks remain local, and earlier calls' results are not replayed into later calls. Context submission does not itself confirm spoken playback.
+
 - Embedded Codex Voice supports per-call `application_context.mode: "persona"` for host-defined roleplay, without a Voice Analyst, local delegation execution or Actor notifications. Assistant mode remains the default; call responses expose the mode and readiness advertises supported modes. Experimental quicksilver delegation suppression and opening behavior require real-provider acceptance.
 
 - Runtime Dock uses fixed-size, thin activity rings and shows authoritative unread Mail counts, independent of loaded chat history. Nonzero unread and browser-queue badges remain separate, without persistent time labels. Thanks to [@chriscoveries](https://github.com/chriscoveries) for [#116](https://github.com/ChesterRa/cccc/pull/116).
 
 ### Fixed
+
+- Saving ACP mode without restarting a native Actor preserves delivery through its current terminal until restart applies the new configuration. Delivery records and readiness follow the running session; Claude workspace-trust terminals remain isolated from task input.
+
+- Claude resume failures preserve the saved conversation and pending messages, record safe diagnostics, and pause automatic recovery when session identity or history cannot be verified. Explicit Start/Restart retries the same session; New session remains deliberate. Workspace-trust recovery no longer retries unrelated launch errors or accepts tasks through the temporary trust terminal.
+
+- Antigravity ACP quarantines unconfirmed Actor deliveries instead of replaying them, permits cancellation before the first admission receipt, and preserves separate queued-result associations. Provider failures retain visible error details. Repeating the same Runtime preserves ACP mode, and New session follows the current linked Profile when selecting its receipt.
+
+- Antigravity Voice Analyst's default command now enables ACP YOLO mode like Actors, including after session resume. Remaining permission requests receive automatic one-time approval; explicit custom and Profile commands keep their configured policy.
+
+- Voice Analyst's ACP panel refreshes without requiring a native terminal, so pending tool permissions and progress remain visible during calls.
+
+- Official ACP Actor shutdown can interrupt a stalled admission wait while preserving unconfirmed delivery records. Analyst setting changes distinguish empty sessions from resumable ones, and native ACP startup resolves Windows CLI shims through the shared executable lookup.
+
+- ACP interaction replies use unique, turn-bound CCCC request tokens, preventing delayed answers or approvals from affecting replacement requests. Voice Analyst keeps cancellation available while investigations are queued or awaiting admission, even after the previous turn completes.
+
+- Codex Voice updates its connected-call state after startup, so subsequent manual investigations bind to the current call. Failed, cancelled or unconfirmed investigations retain their distinct outcomes and do not forward partial output as a completed answer.
+
+- Voice Analyst settings and investigation controls use clearer desktop and narrow layouts. Each task prompt appears once, with a one-line collapsed summary and complete text when expanded; failed submissions retain their drafts and original task identity for retry.
+
+- Embedded assistant calls follow the host's language, response length and source-label instructions without imposing global Voice expression preferences. Immediate provider acknowledgement remains enabled, while persona isolation and shared delegation/authority rules are preserved.
+
+- Runtime selectors show host detection states and offer an explicit recheck without refreshing the page. Antigravity distinguishes its native CLI from the official ACP component; failed detection is not reported as a missing installation.
 
 - Pending Mail counts no longer build and retain a full ledger index in each MCP process. Cursor and Actor-generation boundaries remain unchanged, including rotated and compressed history.
 - On Unix, daemon crashes now trigger cleanup of its owned process groups, with restart reconciliation if the watchdog also exits. Cleanup checks recorded process identities, removes externally reaped children from its lists, and leaves unverified groups untouched. Restart recovery also preserves old-format ownership records and unfinished termination attempts; unreadable cleanup state is reported before any replacement.
@@ -23,7 +113,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 - Switching an Actor from ChatGPT to Grok now replaces its old window through the Grok login profile when saving the Bot URL, while preserving draft and active-response checks.
 - Converting a linked Actor Profile to custom configuration preserves pending secret edits if saving fails. Successfully saved secrets are cleared from the draft independently of later save steps.
 
-## [0.4.41] — Unreleased
+## [0.4.41]
 
 ### Added
 

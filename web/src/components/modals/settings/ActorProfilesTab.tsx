@@ -1,7 +1,10 @@
+import { useModalA11y } from "../../../hooks/useModalA11y";
+import { supportsAcpMode } from "../../../types";
+import { AcpRuntimeMode } from "../AcpRuntimeMode";
 import { isWebModelRuntime } from "../../../types";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ActorProfile, ActorProfileUsage, RUNTIME_INFO, SUPPORTED_RUNTIMES } from "../../../types";
+import { ActorProfile, ActorProfileUsage } from "../../../types";
 import * as api from "../../../services/api";
 import { parsePrivateEnvSetText, parsePrivateEnvUnsetText } from "../../../utils/privateEnvInput";
 import { formatCapabilityIdInput, parseCapabilityIdInput } from "../../../utils/capabilityAutoload";
@@ -24,11 +27,19 @@ import { CapabilityPicker } from "../../CapabilityPicker";
 import { SelectCombobox } from "../../SelectCombobox";
 import { BodyPortal } from "../../ui/BodyPortal";
 import { formatRuntimeCommand } from "../runtimeProfileControlsModel";
+import { RuntimeSelector } from "../RuntimeSelector";
+import { structuredVoiceRuntimes } from "../../../features/voice/voiceRuntimeOptions";
+import { runtimeProfileRuntimeLabel } from "../runtimeProfileControlsModel";
 
 interface ActorProfilesTabProps {
   isDark: boolean;
   isActive: boolean;
   scope: "global" | "my";
+  editorOnly?: boolean;
+  structuredOnly?: boolean;
+  editorRequest?: { profile?: ActorProfile; nonce: number; defaultName?: string };
+  onEditorClose?: () => void;
+  onSaved?: (profile: ActorProfile) => void;
 }
 
 type EditorState = {
@@ -36,6 +47,7 @@ type EditorState = {
   revision: number;
   name: string;
   runtime: string;
+  runtimeMode: "default" | "acp";
   command: string;
   useDefaultCommand: boolean;
   submit: "enter" | "newline" | "none";
@@ -59,14 +71,15 @@ const RUNTIME_DEFAULT_COMMANDS: Record<string, string> = {
   antigravity: "agy --dangerously-skip-permissions",
   droid: "droid --auto high",
   grok: "grok --always-approve",
+  hermes: "hermes --tui --yolo",
   kimi: "kimi --yolo",
   opencode: "opencode --auto",
+  pi: "pi",
   web_model: "",
+  chatgpt_dots: "",
   grok_web_model: "",
   custom: "",
 };
-
-const PROFILE_RUNTIME_OPTIONS = SUPPORTED_RUNTIMES;
 
 function defaultCommandForRuntime(runtime: string): string {
   const key = String(runtime || "").trim();
@@ -89,6 +102,7 @@ function buildEditor(profile?: ActorProfile | null): EditorState {
     revision: Number(profile?.revision || 0),
     name: String(profile?.name || ""),
     runtime,
+    runtimeMode: profile?.runtime_mode || "default",
     command,
     useDefaultCommand,
     submit: String(profile?.submit || "enter") as "enter" | "newline" | "none",
@@ -108,7 +122,16 @@ function buildEditor(profile?: ActorProfile | null): EditorState {
   };
 }
 
-export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabProps) {
+export function ActorProfilesTab({
+  isDark,
+  isActive,
+  scope,
+  editorOnly = false,
+  structuredOnly = false,
+  editorRequest,
+  onEditorClose,
+  onSaved,
+}: ActorProfilesTabProps) {
   const { t } = useTranslation("settings");
   const groups = useGroupStore((s) => s.groups);
   const refreshGroups = useGroupStore((s) => s.refreshGroups);
@@ -120,6 +143,13 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
   const [usageBusyProfileId, setUsageBusyProfileId] = useState("");
 
   const [editorOpen, setEditorOpen] = useState(false);
+  const editorVisit = useRef(0);
+  useEffect(
+    () => () => {
+      editorVisit.current += 1;
+    },
+    [],
+  );
   const [editorBusy, setEditorBusy] = useState(false);
   const [editorErr, setEditorErr] = useState("");
   const [editor, setEditor] = useState<EditorState>(buildEditor());
@@ -193,13 +223,20 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
   };
 
   const closeEditor = () => {
+    if (editorBusy) return;
+    editorVisit.current += 1;
+    setSecretKeys([]);
+    setSecretMasks({});
     setDuplicateSourceProfileId("");
     setEditorOpen(false);
+    onEditorClose?.();
   };
+  const { modalRef: editorRef } = useModalA11y(editorOpen, closeEditor);
 
   const editorModal = editorOpen ? (
     <div
       className="fixed inset-0 z-[1000] flex items-stretch justify-center p-3 sm:items-center"
+      ref={editorRef}
       role="dialog"
       aria-modal="true"
       onPointerDown={(e) => {
@@ -244,14 +281,12 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
           <div>
             <div>
               <label className={labelClass()}>{t("actorProfiles.runtime")}</label>
-              <SelectCombobox
-                items={[
-                  ...PROFILE_RUNTIME_OPTIONS.map((rt) => ({
-                    value: rt,
-                    label: RUNTIME_INFO[rt]?.label || rt,
-                  })),
-                ]}
+              <RuntimeSelector
                 value={editor.runtime}
+                allowedRuntimes={structuredOnly ? structuredVoiceRuntimes : undefined}
+                runtimeMode={editor.runtimeMode}
+                allowUndetected
+                disabled={editorBusy}
                 onChange={(value) => {
                   const nextRuntime = String(value || "");
                   setEditor((prev) => {
@@ -259,6 +294,8 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
                     return {
                       ...prev,
                       runtime: nextRuntime,
+                      runtimeMode:
+                        structuredOnly && supportsAcpMode(nextRuntime) ? "acp" : "default",
                       useDefaultCommand: supportsDefault ? prev.useDefaultCommand : false,
                       command: supportsDefault && prev.useDefaultCommand ? "" : prev.command,
                     };
@@ -266,11 +303,18 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
                 }}
                 ariaLabel={t("actorProfiles.runtime")}
                 className={inputClass()}
-                searchable
               />
             </div>
           </div>
 
+          {!structuredOnly && supportsAcpMode(editor.runtime) && (
+            <AcpRuntimeMode
+              runtime={editor.runtime}
+              value={editor.runtimeMode}
+              onChange={(runtimeMode) => setEditor((prev) => ({ ...prev, runtimeMode }))}
+              disabled={editorBusy}
+            />
+          )}
           {!isWebModelRuntime(editor.runtime) && (
             <>
               <div>
@@ -517,8 +561,8 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
     );
   };
 
-  const loadProfileSecrets = async (profileId: string) => {
-    if (!profileId) {
+  const loadProfileSecrets = async (profileId: string, visit: number, runtime: string) => {
+    if (!profileId || isWebModelRuntime(runtime)) {
       setSecretKeys([]);
       setSecretMasks({});
       return;
@@ -529,6 +573,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
       return;
     }
     const resp = await api.fetchProfilePrivateEnvKeys(profileId, profileLookup);
+    if (visit !== editorVisit.current) return;
     if (!resp.ok) {
       setEditorErr(resp.error?.message || t("actorProfiles.loadSecretsFailed"));
       setSecretKeys([]);
@@ -545,13 +590,14 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
   };
 
   useEffect(() => {
-    if (isActive) {
+    if (isActive && !editorOnly) {
       void loadProfiles();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive]);
+  }, [isActive, editorOnly]);
 
   const openNew = () => {
+    editorVisit.current += 1;
     setEditor(buildEditor());
     setSecretKeys([]);
     setSecretMasks({});
@@ -564,17 +610,21 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
   };
 
   const openEdit = async (profile: ActorProfile) => {
+    const visit = ++editorVisit.current;
     setEditor(buildEditor(profile));
+    setSecretKeys([]);
+    setSecretMasks({});
     setSecretSetText("");
     setSecretUnsetText("");
     setSecretClear(false);
     setDuplicateSourceProfileId("");
     setEditorErr("");
     setEditorOpen(true);
-    await loadProfileSecrets(String(profile.id || ""));
+    await loadProfileSecrets(String(profile.id || ""), visit, String(profile.runtime || ""));
   };
 
   const openDuplicate = async (profile: ActorProfile) => {
+    const visit = ++editorVisit.current;
     const sourceId = String(profile.id || "").trim();
     setEditor({
       ...buildEditor(profile),
@@ -590,7 +640,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
     setDuplicateSourceProfileId(sourceId);
     setEditorErr("");
     setEditorOpen(true);
-    await loadProfileSecrets(sourceId);
+    await loadProfileSecrets(sourceId, visit, String(profile.runtime || ""));
   };
 
   const handleDelete = async (profile: ActorProfile) => {
@@ -616,6 +666,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
           const lines = usage
             .slice(0, 6)
             .map((item) => {
+              if (item.consumer === "voice_secretary") return t("voiceSettings.profileUsage");
               const gid = String(item.group_id || "").trim();
               const aid = String(item.actor_id || "").trim();
               if (!gid || !aid) return "";
@@ -702,6 +753,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
       });
       const lines = usage
         .map((item) => {
+          if (item.consumer === "voice_secretary") return t("voiceSettings.profileUsage");
           const gid = String(item.group_id || "").trim();
           const aid = String(item.actor_id || "").trim();
           if (!gid || !aid) return "";
@@ -757,6 +809,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
         scope: profileScope,
         owner_id: ownerId,
         runtime: editor.runtime,
+        ...(supportsAcpMode(editor.runtime) ? { runtime_mode: editor.runtimeMode } : {}),
         command:
           isWebModelRuntime(editor.runtime) ||
           (editorSupportsDefaultCommand && editor.useDefaultCommand)
@@ -848,13 +901,27 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
       }
       await loadProfiles();
       setDuplicateSourceProfileId("");
+      editorVisit.current += 1;
       setEditorOpen(false);
+      onSaved?.(profile);
     } catch {
       setEditorErr(t("actorProfiles.saveFailed"));
     } finally {
       setEditorBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (!editorRequest) return;
+    if (editorRequest.profile) void openEdit(editorRequest.profile);
+    else {
+      openNew();
+      setEditor((current) => ({ ...current, name: editorRequest.defaultName || "" }));
+    }
+    // The request is a user action, not a response to form state changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editorRequest]);
+  if (editorOnly) return editorModal ? <BodyPortal>{editorModal}</BodyPortal> : null;
 
   return (
     <div className="space-y-5">
@@ -926,7 +993,7 @@ export function ActorProfilesTab({ isDark, isActive, scope }: ActorProfilesTabPr
                             : "border-black/8 bg-black/[0.03] text-[var(--color-text-secondary)]"
                         }`}
                       >
-                        {RUNTIME_INFO[String(profile.runtime)]?.label || profile.runtime}
+                        {runtimeProfileRuntimeLabel(profile)}
                       </span>
                     </div>
                     <div className="mt-1 text-xs text-[var(--color-text-tertiary)]">

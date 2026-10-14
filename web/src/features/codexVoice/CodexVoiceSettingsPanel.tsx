@@ -1,30 +1,54 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronLeftIcon } from "../../components/Icons";
-import { Button } from "../../components/ui/button";
-import { CodexVoiceAnalystSettings } from "./CodexVoiceAnalystSettings";
+import { CodexVoiceAnalystSettingsFields } from "./CodexVoiceAnalystSettings";
 import { CodexVoiceAudioSettings } from "./CodexVoiceAudioSettings";
 import { CodexVoicePreferenceFields } from "./CodexVoicePreferenceFields";
 import { useVoicePreferences } from "./useVoicePreferences";
 import type { CodexVoiceSessionController } from "./useCodexVoiceSessionController";
 
 type SettingsSection = "audio" | "notifications" | "analyst";
-type Props = { active: boolean; controller: CodexVoiceSessionController; onClose: () => void };
+type Props = {
+  active: boolean;
+  analystRequest?: number;
+  initialFocusRef?: RefObject<HTMLElement | null>;
+  controller: CodexVoiceSessionController;
+  analystSettings: import("./useCodexVoiceShell").CodexVoiceShellState["analystSettings"];
+  onAnalystSettingsActive: (active: boolean) => void;
+  onProfileEditingChange?: (editing: boolean) => void;
+};
 const SETTINGS_SECTIONS: SettingsSection[] = ["audio", "notifications", "analyst"];
 
-// Mounted for the lifetime of the Voice panel once first opened. Navigation
-// changes visibility, so returning to the conversation never discards a draft.
-export function CodexVoiceSettingsPanel({ active, controller, onClose }: Props) {
+// The shared editor uses the existing call controller. Analyst drafts live
+// above the settings surface and survive closing or changing settings tabs.
+export function CodexVoiceSettingsPanel({
+  active,
+  analystRequest = 0,
+  initialFocusRef,
+  controller,
+  analystSettings,
+  onAnalystSettingsActive,
+  onProfileEditingChange,
+}: Props) {
   const { t } = useTranslation("modals");
   const [section, setSection] = useState<SettingsSection>("audio");
   const preferences = useVoicePreferences(active);
   const tabRefs = useRef<Partial<Record<SettingsSection, HTMLButtonElement>>>({});
+  const consumedAnalystRequest = useRef(0);
   useEffect(() => {
-    if (!active) return;
-    const frame = requestAnimationFrame(() => tabRefs.current[section]?.focus());
+    if (!active || !analystRequest || consumedAnalystRequest.current === analystRequest) return;
+    consumedAnalystRequest.current = analystRequest;
+    setSection("analyst");
+    const frame = requestAnimationFrame(() => {
+      const tab = tabRefs.current.analyst;
+      tab?.scrollIntoView({ block: "nearest" });
+      tab?.focus({ preventScroll: true });
+    });
     return () => cancelAnimationFrame(frame);
-  }, [active, section]);
-
+  }, [active, analystRequest]);
+  useEffect(() => {
+    onAnalystSettingsActive(active && section === "analyst");
+    return () => onAnalystSettingsActive(false);
+  }, [active, section, onAnalystSettingsActive]);
   const selectAdjacentSection = (
     event: KeyboardEvent<HTMLButtonElement>,
     current: SettingsSection,
@@ -35,36 +59,20 @@ export function CodexVoiceSettingsPanel({ active, controller, onClose }: Props) 
         ? 0
         : event.key === "End"
           ? 2
-          : event.key === "ArrowRight" || event.key === "ArrowDown"
+          : event.key === "ArrowRight"
             ? (index + 1) % 3
-            : event.key === "ArrowLeft" || event.key === "ArrowUp"
+            : event.key === "ArrowLeft"
               ? (index + 2) % 3
               : undefined;
     if (next === undefined) return;
     event.preventDefault();
     setSection(SETTINGS_SECTIONS[next]);
+    tabRefs.current[SETTINGS_SECTIONS[next]]?.focus();
   };
-
   return (
-    <section
-      className="flex h-full min-h-0 flex-col bg-[var(--color-bg-primary)]"
-      aria-labelledby="codex-voice-settings-title"
-      data-codex-voice-settings-panel="true"
-    >
-      <div className="flex flex-none flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--glass-border-subtle)] px-4 py-3 sm:px-5">
-        <Button type="button" variant="ghost" size="sm" onClick={onClose}>
-          <ChevronLeftIcon size={16} />
-          {t("codexVoiceBackToConversation")}
-        </Button>
-        <h3 id="codex-voice-settings-title" className="text-sm font-semibold">
-          {t("codexVoiceSettings")}
-        </h3>
-        <p className="w-full px-2 text-xs leading-5 text-[var(--color-text-muted)] sm:w-auto sm:px-0">
-          {t("codexVoiceSettingsHint")}
-        </p>
-      </div>
+    <section className="@container/voice-settings min-w-0" data-codex-voice-settings-panel="true">
       <div
-        className="flex flex-none border-b border-[var(--glass-border-subtle)] px-3 sm:px-5"
+        className="flex flex-none border-b border-[var(--glass-border-subtle)]"
         role="tablist"
         aria-label={t("codexVoiceSettings")}
       >
@@ -73,6 +81,8 @@ export function CodexVoiceSettingsPanel({ active, controller, onClose }: Props) 
             key={candidate}
             ref={(node) => {
               if (node) tabRefs.current[candidate] = node;
+              if (node && active && analystRequest && candidate === "analyst" && initialFocusRef)
+                initialFocusRef.current = node;
             }}
             type="button"
             role="tab"
@@ -94,21 +104,21 @@ export function CodexVoiceSettingsPanel({ active, controller, onClose }: Props) 
           </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      <div className="min-w-0 pt-5">
         <div
           id="codex-voice-settings-audio-panel"
           role="tabpanel"
-          className="mx-auto w-full max-w-4xl"
+          className="min-w-0 space-y-5"
           aria-labelledby="codex-voice-settings-audio-tab"
           hidden={section !== "audio"}
         >
-          <CodexVoiceAudioSettings active={active && section === "audio"} controller={controller} />
+          <CodexVoiceAudioSettings controller={controller} />
           <CodexVoicePreferenceFields preferences={preferences} section="audio" />
         </div>
         <div
           id="codex-voice-settings-notifications-panel"
           role="tabpanel"
-          className="mx-auto w-full max-w-4xl"
+          className="min-w-0"
           aria-labelledby="codex-voice-settings-notifications-tab"
           hidden={section !== "notifications"}
         >
@@ -117,13 +127,14 @@ export function CodexVoiceSettingsPanel({ active, controller, onClose }: Props) 
         <div
           id="codex-voice-settings-analyst-panel"
           role="tabpanel"
-          className="mx-auto w-full max-w-4xl"
+          className="min-w-0"
           aria-labelledby="codex-voice-settings-analyst-tab"
           hidden={section !== "analyst"}
         >
-          <CodexVoiceAnalystSettings
-            active={active && section === "analyst"}
+          <CodexVoiceAnalystSettingsFields
+            form={analystSettings}
             controller={controller}
+            onProfileEditingChange={onProfileEditingChange}
           />
         </div>
       </div>

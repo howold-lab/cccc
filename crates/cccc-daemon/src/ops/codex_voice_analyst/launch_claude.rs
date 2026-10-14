@@ -37,6 +37,12 @@ impl AnalystSession {
                 )
             },
         );
+        let tool_profile = task_tool_profile(purpose, tool_profile);
+        let settings_key = if purpose == SessionPurpose::VoiceSecretary {
+            format!("voice-secretary:{generation}")
+        } else {
+            settings_key
+        };
         environment.insert("CCCC_GROUP_ID".into(), group_id.into());
         environment.insert("CCCC_ACTOR_ID".into(), actor_id.into());
         if let Some(tool_profile) = tool_profile {
@@ -53,6 +59,11 @@ impl AnalystSession {
         if let Some(tool_profile) = tool_profile {
             mcp_environment.insert("CCCC_MCP_TOOL_PROFILE".into(), json!(tool_profile));
         }
+        if purpose == SessionPurpose::VoiceSecretary
+            && let Some(path) = environment.get("CCCC_SECRETARY_TASK_TOKEN_FILE")
+        {
+            mcp_environment.insert("CCCC_SECRETARY_TASK_TOKEN_FILE".into(), json!(path));
+        }
         if actor.is_none()
             && let Some(origin) = environment.get(cccc_core::voice_notifications::ORIGIN_ENV)
         {
@@ -67,7 +78,7 @@ impl AnalystSession {
             "env":mcp_environment,
         });
         let session_command = command.clone();
-        let resume_session_id = if let Some((group_id, actor_id)) = actor {
+        let resume_attempt = if let Some((group_id, actor_id)) = actor {
             super::super::runtime_session::prepare_claude_managed_session(
                 home,
                 group_id,
@@ -77,9 +88,13 @@ impl AnalystSession {
                 &environment,
             )?
         } else {
-            requested_session_id
+            None
         };
-        let prepared = claude::prepare(
+        let resume_session_id = resume_attempt
+            .as_ref()
+            .map(|attempt| attempt.session_id.as_str())
+            .or(requested_session_id.as_deref());
+        let result = match claude::prepare(
             home,
             &command,
             &environment,
@@ -87,15 +102,57 @@ impl AnalystSession {
             &settings_key,
             purpose,
             mcp_server,
-        )?;
-        let launched = claude::launch(
-            prepared,
-            &binding.root,
-            &generation,
-            purpose,
-            resume_session_id.as_deref(),
-        )
-        .await?;
+        ) {
+            Ok(prepared) => {
+                // Transcript validation holds a large future. Keep it off the
+                // managed worker's stack, including unoptimized native builds.
+                Box::pin(claude::launch(
+                    prepared,
+                    &binding.root,
+                    &generation,
+                    purpose,
+                    resume_session_id,
+                ))
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        let mut launched = match result {
+            Ok(launched) => launched,
+            Err(error) => {
+                if purpose == SessionPurpose::VoiceSecretary
+                    && claude::cleanup_secretary_owner(home, &binding.root)
+                        .await
+                        .is_ok()
+                {
+                    claude::remove_secretary_settings(home, &settings_key)?;
+                }
+                if let Some((group_id, actor_id)) = actor
+                    && let Some(attempt) = resume_attempt.as_ref()
+                    && let Some((diagnostic, blocked)) = claude::resume_diagnostic(&error)
+                {
+                    super::super::runtime_session::record_claude_resume_failure(
+                        home, group_id, actor_id, attempt, diagnostic, blocked,
+                    )?;
+                    return Err(if blocked {
+                        io::Error::other(super::super::runtime_session::ClaudeResumeBlocked(
+                            diagnostic.into(),
+                        ))
+                    } else {
+                        io::Error::new(error.kind(), diagnostic)
+                    });
+                }
+                return Err(error);
+            }
+        };
+        if purpose == SessionPurpose::VoiceSecretary {
+            launched
+                .cleanup_paths
+                .push(claude::settings_path(home, &settings_key));
+            launched
+                .cleanup_paths
+                .push(claude::secretary_owner_path(&binding.root)?);
+        }
         if let Some((group_id, actor_id)) = actor
             && let Err(error) = super::super::runtime_session::record_claude_managed_session(
                 home,

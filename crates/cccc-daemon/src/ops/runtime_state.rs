@@ -19,6 +19,8 @@ const MAX_TURN_EVENTS: usize = 20;
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "headless_status" => Operation::new(Read, headless_status),
+        "headless_control_state" => Operation::new(Read, control_state),
+        "headless_control" => Operation::new(Write, control),
         "headless_set_status" => Operation::new(Write, headless_set_status),
         "web_model_delivery_preferences_get" => Operation::new(Read, delivery_preferences_get),
         "web_model_delivery_preferences_update" => {
@@ -30,6 +32,67 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         "runtime_complete_turn" => Operation::new(Write, complete_turn),
         _ => return None,
     })
+}
+
+fn control_state(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let (group, actor_id) = group_actor(home, request)?;
+    actor(&group, &actor_id)?;
+    object(json!({"state":super::local_headless::structured_state(&group.group_id,&actor_id)}))
+}
+
+fn control(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    if string_arg(request, "by").as_deref() != Some("user") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Runtime permission and cancel controls require the user",
+        ));
+    }
+    let (group, actor_id) = group_actor(home, request)?;
+    actor(&group, &actor_id)?;
+    let generation = required_arg(request, "generation")?;
+    match required_arg(request, "action")?.as_str() {
+        "permission" => {
+            let request_id = required_arg(request, "request_id")?;
+            let allow = request
+                .args
+                .get("allow")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| OpError::new("invalid_args", "allow must be a boolean"))?;
+            super::local_headless::respond_permission(
+                &group.group_id,
+                &actor_id,
+                &generation,
+                &request_id,
+                allow,
+            )
+            .map_err(OpError::io)?;
+            object(json!({"responded":true}))
+        }
+        "interaction" => {
+            let request_id = required_arg(request, "request_id")?;
+            let reply = request
+                .args
+                .get("response")
+                .cloned()
+                .ok_or_else(|| OpError::new("invalid_args", "response is required"))?;
+            super::local_headless::respond_interaction(
+                &group.group_id,
+                &actor_id,
+                &generation,
+                &request_id,
+                reply,
+            )
+            .map_err(OpError::io)?;
+            object(json!({"responded":true}))
+        }
+        "cancel" => object(
+            json!({"cancelled":super::local_headless::cancel_turn(&group.group_id,&actor_id,&generation).map_err(OpError::io)?}),
+        ),
+        _ => Err(OpError::new(
+            "invalid_action",
+            "Expected permission, interaction or cancel",
+        )),
+    }
 }
 
 fn delivery_preference(group: &GroupDoc, actor_id: &str) -> Value {
@@ -150,6 +213,12 @@ fn headless_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 fn headless_set_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots {
+        return Err(OpError::new(
+            "provider_managed_headless",
+            "Dots task status is owned by the daemon",
+        ));
+    }
     if super::local_headless::supports(actor) {
         return Err(OpError::new(
             "provider_managed_headless",
@@ -180,7 +249,7 @@ fn headless_set_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     object(json!({"state":state}))
 }
 
-fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+pub(super) fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let by = string_arg(request, "by").unwrap_or_else(|| actor_id.clone());
     if by != actor_id {
@@ -190,6 +259,13 @@ fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     let actor = actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots && request.op != "dots_work_claim"
+    {
+        return Err(OpError::new(
+            "dots_event_required",
+            "Dots work requires its explicitly paired session through the connector",
+        ));
+    }
     if super::local_headless::supports(actor) {
         return Err(OpError::new(
             "provider_managed_headless",
@@ -214,10 +290,11 @@ fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         );
     }
     let active_state = actor_state(home, &group.group_id, &actor_id)?;
-    if active_state["status"] == "working"
-        && active_state["active_turn_id"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
+    // Status heartbeats do not relinquish a turn. Only its completion clears
+    // this identity; the browser may still be submitting its claimed payload.
+    if active_state["active_turn_id"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty())
     {
         return object(json!({
             "status":"turn_in_progress",
@@ -254,13 +331,43 @@ fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     };
     let mut messages = Vec::new();
     for event in crate::ops::runtime_delivery::pending_sources(home, &group, actor, limit)? {
-        if let Some((state, claimed_transport)) =
-            crate::ops::runtime_delivery::latest_state(home, &group.group_id, &actor_id, &event.id)?
-            && state == "claimed"
+        let claimed = crate::ops::runtime_delivery::latest_state(
+            home,
+            &group.group_id,
+            &actor_id,
+            &event.id,
+        )?
+        .filter(|(state, _)| state == "claimed");
+        if claimed
+            .as_ref()
+            .is_some_and(|(_, claimed_transport)| *claimed_transport != transport)
         {
-            if claimed_transport == transport {
-                messages.push(event);
-            }
+            continue;
+        }
+        // A pulled turn re-checks Mail notices like a pushed delivery does.
+        if crate::ops::runtime_delivery::is_stale_mail_notice(home, &group, &actor_id, &event) {
+            let outcome = if claimed.is_some() {
+                crate::ops::runtime_delivery::DeliveryOutcome::Ambiguous(
+                    "Mail notice became obsolete while its runtime handoff was claimed; external submission is unconfirmed",
+                )
+            } else {
+                crate::ops::runtime_delivery::DeliveryOutcome::Withdrawn(
+                    crate::ops::runtime_delivery::STALE_MAIL_NOTICE,
+                )
+            };
+            crate::ops::runtime_delivery::append_state(
+                home,
+                &group.group_id,
+                &actor_id,
+                &actor.created_at,
+                &event.id,
+                &transport,
+                outcome,
+            )?;
+            continue;
+        }
+        if claimed.is_some() {
+            messages.push(event);
             continue;
         }
         match crate::ops::runtime_delivery::claim(
@@ -321,6 +428,12 @@ fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 fn recover_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = require_web_model_actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots {
+        return Err(OpError::new(
+            "dots_explicit_resolution_required",
+            "Dots unfinished work requires explicit user resolution; it is not replayed",
+        ));
+    }
     let raw_event_ids = request
         .args
         .get("event_ids")
@@ -543,7 +656,7 @@ fn complete_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     finish_completion(home, &group, &actor_id, &completion, receipt, request)
 }
 
-fn finish_completion(
+pub(super) fn finish_completion(
     home: &HomeLayout,
     group: &GroupDoc,
     actor_id: &str,
@@ -551,10 +664,23 @@ fn finish_completion(
     receipt: Event,
     request: &DaemonRequest,
 ) -> OpResult {
+    if group
+        .actors
+        .iter()
+        .any(|a| a.id == actor_id && a.runtime == cccc_contracts::ActorRuntime::ChatgptDots)
+    {
+        super::dots_events::record_completed(
+            home,
+            group,
+            actor_id,
+            completion,
+            request.op == "dots_work_control"
+                && string_arg(request, "by").as_deref() == Some("user"),
+        )?;
+    }
     let runtime = actor_state(home, &group.group_id, actor_id)?;
-    let owns_active_projection = runtime["active_turn_id"].as_str()
-        == Some(completion.turn_id.as_str())
-        && runtime["status"].as_str() == Some("working");
+    let owns_active_projection =
+        runtime["active_turn_id"].as_str() == Some(completion.turn_id.as_str());
     if owns_active_projection {
         set_runtime_status(home, group, actor_id, "waiting", "", "", &[])?;
     }
@@ -572,6 +698,12 @@ fn finish_completion(
 fn record_browser_delivery(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = require_web_model_actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots {
+        return Err(OpError::new(
+            "dots_requires_events",
+            "Dots has no browser delivery",
+        ));
+    }
     let by = string_arg(request, "by").unwrap_or_else(|| actor_id.clone());
     if by != actor_id {
         return Err(OpError::new(

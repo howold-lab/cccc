@@ -91,11 +91,16 @@ fn send_files(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 }
 
 fn send_cross_group(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    send_cross_group_with_reply(home, request, None)
+}
+
+fn send_cross_group_with_reply(
+    home: &HomeLayout,
+    request: &DaemonRequest,
+    source_reply_to: Option<&str>,
+) -> OpResult {
     let source = load(home, request)?;
     let destination_id = required_arg(request, "dst_group_id")?;
-    let destination = store(home)?
-        .load(&destination_id)
-        .map_err(OpError::not_found)?;
     let by = string_arg(request, "by")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
@@ -125,6 +130,17 @@ fn send_cross_group(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         &by,
         &request.args,
     );
+    if let Some(event) = &existing_source
+        && event.data.get("dst_group_id").and_then(Value::as_str) != Some(&destination_id)
+    {
+        return Err(OpError::new(
+            "idempotency_conflict",
+            "client_id was already accepted for a different destination",
+        ));
+    }
+    let destination = store(home)?
+        .load(&destination_id)
+        .map_err(OpError::not_found)?;
     if let Some(source_event) = existing_source.as_ref()
         && let Some(event) =
             super::message_idempotency::find_relay(home, &destination.group_id, &source_event.id)
@@ -145,7 +161,12 @@ fn send_cross_group(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             request
                 .args
                 .iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "group_id" | "by" | "dst_group_id"))
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "group_id" | "by" | "dst_group_id" | "dst_reply_to"
+                    )
+                })
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect()
         },
@@ -163,6 +184,9 @@ fn send_cross_group(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         if let Some(destination_message_mode) = delivery_data.remove("dst_message_mode") {
             delivery_data.insert("message_mode".into(), destination_message_mode);
         }
+        if let Some(destination_reply_to) = delivery_data.remove("dst_reply_to") {
+            delivery_data.insert("reply_to".into(), destination_reply_to);
+        }
     }
     delivery_data.remove("transport");
     if let Some(origin) = request.args.get(cccc_core::voice_notifications::ORIGIN_ARG) {
@@ -173,6 +197,17 @@ fn send_cross_group(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     delivery_data.remove("dst_group_id");
     delivery_data.remove("to_group_id");
+    if let Some(attachments) = delivery_data.get("attachments") {
+        let items = attachments
+            .as_array()
+            .ok_or_else(|| OpError::new("invalid_attachments", "attachments must be an array"))?;
+        if !items.is_empty() {
+            return Err(OpError::new(
+                "attachments_not_supported",
+                "local cross-group attachments are not supported",
+            ));
+        }
+    }
     super::messaging_recipients::apply_cross_group_recipient(&destination, &mut delivery_data)?;
     super::messaging_recipients::normalize_chat_data(
         &destination,
@@ -195,6 +230,12 @@ fn send_cross_group(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         source_data.insert("dst_to".into(), destination_recipients);
         source_data.insert("dst_message_mode".into(), destination_message_mode);
         source_data.insert("dst_group_id".into(), json!(destination.group_id));
+        if let Some(local_parent) = source_reply_to {
+            if let Some(remote_parent) = source_data.insert("reply_to".into(), json!(local_parent))
+            {
+                source_data.insert("dst_reply_to".into(), remote_parent);
+            }
+        }
         append(home, &source.group_id, "chat.message", &by, source_data)?
     };
 
@@ -275,9 +316,11 @@ fn send_with_audience_policy(
         }
     }
     let event = append(home, &group.group_id, kind, &by, data)?;
-    if kind != "chat.message"
-        || event.data.get("message_mode").and_then(Value::as_str) != Some("mail")
+    if kind == "chat.message"
+        && event.data.get("message_mode").and_then(Value::as_str) == Some("mail")
     {
+        super::automation_runtime::notify_idle_mail_recipients(home, &group, &event);
+    } else {
         let _ = actor_delivery::dispatch(home, &group, &event);
     }
     if kind == "chat.message" {
@@ -371,6 +414,20 @@ fn preflight_upload_reply(home: &HomeLayout, request: &DaemonRequest) -> OpResul
     forwarded
         .args
         .insert("reply_to".into(), Value::String(reply_to));
+    // A reply is new outbound traffic: drop the inbound echo markers a caller
+    // may have forwarded from the source event so the result still relays to
+    // IM subscribers (`transport="im"` and friends suppress outbound delivery).
+    for key in [
+        "transport",
+        "im_platform",
+        "im_chat_id",
+        "im_thread_id",
+        "source_platform",
+        "source_user_id",
+        "source_message_id",
+    ] {
+        forwarded.args.remove(key);
+    }
     super::message_metadata::add_reply_snapshot(&target, &mut forwarded.args);
     if recipient_tokens(&forwarded.args).is_empty() {
         forwarded.args.insert(
@@ -456,6 +513,17 @@ fn reply(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let reply_to = required_arg(request, "reply_to")?;
     let group = load(home, request)?;
     let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
+    if let Some(event) =
+        super::message_idempotency::find(home, &group.group_id, "chat.message", &by, &request.args)
+        && event.data.contains_key("dst_group_id")
+        && !event.data.contains_key("connect_message")
+        && event.data.get("reply_to").and_then(Value::as_str) != Some(&reply_to)
+    {
+        return Err(OpError::new(
+            "idempotency_conflict",
+            "client_id was already accepted for a different reply target",
+        ));
+    }
     let target = find_event(home, &group.group_id, &reply_to)?;
     if target.data.contains_key("connect_message") {
         return super::connect_outbound::reply(
@@ -475,6 +543,20 @@ fn reply(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     forwarded
         .args
         .insert("reply_to".into(), Value::String(reply_to));
+    // A reply is new outbound traffic: drop the inbound echo markers a caller
+    // may have forwarded from the source event so the result still relays to
+    // IM subscribers (`transport="im"` and friends suppress outbound delivery).
+    for key in [
+        "transport",
+        "im_platform",
+        "im_chat_id",
+        "im_thread_id",
+        "source_platform",
+        "source_user_id",
+        "source_message_id",
+    ] {
+        forwarded.args.remove(key);
+    }
     super::message_metadata::add_reply_snapshot(&target, &mut forwarded.args);
     if recipient_tokens(&forwarded.args).is_empty() {
         forwarded.args.insert(
@@ -482,7 +564,119 @@ fn reply(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             json!(default_reply_recipients(&group, &by, &target)),
         );
     }
+    // A reply aimed at a `src_group::actor` token (the default recipients of a
+    // locally relayed cross-group message) routes back through
+    // send_cross_group instead of failing recipient resolution.
+    let routed = routed_reply_recipients(&forwarded.args);
+    if !routed.is_empty() {
+        if routed.len() != recipient_tokens(&forwarded.args).len() {
+            return Err(OpError::new(
+                "invalid_recipient",
+                "replies cannot mix local and cross-group recipients",
+            ));
+        }
+        return reply_cross_group(home, &forwarded, &group, &target, &routed);
+    }
     send(home, &forwarded, "chat.message")
+}
+
+fn routed_reply_recipients(args: &Map<String, Value>) -> Vec<(String, String)> {
+    recipient_tokens(args)
+        .iter()
+        .filter_map(|token| {
+            token
+                .split_once("::")
+                .map(|(group, actor)| (group.to_owned(), actor.to_owned()))
+        })
+        .filter(|(group, actor)| !group.is_empty() && !actor.is_empty())
+        .collect()
+}
+
+/// Called under the source Group permit before upgrading to the same global
+/// ownership used by send_cross_group. The handler still validates the route.
+pub(crate) fn reply_crosses_groups(home: &HomeLayout, request: &DaemonRequest) -> bool {
+    let Some(group_id) = request.args.get("group_id").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(reply_to) = request.args.get("reply_to").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(event) = find_event(home, group_id, reply_to) else {
+        return false;
+    };
+    if event.data.contains_key("connect_message") {
+        return false;
+    }
+    if !recipient_tokens(&request.args).is_empty() {
+        return !routed_reply_recipients(&request.args).is_empty();
+    }
+    event.data.contains_key("src_group_id")
+}
+
+fn reply_cross_group(
+    home: &HomeLayout,
+    forwarded: &DaemonRequest,
+    group: &GroupDoc,
+    target: &Event,
+    routed: &[(String, String)],
+) -> OpResult {
+    let mut destinations = routed
+        .iter()
+        .map(|(group_id, _)| group_id.clone())
+        .collect::<Vec<_>>();
+    destinations.sort();
+    destinations.dedup();
+    if destinations.len() != 1 {
+        return Err(OpError::new(
+            "invalid_recipient",
+            "cross-group replies target one origin group",
+        ));
+    }
+    if target.data.get("src_group_id").and_then(Value::as_str) != Some(&destinations[0]) {
+        return Err(OpError::new(
+            "invalid_recipient",
+            "cross-group replies must address the original source group",
+        ));
+    }
+    let recipients = routed
+        .iter()
+        .map(|(_, actor)| actor.clone())
+        .collect::<Vec<_>>();
+    let mut request = forwarded.clone();
+    request.args = forwarded
+        .args
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "to" | "reply_to"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    request
+        .args
+        .insert("group_id".into(), json!(group.group_id));
+    request
+        .args
+        .insert("dst_group_id".into(), json!(destinations[0]));
+    request.args.insert("to".into(), json!(recipients));
+    if let Some(source_event_id) = target
+        .data
+        .get("src_event_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        // The far-side copy threads under the origin group's source event.
+        request
+            .args
+            .insert("reply_to".into(), json!(source_event_id));
+    }
+    let mut result = send_cross_group_with_reply(home, &request, Some(&target.id))?;
+    // reply returns the caller's local event, as it does for local and Connect replies.
+    if let Some(event) = result.get("source_event").cloned() {
+        result.insert(
+            "message_mode".into(),
+            event["data"]["dst_message_mode"].clone(),
+        );
+        result.insert("event".into(), event);
+    }
+    Ok(result)
 }
 
 fn reject_retired_reply(home: &HomeLayout, target: &Event) -> Result<(), OpError> {

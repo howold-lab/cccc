@@ -1,4 +1,4 @@
-import { isWebModelRuntime } from "../types";
+import { isBrowserWebModelRuntime } from "../types";
 // Group state store (groups, actors, events, context, settings).
 import { create } from "zustand";
 import type { GroupMeta, GroupDoc, GroupRuntimeStatus, HeadlessStreamEvent } from "../types";
@@ -54,6 +54,9 @@ import {
 import { mergeOlderLedgerEvents } from "./groupHistoryMerge";
 import { computeGroupRuntimePatch } from "../utils/groupRuntimeProjection";
 import { projectCrossGroupReceipts } from "../utils/mergeLedgerEvents";
+import { fetchRuntimes } from "../services/api";
+
+let runtimeDetectionRequest: Promise<void> | null = null;
 
 function stableSerialize(value: unknown): string {
   if (value === null || value === undefined) return String(value);
@@ -101,6 +104,7 @@ export const useGroupStore = create<GroupState>((set, get) => ({
   groupSettings: null,
   groupPresentation: null,
   runtimes: [],
+  runtimeDetectionStatus: "idle",
   selectedGroupActorsHydrating: false,
   selectedGroupActorStatusProvisional: false,
   hasMoreHistory: true,
@@ -471,39 +475,39 @@ export const useGroupStore = create<GroupState>((set, get) => ({
       if (!patch) return state;
       return buildChatBucketPatch(state, gid, patch) ?? state;
     }),
-  completeStreamingEventsForActor: (actorId, groupId) =>
+  completeStreamingEventsForActor: (actorId, groupId, streamId) =>
     set((state) => {
       const gid = resolveChatGroupId(state, groupId);
       if (!gid) return state;
       const bucket = getGroupChatBucket(state.chatByGroup, gid);
-      const patch = completeStreamingEventsForActorPatch(bucket, actorId);
+      const patch = completeStreamingEventsForActorPatch(bucket, actorId, streamId);
       if (!patch) return state;
       return buildChatBucketPatch(state, gid, patch) ?? state;
     }),
-  clearStreamingEventsForActor: (actorId, groupId) =>
+  clearStreamingEventsForActor: (actorId, groupId, streamId) =>
     set((state) => {
       const gid = resolveChatGroupId(state, groupId);
       if (!gid) return state;
       const bucket = getGroupChatBucket(state.chatByGroup, gid);
-      const patch = clearStreamingEventsForActorPatch(bucket, actorId);
+      const patch = clearStreamingEventsForActorPatch(bucket, actorId, streamId);
       if (!patch) return state;
       return buildChatBucketPatch(state, gid, patch) ?? state;
     }),
-  clearEmptyStreamingEventsForActor: (actorId, groupId) =>
+  clearEmptyStreamingEventsForActor: (actorId, groupId, streamId) =>
     set((state) => {
       const gid = resolveChatGroupId(state, groupId);
       if (!gid) return state;
       const bucket = getGroupChatBucket(state.chatByGroup, gid);
-      const patch = clearEmptyStreamingEventsForActorPatch(bucket, actorId);
+      const patch = clearEmptyStreamingEventsForActorPatch(bucket, actorId, streamId);
       if (!patch) return state;
       return buildChatBucketPatch(state, gid, patch) ?? state;
     }),
-  clearTransientStreamingEventsForActor: (actorId, groupId) =>
+  clearTransientStreamingEventsForActor: (actorId, groupId, streamId) =>
     set((state) => {
       const gid = resolveChatGroupId(state, groupId);
       if (!gid) return state;
       const bucket = getGroupChatBucket(state.chatByGroup, gid);
-      const patch = clearTransientStreamingEventsForActorPatch(bucket, actorId);
+      const patch = clearTransientStreamingEventsForActorPatch(bucket, actorId, streamId);
       if (!patch) return state;
       return buildChatBucketPatch(state, gid, patch) ?? state;
     }),
@@ -568,7 +572,11 @@ export const useGroupStore = create<GroupState>((set, get) => ({
         const workingState = String(actor.effective_working_state || "")
           .trim()
           .toLowerCase();
-        if (!targets.has(actorId) || !isWebModelRuntime(runtime) || workingState !== "working") {
+        if (
+          !targets.has(actorId) ||
+          !isBrowserWebModelRuntime(runtime) ||
+          workingState !== "working"
+        ) {
           return actor;
         }
         changed = true;
@@ -638,7 +646,7 @@ export const useGroupStore = create<GroupState>((set, get) => ({
                 ? { runtime_session_last_resume_error: u.runtime_session_last_resume_error ?? null }
                 : {}),
               web_model_queued_count:
-                isWebModelRuntime(a.runtime) &&
+                isBrowserWebModelRuntime(a.runtime) &&
                 String(u.effective_working_state || "")
                   .trim()
                   .toLowerCase() !== "working"
@@ -698,7 +706,26 @@ export const useGroupStore = create<GroupState>((set, get) => ({
       }
       return { groupPresentation: presentation };
     }),
-  setRuntimes: (runtimes) => set({ runtimes }),
+  setRuntimes: (runtimes) => set({ runtimes, runtimeDetectionStatus: "ready" }),
+  refreshRuntimes: () => {
+    if (runtimeDetectionRequest) return runtimeDetectionRequest;
+    set({ runtimeDetectionStatus: "loading" });
+    runtimeDetectionRequest = (async () => {
+      try {
+        const response = await fetchRuntimes();
+        if (response.ok) {
+          set({ runtimes: response.result.runtimes, runtimeDetectionStatus: "ready" });
+        } else {
+          set({ runtimeDetectionStatus: "error" });
+        }
+      } catch {
+        set({ runtimeDetectionStatus: "error" });
+      }
+    })().finally(() => {
+      runtimeDetectionRequest = null;
+    });
+    return runtimeDetectionRequest;
+  },
 
   updateReadStatus: (eventId, actorId, groupId) =>
     set((state) => {

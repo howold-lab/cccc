@@ -70,14 +70,18 @@ async fn main() -> Result<()> {
             println!("{}", home.root().display());
             Ok(())
         }
-        Some(CommandKind::Attach { path, group_id }) => print(
-            call(
-                &client,
-                "attach",
-                json!({"path":path,"group_id":group_id,"by":"user"}),
+        Some(CommandKind::Attach { path, group_id }) => {
+            // The daemon runs from its own runtime home, not this terminal's project.
+            let path = std::path::absolute(path)?;
+            print(
+                call(
+                    &client,
+                    "attach",
+                    json!({"path":path.to_string_lossy(),"group_id":group_id,"by":"user"}),
+                )
+                .await?,
             )
-            .await?,
-        ),
+        }
         Some(CommandKind::Group(args)) => commands::group::run(&client, &home, args).await,
         Some(CommandKind::Groups) => print(call(&client, "group_list", json!({})).await?),
         Some(CommandKind::Use { group_id }) => {
@@ -126,7 +130,10 @@ async fn main() -> Result<()> {
         Some(CommandKind::Doctor(args)) => {
             commands::doctor::run(&home, PRODUCT_VERSION, args.all).await
         }
-        Some(CommandKind::Setup(args)) => commands::setup::run(&home, args),
+        Some(CommandKind::Setup(args)) => {
+            // Setup owns synchronous provider commands and the explicit ACP login runtime.
+            tokio::task::spawn_blocking(move || commands::setup::run(&home, args)).await?
+        }
         Some(CommandKind::Update(args)) => commands::update::run(args).await,
     }
 }

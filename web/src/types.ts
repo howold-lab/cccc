@@ -247,6 +247,7 @@ export type ChatMessageData = {
   dst_actor_titles?: Record<string, string>;
   dst_to?: string[];
   dst_message_mode?: MessageMode;
+  dst_reply_to?: string;
   dst_event_id?: string;
   remote_event_id?: string;
   activities?: StreamingActivity[];
@@ -317,6 +318,8 @@ export type WebModelDeliveryStatusPayload = {
   detail?: string;
 };
 
+export type RuntimeMode = "default" | "acp";
+
 export type Actor = {
   id: string;
   generation?: string;
@@ -339,6 +342,9 @@ export type Actor = {
   runner?: string;
   runner_effective?: string;
   runtime?: string;
+  runtime_mode?: RuntimeMode;
+  effective_runtime_mode?: RuntimeMode;
+  effective_runtime?: string;
   runtime_state_source?: "terminal" | "managed_session" | string;
   runtime_session_status?: string | null;
   runtime_session_resume_eligible?: boolean | null;
@@ -362,6 +368,7 @@ export type ActorProfile = {
   scope?: "global" | "user";
   owner_id?: string;
   runtime: SupportedRuntime | string;
+  runtime_mode?: RuntimeMode;
   runner: "pty" | "headless";
   command: string[] | string;
   submit: "enter" | "newline" | "none";
@@ -378,6 +385,7 @@ export type ActorProfile = {
 };
 
 export type ActorProfileUsage = {
+  consumer?: "voice_secretary";
   group_id: string;
   group_title?: string;
   actor_id: string;
@@ -602,6 +610,7 @@ export type RuntimeInfo = {
   display_name: string;
   recommended_command?: string;
   available: boolean;
+  mode_availability?: Partial<Record<RuntimeMode, boolean>>;
 };
 
 export type ReplyTarget = {
@@ -789,6 +798,7 @@ export type GroupSettings = {
   help_nudge_interval_seconds: number;
   help_nudge_min_messages: number;
   mail_notice_after_seconds: number;
+  mail_notice_idle_after_seconds: number;
   reply_notice_after_seconds: number;
 
   terminal_transcript_visibility: "off" | "foreman" | "all";
@@ -878,6 +888,7 @@ export type AssistantStateResult = {
   capture_target_document_path?: string;
   documents_by_path?: Record<string, AssistantVoiceDocument>;
   new_input_available?: boolean;
+  secretary_tasks?: SecretaryTaskSummary[];
   prompt_draft?: AssistantVoicePromptDraft;
   ask_requests?: AssistantVoiceAskFeedback[];
   latest_ask_request?: AssistantVoiceAskFeedback;
@@ -897,6 +908,62 @@ export type AssistantVoiceRecordingLease = {
   created_at?: string;
   updated_at?: string;
   expires_at?: string;
+};
+
+export type SecretaryTaskPhase =
+  | "queued"
+  | "starting"
+  | "running"
+  | "done"
+  | "needs_user"
+  | "conflict"
+  | "failed"
+  | "cancelled"
+  | "unconfirmed";
+export type SecretaryTaskSummary = {
+  task_id: string;
+  target: {
+    group_id: string;
+    scope_key: string;
+    kind: "document" | "ask" | "prompt";
+    document_path: string;
+    document_id?: string;
+    request_id: string;
+  };
+  phase: SecretaryTaskPhase;
+  created_at: string;
+  updated_at: string;
+  cleanup_confirmed: boolean;
+  source_count: number;
+  preview: string;
+  diagnostic: string;
+  projection_error: string;
+  projected_at?: string;
+  prompt_draft_status?: "pending" | "applied" | "dismissed" | "stale" | "no_change";
+  previous_task_id: string;
+  superseded_by: string;
+  candidate_available: boolean;
+  forwarded_event_id?: string;
+  cancellation_reason?: string;
+  recovery_attempts?: number;
+  execution?: {
+    generation: string;
+    runtime: string;
+    native_terminal: boolean;
+    progress: string;
+    activity?: string;
+  };
+  receipt?: {
+    status: SecretaryTaskPhase;
+    document_version?: string;
+    output: {
+      no_op?: boolean;
+      reply_text?: string;
+      draft_text?: string;
+      handoff_target?: string;
+      handoff_text?: string;
+    };
+  } | null;
 };
 
 export type AssistantVoiceRecordingLeaseResult = {
@@ -965,12 +1032,8 @@ export type AssistantVoiceTranscriptSegmentResult = {
   document_updated?: boolean;
   input_event?: Record<string, unknown>;
   input_event_created?: boolean;
-  input_notify_emitted?: boolean;
-  input_notify_error?: string;
-  actor_woken?: boolean;
-  actor_wake_error?: string;
-  actor_notify_delivered?: boolean;
-  actor_notify_delivery_error?: string;
+  secretary_processing_deferred?: boolean;
+  secretary_processing_error?: string;
 };
 
 export type AssistantVoiceMeetingSession = {
@@ -1000,12 +1063,8 @@ export type AssistantVoiceDocumentMutationResult = {
   document?: AssistantVoiceDocument;
   input_event?: Record<string, unknown>;
   input_event_created?: boolean;
-  input_notify_emitted?: boolean;
-  input_notify_error?: string;
-  actor_woken?: boolean;
-  actor_wake_error?: string;
-  actor_notify_delivered?: boolean;
-  actor_notify_delivery_error?: string;
+  secretary_processing_deferred?: boolean;
+  secretary_processing_error?: string;
   event?: unknown;
   request_id?: string;
   input_append_id?: string;
@@ -1013,7 +1072,7 @@ export type AssistantVoiceDocumentMutationResult = {
 
 export type AssistantVoicePromptDraft = {
   request_id: string;
-  status: "pending" | "applied" | "dismissed" | "stale" | string;
+  status: "pending" | "no_change" | "applied" | "dismissed" | "stale" | string;
   operation?: string;
   draft_text: string;
   draft_preview?: string;
@@ -1025,6 +1084,7 @@ export type AssistantVoicePromptDraft = {
 
 export type AssistantVoiceAskFeedback = {
   request_id: string;
+  secretary_task_id?: string;
   status: "pending" | "working" | "done" | "needs_user" | "failed" | "handed_off" | string;
   request_text?: string;
   request_preview?: string;
@@ -1051,12 +1111,8 @@ export type AssistantVoiceInputResult = {
   document?: AssistantVoiceDocument;
   input_event?: Record<string, unknown>;
   input_event_created?: boolean;
-  input_notify_emitted?: boolean;
-  input_notify_error?: string;
-  actor_woken?: boolean;
-  actor_wake_error?: string;
-  actor_notify_delivered?: boolean;
-  actor_notify_delivery_error?: string;
+  secretary_processing_deferred?: boolean;
+  secretary_processing_error?: string;
   event?: unknown;
   request_id?: string;
   input_append_id?: string;
@@ -1529,7 +1585,9 @@ export const SUPPORTED_RUNTIMES = [
   "hermes",
   "kimi",
   "opencode",
+  "pi",
   "web_model",
+  "chatgpt_dots",
   "grok_web_model",
   "custom",
 ] as const;
@@ -1537,6 +1595,10 @@ export const SUPPORTED_RUNTIMES = [
 export type SupportedRuntime = (typeof SUPPORTED_RUNTIMES)[number];
 
 export function isWebModelRuntime(runtime: string | undefined): boolean {
+  return runtime === "chatgpt_dots" || isBrowserWebModelRuntime(runtime);
+}
+
+export function isBrowserWebModelRuntime(runtime: string | undefined): boolean {
   return runtime === "web_model" || runtime === "grok_web_model";
 }
 
@@ -1567,9 +1629,14 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   hermes: { label: "Hermes Agent", desc: "Uses your Hermes profile with CCCC MCP" },
   kimi: { label: "Kimi Code", desc: "" },
   opencode: { label: "OpenCode", desc: "Managed delivery in the same native OpenCode TUI" },
+  pi: { label: "Pi", desc: "" },
   web_model: {
     label: "ChatGPT Web Model",
     desc: "ChatGPT browser delivery + remote MCP connector",
+  },
+  chatgpt_dots: {
+    label: "ChatGPT Dots",
+    desc: "ChatGPT event tasks + shared remote MCP connector",
   },
   grok_web_model: {
     label: "Grok Bot Web Model",
@@ -1596,6 +1663,16 @@ export const RUNTIME_COLORS: Record<
     dotLight: string;
   }
 > = {
+  pi: {
+    bg: "bg-slate-900/40",
+    text: "text-slate-200",
+    border: "border-slate-500/60",
+    dot: "bg-slate-300",
+    bgLight: "bg-slate-100",
+    textLight: "text-slate-800",
+    borderLight: "border-slate-300",
+    dotLight: "bg-slate-600",
+  },
   amp: {
     bg: "bg-rose-900/30",
     text: "text-rose-300",
@@ -1766,6 +1843,16 @@ export const RUNTIME_COLORS: Record<
     borderLight: "border-indigo-300",
     dotLight: "bg-indigo-500",
   },
+  chatgpt_dots: {
+    bg: "bg-indigo-900/30",
+    text: "text-indigo-300",
+    border: "border-indigo-600/50",
+    dot: "bg-indigo-400",
+    bgLight: "bg-indigo-50",
+    textLight: "text-indigo-700",
+    borderLight: "border-indigo-300",
+    dotLight: "bg-indigo-500",
+  },
   grok_web_model: {
     bg: "bg-indigo-900/30",
     text: "text-indigo-300",
@@ -1880,4 +1967,18 @@ export function getActorAccentColor(actorId?: string, isDark: boolean = true) {
   const a = ACTOR_ACCENTS[idx] || ACTOR_ACCENTS[0];
   if (isDark) return { ring: a.ring, text: a.text };
   return { ring: a.ringLight, text: a.textLight };
+}
+
+export function supportsAcpMode(runtime?: string | null): boolean {
+  return [
+    "antigravity",
+    "copilot",
+    "devin",
+    "cursor",
+    "kimi",
+    "auggie",
+    "kiro",
+    "hermes",
+    "droid",
+  ].includes(runtime || "");
 }

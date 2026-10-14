@@ -2,7 +2,7 @@ use super::operation::{
     Operation,
     Policy::{Read, Write},
 };
-use cccc_contracts::{Actor, DaemonRequest, Event};
+use cccc_contracts::{Actor, ActorRuntime, DaemonRequest, Event};
 use cccc_core::actors;
 use cccc_core::ledger;
 use cccc_core::permissions::{self, ActorAction};
@@ -100,6 +100,22 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     if let Err(error) = remove_persisted_headless_state(home, &group_id, &added.id) {
+        return Err(super::actor_saga::rollback_added(
+            home,
+            &group_id,
+            &added.id,
+            OpError::io(error),
+        ));
+    }
+    if let Err(error) = runtime_session::antigravity::remove(home, &group_id, &added.id) {
+        return Err(super::actor_saga::rollback_added(
+            home,
+            &group_id,
+            &added.id,
+            OpError::io(error),
+        ));
+    }
+    if let Err(error) = runtime_session::native_acp::retire_all(home, &group_id, &added.id) {
         return Err(super::actor_saga::rollback_added(
             home,
             &group_id,
@@ -338,25 +354,29 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             effect = ActorUpdateEffect::Started;
         }
     }
-    let retired_routes =
-        if original_actor.runtime.web_model_provider() != actor.runtime.web_model_provider() {
-            match web_model_connectors::retire_actor(home, &group_id, &actor_id) {
-                Ok(routes) => routes,
-                Err(error) => {
-                    return Err(rollback_actor_update(
-                        home,
-                        &group,
-                        &original_actor,
-                        original_secrets.as_ref(),
-                        Some(&updated_group),
-                        effect,
-                        OpError::io(error),
-                    ));
-                }
+    let retired_routes = if original_actor.runtime.web_model_provider()
+        != actor.runtime.web_model_provider()
+        || (original_actor.runtime != actor.runtime
+            && (original_actor.runtime == ActorRuntime::ChatgptDots
+                || actor.runtime == ActorRuntime::ChatgptDots))
+    {
+        match web_model_connectors::retire_actor(home, &group_id, &actor_id) {
+            Ok(routes) => routes,
+            Err(error) => {
+                return Err(rollback_actor_update(
+                    home,
+                    &group,
+                    &original_actor,
+                    original_secrets.as_ref(),
+                    Some(&updated_group),
+                    effect,
+                    OpError::io(error),
+                ));
             }
-        } else {
-            Vec::new()
-        };
+        }
+    } else {
+        Vec::new()
+    };
     let event = match append_event(
         home,
         &group_id,
@@ -579,6 +599,12 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if let Err(error) = runtime_session::remove(home, &group_id, &actor_id) {
         tracing::warn!(%error, %group_id, %actor_id, "post-commit runtime session cleanup failed");
     }
+    if let Err(error) = runtime_session::antigravity::remove(home, &group_id, &actor_id) {
+        tracing::warn!(%error,%group_id,%actor_id,"post-commit ACP receipt cleanup failed");
+    }
+    if let Err(error) = runtime_session::native_acp::retire_all(home, &group_id, &actor_id) {
+        tracing::warn!(%error,%group_id,%actor_id,"post-commit native ACP receipt cleanup failed");
+    }
     object(json!({"actor_id": actor_id, "event": event}))
 }
 
@@ -695,23 +721,50 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         .cloned()
         .ok_or_else(|| OpError::new("actor_not_found", "actor not found"))?;
     let runtime_was_running = actor_process_running(&group, &original_actor);
+    let retry_runtime = if matches!(kind, "actor.start" | "actor.restart") {
+        Some(actor_profile_runtime::resolve(home, &original_actor)?.runtime)
+    } else {
+        None
+    };
+    let retry_claude_trust = retry_runtime == Some(cccc_contracts::ActorRuntime::Claude)
+        && !super::local_headless::running(&group_id, &actor_id)
+        && super::local_headless::waiting_for_workspace_trust(&group_id, &actor_id)
+            .map_err(OpError::io)?;
     let runtime_session_snapshot = if kind == "actor.new_session" {
         Some(runtime_session::snapshot(home, &group_id, &actor_id).map_err(OpError::io)?)
     } else {
         None
     };
-    if kind == "actor.new_session" {
-        runtime_session::remove(home, &group_id, &actor_id).map_err(OpError::io)?;
-    }
-    if kind != "actor.start" || !runtime_was_running {
+    if kind != "actor.start" || !runtime_was_running || retry_claude_trust {
         super::codex_voice_analyst::lifecycle_timing::run_sync("actor.delivery_shutdown", || {
             actor_delivery::shutdown_actor(&group_id, &actor_id);
             Ok(())
         })
         .map_err(OpError::io)?;
     }
+    let retried_claude_resume = if let Some(runtime) = retry_runtime
+        .filter(|_| kind == "actor.restart" || !runtime_was_running || retry_claude_trust)
+    {
+        if runtime == cccc_contracts::ActorRuntime::Claude {
+            runtime_session::retry_failed_claude_resume(home, &group_id, &actor_id)
+                .map_err(OpError::io)?
+        } else {
+            runtime_session::resume_failure::retry(home, &group_id, &actor_id, runtime)
+                .map_err(OpError::io)?;
+            false
+        }
+    } else {
+        false
+    };
     let enabled = kind != "actor.stop";
-    let status = match actor_runtime::apply(home, &group, &actor_id, kind) {
+    // An old trust terminal is not a resumed managed session. An explicit retry
+    // must retire that attachment before retrying the same durable conversation.
+    let apply_kind = if retry_claude_trust && retried_claude_resume && kind == "actor.start" {
+        "actor.restart"
+    } else {
+        kind
+    };
+    let status = match actor_runtime::apply(home, &group, &actor_id, apply_kind) {
         Ok(status) => status,
         Err(error) => {
             // A failed teardown has not launched a replacement. Do not turn

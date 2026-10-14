@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   cancelCodexVoiceAnalyst,
@@ -10,9 +10,14 @@ import {
   type CodexVoiceReadiness,
 } from "../../services/api";
 import { CodexVoiceBrowserSession, type CodexVoicePhase } from "./codexVoiceSession";
-import { codexVoiceErrorText, codexVoiceWarningText } from "./codexVoiceControllerText";
+import {
+  codexVoiceErrorText,
+  codexVoiceReadinessProblem,
+  codexVoiceWarningText,
+} from "./codexVoiceControllerText";
 import { useCodexVoicePolling } from "./useCodexVoicePolling";
 import { useCodexVoicePreferencesState } from "./useCodexVoicePreferencesState";
+import { voiceAudioSnapshot } from "../../stores/useVoiceAudioStore";
 import { useCodexVoiceWindowLifecycle } from "./useCodexVoiceWindowLifecycle";
 import type { VoiceConversationTurn } from "./codexVoiceProtocol";
 import type { CodexVoiceOutputStatus } from "./codexVoiceProviderChannel";
@@ -25,9 +30,22 @@ export function useCodexVoiceSessionController(enabled = true) {
   const sessionRef = useRef<CodexVoiceBrowserSession | null>(null);
   const mountedRef = useRef(true);
   const refreshGenerationRef = useRef(0);
+  const enabledRef = useRef(enabled);
+  const refreshFlightRef = useRef<{
+    promise: Promise<void>;
+    trailingGeneration: number | null;
+  } | null>(null);
+  const hasSnapshotRef = useRef(false);
+  useLayoutEffect(() => {
+    enabledRef.current = enabled;
+  }, [enabled]);
   const [phase, setPhase] = useState<CodexVoicePhase>("idle");
   const [call, setCall] = useState<CodexVoiceCallInfo | null>(null);
   const [analyst, setAnalyst] = useState<CodexVoiceAnalystInfo | null>(null);
+  const analystGenerationRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    analystGenerationRef.current = analyst?.generation || null;
+  }, [analyst?.generation]);
   const [owned, setOwned] = useState(false);
   const [checking, setChecking] = useState(enabled);
   const [conversation, setConversation] = useState<VoiceConversationTurn[]>([]);
@@ -35,6 +53,7 @@ export function useCodexVoiceSessionController(enabled = true) {
   const [microphoneMuted, setMicrophoneMuted] = useState(false);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [error, setError] = useState("");
+  const [refreshError, setRefreshError] = useState("");
   const [outputStatus, setOutputStatus] = useState<CodexVoiceOutputStatus>({
     queued: 0,
     blocked: null,
@@ -42,6 +61,31 @@ export function useCodexVoiceSessionController(enabled = true) {
   const { preferences, supportedVoices, updatePreferences, acceptSupportedVoices } =
     useCodexVoicePreferencesState();
   const [readiness, setReadiness] = useState<CodexVoiceReadiness | null>(null);
+  const analystWorking =
+    analyst?.phase === "working" ||
+    Boolean(
+      analyst?.structured &&
+      ((analyst.queued_inputs || 0) > 0 ||
+        analyst.manual_tasks?.some((task) => ["queued", "working"].includes(task.status))),
+    );
+
+  const updateAnalystSnapshot = useCallback(
+    (next: CodexVoiceAnalystInfo, confirmedControl = false) => {
+      if (!mountedRef.current) return;
+      const session = sessionRef.current;
+      if (session) session.updateAnalystSnapshot(next);
+      else if (analystGenerationRef.current === next.generation) {
+        if (confirmedControl) {
+          // Accepted controls supersede earlier reads. Ordinary ACP polling must
+          // not retire the controller's slower call/readiness snapshots.
+          refreshGenerationRef.current += 1;
+          setChecking(false);
+        }
+        setAnalyst(next);
+      }
+    },
+    [],
+  );
 
   const refresh = useCallback(
     async (showChecking = true) => {
@@ -50,28 +94,67 @@ export function useCodexVoiceSessionController(enabled = true) {
         return;
       }
       if (sessionRef.current) return;
-      const generation = ++refreshGenerationRef.current;
       if (showChecking) setChecking(true);
-      const response = await fetchActiveCodexVoiceCall();
-      const refreshIsStale =
-        !mountedRef.current || generation !== refreshGenerationRef.current || sessionRef.current;
-      if (refreshIsStale) return;
-      if (response.ok) {
-        setCall(response.result.call);
-        setAnalyst(response.result.analyst);
-        setPhase((current) => (current === "failed" ? current : "idle"));
-        setReadiness(response.result.readiness);
-        acceptSupportedVoices(response.result.voices);
-      } else {
-        setError(codexVoiceErrorText(t, response.error.code));
+      const existing = refreshFlightRef.current;
+      if (existing) {
+        // Focus, visibility and polling request one later snapshot without
+        // invalidating a useful slow read already in flight.
+        existing.trailingGeneration = refreshGenerationRef.current;
+        return existing.promise;
       }
-      if (showChecking) setChecking(false);
+      const flight = { promise: Promise.resolve(), trailingGeneration: null as number | null };
+      refreshFlightRef.current = flight;
+      flight.promise = (async () => {
+        do {
+          flight.trailingGeneration = null;
+          const generation = ++refreshGenerationRef.current;
+          const current = () =>
+            mountedRef.current &&
+            enabledRef.current &&
+            generation === refreshGenerationRef.current &&
+            !sessionRef.current;
+          const readFailed = () => {
+            if (current()) {
+              setRefreshError(
+                t(hasSnapshotRef.current ? "codexVoiceStatusStale" : "codexVoiceStatusUnavailable"),
+              );
+            }
+          };
+          try {
+            const response = await fetchActiveCodexVoiceCall();
+            if (current()) {
+              if (response.ok) {
+                hasSnapshotRef.current = true;
+                setRefreshError("");
+                setCall(response.result.call);
+                setAnalyst(response.result.analyst);
+                setPhase((value) => (value === "failed" ? value : "idle"));
+                setReadiness(response.result.readiness);
+                acceptSupportedVoices(response.result.voices);
+              } else readFailed();
+            }
+          } catch {
+            readFailed();
+          }
+          if (current()) setChecking(false);
+          // An explicit Start/Stop/Cancel retires earlier pending refreshes.
+          // Only a refresh requested after that action may continue reading.
+        } while (
+          mountedRef.current &&
+          enabledRef.current &&
+          !sessionRef.current &&
+          flight.trailingGeneration === refreshGenerationRef.current
+        );
+      })().finally(() => {
+        if (refreshFlightRef.current === flight) refreshFlightRef.current = null;
+      });
+      return flight.promise;
     },
     [acceptSupportedVoices, enabled, t],
   );
 
   useCodexVoiceWindowLifecycle({ refresh, mountedRef, refreshGenerationRef, sessionRef });
-  useCodexVoicePolling({ enabled, analyst, sessionRef, refresh });
+  useCodexVoicePolling({ enabled, analyst, owned, sessionRef, refresh });
 
   const start = useCallback(async () => {
     const audio = audioRef.current;
@@ -80,20 +163,17 @@ export function useCodexVoiceSessionController(enabled = true) {
       setError(t("codexVoiceExistingCallStartBlocked"));
       return;
     }
-    if (readiness && !readiness.analyst_runtime_available) {
+    const readinessProblem = codexVoiceReadinessProblem(t, readiness);
+    if (readinessProblem) {
       setPhase("failed");
-      setError(t("codexVoiceAnalystRuntimeMissing", { runtime: readiness.analyst_runtime }));
-      return;
-    }
-    if (readiness && !readiness.realtime_credentials_available) {
-      setPhase("failed");
-      setError(t("codexVoiceCodexLoginRequired"));
+      setError(readinessProblem);
       return;
     }
 
     refreshGenerationRef.current += 1;
     setChecking(false);
     setError("");
+    setRefreshError("");
     setConversation([]);
     setNotificationPaused(false);
     setMicrophoneMuted(false);
@@ -102,7 +182,7 @@ export function useCodexVoiceSessionController(enabled = true) {
 
     const session = new CodexVoiceBrowserSession({
       audio,
-      preferences,
+      preferences: { ...preferences, ...voiceAudioSnapshot() },
       callbacks: {
         onPhase: (next) => {
           if (mountedRef.current) setPhase(next);
@@ -177,7 +257,9 @@ export function useCodexVoiceSessionController(enabled = true) {
   }, [call, t]);
 
   const cancelInvestigation = useCallback(async () => {
-    if (!analyst || analyst.phase !== "working") return false;
+    if (!analyst || !analystWorking) return false;
+    refreshGenerationRef.current += 1;
+    setChecking(false);
     setError("");
     if (sessionRef.current?.cancelInvestigation()) return true;
     const response = await cancelCodexVoiceAnalyst(analyst.generation);
@@ -191,7 +273,7 @@ export function useCodexVoiceSessionController(enabled = true) {
       return false;
     }
     return true;
-  }, [analyst, refresh, t]);
+  }, [analyst, analystWorking, refresh, t]);
 
   const toggleMicrophone = useCallback(() => {
     const next = !microphoneMuted;
@@ -204,7 +286,9 @@ export function useCodexVoiceSessionController(enabled = true) {
   }, []);
 
   const startNewAnalyst = useCallback(async () => {
-    if (!analyst || call || analyst.phase === "working") return false;
+    if (!analyst || call || analystWorking) return false;
+    refreshGenerationRef.current += 1;
+    setChecking(false);
     setError("");
     const response = await resetCodexVoiceAnalyst(analyst.generation);
     if (!mountedRef.current) return false;
@@ -214,7 +298,7 @@ export function useCodexVoiceSessionController(enabled = true) {
     }
     setAnalyst(response.result.analyst);
     return true;
-  }, [analyst, call, t]);
+  }, [analyst, analystWorking, call, t]);
 
   const clearError = useCallback(() => {
     setError("");
@@ -235,12 +319,14 @@ export function useCodexVoiceSessionController(enabled = true) {
       playbackBlocked,
       outputStatus,
       error,
+      refreshError,
       preferences,
+      audioDeviceSnapshot: sessionRef.current?.audioPreferences() || null,
       supportedVoices,
       isStarting: phase === "preparing" || phase === "connecting",
       isEngaged: call !== null || owned || ENGAGED_PHASES.includes(phase),
       externalCall: call !== null && !owned,
-      analystWorking: analyst?.phase === "working",
+      analystWorking,
       analystWarning: analyst?.warning ? codexVoiceWarningText(t, analyst.warning) : "",
       refresh,
       readiness,
@@ -251,10 +337,12 @@ export function useCodexVoiceSessionController(enabled = true) {
       resumeAudio,
       startNewAnalyst,
       updatePreferences,
+      updateAnalystSnapshot,
       clearError,
     }),
     [
       analyst,
+      analystWorking,
       conversation,
       notificationPaused,
       call,
@@ -263,6 +351,7 @@ export function useCodexVoiceSessionController(enabled = true) {
       clearError,
       disconnect,
       error,
+      refreshError,
       microphoneMuted,
       owned,
       phase,
@@ -277,6 +366,7 @@ export function useCodexVoiceSessionController(enabled = true) {
       supportedVoices,
       toggleMicrophone,
       updatePreferences,
+      updateAnalystSnapshot,
       t,
     ],
   );

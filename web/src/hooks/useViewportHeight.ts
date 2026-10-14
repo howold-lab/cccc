@@ -9,10 +9,24 @@
 // the app must also follow the visual viewport's top edge.
 import { useEffect } from "react";
 
+/** Marks the element placed by `VISUAL_VIEWPORT_BOX` at the visible viewport top. */
+export const VISUAL_VIEWPORT_BOX_ATTRIBUTE = "data-visual-viewport-box";
+
 export interface VisualViewportLayout {
   height: string;
   offsetTop: string;
 }
+
+/**
+ * Box that follows the visible viewport published by `useViewportHeight`, so a
+ * full-screen surface stays above the mobile keyboard. Without the variables it
+ * falls back to the full dynamic viewport, matching `inset-0` on desktop.
+ */
+export const VISUAL_VIEWPORT_BOX = {
+  top: "var(--app-viewport-offset-top, 0px)",
+  height: "var(--app-viewport-height, 100dvh)",
+  maxHeight: "var(--app-viewport-height, 100dvh)",
+} as const;
 
 export function getVisualViewportLayout(
   height: number,

@@ -1,3 +1,5 @@
+import { supportsAcpMode } from "../types";
+import { runtimeDetectionKey } from "../utils/runtimeDetection";
 import { isWebModelRuntime } from "../types";
 import { formatRuntimeCommand } from "./modals/runtimeProfileControlsModel";
 import type { ActorSecretSaveChanges } from "./modals/actorSecretManagerModel";
@@ -72,6 +74,7 @@ const PresentationViewerModal = lazy(() =>
 );
 
 interface AppModalsProps {
+  codexVoice: import("../features/codexVoice/useCodexVoiceShell").CodexVoiceShellState;
   isDark: boolean;
   theme: Theme;
   textScale: TextScale;
@@ -85,6 +88,7 @@ interface AppModalsProps {
   fetchContext: ContextModalFetch;
   canManageGroups: boolean;
   accountLabel?: string | null;
+  onDotsActorCreated?: (visit: import("../hooks/useAppTabState").CreatedDotsNavigation) => void;
 }
 
 function sortPresentationSlotIds(slotIds: string[]): string[] {
@@ -109,6 +113,7 @@ function LazyModalFallback({ isDark: _ }: { isDark?: boolean }) {
 }
 
 export function AppModals({
+  codexVoice,
   isDark,
   theme,
   textScale,
@@ -119,6 +124,7 @@ export function AppModals({
   onThemeChange,
   onTextScaleChange,
   onDeleteGroup,
+  onDotsActorCreated,
   fetchContext,
   canManageGroups,
   accountLabel,
@@ -136,6 +142,7 @@ export function AppModals({
     groupSettings,
     groupPresentation,
     runtimes,
+    runtimeDetectionStatus,
     setSelectedGroupId,
     setGroupContext,
     setGroupSettings,
@@ -158,6 +165,7 @@ export function AppModals({
       groupSettings: s.groupSettings,
       groupPresentation: s.groupPresentation,
       runtimes: s.runtimes,
+      runtimeDetectionStatus: s.runtimeDetectionStatus,
       setSelectedGroupId: s.setSelectedGroupId,
       setGroupContext: s.setGroupContext,
       setGroupSettings: s.setGroupSettings,
@@ -922,6 +930,11 @@ export function AppModals({
       ? normalizeCapabilityIdList(payload.capabilityAutoload)
       : [];
 
+    const nextRuntimeMode = supportsAcpMode(nextRuntime)
+      ? payload.runtimeMode || "default"
+      : "default";
+    const runtimeModeChanged =
+      mode === "custom" && nextRuntimeMode !== (savedActor.runtime_mode || "default");
     const runtimeChanged =
       mode === "custom" && (!linkedBefore || convertToCustom) && nextRuntime !== currentRuntime;
     const commandChanged =
@@ -940,6 +953,7 @@ export function AppModals({
     const hasActorMutation =
       convertToCustom ||
       runtimeChanged ||
+      runtimeModeChanged ||
       commandChanged ||
       titleChanged ||
       autoloadChanged ||
@@ -1035,6 +1049,7 @@ export function AppModals({
         const snapshotTitle = String(actorSnapshot.title || "").trim();
         const needCustomPatch =
           nextRuntime !== snapshotRuntime ||
+          nextRuntimeMode !== (actorSnapshot.runtime_mode || "default") ||
           nextCommand !== snapshotCommand ||
           nextTitle !== snapshotTitle ||
           autoloadChanged;
@@ -1045,7 +1060,12 @@ export function AppModals({
             nextRuntime !== snapshotRuntime ? editActorRuntime : undefined,
             nextCommand !== snapshotCommand ? nextCommand : undefined,
             nextTitle,
-            { capabilityAutoload: nextCapabilityAutoload },
+            {
+              capabilityAutoload: nextCapabilityAutoload,
+              ...(supportsAcpMode(nextRuntime) || actorSnapshot.runtime_mode === "acp"
+                ? { runtimeMode: nextRuntimeMode }
+                : {}),
+            },
           );
           if (!customResp.ok) {
             throw new Error(`${customResp.error.code}: ${customResp.error.message}`);
@@ -1154,6 +1174,7 @@ export function AppModals({
 
   const handleSaveEditActorAsProfile = async (
     secrets?: ActorSecretSaveChanges,
+    runtimeMode?: "default" | "acp",
   ): Promise<SaveActorProfileResult | void> => {
     if (!editingActor || !selectedGroupId) return;
     const suggested = String(
@@ -1169,6 +1190,7 @@ export function AppModals({
           id: editProfileSaveRef.current?.profile.id,
           name: name.trim(),
           runtime: editActorRuntime,
+          ...(supportsAcpMode(editActorRuntime) ? { runtime_mode: runtimeMode || "default" } : {}),
           command: isWebModelRuntime(editActorRuntime) ? "" : editActorCommand.trim(),
           submit: String(editingActor.submit || "enter"),
           env: {},
@@ -1267,8 +1289,13 @@ export function AppModals({
     }
   };
 
-  const handleAddActor = async (avatarFile?: File | null): Promise<boolean> => {
+  const handleAddActor = async (
+    avatarFile?: File | null,
+    runtimeMode?: "default" | "acp",
+  ): Promise<boolean> => {
     if (!selectedGroupId) return false;
+    const creationGroupId = selectedGroupId;
+    const creationActiveTab = useUIStore.getState().activeTab;
     const actorId = resolveNewActorId(newActorId, suggestedActorId);
     const secretsText = String(newActorSecretsSetText || "");
     const actorNotes = String(newActorNotes || "").trim();
@@ -1320,7 +1347,7 @@ export function AppModals({
               profileOwner: String(selectedProfile?.owner_id || "").trim() || undefined,
               capabilityAutoload,
             }
-          : { capabilityAutoload },
+          : { capabilityAutoload, ...(supportsAcpMode(newActorRuntime) ? { runtimeMode } : {}) },
       );
       if (!resp.ok) {
         setAddActorError(resp.error?.message || t("failedToAddAgent"));
@@ -1358,9 +1385,20 @@ export function AppModals({
         }
       }
 
+      if (
+        (resp.result as { actor?: { runtime?: string } })?.actor?.runtime === "chatgpt_dots" &&
+        useGroupStore.getState().selectedGroupId === creationGroupId &&
+        useUIStore.getState().activeTab === creationActiveTab
+      ) {
+        onDotsActorCreated?.({
+          groupId: creationGroupId,
+          actorId: createdActorId,
+          activeTab: creationActiveTab,
+        });
+      }
       closeModal("addActor");
       resetAddActorForm();
-      await refreshActors();
+      await refreshActors(creationGroupId);
       if (postCreateErrors.length > 0) {
         showError(
           t("actorCreatedSetupFailed", {
@@ -1375,7 +1413,10 @@ export function AppModals({
     }
   };
 
-  const handleSaveNewActorAsProfile = async () => {
+  const handleSaveNewActorAsProfile = async (
+    _secrets?: ActorSecretSaveChanges,
+    runtimeMode?: "default" | "acp",
+  ) => {
     if (newActorUseProfile) return;
     const parsed = parsePrivateEnvSetText(
       isWebModelRuntime(newActorRuntime) ? "" : newActorSecretsSetText,
@@ -1399,6 +1440,7 @@ export function AppModals({
           id: newProfileSaveRef.current?.id,
           name: name.trim(),
           runtime: newActorRuntime,
+          ...(supportsAcpMode(newActorRuntime) ? { runtime_mode: runtimeMode || "default" } : {}),
           command: commandToUse,
           submit: "enter",
           env: {},
@@ -1449,9 +1491,11 @@ export function AppModals({
     const prefix = newActorUseProfile
       ? profileRuntime || "actor"
       : isWebModelRuntime(newActorRuntime)
-        ? newActorRuntime === "grok_web_model"
-          ? "grok-web"
-          : "chatgpt-web"
+        ? newActorRuntime === "chatgpt_dots"
+          ? "chatgpt-dots"
+          : newActorRuntime === "grok_web_model"
+            ? "grok-web"
+            : "chatgpt-web"
         : newActorRuntime;
     const existing = new Set(actors.map((a) => String(a.id || "")));
     for (let i = 1; i <= 999; i++) {
@@ -1465,11 +1509,16 @@ export function AppModals({
     if (newActorUseProfile) return Boolean(String(newActorProfileId || "").trim());
     if (isWebModelRuntime(newActorRuntime)) return true;
     const rtInfo = runtimes.find((r) => r.name === newActorRuntime);
-    const available = rtInfo?.available ?? false;
+    const available = runtimeDetectionStatus === "ready" && (rtInfo?.available ?? false);
     if (!newActorUseDefaultCommand && !newActorCommand.trim()) return false;
     if (newActorRuntime === "custom" && (newActorUseDefaultCommand || !newActorCommand.trim()))
       return false;
-    if (!available && (newActorUseDefaultCommand || !newActorCommand.trim())) return false;
+    if (
+      !available &&
+      newActorRuntime !== "antigravity" &&
+      (newActorUseDefaultCommand || !newActorCommand.trim())
+    )
+      return false;
     return true;
   })();
 
@@ -1480,17 +1529,24 @@ export function AppModals({
     }
     if (isWebModelRuntime(newActorRuntime)) return "";
     const rtInfo = runtimes.find((r) => r.name === newActorRuntime);
-    const available = rtInfo?.available ?? false;
+    const available = runtimeDetectionStatus === "ready" && (rtInfo?.available ?? false);
     if (!newActorUseDefaultCommand && !newActorCommand.trim()) {
       return t("commandOverrideRequired");
     }
     if (newActorRuntime === "custom" && (newActorUseDefaultCommand || !newActorCommand.trim())) {
       return t("customRuntimeRequiresCommand");
     }
-    if (!available && (newActorUseDefaultCommand || !newActorCommand.trim())) {
-      return t("runtimeNotInstalled", {
-        runtime: RUNTIME_INFO[newActorRuntime]?.label || newActorRuntime,
-      });
+    if (
+      !available &&
+      newActorRuntime !== "antigravity" &&
+      (newActorUseDefaultCommand || !newActorCommand.trim())
+    ) {
+      const key = runtimeDetectionKey(newActorRuntime, rtInfo, runtimeDetectionStatus);
+      return key === "missing"
+        ? t("runtimeDetection.missingRuntime", {
+            runtime: RUNTIME_INFO[newActorRuntime]?.label || newActorRuntime,
+          })
+        : t(`runtimeDetection.${key}`);
     }
     return "";
   })();
@@ -2017,6 +2073,7 @@ export function AppModals({
       {modals.settings ? (
         <Suspense fallback={<LazyModalFallback isDark={isDark} />}>
           <SettingsModal
+            codexVoice={codexVoice}
             isOpen={modals.settings}
             onClose={() => closeModal("settings")}
             settings={groupSettings}
