@@ -53,6 +53,7 @@ mod tests {
         let reachable = ordinary
             .chain(cccc_core::web_model_tool_names())
             .chain(cccc_core::USER_CONTROL_TOOL_NAMES.iter().copied())
+            .chain(cccc_core::LOCAL_SESSION_TOOL_NAMES.iter().copied())
             .chain(cccc_core::VOICE_SECRETARY_TASK_TOOL_NAMES.iter().copied())
             .map(str::to_owned)
             .chain(packs)

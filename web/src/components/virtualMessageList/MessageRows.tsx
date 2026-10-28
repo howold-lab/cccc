@@ -17,6 +17,7 @@ type MessageRowsProps = Pick<
   | "webModelDeliveryStatusByEventId"
   | "onReply"
   | "onShowRecipients"
+  | "onViewContext"
   | "onCopyLink"
   | "onCopyContent"
   | "onRelay"
@@ -61,6 +62,7 @@ export function MessageRows({
   onReply,
   onShowRecipients,
   onCopyLink,
+  onViewContext,
   onCopyContent,
   onRelay,
   onOpenSource,
@@ -79,6 +81,7 @@ export function MessageRows({
     groupId,
     groupLabelById,
     onCopyLink,
+    onViewContext,
     onCopyContent,
     onRelay,
     onOpenSource,
@@ -148,7 +151,7 @@ export function MessageRows({
                 ? "true"
                 : undefined
             }
-            className={grouping.compactSpacing ? "pb-3" : "pb-6"}
+            className={grouping.compactSpacing ? "pb-2" : "pb-4"}
           >
             <MessageBubble
               {...common}

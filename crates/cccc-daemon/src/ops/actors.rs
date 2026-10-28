@@ -2,12 +2,13 @@ use super::operation::{
     Operation,
     Policy::{Read, Write},
 };
-use cccc_contracts::{Actor, ActorRuntime, DaemonRequest, Event};
+use cccc_contracts::{Actor, ActorRole, ActorRuntime, DaemonRequest, Event};
 use cccc_core::actors;
+use cccc_core::context::ContextStore;
 use cccc_core::ledger;
 use cccc_core::permissions::{self, ActorAction};
 use cccc_core::{GroupDoc, GroupStore, HomeLayout, group_scope, web_model_connectors};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 use crate::dispatch::{OpError, OpResult, object, required_arg, store, string_arg};
@@ -55,7 +56,7 @@ fn prompt(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     object(json!({
         "group_id":group.group_id,
         "actor_id":actor_id,
-        "prompt":cccc_core::system_prompt::render_session(home, &group, actor)
+        "prompt":actor_runtime::session_prompt(home, &group, actor)
     }))
 }
 
@@ -208,6 +209,14 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         .find(|actor| actor.id == actor_id)
         .ok_or_else(|| OpError::new("actor_not_found", "actor not found"))?;
     let original_actor = current.clone();
+    if !current.external_session_id.is_empty()
+        && (!profile_id.is_empty() || !profile_action.is_empty())
+    {
+        return Err(OpError::new(
+            "external_session_owned",
+            "Native runtime configuration belongs to the original session",
+        ));
+    }
     if actor_profile_runtime::rejects_linked_patch(current, &patch) {
         return Err(OpError::new(
             "actor_profile_linked_readonly",
@@ -243,6 +252,10 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         None
     };
     let enabled_patched = patch.contains_key("enabled");
+    let enabling_native = enabled_patched
+        && !original_actor.enabled
+        && final_preview.enabled
+        && !final_preview.external_session_id.is_empty();
     let was_running = actor_process_running(&group, &original_actor);
     let actor = store(home)?
         .mutate(&group_id, |doc| {
@@ -272,6 +285,15 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             doc.actors[index] = final_actor.clone();
             if enabled_patched && !final_actor.enabled {
                 doc.running = doc.running && doc.actors.iter().any(|actor| actor.enabled);
+            } else if enabling_native
+                && matches!(
+                    doc.state,
+                    cccc_contracts::GroupState::Active | cccc_contracts::GroupState::Idle
+                )
+            {
+                // Native access needs no provider launch, but must survive
+                // daemon restart just like an explicit Actor Start.
+                doc.running = true;
             }
             Ok(final_actor)
         })
@@ -328,7 +350,7 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
     } else if enabled_patched
         && actor.enabled
-        && group.running
+        && updated_group.running
         && matches!(
             group.state,
             cccc_contracts::GroupState::Active | cccc_contracts::GroupState::Idle
@@ -402,6 +424,9 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             ));
         }
     };
+    if enabling_native {
+        actor_delivery::dispatch_unread(home, &updated_group, &actor_id);
+    }
     object(json!({"actor": actor, "event": event}))
 }
 
@@ -491,6 +516,13 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let actor_id = required_arg(request, "actor_id")?;
     let group = store(home)?.load(&group_id).map_err(OpError::not_found)?;
     authorize(&group, request, ActorAction::Remove, &actor_id)?;
+    // The Foreman is the first visible Actor: removing it hands the role on.
+    let succession =
+        (actors::effective_role(&group, &actor_id) == Some(ActorRole::Foreman)).then(|| {
+            actors::visible(&group)
+                .find(|actor| actor.id != actor_id)
+                .map(|actor| actor.id.clone())
+        });
     let index = group
         .actors
         .iter()
@@ -593,6 +625,18 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             ));
         }
     };
+    if let Some(successor) = succession
+        && let Err(error) = append_event(
+            home,
+            &group_id,
+            "group.foreman_change",
+            request,
+            json!({"from": actor_id, "to": successor}),
+        )
+    {
+        // The removal is committed; a missing record is not worth undoing it.
+        tracing::warn!(error = %error.message, %group_id, %actor_id, "foreman change not recorded");
+    }
     if let Err(error) = remove_persisted_headless_state(home, &group_id, &actor_id) {
         tracing::warn!(%error, %group_id, %actor_id, "post-commit headless state cleanup failed");
     }
@@ -605,7 +649,82 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if let Err(error) = runtime_session::native_acp::retire_all(home, &group_id, &actor_id) {
         tracing::warn!(%error,%group_id,%actor_id,"post-commit native ACP receipt cleanup failed");
     }
+    if let Err(error) = retire_actor_context(home, &group_id, &actor_id, &event.by) {
+        tracing::warn!(%error, %group_id, %actor_id, "post-commit Actor context cleanup failed");
+    }
     object(json!({"actor_id": actor_id, "event": event}))
+}
+
+/// Retire open task references and working state belonging to a removed Actor.
+/// Task progress, content, other Actors and finished ownership stay unchanged.
+/// One `context.sync` event records the cleanup.
+fn retire_actor_context(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    by: &str,
+) -> std::io::Result<()> {
+    let contexts = ContextStore::new(home.clone())?;
+    // The version check retries when the board changes between read and write.
+    for _ in 0..3 {
+        let document = contexts.load(group_id)?;
+        let mut operations = document
+            .tasks
+            .iter()
+            .filter(|task| {
+                ["assignee", "handoff_to"]
+                    .iter()
+                    .any(|field| task.get(*field).and_then(Value::as_str) == Some(actor_id))
+                    && matches!(
+                        task.get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("planned"),
+                        "planned" | "active"
+                    )
+            })
+            .filter_map(|task| {
+                let task_id = task.get("id").and_then(Value::as_str)?;
+                let mut operation = Map::from_iter([
+                    ("op".into(), json!("task.update")),
+                    ("task_id".into(), json!(task_id)),
+                ]);
+                for field in ["assignee", "handoff_to"] {
+                    if task.get(field).and_then(Value::as_str) == Some(actor_id) {
+                        operation.insert(field.into(), Value::Null);
+                    }
+                }
+                Some(operation)
+            })
+            .collect::<Vec<_>>();
+        if document.agent_states.contains_key(actor_id) {
+            operations.push(Map::from_iter([
+                ("op".into(), json!("agent_state.clear")),
+                ("actor_id".into(), json!(actor_id)),
+            ]));
+        }
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let version = contexts.version(&document)?;
+        let result = match contexts.sync(group_id, &operations, Some(&version), by, false) {
+            Ok(result) => result,
+            Err(error) if error.to_string() == "version_conflict" => continue,
+            Err(error) => return Err(error),
+        };
+        let mut event = Event::new("context.sync", group_id);
+        event.by = by.to_owned();
+        event.data = Map::from_iter([
+            ("version".into(), json!(result.version)),
+            ("changes".into(), json!(result.changes)),
+        ]);
+        return ledger::append(
+            &GroupStore::new(home.clone())?.ledger_path(group_id)?,
+            &event,
+        );
+    }
+    Err(std::io::Error::other(
+        "context kept changing during Actor retirement",
+    ))
 }
 
 fn restore_removed_and_runtime(
@@ -700,7 +819,7 @@ fn remove_persisted_headless_state(
     }
 }
 
-fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult {
+pub(super) fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult {
     let group_id = required_arg(request, "group_id")?;
     let actor_id = required_arg(request, "actor_id")?;
     let _timing_span = tracing::info_span!(
@@ -720,8 +839,18 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         .find(|actor| actor.id == actor_id)
         .cloned()
         .ok_or_else(|| OpError::new("actor_not_found", "actor not found"))?;
+    if !original_actor.external_session_id.is_empty()
+        && matches!(kind, "actor.restart" | "actor.new_session")
+    {
+        return Err(OpError::new(
+            "external_session_owned",
+            "Reset this session in its original runtime; CCCC only controls collaboration access",
+        ));
+    }
     let runtime_was_running = actor_process_running(&group, &original_actor);
-    let retry_runtime = if matches!(kind, "actor.start" | "actor.restart") {
+    let retry_runtime = if original_actor.external_session_id.is_empty()
+        && matches!(kind, "actor.start" | "actor.restart")
+    {
         Some(actor_profile_runtime::resolve(home, &original_actor)?.runtime)
     } else {
         None
@@ -936,6 +1065,23 @@ fn rollback_actor_lifecycle(
 }
 
 fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
+    if request
+        .args
+        .get("external_session_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+        || request
+            .args
+            .get("actor")
+            .and_then(|actor| actor.get("external_session_id"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+    {
+        return Err(OpError::new(
+            "unsupported_field",
+            "Create native-session Actors through local_session_conversation",
+        ));
+    }
     if let Some(value) = request.args.get("actor") {
         if value.get("runner").is_some() {
             return Err(OpError::new(

@@ -135,7 +135,6 @@ export default function App({
   const {
     activeGroupId,
     destGroupId,
-    composerFiles,
     replyTarget,
     setDestGroupId,
     setReplyTarget,
@@ -144,7 +143,6 @@ export default function App({
     useShallow((s) => ({
       activeGroupId: s.activeGroupId,
       destGroupId: s.destGroupId,
-      composerFiles: s.composerFiles,
       replyTarget: s.replyTarget,
       setDestGroupId: s.setDestGroupId,
       setReplyTarget: s.setReplyTarget,
@@ -228,7 +226,7 @@ export default function App({
     actorsRef,
     allTabs,
     handleTabChange,
-    onDotsActorCreated,
+    onNativeActorCreated,
   } = useAppTabState({
     activeTab,
     runtimeActors: visibleRuntimeActors,
@@ -373,14 +371,12 @@ export default function App({
   }, [groups]);
 
   const hasReplyTarget = !!replyTarget;
-  const hasComposerFiles = composerFiles.length > 0;
 
   useAppGroupLifecycle({
     selectedGroupId: remoteSelected ? "" : selectedGroupId,
     destGroupId,
     sendGroupId,
     hasReplyTarget,
-    hasComposerFiles,
     setDestGroupId,
     fileInputRef,
     resetDragDrop,
@@ -510,7 +506,7 @@ export default function App({
         onEditActor={editActor}
         onRemoveActor={removeActor}
         onOpenActorInbox={openActorInbox}
-        onRefreshActors={() => void refreshRuntimeActors(selectedGroupId)}
+        onRefreshActors={refreshRuntimeActors}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       />
@@ -535,7 +531,7 @@ export default function App({
             ccccHome={ccccHome}
             composerRef={composerRef}
             onStartReply={startReply}
-            onDotsActorCreated={onDotsActorCreated}
+            onNativeActorCreated={onNativeActorCreated}
             onThemeChange={setTheme}
             onTextScaleChange={setTextScale}
             onDeleteGroup={handleDeleteGroup}

@@ -399,6 +399,129 @@ async fn rejected_pairing_remains_in_shared_diagnostics_after_status_reads() {
 }
 
 #[tokio::test]
+async fn paused_dot_pairing_preserves_identity_and_resumes_without_repairing() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon().await;
+    let pair = connectors::begin_dots_pairing(&fixture.state.home, &fixture.connector_id)
+        .expect("setup")
+        .expect("new Dot pair");
+    let metadata = json!({"openai/session":"synthetic-dot-session",
+        "openai/subject":"synthetic-user","openai/organization":"synthetic-org"});
+    let (_, paired) = fixture
+        .mcp(
+            "tools/call",
+            json!({"name":"cccc_pair",
+        "arguments":{"code":pair["code"]},"_meta":metadata}),
+            true,
+        )
+        .await;
+    assert_eq!(paired["result"]["structuredContent"]["state"], "bound");
+    let (_, paused) = fixture
+        .mcp(
+            "tools/call",
+            json!({"name":"cccc_runtime_wait_next_turn",
+        "arguments":{},"_meta":metadata}),
+            true,
+        )
+        .await;
+    assert_eq!(paused["result"]["isError"], true);
+    assert!(
+        paused["result"]["structuredContent"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("paired_actor_stopped"))
+    );
+    let (_, status) = fixture
+        .mcp(
+            "tools/call",
+            json!({"name":"cccc_connector_status",
+        "arguments":{},"_meta":metadata}),
+            true,
+        )
+        .await;
+    let status = &status["result"]["structuredContent"];
+    assert_eq!(status["paired"], true);
+    assert_eq!(status["enabled"], false);
+    assert_eq!(status["subscribed"], false);
+    // Setup phases retain their priority while the independent access flag is
+    // paused; consumers must not infer enabled state from the phase alone.
+    assert_eq!(status["state"], "waiting_subscription");
+    let mut changed = metadata.clone();
+    changed["openai/organization"] = json!("synthetic-other-org");
+    changed["unrelated-private-metadata"] = json!("synthetic-do-not-log");
+    let (_, unpaired) = fixture
+        .mcp(
+            "tools/call",
+            json!({"name":"cccc_runtime_wait_next_turn",
+        "arguments":{},"_meta":changed}),
+            true,
+        )
+        .await;
+    assert!(
+        unpaired["result"]["structuredContent"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("conversation_not_paired"))
+    );
+    let (_, listed) = fixture.admin_get("/api/v1/web-model/connectors").await;
+    let log = &listed["result"]["connectors"][0]["events_log"];
+    assert_eq!(log.as_array().expect("diagnostics").len(), 3);
+    assert_eq!(log[1]["reason"], "paired_actor_stopped");
+    assert_eq!(log[2]["reason"], "conversation_not_paired");
+    assert_eq!(log[0]["host_identity"], log[1]["host_identity"]);
+    for field in ["session", "subject"] {
+        assert_eq!(
+            log[0]["host_identity"][field],
+            log[2]["host_identity"][field]
+        );
+    }
+    assert_ne!(
+        log[0]["host_identity"]["organization"],
+        log[2]["host_identity"]["organization"]
+    );
+    for private in [
+        "synthetic-dot-session",
+        "synthetic-user",
+        "synthetic-org",
+        "synthetic-other-org",
+        "synthetic-do-not-log",
+        &fixture.secret,
+        pair["code"].as_str().expect("code"),
+    ] {
+        assert!(!listed.to_string().contains(private));
+    }
+    let before = fixture.connector()["bindings"].clone();
+    let groups = GroupStore::new(fixture.state.home.clone()).expect("store");
+    groups
+        .mutate(&fixture.group_id, |group| {
+            group.running = true;
+            group.state = cccc_contracts::GroupState::Active;
+            group.actors[1].enabled = true;
+            Ok(())
+        })
+        .expect("resume access without provider work");
+    let (_, resumed) = fixture
+        .mcp(
+            "tools/call",
+            json!({"name":"cccc_runtime_wait_next_turn",
+        "arguments":{},"_meta":metadata}),
+            true,
+        )
+        .await;
+    assert_ne!(resumed["result"]["isError"], true, "{resumed}");
+    assert_eq!(resumed["result"]["structuredContent"]["status"], "idle");
+    assert_eq!(
+        fixture.connector()["events_log"][3]["host_identity"],
+        log[0]["host_identity"]
+    );
+    let after = fixture.connector()["bindings"].clone();
+    let key = json!([fixture.group_id, "dots"]).to_string();
+    for field in ["session_key", "revision", "generation", "pairing_id"] {
+        assert_eq!(before[&key][field], after[&key][field]);
+    }
+    assert!(fixture.connector()["dots"]["execution"].is_null());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn paired_dot_status_waits_for_subscription_without_creating_work() {
     let mut fixture = Fixture::new();
     fixture.start_daemon().await;
@@ -441,11 +564,169 @@ async fn paired_dot_status_waits_for_subscription_without_creating_work() {
     );
     assert_eq!(response["result"]["structuredContent"]["paired"], true);
     assert!(fixture.connector()["dots"] == before);
-    assert_eq!(
-        std::fs::read(groups.ledger_path(&fixture.group_id).expect("ledger"))
-            .expect("after status"),
-        ledger_before
+    assert_only_background_activity_appended(
+        &groups.ledger_path(&fixture.group_id).expect("ledger"),
+        &ledger_before,
+        "reading connector status",
     );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn host_javascript_forwards_current_claim_arguments_without_business_code_credentials() {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let mut fixture = Fixture::new();
+    let store = GroupStore::new(fixture.state.home.clone()).expect("store");
+    let project = fixture._temp.path().join("host-workspace");
+    std::fs::create_dir(&project).expect("workspace");
+    cccc_core::group_scope::attach(
+        &store,
+        &fixture.group_id,
+        cccc_core::scope::detect(&project).expect("scope"),
+    )
+    .expect("attach workspace");
+    store
+        .mutate(&fixture.group_id, |group| {
+            group.running = true;
+            group.state = cccc_contracts::GroupState::Active;
+            group.actors[1].enabled = true;
+            Ok(())
+        })
+        .expect("enable Dot");
+    fixture.start_daemon().await;
+    connectors::dots_update(&fixture.state.home, &fixture.connector_id, |connector| {
+        connector["dots"]["subscription"] = json!({"enabled":true,"subscription_id":"fixture-sub",
+            "callback_url":"https://callback.invalid/fixture","signing_secret":"synthetic-only","expires_at_ms":null});
+        Ok(())
+    }).expect("subscription without network delivery");
+    let pair = connectors::begin_dots_pairing(&fixture.state.home, &fixture.connector_id)
+        .expect("pairing")
+        .expect("new pairing");
+    let metadata =
+        json!({"openai/session":"synthetic-host-dot","openai/subject":"synthetic-host-user"});
+    let (_, paired) = fixture
+        .mcp(
+            "tools/call",
+            json!({"name":"cccc_pair",
+        "arguments":{"code":pair["code"]},"_meta":metadata}),
+            true,
+        )
+        .await;
+    assert_eq!(paired["result"]["structuredContent"]["state"], "bound");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("owned HTTP listener");
+    let address = listener.local_addr().expect("address");
+    let router = fixture.router.clone();
+    let http = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("owned HTTP server");
+    });
+    for mode in ["retained-reference", "original-tool-output"] {
+        let mut event = Event::new("chat.message", &fixture.group_id);
+        event.by = "user".into();
+        event.data = json!({"to":["dots"],"message_mode":"send","text":mode})
+            .as_object()
+            .expect("source")
+            .clone();
+        ledger::append(
+            &store.ledger_path(&fixture.group_id).expect("ledger"),
+            &event,
+        )
+        .expect("seed source");
+        let wake = fixture
+            .state
+            .client
+            .call(&DaemonRequest {
+                v: 1,
+                op: "dots_events_next_delivery".into(),
+                args: json!({"by":"user"}).as_object().expect("args").clone(),
+            })
+            .await
+            .expect("wake");
+        assert!(wake.result["delivery"]["event"]["data"]["event_id"].is_string());
+        let mut child = tokio::process::Command::new("node")
+            .args([
+                "--input-type=module",
+                "--eval",
+                include_str!("../../../tests/fixtures/native_tool_client.mjs"),
+            ])
+            .current_dir(&project)
+            .env("CCCC_HOME", fixture.state.home.root())
+            .env("CODEX_HOME", fixture._temp.path().join("codex"))
+            .env("CLAUDE_CONFIG_DIR", fixture._temp.path().join("claude"))
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("isolated JavaScript host client");
+        let input = json!({"url":format!("http://{address}/mcp/web-model/{}", fixture.connector_id),
+            "secret":fixture.secret,"metadata":metadata,"mode":mode});
+        {
+            let mut stdin = child.stdin.take().expect("private input pipe");
+            stdin
+                .write_all(&serde_json::to_vec(&input).expect("input"))
+                .await
+                .expect("private input");
+        }
+        let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+            .await
+            .expect("host client timeout")
+            .expect("host client exit");
+        assert!(
+            output.status.success(),
+            "host client: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&fixture.secret));
+        let report: Value = serde_json::from_slice(&output.stdout).expect("safe host report");
+        assert_eq!(report["mode"], mode);
+        assert_eq!(report["claim_count"], 1);
+        for field in [
+            "code_completed",
+            "reply_completed",
+            "turn_completed",
+            "temporary_context_discarded",
+        ] {
+            assert_eq!(report[field], true);
+        }
+        let (_, state) = fixture
+            .admin_get(&format!(
+                "/api/v1/web-model/dots?group_id={}&actor_id=dots",
+                fixture.group_id
+            ))
+            .await;
+        assert_eq!(state["result"]["active_turn_id"], "");
+        assert_eq!(state["result"]["last_execution"]["status"], "done");
+    }
+    let events =
+        ledger::read_all(&store.ledger_path(&fixture.group_id).expect("ledger")).expect("events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "chat.message" && event.by == "dots")
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| event.kind == "runtime.turn.completed" && event.data["actor_id"] == "dots"
+            )
+            .count(),
+        2
+    );
+    http.abort();
+    let _ = http.await;
     fixture.close().await;
 }
 
@@ -586,10 +867,10 @@ async fn paired_dot_claims_successive_turns_without_saved_credentials_or_event_p
         "mcp_events"
     );
     assert!(fixture.connector()["dots"]["execution"].is_null());
-    assert_eq!(
-        std::fs::read(store.ledger_path(&fixture.group_id).expect("ledger"))
-            .expect("after pairing"),
-        ledger_before
+    assert_only_background_activity_appended(
+        &store.ledger_path(&fixture.group_id).expect("ledger"),
+        &ledger_before,
+        "pairing",
     );
     for tool in [
         "cccc_help",
@@ -621,6 +902,7 @@ async fn paired_dot_claims_successive_turns_without_saved_credentials_or_event_p
         assert!(rejected["result"]["structuredContent"]["turn"].is_null());
     }
     let mut tokens = Vec::new();
+    let mut previous_completion = None;
     for text in ["first Dots packet", "second Dots packet"] {
         let mut event = Event::new("chat.message", &fixture.group_id);
         event.by = "user".into();
@@ -685,10 +967,10 @@ async fn paired_dot_claims_successive_turns_without_saved_credentials_or_event_p
                 .contains("wm_pair_")
         );
         assert!(fixture.connector()["dots"] == before);
-        assert_eq!(
-            std::fs::read(store.ledger_path(&fixture.group_id).expect("ledger"))
-                .expect("ledger bytes"),
-            ledger_before
+        assert_only_background_activity_appended(
+            &store.ledger_path(&fixture.group_id).expect("ledger"),
+            &ledger_before,
+            "restoring instructions",
         );
         // Load the handler afresh for every independent run; never inject the
         // private connector's subscription arguments into the runtime context.
@@ -741,6 +1023,26 @@ async fn paired_dot_claims_successive_turns_without_saved_credentials_or_event_p
         assert!(duplicate["result"]["structuredContent"]["turn"].is_null());
         assert!(duplicate["result"]["structuredContent"]["actor_token"].is_null());
         if let Some(old) = tokens.last() {
+            let path = store.ledger_path(&fixture.group_id).expect("ledger");
+            let (_, forged) = fixture.mcp("tools/call", json!({"name":"cccc_runtime_complete_turn","arguments":{"actor_token":old,"turn_id":packet["turn"]["turn_id"],"event_ids":packet["turn"]["event_ids"]}}), true).await;
+            assert_eq!(forged["result"]["isError"], true);
+            assert!(
+                !ledger::read_all(&path)
+                    .expect("ledger")
+                    .iter()
+                    .any(|event| {
+                        event.kind == "runtime.turn.completed"
+                            && event.data["turn_id"] == packet["turn"]["turn_id"]
+                    })
+            );
+            let (_, retried) = fixture
+                .mcp(
+                    "tools/call",
+                    json!({"name":"cccc_runtime_complete_turn","arguments":previous_completion}),
+                    true,
+                )
+                .await;
+            assert_ne!(retried["result"]["isError"], true);
             let (_, stale) = fixture
                 .mcp(
                     "tools/call",
@@ -761,6 +1063,9 @@ async fn paired_dot_claims_successive_turns_without_saved_credentials_or_event_p
             )
             .await;
         assert_ne!(completed["result"]["isError"], true);
+        previous_completion = Some(
+            json!({"actor_token":token,"turn_id":packet["turn"]["turn_id"],"event_ids":packet["turn"]["event_ids"],"status":"done"}),
+        );
         tokens.push(token);
     }
     assert!(
@@ -1327,4 +1632,26 @@ async fn one_click_create_refuses_to_rotate_an_existing_connector() {
     // The credential already added to ChatGPT keeps working.
     assert_eq!(fixture.connector()["secret_hash"], before);
     fixture.close().await;
+}
+
+/// The operation under test writes nothing to the ledger. The daemon's
+/// once-a-second activity publisher may still project running Actors into the
+/// window, so only its `actor.activity` lines may follow the snapshot.
+fn assert_only_background_activity_appended(
+    path: &std::path::Path,
+    before: &[u8],
+    operation: &str,
+) {
+    let after = std::fs::read(path).expect("ledger bytes");
+    let appended = after
+        .strip_prefix(before)
+        .unwrap_or_else(|| panic!("{operation} must not rewrite the ledger"));
+    for line in String::from_utf8_lossy(appended).lines() {
+        let event: Event = serde_json::from_str(line).expect("ledger event");
+        assert!(
+            event.kind == "actor.activity" && event.by == "system",
+            "{operation} must not write {}",
+            event.kind
+        );
+    }
 }

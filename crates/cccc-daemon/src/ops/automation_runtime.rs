@@ -57,7 +57,7 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
             .map(|group| {
                 actors::visible(&group)
                     .filter(|actor| actor.enabled)
-                    .filter(|actor| actor_runtime_status::resolve(&group, actor).running)
+                    .filter(|actor| actor_runtime_status::resolve(home, &group, actor).running)
                     .map(|actor| actor.id.clone())
                     .collect::<HashSet<_>>()
             })
@@ -73,7 +73,26 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
         &delivery_actor_ids,
         &idle_actor_ids,
     ) {
-        Ok(result) => apply(home, result, cancelled),
+        Ok(result) => {
+            let unread_success = result.unread_failure.is_none();
+            apply(home, result, cancelled);
+            // Opt-in, payload-free evidence that daemon discovery, runtime
+            // eligibility and the periodic unread pass actually participated
+            // in an operator's isolated real-group memory replay.
+            if include_unread
+                && std::env::var_os("CCCC_AUTOMATION_TICK_PROBE").is_some_and(|value| value == "1")
+            {
+                cccc_runtime::diagnostic(format_args!(
+                    "CCCC_UNREAD_TICK {}",
+                    json!({
+                        "group_id":group_id,
+                        "include_unread":include_unread,
+                        "eligible_actors":delivery_actor_ids.len(),
+                        "success":unread_success && !cancelled.load(Ordering::Acquire),
+                    })
+                ));
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(%error, %group_id, "automation group tick failed"),
     }
@@ -214,7 +233,7 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
                 let mut succeeded = true;
                 if state == "active"
                     && store.load(&group_id).is_ok_and(|group| {
-                        !group_runtime::status(&group)["runtime_running"]
+                        !group_runtime::status(home, &group)["runtime_running"]
                             .as_bool()
                             .unwrap_or(false)
                     })
@@ -381,6 +400,7 @@ mod tests {
             group: group.clone(),
             actor: peer.clone(),
             event: first.clone(),
+            claimed: true,
         };
         super::super::actor_delivery::withdraw_jobs(std::slice::from_ref(&job), "held");
 
@@ -668,3 +688,10 @@ mod tests {
             .expect("automation rule");
     }
 }
+
+#[cfg(all(test, unix))]
+mod mail_notice_repeat_tests;
+
+#[cfg(all(test, unix))]
+#[path = "automation_mail_tests.rs"]
+mod automation_mail_tests;

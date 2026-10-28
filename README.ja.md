@@ -6,12 +6,12 @@
 
 ### コーディングエージェントをグループチャットのように指揮する
 
-**既読・送達トラッキング・インスタンス間連携・スマホ運用 —
-Claude Code、Codex、ChatGPT Web などの対応ランタイムをひとつの永続グループで。**
+**ローカル主体のエージェント連携。永続的な協調状態と明確なメッセージ状態、
+インスタンス間連携、Web／IM からのアクセス。**
 
-複数のコーディングエージェントを、ランタイム・マシン・信頼済み working group をまたぐ**永続的で協調されたチーム**として運用 — バラバラのターミナルセッションではなく。
+複数のコーディングエージェントを、ランタイム・マシン・信頼済み working group をまたぐ**永続的で協調されたチーム**として運用します。
 
-インストールコマンドひとつ。Rust ツールチェーンも追加インフラも不要です。
+インストールコマンドひとつ。Rust ツールチェーン、DB サーバー、メッセージブローカー、Docker は不要です。
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=232425)](https://pypi.org/project/cccc-pair/)
 [![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
@@ -41,7 +41,7 @@ CCCC はエージェント群を、永続的で協調された 1 つのシステ
 - **永続協調** — メッセージ履歴は append-only ledger に記録し、タスクと共有コンテキストもそれぞれ永続化します。
 - **配信事実の可視化** — ルーティング、保存、runtime 配信、既読、返信を個別に記録し、「送信済み」を「確認済み」と扱いません。
 - **1 つのコントロールプレーン** — Web UI、CLI、MCP、IM ブリッジがすべて同じ daemon 状態を共有します。
-- **マルチランタイム前提** — Claude Code、Codex CLI、ChatGPT Web、Grok Build などの主要ランタイムを 1 つのグループで混在運用できます。
+- **マルチランタイム前提** — 対応 CLI ランタイムと任意の Web 連携を 1 つのグループで運用できます。利用できる機能と設定要件はランタイムごとに異なります。
 - **CCCC Connect によるインスタンス間連携** — 同一アカウント内の検出、承認済みの会員間 Group 接続、アカウント不要の Direct 接続に対応。各インスタンスの状態と権限境界を保ちます。
 - **ローカルファースト運用** — インストールコマンドひとつで始められ、ランタイム状態は `CCCC_HOME` に置いたまま、必要時だけリモート監視へ広げられます。
 
@@ -57,19 +57,19 @@ CCCC はコマンド一つで導入でき、データベースやメッセージ
 | **マルチランタイム編成** | 対応するランタイムを同じ Group で混在利用し、その他の CLI エージェントには `custom` を使用 |
 | **CCCC Connect** | 自分のインスタンス、異なる会員の指定 Group、またはアカウントなしで二つの Group を直接接続 |
 | **ワークスペースツール** | ファイルの閲覧・編集、Git 差分確認、Presentation への文書固定、タイル表示の純正ターミナル操作 |
-| **音声ワークフロー** | グローバルな Voice Secretary が共有会話で各 Group の音声・文書・入力欄の下書きを処理。実験的な Codex Voice は独立した Realtime Analyst を使用 |
+| **音声ワークフロー** | グローバルな Voice Secretary が共有会話で各 Group の音声・文書・入力欄の下書きを処理。実験的な Codex Voice と Grok Voice は独立した Analyst を使用 |
 | **ロールベース協調** | Foreman + Peer ロールモデル、権限境界と宛先ルーティング（`@all`、`@peers`、`@foreman`） |
 | **ローカルファーストなランタイム状態** | ランタイムデータはリポジトリではなく `CCCC_HOME` に保持しつつ、Web Access と IM ブリッジで遠隔運用も可能 |
 
-## 0.4.42 の主な変更
+## 0.4.45 の主な変更
 
-- **任意の公式 ACP モード**：Antigravity、GitHub Copilot、Devin CLI、Cursor で、純正ターミナルのない構造化 Actor と Voice Analyst を利用できます。既定は TUI のままです。保存したモード変更は再起動または次回起動時に反映されます。
-- **音声調査とホスト定義のペルソナ**：ACP 調査の状態、ユーザー判断、結果を表示。通話に紐づく完了結果は、その通話の Realtime コンテキストに返します。ホスト API は Analyst や Actor 通知を使わない persona 通話を開始できます。
-- **会話の復旧**：Claude の再開を検証できない場合は自動起動を停止し、診断と明示的な復旧操作を表示。Codex は長い会話の全履歴を CCCC に転送せずに再開します。管理ターミナルを閉じても正常なプロバイダー会話は維持されます。
-- **分かりやすい日常操作**：細いアクティビティリング、正確な未読 Mail バッジ、Group ごとの宛先保持、インストール検出、予測しやすい Actor/Profile の保存処理。
-- **Grok とライフサイクルの信頼性**：必須の Bot URL は Profile 連携時も編集でき、ログインウィンドウは独立して閉じられます。Unix のプロセスのクリーンアップでは、クラッシュ後も未解決の所有記録を保持します。
+- **Grok Bot のネイティブ配信**：画面経由の配信を Webhook Routine とリモート MCP に置き換え、順序を守ったタスク受付、権限を限定した認証情報、明示的な復旧を提供します。既存の Grok Actor には Routine の設定が必要です。
+- **分かりやすい Web Model 設定**：アクセスと編集の操作を統一しつつ、ChatGPT のブラウザーログイン、Dots のイベントペアリング、Grok Routine の違いを維持します。ChatGPT の現在の画面構造に対応し、共有ログインへの入口を設けました。
+- **大規模 Group の重複処理を削減**：コンパクトな Inbox 投影、上限のあるアーカイブハンドル、gzip の一括読み取り、上限付き Web キャッシュにより、履歴と進行中の出力を保持します。任意の Mail 再通知は既定で無効で、タスクを再実行しません。
+- **より確実なタスク操作**：作成要求の識別子と参照によりタスクツリーの再試行を支援し、任意の revision チェックで古い編集を拒否します。Context のページ分割とバイト上限で応答を制限し、Actor 削除時には無効なタスク参照と作業状態をクリアします。
+- **予測しやすい復旧**：Claude の中断・再開と停止診断を改善し、Codex コマンドのモデル指定を反映、DeepSeek の失敗ターンの再送を抑止、Pi の安全なツール活動を表示します。Direct 接続のプレビューでは Group の識別と再接続エラーを明確にします。
 
-設定、更新手順、検証範囲は [0.4.42 英語リリースノート](docs/release/v0.4.42_release_notes.md)をご覧ください。以前の Actor 専用 ChatGPT コネクターから更新する場合は、[0.4.41 の説明](docs/release/v0.4.41_release_notes.md)にある共有コネクターへの移行手順に従ってください。
+更新手順と機能の範囲は [0.4.45 英語リリースノート](docs/release/v0.4.45_release_notes.md)をご覧ください。ライブ音声は実験的な機能で、Grok の音高・声質の変動は修正を確認できていません。グローバル Secretary は引き続き Group 間でモデルの会話履歴を共有します。外部セッションのホット接続は本版に含まれません。
 
 ## クイックスタート
 
@@ -127,7 +127,17 @@ pip 管理下のコマンドは standalone 自己更新を引き続き拒否し�
 cccc
 ```
 
-**http://127.0.0.1:8848** を開く — デフォルトで daemon とローカル Web UI が一緒に起動します。
+対話的なターミナルで `cccc` を実行すると、シンプルなターミナル画面が開き、daemon とローカル Web UI も
+一緒に起動します。この画面はステータスパネルで、Web のアドレス、daemon がこの起動で開始されたかどうか、
+各グループの状態と実行中のメンバー、ネイティブセッションが表示されます。上下キーでグループを選び、Enter で開くと
+タスクの確認（読み取り専用）や起動・停止ができます。`/` を入力するとコマンドの一覧が表示されます。`/sessions` ですべてのネイティブセッションを確認でき、
+`/setup` で Codex、Claude Code、Pi、OpenCode のセッションを接続でき、`/quit`（または Ctrl+C）でこの起動で
+開始したものを停止します。それ以外の機能は Web UI にあります。
+
+Web UI 全体は **http://127.0.0.1:8848** で開けます。ターミナル画面が不要な場合（サーバー、コンテナ、
+サービスマネージャー、スクリプトなど）は `cccc --headless`（または `cccc web`）を使ってください。従来どおりの
+ログ出力のままです。入力または出力がターミナルでない場合や、読み取り専用（Exhibit）モードでも、
+`cccc` は headless で動作します。
 `localhost`／`127.0.0.1` から直接利用する場合はパスワード不要で、Access Token も作成しません。LAN、Remote Access、公開 URL、リバースプロキシ経由の利用には明示的な管理者 Token が必要です。
 
 ```bash
@@ -179,58 +189,20 @@ SDK には daemon は含まれません。実行中の `cccc` 本体に接続し
 
 ```mermaid
 graph TB
-    subgraph Agents["エージェントランタイム"]
-        direction LR
-        A1["Claude Code"]
-        A2["Codex CLI"]
-        A3["ChatGPT Web<br/>Remote MCP"]
-        A4["Grok Build"]
-        A5["その他のランタイム + custom"]
-    end
+    A1["CLI ランタイム + custom<br/>Codex · Claude · Grok · ..."]
+    A3["リモートランタイム<br/>ChatGPT Web · Grok Bot"]
+    A6["ChatGPT Dots"]
+    Daemon["CCCC daemon · 単一ライター<br/>Ledger · tasks · context · Actor lifecycle"]
+    Ports["CCCC Web UI · CLI · MCP"]
+    IM["IM ブリッジ"]
+    Remote["接続済み CCCC Groups"]
 
-    subgraph Daemon["CCCC Daemon · 単一ライター"]
-        direction LR
-        Ledger[("Ledger<br/>append-only JSONL")]
-        ActorMgr["Actor<br/>マネージャ"]
-        Auto["オートメーション<br/>ルール · 催促 · Cron"]
-        Ledger ~~~ ActorMgr ~~~ Auto
-    end
-
-    subgraph Ports["コントロールプレーン"]
-        direction LR
-        Web["Web UI<br/>:8848"]
-        CLI["CLI"]
-        MCP["MCP<br/>(stdio)"]
-    end
-
-    subgraph IM["IM ブリッジ"]
-        direction LR
-        TG["Telegram"]
-        SL["Slack"]
-        DC["Discord"]
-        MM["Mattermost"]
-        FS["Feishu"]
-        DT["DingTalk"]
-        WC["WeCom"]
-        WX["Weixin"]
-    end
-
-    subgraph Remote["接続済み CCCC Groups"]
-        direction LR
-        RG1["別のインスタンス"]
-        RG2["別のマシン"]
-    end
-
-    A1 <-->|純正ターミナル<br/>MCP + 制御プロトコル| Daemon
-    A2 <-->|純正ターミナル<br/>MCP + 制御プロトコル| Daemon
+    A1 <-->|ターミナル / Runtime プロトコル<br/>MCP| Daemon
     A3 <-->|ブラウザ配信<br/>Remote MCP| Daemon
-    A4 <-->|MCP ツール| Daemon
-    A5 <-->|MCP ツール| Daemon
+    A6 <-->|MCP Events<br/>Remote MCP| Daemon
     Daemon <--> Ports
-    Web <--> IM
-    Daemon <-->|CCCC Connect<br/>アカウントで認可した通信| RG1
-    Daemon <-->|Direct<br/>承認済み Group ペア| RG2
-
+    Ports <-->|Web がホストする連携| IM
+    Daemon <-->|CCCC Connect / Direct<br/>承認済みの接続| Remote
 ```
 
 **設計上の重要な決定：**
@@ -243,7 +215,7 @@ graph TB
 
 ## サポートランタイム
 
-CCCC は 20 種の組み込み Runtime 連携と、その他の CLI エージェント向けの `custom` に対応します。同じ Group の Actor が異なる Runtime を使えます。操作方法と設定要件は Runtime ごとに異なります：
+CCCC は以下の Runtime 連携と、その他の CLI エージェント向けの `custom` に対応します。同じ Group の Actor が異なる Runtime を使えます。操作方法と設定要件は Runtime ごとに異なります：
 
 | ランタイム | 連携方式 | 入口 / サーフェス |
 |-----------|----------|-------------------|
@@ -257,8 +229,9 @@ CCCC は 20 種の組み込み Runtime 連携と、その他の CLI エージェ
 | Kiro CLI | 純正 TUI または公式 ACP、ACP はセッション単位 MCP | `kiro-cli` |
 | Kilo Code CLI | 管理 ACP セッション + 純正 TUI、セッション単位 MCP | `kilo` |
 | Antigravity CLI | MCP 自動設定 | `agy` |
-| ChatGPT Web | Remote MCP + ブラウザ配信 | `chatgpt.com` の会話 |
-| Grok Bot Web Model | Remote MCP + ブラウザ配信、Actor ごとの認証情報でルーティング | 必須の `grok.com/bot/<UUID>` URL |
+| ChatGPT Web | ブラウザ UI 配信 + Remote MCP | `chatgpt.com` の会話 |
+| ChatGPT Dots | MCP Events + タスクに限定した Remote MCP、ブラウザでのメッセージ配信なし | 明示的にペアリングした 1 つの Dot |
+| Grok Bot Web Model | Remote MCP + ネイティブ Webhook、Actor ごとのタスク権限 | 必須の `grok.com/bot/<UUID>` URL |
 | Grok Build | 管理 ACP セッション + 純正 TUI、自動 MCP 設定 | `grok` |
 | Hermes Agent | 純正 TUI または公式 ACP、ACP はセッション単位 MCP | `hermes` |
 | Droid | 純正 TUI または公式 ACP、ACP はセッション単位 MCP | `droid` |
@@ -269,7 +242,7 @@ CCCC は 20 種の組み込み Runtime 連携と、その他の CLI エージェ
 | Pi | 公式 RPC、セッション単位 MCP、純正ターミナル接続なし | `pi` |
 | Custom | 手動設定 | 任意のコマンド |
 
-ここでは安定したランタイムの入口または利用サーフェスのみを示します。CCCC はランタイムごとの起動デフォルトを自動適用し、actor/profile のコマンドは設定で確認・変更できます。[サポートランタイムガイド](https://chesterra.github.io/cccc/guide/runtimes) には、`agy --dangerously-skip-permissions`、`grok --always-approve`、`opencode --auto` など、承認を省略する既定の autonomy flags も記載しています。
+ここではランタイムのコマンドまたはブラウザの入口を示します。CCCC はランタイムごとの起動デフォルトを自動適用し、actor/profile のコマンドは設定で確認・変更できます。[サポートランタイムガイド](https://chesterra.github.io/cccc/guide/runtimes) には、`agy --dangerously-skip-permissions`、`grok --always-approve`、`opencode --auto` など、承認を省略する既定の autonomy flags も記載しています。
 
 ```bash
 cccc setup --runtime claude       # CCCC のセッション単位 MCP 注入を確認
@@ -287,21 +260,27 @@ GitHub Copilot、Devin CLI、Cursor、Kimi Code、Auggie、Kiro V3、Hermes、Dr
 
 Antigravity は Actor と Voice Analyst 向けの任意の**公式 ACP モード**にも対応し、端末の代わりに構造化ワークスペースを使います。Actor／Profile 設定で ACP を選び、`cccc setup --runtime antigravity --runtime-mode acp --login` を一度実行して CCCC 専用ログインを完了してください。待機中の入力と今回のみの権限確認を画面で確認できます。[ランタイムガイド](https://chesterra.github.io/cccc/guide/runtimes#antigravity-tui-or-official-acp)をご覧ください。
 
-Runtime を選ぶと、CCCC が操作方法を自動的に決定します。Claude Code、Codex CLI、Grok Build、OpenCode、Kilo は、同じ provider session で純正の書き込み可能なターミナルと構造化プロトコルを併用します。メッセージはそのターミナルへ渡され、steer と queue は受信 Runtime が判断します。Pi は公式 RPC を使い、純正ターミナルへの接続はありません。Pi 1.1.0 以降（`@earendil-works/pi-coding-agent`）が必要です。DeepSeek Harness は純正ターミナルなしの ACP、ChatGPT Web と Grok Bot Web Model はブラウザ配信と Remote MCP を使用します。
+Runtime を選ぶと、CCCC が操作方法を自動的に決定します。Claude Code、Codex CLI、Grok Build、OpenCode、Kilo は、同じ provider session で純正の書き込み可能なターミナルと構造化プロトコルを併用します。メッセージはそのターミナルへ渡され、steer と queue は受信 Runtime が判断します。Pi は公式 RPC を使い、純正ターミナルへの接続はありません。Pi 1.1.0 以降（`@earendil-works/pi-coding-agent`）が必要です。DeepSeek Harness は純正ターミナルなしの ACP、ChatGPT Web はブラウザー配信と Remote MCP を使います。Grok Bot Web Model はネイティブ Webhook Routine と Remote MCP を使います。
 
 各サポート Runtime の setup コマンド、操作方式、トラブルシュートは [サポートランタイムガイド](https://chesterra.github.io/cccc/guide/runtimes) を参照してください。
 
 ### ChatGPT Web をローカル開発 actor として
 
-CCCC は Group メッセージをペアリング済みの ChatGPT 会話へ届けます。複数の Web Model Actor が専用ブラウザのログインと一つの認証付き Remote MCP connector を共有し、各 Actor は独立した常設ウィンドウと確認済みの会話を持ちます。メッセージの受信・返信、リポジトリの閲覧・編集、scope 内の shell/git 実行ができます。共有ログインと connector は全体設定、各会話は Actor 設定で管理します。通常の Actor 起動時に会話を自動確認してから待機中のタスクを配信するため、事前のペアリング操作は不要です。
+CCCC はブラウザ UI の自動操作で Group メッセージをペアリング済みの ChatGPT 会話へ届けます。複数の Web Model Actor が専用ブラウザのログインと一つの認証付き Remote MCP connector を共有し、各 Actor は独立した常設ウィンドウと確認済みの会話を持ちます。メッセージの受信・返信、リポジトリの閲覧・編集、scope 内の shell/git 実行ができます。共有ログインと connector は全体設定、各会話は Actor 設定で管理します。通常の Actor 起動時に会話を自動確認してから待機中のタスクを配信するため、事前のペアリング操作は不要です。
 
-セットアップには MCP connector 用の public HTTPS URL（Cloudflare Tunnel、ngrok、Tailscale Funnel、またはリバースプロキシ）が必要です。CCCC は安定したテキストのみの配信を既定とし、実験的な **GPT Pro** モードも提供します。このモードは、画像添付によって第三者 MCP が利用可能になる一部アカウント向けに、ごく小さな空白 PNG を各配信へ添付します。CCCC はモデルを切り替えず、ChatGPT の変更後もこの互換手段が動作し続けることを保証しません。詳細な設定とトラブルシュート: [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+セットアップには MCP connector 用の public HTTPS URL（Cloudflare Tunnel、ngrok、Tailscale Funnel、またはリバースプロキシ）が必要です。CCCC はブラウザでのテキスト配信を既定とし、実験的な **GPT Pro** モードも提供します。このモードは、画像添付によって第三者 MCP が利用可能になる一部アカウント向けに、ごく小さな空白 PNG を各配信へ添付します。CCCC はモデルを切り替えず、ChatGPT の変更後もこの互換手段が動作し続けることを保証しません。共有ログインを使う Actor の会話には、設定済みの同じ ChatGPT アカウントの機能と利用上限が適用されます。設定と連携の範囲は [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+
+### ChatGPT Dots
+
+**ChatGPT Dots**（`chatgpt_dots`）は、ChatGPT のネイティブなイベントタスクと Remote MCP を使います。ChatGPT Web Actor と設定済みの CCCC プラグインを共有しますが、ブラウザでのメッセージ配信も CCCC のブラウザログインも使いません。Dot を 1 つの Actor とペアリングし、ネイティブのイベントタスクを保存すると配信できます。イベント受領、タスク取得、完了を別々に表示します。[Dots の設定](https://chesterra.github.io/cccc/guide/runtimes#chatgpt-dots)を参照してください。
 
 ### Grok Bot Web Model
 
-**Grok Bot Web Model**（`grok_web_model`）は、同じ CCCC ワークスペースツールと配信キューを利用します。Grok Actor はログインと一つの MCP コネクターを共有し、それぞれ独立した Bot URL とウィンドウを持ちます。既存の `https://grok.com/bot/<UUID>` URL が必須で、CCCC は Bot を自動作成しません。全体の Web Model 設定で共有ログインとコネクターを設定し、Actor 設定で Bot URL を保存して起動します。CCCC が各タスクに Actor のルーティング用認証情報を付けるため、別途ペアリングメッセージを送る必要はありません。Grok Build CLI（`grok`）とは別のランタイムです。設定手順と現在の検証範囲は [Grok Bot ガイド](https://chesterra.github.io/cccc/guide/grok-web-model-runtime)を参照してください。
+**Grok Bot Web Model**（`grok_web_model`）は、Actor ごとの既存の `https://grok.com/bot/<UUID>`、ネイティブ Webhook Routine、CCCC Remote MCP コネクターで接続します。Grok のサブスクリプションを使い、ブラウザー配信や別のモデル API key は不要です。初回は Grok デスクトップアプリから Routine URL と Key をコピーします。タスクの順序・単一受付・正確な完了確認は CCCC、承認・利用上限・クラウド実行は Grok が管理します。Grok Build CLI（`grok`）とは別です。[設定・復旧・検証範囲](https://chesterra.github.io/cccc/guide/grok-web-model-runtime)を参照してください。
 
 ## CCCC Connect：インスタンスとチームをつなぐ
+
+ここでのアカウントは CCCC アカウントです。プロバイダーへのログインと利用枠は、CCCC Connect の協調権限とは別に管理されます。
 
 作業に合う接続範囲を選びます：
 
@@ -366,7 +345,7 @@ CCCC は IM グレードのメッセージングセマンティクスを実装 �
 - **Project Context** — 共有の協調情報、タスク、Agent 状態、自己進化スキル
 - **Group Space** — NotebookLM による共有ナレッジ管理
 - **ChatGPT Web Model 設定** — 共有ログインと各 Actor の ChatGPT 会話を接続
-- **Voice Secretary と Codex Voice** — Runtime の直接設定または Profile を使うグローバルな Secretary が、共有会話でタスクを順番に処理し、各タスクの元の Group を保持します。実験的なリアルタイム Voice は独立した Analyst を使用。音声設定と音声デバイスの選択を共通化し、各 Group の文書・依頼・録音設定を保持します。Group ごとの秘書 Actor は作成しません。
+- **Voice Secretary と Codex Voice** — Runtime の直接設定または Profile を使うグローバルな Secretary が、共有会話でタスクを順番に処理し、各タスクの元の Group を保持します。実験的な Codex Voice と Grok Voice は独立した Analyst を使用。音声設定と音声デバイスの選択を共通化し、各 Group の文書・依頼・録音設定を保持します。Group ごとの秘書 Actor は作成しません。[音声の設定とプロバイダー接続](https://chesterra.github.io/cccc/guide/voice-secretary#codex-voice-provider-connection)を参照してください。
 - **CCCC Connect 設定** — アカウント経由の検出、指定 Group の接続、Direct ペアリング
 - **IM ブリッジ設定** — Telegram、Slack、Discord、Mattermost、Feishu、DingTalk、WeCom、Weixin
 - **設定** — メッセージポリシー、配信調整、ターミナル履歴
@@ -420,7 +399,8 @@ cccc im start
 
 ```bash
 # ライフサイクル
-cccc                           # daemon + Web UI を起動
+cccc                           # daemon + Web UI を起動し、ターミナル画面を開く
+cccc --headless                # ターミナル画面なしで daemon + Web UI を起動（cccc web と同じ）
 cccc daemon start|status|stop  # daemon 管理
 
 # グループ
@@ -460,7 +440,7 @@ cccc im start|stop|status
 | 機能面 | 例 |
 |--------|----|
 | **常時公開の協調コア** | `cccc_bootstrap`、`cccc_help`、機能検索・呼び出し、Inbox、メッセージ、ファイル、`cccc_context_get`、`cccc_coordination`、`cccc_task`、`cccc_agent_state` |
-| **プロジェクト情報と記憶（必要時）** | `cccc_project_info`、`cccc_tracked_send`、`cccc_memory`、`cccc_context_sync` |
+| **プロジェクト情報と記憶（必要時）** | `cccc_tracked_send`、`cccc_memory`、`cccc_context_sync` |
 | **Group と Actor 制御（必要時）** | `cccc_group`、`cccc_actor`、`cccc_runtime_list` |
 | **ワークスペースツール（必要時）** | `cccc_repo`、`cccc_presentation`、`cccc_terminal`、`cccc_debug` |
 | **インスタンス検出** | `cccc_connect`、`cccc_message_send` と `cccc_file_send` の正確なインスタンス間宛先 |
@@ -513,6 +493,7 @@ CCCC はエージェントを置き換えるものではなく、それらをチ
 | [ユースケース](https://chesterra.github.io/cccc/guide/use-cases) | 実践的なマルチエージェントシナリオ |
 | [Web UI ガイド](https://chesterra.github.io/cccc/guide/web-ui) | ダッシュボードのナビゲーション |
 | [CCCC Connect](https://chesterra.github.io/cccc/guide/connect) | アカウント・Direct 接続、配信と権限境界 |
+| [ネイティブセッション](https://chesterra.github.io/cccc/guide/local-sessions) | 履歴を取り込まずに既存の Codex / Claude セッションを接続 |
 | [Voice Secretary](https://chesterra.github.io/cccc/guide/voice-secretary) | 音声入力、文書、入力欄のワークフロー |
 | [IM ブリッジ設定](https://chesterra.github.io/cccc/guide/im-bridge/) | Telegram、Slack、Discord、Mattermost、Feishu、DingTalk、WeCom、Weixin の接続 |
 | [Group Space](https://chesterra.github.io/cccc/guide/group-space-notebooklm) | NotebookLM ナレッジ統合 |

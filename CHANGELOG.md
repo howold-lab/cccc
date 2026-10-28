@@ -8,6 +8,87 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ### Added
 
+- A terminal interface for a bare `cccc` in an interactive terminal. Within at most 100 columns it shows the actual Web address, `CCCC_HOME`, whether this launch owns the daemon, a Group table with each Group's status and running count, and the native sessions this CCCC knows. Typing `/` lists the commands with their descriptions; Tab completes without running, and in terminals with bracketed paste, pasted newlines do not run a command. `/setup` connects Codex, Claude Code, Pi and OpenCode sessions through the existing enable step, with nothing picked by default and each app's next step shown afterwards. `/sessions` lists every native session and shows one session's details. `/quit` or Ctrl+C stops what the launch started and then reports what actually stopped. Tested on Linux; macOS and Windows terminals still need acceptance testing.
+- Groups in the terminal interface use the Web UI's status words. Up/Down and Enter on the main screen open a Group in `/groups`, which shows its recorded state, its actors and a link that opens it in the Web UI, and starts (`s`) or stops (`x`) it after a confirmation; a paused Group can be stopped directly. A start or stop whose answer never arrives is reported as unconfirmed, never as done.
+- `/groups` shows how many tasks the selected Group has in each state, and `t` lists them: the unfinished ones (Active, then Planned), or the Done ones after `d`, in pages. Enter shows one task read-only, with its status, assignee, checklist, notes and outcome; tasks are still edited in the Web UI.
+- `cccc --headless` starts the daemon and the Web UI without the terminal interface, with plain log output, for servers, containers, service managers and scripts. It is the same launch as `cccc web` and cannot be combined with a subcommand. `cccc --help` now describes the launch modes, the global options and every top-level command.
+
+### Changed
+
+- **Migration:** a bare `cccc` in an interactive terminal now opens the terminal interface instead of printing launch logs. Scripts and tmux automation that start `cccc` in a terminal should use `cccc --headless` (or `cccc web`), which keeps the plain output. Launches without a terminal or in read-only Exhibit mode stay plain. Options such as `--port` no longer select the plain output: `cccc --port 9000` in a terminal opens the interface on port 9000.
+- The Web UI and the terminal interface call a Group that was not stopped or paused, but has no running actor, Offline instead of Stopped; Stopped now means only that the Group was stopped. An Offline Group still offers Stop in the Web UI.
+- When the daemon a launch started cannot be confirmed stopped, `cccc` and `cccc web` now exit with an error instead of only printing a warning. Normal starts and stops are unchanged.
+- The Web native-session setup section leads with `/setup` and the four enable commands; registration checks and runtime troubleshooting moved into a collapsed section. With no session connected yet it opens by itself, and when a listed session cannot receive, a link opens its troubleshooting steps.
+- After an explicit Codex **Refresh status** in a native member's panel, the Web reads the Actor list again, so the status line above it no longer lags behind the check.
+- Messages to a native Codex session that is in the middle of a turn are now added to that turn, as pressing Enter does in the Codex CLI. Before, they were queued until the turn ended and then each opened a turn of its own, so one long turn could be followed by dozens of short turns re-reading messages Codex had already handled. While Codex is idle, compacting, or waiting for an approval or an answer, messages are queued as before. Your own input mode in Codex clients is unchanged.
+- Messages and system notices delivered to an actor show their original timestamp, as `sent=2026-10-28T01:45:03Z` (UTC) in the header. A runtime can show queued input long after CCCC handed it over, so an agent can tell an old instruction from a new one without looking up the history. Scripts that match the exact header text need updating.
+- Reading one message by `event_id` with the MCP `cccc_message_history` tool returns it once: `delivery_text` as before, plus a single `message` holding the event, instead of a `messages` list that repeated its text and insight. Quotes, attachments, references and source fields stay in `message`, and a text the delivery does not show in full, such as a typed `/install` command, is kept. History lists and the daemon `message_history` result are unchanged.
+
+### Fixed
+
+- Resuming the same Claude Code or Pi conversation after its former host exits reconnects its original Group memberships, retaining roles, paused access and pending-work receipts. Matching requires the original conversation and provider configuration; live duplicate hosts and conflicting memberships are not taken over. Claude's in-app resume also reattaches its long-lived Monitor.
+- Native `cccc_session` rejects message parameters on create-only, list or leave actions, instead of accepting them while discarding the message. Missing and paused memberships now identify the source and Group and explain the recovery action.
+- `cccc group set-state stopped` and the MCP `cccc_group` `set_state` action with `stopped` now stop the Group the way `group stop` does. Before, they recorded the stopped state while its actors kept running. The daemon's `group_set_state` now rejects `stopped`, as its IPC contract specifies; use `group_stop`. The Web API rejects `POST /api/v1/groups/<group_id>/state?state=stopped` the same way; use `POST /api/v1/groups/<group_id>/stop`.
+- `cccc ledger snapshot` and `cccc ledger compact` now fail with `group_not_found` for a Group that does not exist, including a deleted one. Before, they reported success and recreated files under the deleted Group's directory.
+
+## [0.4.45]
+
+### Added
+
+- Native Webhook Routine delivery for Grok Bot Actors through the Grok subscription and CCCC remote MCP connector, with ordered admission, task-scoped credentials, exact completion and explicit interrupted-task recovery. Existing Grok Actors require Routine setup; browser delivery is removed.
+- Retry-safe task creation with caller-owned `client_request_id`, `parent_ref` and `blocked_by_refs`; optional per-task `rev`/`if_task_rev` checks for existing-task operations.
+- Optional Context task pagination and rendered-response byte limits, exact stored-recipient and timestamp filters for history search, and passive terminal output timestamps/quiet durations in Actor queries.
+- Opt-in repeat Mail reminders through `delivery.mail_notice_repeat_seconds`, defaulting to zero. Repeats preserve pending-delivery ownership and never replay the underlying work.
+
+### Changed
+
+- Align Web Model access controls and connection setup while retaining browser login, Dots event pairing and Grok Routine differences. Actor details focus on operation, editors on setup; Dots retains vertical progress. Enabled-Actor edits preserve drafts and apply only when the runtime lifecycle permits.
+- Show claimed Dots/Grok turns as awaiting completion and allow users to end an exact unfinished turn without first pausing. Retire its execution authority while preserving access and connection state, without stopping cloud work or replaying inputs.
+- Stream Inbox and startup-recovery ledger facts into compact projections, bound archive file handles, and batch selected gzip records by segment. Bound recoverable Web Group caches and retire unused terminal streams while protecting active output and drafts.
+- Clarify Direct/account invitation flows, local/remote Group identity, retrying connection errors and approval state.
+
+### Fixed
+
+- Protect ChatGPT drafts, generation and exact user/assistant receipt boundaries in the current page layout; distinguish current readiness from stale login/delivery status and provide a shared-login entry point.
+- Clear old Grok Routine drafts and credentials when switching Bots; acknowledge canonical Bot URLs after saving; prevent stale completion credentials from completing a newer task.
+- Distinguish paused Dots access from host-identity and Actor lifecycle failures, preserve paused access during setup, and add bounded salted identity diagnostics. Clarify current-turn credential handoff through host tool arguments without putting credentials in saved handlers or CCCC business code.
+- Persist new task reference targets before dependents across task-number digit widths and partial-write retries. Clear removed Actors' open-task assignment/handoff references and hot/warm working state while preserving progress and historical ownership; prevent foreman self-removal and record user-triggered succession.
+- Preserve Claude sessions across queued-input interruption and late replies, pause repeated automatic restoration failures, and retain resources until authoritative stop. Honor Codex command model selection, avoid replaying failed DeepSeek turns, expose safe Pi tool activity, and settle Pi length stops without final text as failed.
+- Avoid claim-table pruning for unrelated ledger events, blocking optional terminal observations, and command-substitution secrets in Pi activity summaries. Correct cloudflared multicall fixtures, Chrome CI selection and lazy Guidance test readiness.
+
+## [0.4.44]
+
+### Added
+
+- Multi-sender conversation filters with per-Group browser preferences, independent older-history pagination, and context navigation. Filters combine with message types and remain selected after sending; hidden outgoing messages offer a link back to their originating Group.
+- Experimental subscription-backed Grok Voice alongside Codex Voice, using the host's Grok Build login without a separate API key. Select the next call's service and voice directly in the console header; provider-specific choices share Settings preferences and the independent Analyst.
+- Expanded Codex subscription voice catalog with searchable primary-language hints for newly documented profiles.
+- Video attachment previews and focused playback with authenticated byte ranges, pause-on-other-video behavior and download fallback for unsupported formats.
+
+### Changed
+
+- Project Context edits the active workspace's `AGENTS.md`, leaving instruction loading to each runtime. Remove special `PROJECT.md` startup handling, the dedicated `cccc_project_info` MCP tool, bootstrap metadata and `/project_md` endpoint. Existing files remain untouched; custom integrations and reusable instructions need deliberate migration.
+- Terminal pages adapt to available width and height with up to four panes in a 2×2 grid. Shared dividers, compact controls and Actor avatars recover space in tiled native, Web Model, Dots and managed-output views.
+- Project Context uses one navigation row with separate task, repository-instruction, Agent State, coordination-log and skill views, retaining drafts and task filters across sections. Voice sidebar entries and compact headers keep the service and voice visible, using current preferences when idle and actual call metadata during calls. Task-board summaries preserve status, actions and full-content expansion without adding global density settings.
+- Confirmed closed Direct connections are cleaned up automatically; active, offline and uncertain records remain visible. Queued messages retain their route; removal releases the Direct preference for future independently authorized routing.
+- Website installers resolve the latest stable release at execution time while retaining explicit version selection. Reduce repeated ledger/status scans, blocking SSE polling and unrelated Web rendering; consolidate IM and settings helpers.
+
+### Fixed
+
+- Keep sender-filtered history complete and in ledger order across delayed hydration, clock changes, replay and reconnect catch-up. Project live read, reply, cancellation and cross-Group receipts into older filtered pages.
+- Preserve Group selection on refresh by synchronizing real switches with the URL. Restore valid last selection before falling back to the first unarchived Group in sidebar order; explicit Group/message links retain priority.
+- Keep Voice Analyst requests actionable with bounded recent conversation and the user's request language. Sequence complete Grok reports, including manual investigations, and keep unrelated acknowledgements from blocking later ready work. Settle missing native input echoes, lost admission owners and ACP disconnects without indefinitely blocking the queue.
+- Close Codex turns with no final transcript, retain new Grok speech demand during response startup, handle pending VAD replies and completion-only updates, and buffer Grok playback while rejecting stale response audio. Reported Grok pitch/timbre drift remains unresolved.
+- Capture the original Group's composer draft before asynchronous recording startup; metadata-only document refreshes no longer create false remote-edit conflicts. Blank voice-flush session IDs receive a fresh ID.
+- Preserve settings drafts and valid Profile credential-metadata reads across failed saves and navigation. Reconcile independent completed writes, retain pending exports after closing Settings, preserve skill assignment drafts during content saves and prevent assignment saves from undoing skill blocks.
+- Prevent automatic Context retry loops and stale in-flight reads from overwriting accepted Actor, Context, capability, Prompt or Web Access changes. Retain task summary fields during editing and current managed Actor status after recovery.
+
+## [0.4.43]
+
+### Added
+
+- Local cross-Group file and image attachments through Web uploads and MCP `cccc_file_send`, with a 100 MiB combined limit. Validate source bytes, scope and destination placement before ledger writes, preserve the accepted content on interrupted relay retries, and retain both Groups' reply references and obligations.
+- ChatGPT Dots through native MCP Events and the shared ChatGPT connector: explicit conversation pairing, persistent event subscriptions, credential-free saved handlers, per-turn execution authority and exact completion receipts. Actor and settings views provide setup, instruction regeneration, delivery stages and bounded safe diagnostics; callbacks support configured proxies. Dots does not use browser message delivery.
 - Runtime Profile summaries distinguish native TUI, ACP and Pi RPC. OpenCode and Kilo expose their existing New session action in the Actor pane.
 - Pi official RPC support across Actors, Runtime Profiles, Voice Analyst and Voice Secretary, with session-local MCP, verified resume, precise cancellation and explicit extension interactions. Pi requires 1.1.0 or newer and has a structured workspace rather than a native terminal attachment.
 - Optional official ACP modes for Kimi Code, Auggie, Kiro V3, Hermes and Droid, sharing the existing managed lifecycle and Voice adapters while retaining native TUI defaults. Model and permission settings apply on new and resumed sessions; saved settings do not change a running surface before restart. Hermes cancellation retires its process while retaining the conversation, preventing interrupted input from being replayed into a subsequent task.
@@ -20,6 +101,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ### Changed
 
+- Improve mobile Presentation navigation, slot selection and Standard/Enhanced previews; follow the visual viewport for overlays, coalesce terminal resize requests, and normalize composer slash commands and attachment chips.
 - Share labelled controls, compact page layouts and save actions across settings pages. The settings menu groups appearance and presentation controls and provides an explicit All settings entry.
 - Notify idle managed Actors immediately when concrete Mail is written, preserving the configured disable switches and ordinary delay for busy or unknown states. Broadcast Mail does not accelerate other pending Mail, and Mail consumption remains explicit.
 - Simplify the Group header and sidebar, and give terminal panels full-height columns with fewer simultaneous panels on narrow screens.
@@ -31,6 +113,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ### Fixed
 
+- Ignore the obsolete per-Group Secretary enable flag for recording, preserving lease ownership and Group permissions. Reject invalid destination scopes and unreadable or content-mismatched existing blobs before recording a cross-Group send; existing files are not overwritten.
+- Keep Dots pairing codes valid across pause/resume until their ten-minute expiry, retain instruction regeneration while setup is incomplete, and revalidate captured authority before pending local-tool side effects. Older saved cloud tasks require the current handler; upgrading CCCC does not silently rewrite them.
+- Preserve restored Actor-start facts and process-exit diagnostics; settle managed failures and cancellations exactly once. Replayed historical failures cannot replace newer daemon state, while matching late stop events still clear terminated streaming output.
+- Read and edit Profiles with missing stored scope/owner fields using the established defaults, and validate private-environment copy sources independently of their targets, including the Web selectors.
 - Correct Hermes native MCP setup argument order and confirmations, and verify the saved entry is enabled before reporting success. ACP startup and prompt errors identify the failed request and retain bounded, redacted Hermes diagnostic details.
 - Keep Kiro V3 ACP authentication with its native CLI login. Surface unconfirmed ACP prompt submission errors in the Actor execution record with safe diagnostics and RPC codes, preserving ambiguous delivery and preventing automatic replay.
 - Keep Guidance reads and mutations tied to their original Group, and constrain expanded-editor keyboard focus to its own dialog. Connector setup checks the configured Web address before creation, warns for known local HTTPS addresses and does not claim verified connectivity.

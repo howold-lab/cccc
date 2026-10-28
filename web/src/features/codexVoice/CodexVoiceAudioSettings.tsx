@@ -1,9 +1,9 @@
 import { useTranslation } from "react-i18next";
-import { SelectCombobox } from "../../components/SelectCombobox";
 import { inputClass } from "../../components/modals/settings/types";
 import { SettingsCard, SettingsRow } from "../../components/modals/settings/SettingsKit";
-import { formatCodexVoiceName, type CodexRealtimeVoice } from "./codexVoicePreferences";
+import { SpeakingVoiceSelect } from "./SpeakingVoiceSelect";
 import type { CodexVoiceSessionController } from "./useCodexVoiceSessionController";
+import { VoiceProviderSelect } from "./VoiceProviderSelect";
 
 export function CodexVoiceAudioSettings({
   controller,
@@ -14,19 +14,13 @@ export function CodexVoiceAudioSettings({
   return (
     <SettingsCard
       title={t("codexVoiceSettingsVoiceAudio")}
-      description={t("codexVoiceAudioPreferencesHint")}
+      description={`${t("codexVoiceExperimental")} · ${t("codexVoiceAudioPreferencesHint")}`}
     >
+      <SettingsRow label={t("codexVoiceProviderLabel")}>
+        <VoiceProviderSelect controller={controller} className={inputClass()} />
+      </SettingsRow>
       <SettingsRow label={t("codexVoiceVoiceLabel")}>
-        <SelectCombobox
-          ariaLabel={t("codexVoiceVoiceLabel")}
-          className={inputClass()}
-          value={controller.preferences.voice}
-          onChange={(voice) => controller.updatePreferences({ voice: voice as CodexRealtimeVoice })}
-          items={controller.supportedVoices.map((voice) => ({
-            value: voice,
-            label: formatCodexVoiceName(voice),
-          }))}
-        />
+        <SpeakingVoiceSelect controller={controller} className={inputClass()} />
       </SettingsRow>
     </SettingsCard>
   );

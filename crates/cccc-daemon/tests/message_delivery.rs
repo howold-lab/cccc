@@ -106,7 +106,20 @@ async fn serializes_delivery_and_keeps_read_as_a_separate_fact() {
         .as_str()
         .expect("reply event id");
 
-    wait_for(&client, &group_id, &format!("[event_id={reply_event_id}]")).await;
+    // The envelope carries the event's original timestamp to the second.
+    let sent = |result: &Map<String, Value>| {
+        let ts = result["event"]["ts"].as_str().expect("event ts");
+        format!("{}Z", &ts[..19])
+    };
+    let (first_sent, second_sent) = (sent(&first.result), sent(&second.result));
+    let (notify_sent, reply_sent) = (sent(&notify.result), sent(&reply.result));
+
+    wait_for(
+        &client,
+        &group_id,
+        &format!("[event_id={reply_event_id} sent={reply_sent}]"),
+    )
+    .await;
     let tail = daemon_call(
         &client,
         "terminal_tail",
@@ -116,14 +129,16 @@ async fn serializes_delivery_and_keeps_read_as_a_separate_fact() {
     let text = tail.result["text"].as_str().unwrap_or_default();
     assert!(text.contains("PREAMBLE:[CCCC] You are peer1"));
     assert!(text.contains(&format!(
-        "FIRST:[cccc] user → peer1 [event_id={first_event_id}]: one"
+        "FIRST:[cccc] user → peer1 [event_id={first_event_id} sent={first_sent}]: one"
     )));
     assert!(text.contains(&format!(
-        "SECOND:[cccc] user → peer1 [event_id={second_event_id}]: two"
+        "SECOND:[cccc] user → peer1 [event_id={second_event_id} sent={second_sent}]: two"
     )));
-    assert!(text.contains("THIRD:[cccc] SYSTEM (info): notice"));
     assert!(text.contains(&format!(
-        "FOURTH:[cccc] user → peer1 (reply:{}) [event_id={reply_event_id}]",
+        "THIRD:[cccc] SYSTEM (info) [sent={notify_sent}]: notice"
+    )));
+    assert!(text.contains(&format!(
+        "FOURTH:[cccc] user → peer1 (reply:{}) [event_id={reply_event_id} sent={reply_sent}]",
         &first_event_id[..8]
     )));
     assert!(text.contains("> \"one\": fix it"));
@@ -386,6 +401,109 @@ fn inbox_read_consumes_only_mail_in_append_order() {
     );
     assert_eq!(empty.result["messages"], json!([]));
     assert!(empty.result["event"].is_null());
+}
+
+#[test]
+fn exact_message_history_is_visible_generation_scoped_and_non_consuming() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group_id = stopped_peer_group(&home, "exact history");
+    call(
+        &home,
+        "actor_add",
+        json!({"group_id":group_id,"actor_id":"peer2","by":"user"}),
+    );
+    let body = "quoted \"message\" 界😀\n".repeat(1_000);
+    let old = call(
+        &home,
+        "send",
+        json!({"group_id":group_id,"by":"user","to":["peer1"],"text":body,"message_mode":"request_reply"}),
+    );
+    let private = call(
+        &home,
+        "send",
+        json!({"group_id":group_id,"by":"user","to":["peer2"],"text":"other Actor only","message_mode":"send"}),
+    );
+    let store = GroupStore::new(home.clone()).expect("store");
+    let path = store.ledger_path(&group_id).expect("ledger");
+    for _ in 0..110 {
+        let mut newer = Event::new("chat.message", &group_id);
+        newer.by = "user".into();
+        newer.data = json!({"to":["peer1"],"text":"newer","message_mode":"send"})
+            .as_object()
+            .expect("data")
+            .clone();
+        ledger::append(&path, &newer).expect("newer event");
+    }
+    let before = std::fs::read(&path).expect("ledger before read");
+    let exact = call(
+        &home,
+        "message_history",
+        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.result["event"]["id"]}),
+    );
+    assert_eq!(exact.result["messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(exact.result["messages"][0]["data"]["text"], body);
+    assert!(
+        exact.result["delivery_text"]
+            .as_str()
+            .expect("rendered message")
+            .contains(&body)
+    );
+    assert_eq!(exact.result["has_more"], false);
+    assert_eq!(std::fs::read(&path).expect("ledger after read"), before);
+    let notice = call(
+        &home,
+        "system_notify",
+        json!({
+            "group_id":group_id,"by":"system","title":"notice","message":"Complete system guidance",
+            "target_actor_id":"peer1"
+        }),
+    );
+    let exact_notice = call(
+        &home,
+        "message_history",
+        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":notice.result["event"]["id"]}),
+    );
+    assert_eq!(exact_notice.result["messages"][0]["kind"], "system.notify");
+    assert!(
+        exact_notice.result["delivery_text"]
+            .as_str()
+            .expect("notice text")
+            .contains("Complete system guidance")
+    );
+    for event_id in [private.result["event"]["id"].clone(), json!("missing")] {
+        let denied = call_raw(
+            &home,
+            "message_history",
+            json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":event_id}),
+        );
+        assert_eq!(denied.error.expect("not visible").code, "event_not_found");
+    }
+    let conflict = call_raw(
+        &home,
+        "message_history",
+        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.result["event"]["id"],"limit":1}),
+    );
+    assert_eq!(
+        conflict.error.expect("exclusive exact lookup").code,
+        "invalid_args"
+    );
+    call(
+        &home,
+        "actor_remove",
+        json!({"group_id":group_id,"actor_id":"peer1","by":"user"}),
+    );
+    call(
+        &home,
+        "actor_add",
+        json!({"group_id":group_id,"actor_id":"peer1","by":"user"}),
+    );
+    let stale = call_raw(
+        &home,
+        "message_history",
+        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.result["event"]["id"]}),
+    );
+    assert_eq!(stale.error.expect("old generation").code, "event_not_found");
 }
 
 #[test]
@@ -2120,6 +2238,24 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
     }
 }
 
+/// Fail ledger appends while reads still work. Root/CAP_DAC_OVERRIDE bypass
+/// mode bits; such a run skips the case rather than pretending it was tested.
+fn block_ledger_writes(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+    if std::fs::OpenOptions::new().append(true).open(path).is_ok() {
+        allow_ledger_writes(path);
+        eprintln!("ledger write-failure case skipped: this process bypasses file mode bits");
+        return false;
+    }
+    true
+}
+
+fn allow_ledger_writes(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).expect("writable");
+}
+
 fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
     let response = call_raw(home, op, args);
     assert!(
@@ -2467,10 +2603,11 @@ fn local_cross_group_reply_routes_back_to_origin_and_threads_there() {
 
     // Simulate failure after the local audit event was accepted. Retry must
     // recover the remote parent from that event, without duplicating either copy.
+    // The origin stays readable: replies prove their route from its ledger.
     let path = store.ledger_path(source_id).expect("ledger path");
-    let held = path.with_extension("retry-fixture");
-    std::fs::rename(&path, &held).expect("hold fixture ledger");
-    std::fs::create_dir(&path).expect("block fixture destination");
+    if !block_ledger_writes(&path) {
+        return;
+    }
     let pending = call_raw(
         &home,
         "reply",
@@ -2479,8 +2616,7 @@ fn local_cross_group_reply_routes_back_to_origin_and_threads_there() {
             "text":"retry answer", "message_mode":"mail", "client_id":"partial-reply"
         }),
     );
-    std::fs::remove_dir(&path).expect("unblock fixture destination");
-    std::fs::rename(&held, &path).expect("restore fixture ledger");
+    allow_ledger_writes(&path);
     assert!(!pending.ok);
     assert_eq!(
         (count(source_id), count(destination_id)),
@@ -2502,73 +2638,6 @@ fn local_cross_group_reply_routes_back_to_origin_and_threads_there() {
     assert_eq!(
         (count(source_id), count(destination_id)),
         (before.0 + 1, before.1 + 1)
-    );
-}
-
-#[test]
-fn cross_group_attachments_are_rejected_without_settling_reply_obligations() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-    let store = GroupStore::new(home.clone()).expect("store");
-    let origin = store.create("origin", "").expect("origin");
-    let receiver = store.create("receiver", "").expect("receiver");
-    call(
-        &home,
-        "actor_add",
-        json!({"group_id":receiver.group_id,"actor_id":"receiver","by":"user"}),
-    );
-    store
-        .mutate(&receiver.group_id, |group| {
-            group.state = cccc_contracts::GroupState::Paused;
-            Ok(())
-        })
-        .expect("pause fixture");
-    let sent = call(
-        &home,
-        "send_cross_group",
-        json!({
-            "group_id":origin.group_id,"dst_group_id":receiver.group_id,"by":"user",
-            "to":["receiver"],"text":"question","message_mode":"request_reply"
-        }),
-    );
-    let parent = &sent.result["dst_event"]["id"];
-    let blob = cccc_core::blobs::store(&home, &receiver.group_id, b"reply attachment")
-        .expect("local blob");
-    let read = |group_id: &str| {
-        ledger::read_all(&store.ledger_path(group_id).expect("ledger path")).expect("ledger")
-    };
-    let before = (read(&origin.group_id), read(&receiver.group_id));
-    for op in ["reply", "send_cross_group"] {
-        let mut args = json!({
-            "group_id":receiver.group_id,"dst_group_id":origin.group_id,"by":"receiver",
-            "reply_to":parent,"text":"answer","message_mode":"send",
-            "attachments":[{"path":blob.path}]
-        });
-        if op == "send_cross_group" {
-            args["to"] = json!(["user"]);
-        }
-        let rejected = call_raw(&home, op, args);
-        assert!(!rejected.ok);
-        assert_eq!(
-            read(&origin.group_id),
-            before.0,
-            "destination must not change"
-        );
-        assert_eq!(read(&receiver.group_id), before.1, "source must not change");
-        assert_eq!(
-            rejected.error.as_ref().map(|error| error.code.as_str()),
-            Some("attachments_not_supported")
-        );
-    }
-    let status = call(
-        &home,
-        "ledger_statuses",
-        json!({"group_id":receiver.group_id,"event_ids":[parent]}),
-    );
-    assert_eq!(
-        status.result["statuses"][parent.as_str().expect("parent")]["obligation_status"]["receiver"]
-            ["replied"],
-        false
     );
 }
 
@@ -2607,15 +2676,12 @@ fn cross_group_retries_reject_conflicting_routes_even_after_partial_delivery() {
             "text":"original answer","message_mode":"send","client_id":client_id
         });
         let path = store.ledger_path(&origin.group_id).expect("ledger path");
-        let held = path.with_extension("retry-fixture");
-        if partial {
-            std::fs::rename(&path, &held).expect("hold fixture ledger");
-            std::fs::create_dir(&path).expect("block fixture destination");
+        if partial && !block_ledger_writes(&path) {
+            continue;
         }
         let accepted = call_raw(&home, "reply", original_args.clone());
         if partial {
-            std::fs::remove_dir(&path).expect("unblock fixture destination");
-            std::fs::rename(&held, &path).expect("restore fixture ledger");
+            allow_ledger_writes(&path);
         }
         assert_eq!(accepted.ok, !partial);
         let before = (

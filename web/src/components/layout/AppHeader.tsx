@@ -1,7 +1,7 @@
 import { useUIStore } from "../../stores/useUIStore";
 import type { Ref } from "react";
 import { useTranslation } from "react-i18next";
-import { getGroupStatusFromSource } from "../../utils/groupStatus";
+import { GROUP_STATUS_LABEL_KEYS, getGroupStatusFromSource } from "../../utils/groupStatus";
 import { GroupDoc, GroupRuntimeStatus, TextScale, Theme } from "../../types";
 import { ChevronDownIcon, ClipboardIcon, EditIcon, SearchIcon, MoreIcon, MenuIcon } from "../Icons";
 import { IconButton } from "../ui/icon-button";
@@ -78,14 +78,7 @@ export function AppHeader({
   const runLabel = selectedStatus
     ? t("groupRun.control", {
         group: groupTitle,
-        state: t(
-          {
-            run: "statusRunning",
-            paused: "statusPaused",
-            idle: "statusIdle",
-            stop: "statusStopped",
-          }[selectedStatus.key],
-        ),
+        state: t(GROUP_STATUS_LABEL_KEYS[selectedStatus.key]),
       })
     : "";
   const sseErrorDetail = useSseErrorDetailText();
@@ -105,7 +98,7 @@ export function AppHeader({
       : [],
   );
   return (
-    <header className="@container/group-header absolute inset-x-0 top-0 z-20 flex h-14 shrink-0 items-center px-3 glass-header md:relative md:inset-auto md:px-4">
+    <header className="@container/group-header absolute inset-x-0 top-0 z-20 flex h-14 shrink-0 items-center px-3 glass-header md:relative md:inset-auto md:h-11 md:px-3">
       <div
         className="@container/group-work-header flex min-w-0 flex-1 items-center gap-2 pr-2 md:pr-3"
         data-group-header-work
@@ -123,7 +116,7 @@ export function AppHeader({
           </IconButton>
           <div className="min-w-0">
             <h1
-              className="min-w-0 truncate text-base font-semibold leading-tight text-[var(--color-text-primary)] md:text-[1.125rem]"
+              className="min-w-0 truncate text-base font-semibold leading-tight text-[var(--color-text-primary)]"
               title={groupTitle}
             >
               {groupTitle}

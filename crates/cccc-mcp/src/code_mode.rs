@@ -231,6 +231,17 @@ pub(crate) fn binding_identity(binding: &Value) -> Value {
             identity[field] = binding[field].clone();
         }
     }
+    if binding["transport"] == "grok_webhook" {
+        for field in [
+            "transport",
+            "grok_epoch",
+            "grok_wake_id",
+            "grok_stage",
+            "grok_turn_id",
+        ] {
+            identity[field] = binding[field].clone();
+        }
+    }
     identity
 }
 
@@ -758,6 +769,7 @@ async fn call_nested(
         Some(crate::RequestContext {
             group_id: &owner.group_id,
             actor_id: &owner.actor_id,
+            native_binding: None,
             binding: owner.binding.as_ref(),
         }),
         false,

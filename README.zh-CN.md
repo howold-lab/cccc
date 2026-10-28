@@ -6,12 +6,12 @@
 
 ### 像群聊一样指挥你的编码智能体
 
-**已读回执、送达追踪、跨实例协作、手机远程运维 ——
-Claude Code、Codex、ChatGPT Web 等受支持的运行时，在同一个持久协作组里。**
+**以本地为中心协调编码智能体：持久协作状态、明确的消息状态、
+跨实例协作，以及 Web／IM 访问。**
 
-让多个 coding agent 跨运行时、跨机器、跨可信协作组作为一支**持久化、可协调的团队**运行 — 而不是一堆各自为政的终端窗口。
+让多个 coding agent 跨运行时、跨机器、跨可信协作组作为一支**持久化、可协调的团队**运行。
 
-一条安装命令，无需 Rust 工具链或额外基础设施。
+一条安装命令，无需 Rust 工具链、数据库服务器、消息队列或 Docker。
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=232425)](https://pypi.org/project/cccc-pair/)
 [![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
@@ -41,7 +41,7 @@ CCCC 让你的 agent 作为一套持久、可协调的系统运行：
 - **协作可持久** — 消息历史进入 append-only ledger；任务和共享上下文分别持久化保存。
 - **触达事实可见** — 路由、存储、runtime 投递、已读和回复各自记录，不再把“已发送”当作“已看到”。
 - **控制面统一** — Web UI、CLI、MCP、IM 桥接全部围绕同一 daemon 运作，不会出现多套状态。
-- **多运行时是默认能力** — Claude Code、Codex CLI、ChatGPT Web、Grok Build 以及其它受支持的运行时可以在同一协作组内协同工作。
+- **多运行时是默认能力** — 受支持的 CLI 运行时和可选的 Web 接入可在同一协作组内协同工作，各自保留不同的能力与配置要求。
 - **CCCC Connect 跨实例协作** — 支持同账户发现、经批准的跨会员 Group 连接，以及免账号的 Direct 连接；各实例保持自己的状态和权限边界。
 - **本地优先但可远程值守** — 单条安装命令即可启动，运行时状态放在 `CCCC_HOME`，需要时再通过 Web / IM 远程运维。
 
@@ -57,19 +57,19 @@ CCCC 只需一条安装命令，无需单独运维数据库、消息队列或 Do
 | **多运行时编排** | 同一 Group 可混用受支持的编码智能体运行时；其它命令行智能体可使用 `custom` |
 | **CCCC Connect** | 连接自己的实例、不同会员的指定 Group，或免账号直连两个 Group |
 | **工作区工具** | 浏览和编辑文件、查看 Git 变更、在 Presentation 固定文档，并操作平铺原生终端 |
-| **语音工作流** | 全局语音秘书在共享会话中处理各 Group 的语音、文档和输入框草稿；实验性 Codex Voice 使用独立的实时语音 Analyst |
+| **语音工作流** | 全局语音秘书在共享会话中处理各 Group 的语音、文档和输入框草稿；实验性 Codex Voice 与 Grok Voice 使用独立 Analyst |
 | **角色化协调** | Foreman + Peer 角色模型，权限边界清晰，收件人路由精确（`@all`、`@peers`、`@foreman`） |
 | **本地优先的运行时状态** | 运行时数据保存在 `CCCC_HOME` 而不是代码仓库里，同时仍可通过 Web Access 与 IM 做远程运维 |
 
-## 0.4.42 要点
+## 0.4.45 要点
 
-- **可选官方 ACP**：Antigravity、GitHub Copilot、Devin CLI 和 Cursor 支持没有原生终端的结构化 Actor 与 Voice Analyst。默认仍是 TUI，保存的模式变更在重启或下次启动时生效。
-- **语音调查与宿主人设**：ACP 调查展示任务状态、人工决策和结果；绑定通话的已完成结果回传到该通话的 Realtime 上下文。宿主 API 可发起不使用 Analyst、也不插入 Actor 通知的 persona 通话。
-- **会话恢复**：Claude 对无法验证的恢复暂停自动启动，显示诊断并提供明确恢复操作；Codex 恢复长会话时不再向 CCCC 传输完整历史。关闭托管终端保留健康的供应商会话。
-- **更清晰的日常控制**：细活动环、准确的未读 Mail 角标、按 Group 保留收件人、安装检测，以及更可预测的 Actor/Profile 保存行为。
-- **Grok 与生命周期可靠性**：必填 Bot URL 支持关联 Profile，登录窗口可独立关闭，Unix 进程清理在崩溃后仍保留未解决的所有权记录。
+- **Grok Bot 原生投递**：使用 Webhook Routine 与远程 MCP 替代画面投递，提供有序任务准入、限定凭据和显式恢复。已有 Grok Actor 需要配置 Routine。
+- **Web Model 设置更清晰**：统一访问和编辑操作，同时保留 ChatGPT 浏览器登录、Dots 事件配对与 Grok Routine 的差异。ChatGPT 适配当前页面结构，并提供共享登录入口。
+- **减少大型 Group 的重复工作**：紧凑 Inbox 投影、有界归档句柄、gzip 批量读取和有界 Web 缓存保留历史及活动输出。可选 Mail 重复提醒默认关闭，不重放任务。
+- **任务操作更稳妥**：创建请求身份及引用支持任务树重试，可选 revision 检查拒绝过期编辑。Context 分页和字节限制约束请求结果，移除 Actor 时清理失效任务引用和工作状态。
+- **恢复行为更明确**：改善 Claude 中断／恢复与停止诊断，遵循 Codex 命令中的模型选择，避免重放 DeepSeek 失败轮次，并展示安全的 Pi 工具活动。直连预览明确 Group 身份和连接重试错误。
 
-设置、升级步骤与验证边界见 [0.4.42 英文发布说明](docs/release/v0.4.42_release_notes.md)。从更早的 Actor 专属 ChatGPT 连接器升级时，请遵循 [0.4.41 说明](docs/release/v0.4.41_release_notes.md)中的共享连接器迁移步骤。
+升级步骤与功能边界见 [0.4.45 英文发布说明](docs/release/v0.4.45_release_notes.md)。实时语音仍属实验功能，Grok 声调／音色漂移尚未确认修复。全局秘书仍共享各 Group 的模型历史。本版不包含外部会话热接入。
 
 ## 快速上手
 
@@ -123,7 +123,15 @@ Windows 尤其如此。如果要在同一命令目录从 pip 切换到官网安�
 cccc
 ```
 
-打开 **http://127.0.0.1:8848** — 默认会一起拉起 daemon 和本地 Web UI。
+在交互式终端里运行 `cccc`，会打开一个简洁的终端界面，并同时拉起 daemon 和本地 Web UI。
+这个界面是一个状态面板：显示 Web 地址、daemon 是否由本次启动、各工作组的状态和运行中的成员，以及原生会话。
+用上下键选中工作组，按 Enter 打开，可以查看它的任务（只读），也可以启动或停止它。输入 `/` 可查看全部命令：`/sessions` 列出所有原生会话，
+`/setup` 可接入 Codex、Claude Code、Pi 或 OpenCode 会话，`/quit`（或 Ctrl+C）会停止本次启动的服务。
+其余功能都在 Web UI 里。
+
+完整的 Web UI 在 **http://127.0.0.1:8848**。不需要终端界面时，例如在服务器、容器、服务管理器或
+脚本中启动，请使用 `cccc --headless`（或 `cccc web`），它保持纯日志输出。输入或输出不是终端时，
+以及只读（Exhibit）模式下，`cccc` 也会以 headless 方式运行。
 直接通过 `localhost` / `127.0.0.1` 使用时保持免密，也不会自动创建 Access Token。
 只有开启 LAN、Remote Access、公网 URL 或反向代理访问时才需要显式管理员 Token。
 
@@ -176,58 +184,20 @@ SDK 不包含 daemon，需要连接已运行的 `cccc` 本体实例。
 
 ```mermaid
 graph TB
-    subgraph Agents["Agent 运行时"]
-        direction LR
-        A1["Claude Code"]
-        A2["Codex CLI"]
-        A3["ChatGPT Web<br/>Remote MCP"]
-        A4["Grok Build"]
-        A5["其它运行时 + custom"]
-    end
+    A1["CLI 运行时 + custom<br/>Codex · Claude · Grok · ..."]
+    A3["Web 运行时<br/>ChatGPT Web · Grok Bot"]
+    A6["ChatGPT Dots"]
+    Daemon["CCCC daemon · 单写者<br/>账本 · 任务 · 上下文 · Actor 生命周期"]
+    Ports["CCCC Web UI · CLI · MCP"]
+    IM["IM 桥接"]
+    Remote["已连接的 CCCC Groups"]
 
-    subgraph Daemon["CCCC Daemon · 单写者"]
-        direction LR
-        Ledger[("Ledger<br/>append-only JSONL")]
-        ActorMgr["Actor<br/>管理器"]
-        Auto["自动化<br/>规则 · 催办 · Cron"]
-        Ledger ~~~ ActorMgr ~~~ Auto
-    end
-
-    subgraph Ports["控制面"]
-        direction LR
-        Web["Web UI<br/>:8848"]
-        CLI["CLI"]
-        MCP["MCP<br/>(stdio)"]
-    end
-
-    subgraph IM["IM 桥接"]
-        direction LR
-        TG["Telegram"]
-        SL["Slack"]
-        DC["Discord"]
-        MM["Mattermost"]
-        FS["飞书"]
-        DT["钉钉"]
-        WC["企业微信"]
-        WX["微信"]
-    end
-
-    subgraph Remote["已连接的 CCCC Groups"]
-        direction LR
-        RG1["另一个实例"]
-        RG2["另一台机器"]
-    end
-
-    A1 <-->|原生终端<br/>MCP + 控制协议| Daemon
-    A2 <-->|原生终端<br/>MCP + 控制协议| Daemon
+    A1 <-->|终端 / 运行时协议<br/>MCP| Daemon
     A3 <-->|浏览器投递<br/>远程 MCP| Daemon
-    A4 <-->|MCP 工具| Daemon
-    A5 <-->|MCP 工具| Daemon
+    A6 <-->|MCP Events<br/>远程 MCP| Daemon
     Daemon <--> Ports
-    Web <--> IM
-    Daemon <-->|CCCC Connect<br/>账户授权通信| RG1
-    Daemon <-->|Direct<br/>已批准的 Group 配对| RG2
-
+    Ports <-->|Web 承载的桥接| IM
+    Daemon <-->|CCCC Connect / Direct<br/>已批准的连接| Remote
 ```
 
 **关键设计决策：**
@@ -240,7 +210,7 @@ graph TB
 
 ## 支持的运行时
 
-CCCC 内置 20 种运行时接入，另支持通过 `custom` 启动其它命令行智能体。同一 Group 的 Actor 可使用不同运行时，其交互方式与配置要求也有所区别：
+CCCC 提供以下运行时接入，另支持通过 `custom` 启动其它命令行智能体。同一 Group 的 Actor 可使用不同运行时，其交互方式与配置要求也有所区别：
 
 | 运行时 | 接入方式 | 入口 |
 |---------|----------|-------------|
@@ -254,8 +224,9 @@ CCCC 内置 20 种运行时接入，另支持通过 `custom` 启动其它命令�
 | Kiro CLI | 原生 TUI 或官方 ACP；ACP 按会话注入 MCP | `kiro-cli` |
 | Kilo Code CLI | 托管 ACP 会话 + 原生 TUI；按会话注入 MCP | `kilo` |
 | Antigravity CLI | 自动 MCP 配置 | `agy` |
-| ChatGPT Web | 远程 MCP + 浏览器投递 | `chatgpt.com` 对话 |
-| Grok Bot Web Model | 远程 MCP + 浏览器投递；按 Actor 凭据路由 | 必填 `grok.com/bot/<UUID>` URL |
+| ChatGPT Web | 浏览器界面投递 + 远程 MCP | `chatgpt.com` 对话 |
+| ChatGPT Dots | MCP Events + 任务范围内的远程 MCP；无浏览器消息投递 | 一个明确配对的 Dot |
+| Grok Bot Web Model | 远程 MCP + 原生 Webhook；每 Actor 独立任务权限 | 必填 `grok.com/bot/<UUID>` URL |
 | Grok Build | 托管 ACP 会话 + 原生 TUI；自动配置原生 MCP | `grok` |
 | Hermes Agent | 原生 TUI 或官方 ACP；ACP 按会话注入 MCP | `hermes` |
 | Droid | 原生 TUI 或官方 ACP；ACP 按会话注入 MCP | `droid` |
@@ -284,21 +255,27 @@ GitHub Copilot、Devin CLI、Cursor、Kimi Code、Auggie、Kiro V3、Hermes、Dr
 
 Antigravity 还支持可选的**官方 ACP 模式**，可用于 Actor 与 Voice Analyst，以结构化工作区代替终端。在 Actor／Profile 设置中选择 ACP，并运行一次 `cccc setup --runtime antigravity --runtime-mode acp --login`，完成独立的 CCCC 登录。忙时输入排队和单次权限确认均在工作区中显示。详情见[运行时指南](https://chesterra.github.io/cccc/guide/runtimes#antigravity-tui-or-official-acp)。
 
-用户只需选择 Runtime，CCCC 会自动确定交互方式。Claude Code、Codex CLI、Grok Build、OpenCode 和 Kilo 在同一个 provider session 上配对原生可写终端与后台结构化协议。消息进入原生终端后，由接收 Runtime 决定是 steer 还是 queue。Pi 使用官方 RPC，没有原生终端附件，要求 Pi 1.1.0 或更新版本（`@earendil-works/pi-coding-agent`）。DeepSeek Harness 使用结构化 ACP，不提供原生终端；ChatGPT Web 和 Grok Bot Web Model 使用浏览器投递和远程 MCP。
+用户只需选择 Runtime，CCCC 会自动确定交互方式。Claude Code、Codex CLI、Grok Build、OpenCode 和 Kilo 在同一个 provider session 上配对原生可写终端与后台结构化协议。消息进入原生终端后，由接收 Runtime 决定是 steer 还是 queue。Pi 使用官方 RPC，没有原生终端附件，要求 Pi 1.1.0 或更新版本（`@earendil-works/pi-coding-agent`）。DeepSeek Harness 使用结构化 ACP，不提供原生终端；ChatGPT Web 使用浏览器投递和远程 MCP；Grok Bot Web Model 使用原生 Webhook Routine 和远程 MCP。
 
 每个支持 Runtime 的 setup 命令、交互说明和排障方式，见[支持的运行时指南](https://chesterra.github.io/cccc/guide/runtimes)。
 
 ### ChatGPT Web 作为本地开发 actor
 
-CCCC 通过浏览器投递把 Group 消息送入配对的 ChatGPT 对话。多个 Web Model Actor 共用一次专用浏览器登录和一个带认证的远程 MCP 连接器，各自拥有持续打开的独立窗口和明确确认的对话配对，可接收消息、回复、查看或编辑仓库文件，以及运行受 scope 限制的 shell/git 命令。全局设置管理共享登录和连接器，Actor 设置管理各自的对话。正常启动 Actor 后会先自动核验对话，再投递排队中的任务，无需提前点击配对。
+CCCC 通过浏览器界面自动操作，把 Group 消息送入配对的 ChatGPT 对话。多个 Web Model Actor 共用一次专用浏览器登录和一个带认证的远程 MCP 连接器，各自拥有持续打开的独立窗口和明确确认的对话配对，可接收消息、回复、查看或编辑仓库文件，以及运行受 scope 限制的 shell/git 命令。全局设置管理共享登录和连接器，Actor 设置管理各自的对话。正常启动 Actor 后会先自动核验对话，再投递排队中的任务，无需提前点击配对。
 
-配置需要通过公网 HTTPS URL 暴露 MCP connector（Cloudflare Tunnel、ngrok、Tailscale Funnel 或反向代理）。CCCC 默认使用稳定的纯文本投递，也提供实验性的 **GPT Pro** 模式：每次投递会附带一张极小的空白 PNG，以兼容部分账户中由此开放第三方 MCP 的 ChatGPT 行为。CCCC 不会替你切换模型，也不保证该兼容方式在 ChatGPT 改版后继续有效。完整配置与排障见 [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+配置需要通过公网 HTTPS URL 暴露 MCP connector（Cloudflare Tunnel、ngrok、Tailscale Funnel 或反向代理）。CCCC 默认通过浏览器投递纯文本，也提供实验性的 **GPT Pro** 模式：每次投递会附带一张极小的空白 PNG，以兼容部分账户中由此开放第三方 MCP 的 ChatGPT 行为。CCCC 不会替你切换模型，也不保证该兼容方式在 ChatGPT 改版后继续有效。共享登录意味着这些 Actor 会话使用同一个已配置的 ChatGPT 账户，受该账户的功能与额度限制。完整配置与接入边界见 [ChatGPT Web Model Runtime](https://chesterra.github.io/cccc/guide/web-model-runtime)。
+
+### ChatGPT Dots
+
+**ChatGPT Dots**（`chatgpt_dots`）使用 ChatGPT 原生事件任务和远程 MCP。它与 ChatGPT Web Actor 共用已配置的 CCCC 插件，但不通过浏览器投递消息，也不需要 CCCC 的浏览器登录。将 Dot 与一个 Actor 配对并保存原生事件任务后，即可接收工作。事件接受、任务领取和完成分别显示。详见 [Dots 配置](https://chesterra.github.io/cccc/guide/runtimes#chatgpt-dots)。
 
 ### Grok Bot Web Model
 
-**Grok Bot Web Model**（`grok_web_model`）使用同一套 CCCC 工作区工具和投递队列。Grok Actor 共享登录和一个 MCP 连接器，各自使用独立的 Bot URL 与窗口。必须提供已有的 `https://grok.com/bot/<UUID>` URL，CCCC 不会自动创建 Bot。在全局 Web Model 设置中配置共享登录和连接器，再到 Actor 设置中保存 Bot URL 并启动。CCCC 会随每条任务提供该 Actor 的路由凭据，无需额外发送配对消息。这与 Grok Build CLI（`grok`）是两种不同的运行时。完整配置与当前验证范围见 [Grok Bot 使用指南](https://chesterra.github.io/cccc/guide/grok-web-model-runtime)。
+**Grok Bot Web Model**（`grok_web_model`）通过每个 Actor 已有的 `https://grok.com/bot/<UUID>`、原生 Webhook Routine 和 CCCC 远程 MCP 连接器接入。使用 Grok 订阅，无需画面投递或单独的模型 API key；首次设置需从 Grok 桌面应用复制 Routine URL 和 Key。CCCC 负责任务顺序、单次领取和精确完成回执，供应商审批、额度及云端执行仍由 Grok 管理。这与 Grok Build CLI（`grok`）不同。详见[配置、恢复与验证边界](https://chesterra.github.io/cccc/guide/grok-web-model-runtime)。
 
 ## CCCC Connect：跨实例与团队协作
+
+这里的账户指 CCCC 账户。供应商登录与使用额度独立于 CCCC Connect 的协作授权。
 
 按工作需要选择连接范围：
 
@@ -363,7 +340,7 @@ CCCC 实现的是 IM 级消息语义，而不是"往终端里粘贴一段文字"
 - **Project Context** — 共享协调、任务、Agent 状态与自演化技能
 - **Group Space** — NotebookLM 集成，共享知识管理
 - **ChatGPT Web Model 设置** — 将一个 ChatGPT Web 对话接入为 CCCC Actor
-- **Voice Secretary 与 Codex Voice** — 全局秘书可直接配置 Runtime 或关联 Profile，在共享会话中串行处理任务，并保持每个任务原有的 Group 归属。实验性实时语音保留独立 Analyst。两套功能共用语音设置入口和音频设备偏好；各组保留文档、请求和采集偏好，不再创建秘书 Actor。
+- **Voice Secretary 与 Codex Voice** — 全局秘书可直接配置 Runtime 或关联 Profile，在共享会话中串行处理任务，并保持每个任务原有的 Group 归属。实验性 Codex Voice 与 Grok Voice 使用独立 Analyst。两套功能共用语音设置入口和音频设备偏好；各组保留文档、请求和采集偏好，不再创建秘书 Actor。详见[语音配置与供应商接线](https://chesterra.github.io/cccc/guide/voice-secretary#codex-voice-provider-connection)。
 - **CCCC Connect 设置** — 账户发现、指定 Group 连接与 Direct 配对
 - **IM 桥接配置** — Telegram、Slack、Discord、Mattermost、飞书、钉钉、企业微信和微信
 - **设置** — 消息策略、投递调优、终端日志控制
@@ -417,7 +394,8 @@ cccc im start
 
 ```bash
 # 生命周期
-cccc                           # 启动 daemon + Web UI
+cccc                           # 启动 daemon + Web UI，并打开终端界面
+cccc --headless                # 启动 daemon + Web UI，不打开终端界面（同 cccc web）
 cccc daemon start|status|stop  # daemon 管理
 
 # 协作组
@@ -457,7 +435,7 @@ cccc im start|stop|status
 | 能力面 | 示例 |
 |--------|------|
 | **始终可见的协作核心** | `cccc_bootstrap`、`cccc_help`、能力搜索与调用、Inbox、消息、文件、`cccc_context_get`、`cccc_coordination`、`cccc_task`、`cccc_agent_state` |
-| **项目上下文与记忆（按需）** | `cccc_project_info`、`cccc_tracked_send`、`cccc_memory`、`cccc_context_sync` |
+| **项目上下文与记忆（按需）** | `cccc_tracked_send`、`cccc_memory`、`cccc_context_sync` |
 | **Group 与 Actor 控制（按需）** | `cccc_group`、`cccc_actor`、`cccc_runtime_list` |
 | **工作区工具（按需）** | `cccc_repo`、`cccc_presentation`、`cccc_terminal`、`cccc_debug` |
 | **实例发现** | `cccc_connect`；在 `cccc_message_send` 和 `cccc_file_send` 中指定准确的跨实例目标 |
@@ -510,6 +488,7 @@ CCCC 不替代你的 agent —— 它是让它们成为一个团队的那一层�
 | [场景示例](https://chesterra.github.io/cccc/guide/use-cases) | 实际多智能体场景 |
 | [Web UI 指南](https://chesterra.github.io/cccc/guide/web-ui) | 看板导航 |
 | [CCCC Connect](https://chesterra.github.io/cccc/guide/connect) | 账户与 Direct 连接、投递和权限边界 |
+| [原生会话](https://chesterra.github.io/cccc/guide/local-sessions) | 连接独立运行的 Codex 和 Claude 会话，无需导入历史 |
 | [Voice Secretary](https://chesterra.github.io/cccc/guide/voice-secretary) | 听写、文档与输入框工作流 |
 | [IM 桥接配置](https://chesterra.github.io/cccc/guide/im-bridge/) | 连接 Telegram、Slack、Discord、Mattermost、飞书、钉钉、企业微信、微信 |
 | [Group Space](https://chesterra.github.io/cccc/guide/group-space-notebooklm) | NotebookLM 知识集成 |

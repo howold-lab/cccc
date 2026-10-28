@@ -72,6 +72,62 @@ const readyAnalyst = {
 };
 
 describe("CodexVoiceAnalystModal", () => {
+  it.each([
+    { provider: "grok" as const, voice: "eve", name: "Eve" },
+    { provider: "codex" as const, voice: "himari", name: "Himari" },
+  ])("shows the selected $provider voice before starting a call", ({ provider, voice, name }) => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceAnalystModal
+        isOpen
+        isDark={false}
+        isSmallScreen={false}
+        controller={controller({
+          preferences: { provider, voice, inputDeviceId: "", outputDeviceId: "" },
+        })}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(html).toContain(`codexVoiceProviders.${provider}`);
+    expect(html).toMatch(new RegExp(`<span[^>]*>${name}</span>`));
+    expect(html).toContain('aria-label="codexVoiceProviderLabel"');
+    expect(html).toContain('role="combobox"');
+    expect(html).toContain('aria-label="codexVoiceVoiceLabel"');
+    expect(html).toContain("codexVoicePhase.idle");
+  });
+
+  it("identifies the live provider and voice instead of the next-call preferences", () => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceAnalystModal
+        isOpen
+        isDark={false}
+        isSmallScreen={false}
+        controller={controller({
+          phase: "listening",
+          isEngaged: true,
+          owned: true,
+          call: {
+            provider: "grok",
+            generation: "call-1",
+            analyst_generation: null,
+            mode: "assistant",
+            voice: "aurora",
+            connected: true,
+          },
+          preferences: { provider: "codex", voice: "cove", inputDeviceId: "", outputDeviceId: "" },
+        })}
+        onClose={vi.fn()}
+      />,
+    );
+    const heading = html.match(/<h2[^>]*>(.*?)<\/h2>/)?.[1];
+    expect(heading).toContain("codexVoiceProviders.grok");
+    expect(html).toMatch(/<span[^>]*>Aurora<\/span>/);
+    expect(html).not.toContain("Cove");
+    expect(html).not.toContain('aria-label="codexVoiceProviderLabel"');
+    expect(html).not.toContain('aria-label="codexVoiceVoiceLabel"');
+    expect(html).toContain('aria-label="codexVoiceMute"');
+    expect(html).toContain('aria-label="codexVoiceStop"');
+  });
+
   it("shows ACP setup guidance for first use instead of a missing native runtime", () => {
     const html = renderToStaticMarkup(
       <CodexVoiceAnalystModal

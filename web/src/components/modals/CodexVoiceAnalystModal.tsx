@@ -13,11 +13,11 @@ import {
   codexVoiceAnalystReadinessProblem,
   codexVoiceCallReadinessProblem,
   codexVoiceCallStatus,
+  codexVoiceDisplayIdentity,
 } from "../../features/codexVoice/codexVoiceControllerText";
 import type { CodexVoiceSessionController } from "../../features/codexVoice/useCodexVoiceSessionController";
 import { useModalA11y } from "../../hooks/useModalA11y";
 import {
-  HeadphonesIcon,
   ChevronDownIcon,
   MicrophoneIcon,
   MicrophoneOffIcon,
@@ -29,6 +29,8 @@ import {
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/icon-button";
 import { ModalFrame } from "./ModalFrame";
+import { VoiceProviderSelect } from "../../features/codexVoice/VoiceProviderSelect";
+import { SpeakingVoiceSelect } from "../../features/codexVoice/SpeakingVoiceSelect";
 
 type Props = {
   isOpen: boolean;
@@ -72,6 +74,8 @@ export function CodexVoiceAnalystModal({
   const analyst = controller.analyst;
   const callStatus = codexVoiceCallStatus(controller);
   const phaseLabel = t(callStatus.labelKey);
+  const identity = codexVoiceDisplayIdentity(controller);
+  const providerLabel = t(`codexVoiceProviders.${identity.provider}`);
   const analystPhase = analyst ? t(`codexVoiceAnalystPhase.${analyst.phase}`) : "";
   const analystVisible = isOpen && (splitLayout ? analystExpanded : mobilePane === "analyst");
   const terminalVisible = analystVisible && Boolean(analyst?.structured || analyst?.tui_ready);
@@ -132,24 +136,38 @@ export function CodexVoiceAnalystModal({
       titleId="codex-voice-analyst-title"
       closeAriaLabel={t("codexVoiceMinimize")}
       closeIcon={<ChevronDownIcon size={18} aria-hidden="true" />}
-      headerClassName="!gap-2 !px-3 !py-3 sm:!px-5"
+      headerClassName="!gap-2 !px-3 !py-2 sm:!px-4 [&>div:first-child]:pr-0 [&>div:last-child]:gap-1"
       panelClassName="h-full w-full overflow-hidden sm:h-[min(820px,92vh)] sm:w-[min(1180px,97vw)]"
       modalRef={modalRef}
       title={
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="hidden h-10 w-10 flex-none sm:flex items-center justify-center rounded-2xl bg-[var(--glass-tab-bg-active)] text-[var(--color-accent-primary)]">
-            <HeadphonesIcon size={20} aria-hidden="true" />
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h2 className="truncate text-base font-semibold text-[var(--color-text-primary)]">
-                {t("codexVoiceTitle")}
-              </h2>
-              <span className="hidden rounded-full border border-[var(--glass-border-subtle)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)] sm:inline-flex">
-                {t("codexVoiceExperimental")}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+          <h2 className="min-w-0 max-w-full text-sm font-semibold text-[var(--color-text-primary)]">
+            {controller.isEngaged ? (
+              <span
+                className="block truncate"
+                title={[providerLabel, identity.voice].filter(Boolean).join(" · ")}
+              >
+                {providerLabel}
               </span>
-            </div>
-            <div className="mt-0.5 flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+            ) : (
+              <VoiceProviderSelect
+                controller={controller}
+                className="min-h-9 max-w-full text-sm font-semibold max-sm:min-h-11 pointer-coarse:min-h-11"
+              />
+            )}
+          </h2>
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[var(--color-text-muted)]">
+            {!controller.isEngaged ? (
+              <SpeakingVoiceSelect
+                controller={controller}
+                className="min-h-9 max-w-full rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-bg-primary)] px-2 text-sm text-[var(--color-text-primary)] max-sm:min-h-11 pointer-coarse:min-h-11"
+              />
+            ) : identity.voice ? (
+              <span className="max-w-full truncate" title={identity.voice}>
+                {identity.voice}
+              </span>
+            ) : null}
+            <div className="flex min-w-0 items-center gap-1.5">
               <span
                 className={`h-2 w-2 flex-none rounded-full ${
                   callBlocked
@@ -164,10 +182,10 @@ export function CodexVoiceAnalystModal({
                 {phaseLabel}
               </span>
             </div>
-            <span className="sr-only" aria-live="polite" aria-atomic="true">
-              {isOpen ? callAnnouncement : ""}
-            </span>
           </div>
+          <span className="sr-only" aria-live="polite" aria-atomic="true">
+            {isOpen ? callAnnouncement : ""}
+          </span>
         </div>
       }
       headerActions={
@@ -176,6 +194,7 @@ export function CodexVoiceAnalystModal({
             type="button"
             variant="ghost"
             size="sm"
+            className="max-sm:h-11 max-sm:w-11"
             onClick={openSettings}
             label={t("codexVoiceSettings")}
           >
@@ -188,6 +207,7 @@ export function CodexVoiceAnalystModal({
                   type="button"
                   variant="ghost"
                   size="sm"
+                  className="max-sm:h-11 max-sm:w-11"
                   onClick={controller.toggleMicrophone}
                   disabled={controller.isStarting || controller.phase === "stopping"}
                   label={controller.microphoneMuted ? t("codexVoiceUnmute") : t("codexVoiceMute")}
@@ -209,7 +229,7 @@ export function CodexVoiceAnalystModal({
                 }
                 onClick={() => void controller.disconnect()}
                 disabled={controller.phase === "stopping"}
-                className="text-rose-500"
+                className="text-rose-500 max-sm:min-h-11 max-sm:min-w-11"
               >
                 <StopIcon size={15} />
                 <span className="hidden sm:inline">
@@ -221,6 +241,7 @@ export function CodexVoiceAnalystModal({
             <Button
               type="button"
               size="sm"
+              className="max-sm:min-h-11 max-sm:min-w-11"
               aria-label={t("codexVoiceStart")}
               onClick={startVoice}
               disabled={controller.checking || controller.isStarting}
@@ -308,6 +329,15 @@ export function CodexVoiceAnalystModal({
                 </div>
               ))}
             </dl>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={controller.checking}
+              onClick={() => void controller.refresh()}
+            >
+              {t("settings:voiceSettings.refresh")}
+            </Button>
             <Button
               type="button"
               variant="secondary"

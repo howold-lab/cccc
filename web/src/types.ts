@@ -321,6 +321,8 @@ export type WebModelDeliveryStatusPayload = {
 export type RuntimeMode = "default" | "acp";
 
 export type Actor = {
+  /** User-owned native runtime; CCCC manages collaboration access only. */
+  external_session_id?: string;
   id: string;
   generation?: string;
   role?: string;
@@ -330,7 +332,7 @@ export type Actor = {
   has_custom_avatar?: boolean;
   enabled?: boolean;
   running?: boolean; // Actual process running status
-  idle_seconds?: number | null; // Seconds since last PTY output (null if not running/headless)
+  idle_seconds?: number | null; // Legacy idle duration, independent of terminal output activity.
   effective_working_state?: "stopped" | "idle" | "working" | "waiting" | "stuck" | string;
   effective_working_reason?: string;
   effective_working_updated_at?: string | null;
@@ -339,6 +341,7 @@ export type Actor = {
   env?: Record<string, string>;
   capability_autoload?: string[];
   capability_hidden?: string[];
+  default_scope_key?: string;
   runner?: string;
   runner_effective?: string;
   runtime?: string;
@@ -782,8 +785,8 @@ export type GroupContext = {
   meta?: { project_status?: string | null; [key: string]: unknown };
 };
 
-export type ProjectMdInfo = {
-  found: boolean;
+export type AgentsMdInfo = {
+  exists: boolean;
   path?: string | null;
   content?: string | null;
   error?: string | null;
@@ -1595,11 +1598,13 @@ export const SUPPORTED_RUNTIMES = [
 export type SupportedRuntime = (typeof SUPPORTED_RUNTIMES)[number];
 
 export function isWebModelRuntime(runtime: string | undefined): boolean {
-  return runtime === "chatgpt_dots" || isBrowserWebModelRuntime(runtime);
+  return (
+    runtime === "chatgpt_dots" || runtime === "grok_web_model" || isBrowserWebModelRuntime(runtime)
+  );
 }
 
 export function isBrowserWebModelRuntime(runtime: string | undefined): boolean {
-  return runtime === "web_model" || runtime === "grok_web_model";
+  return runtime === "web_model";
 }
 
 export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
@@ -1640,7 +1645,7 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   },
   grok_web_model: {
     label: "Grok Bot Web Model",
-    desc: "Grok Bot browser delivery + remote MCP connector",
+    desc: "Grok Bot native Webhook + remote MCP connector",
   },
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
 };
@@ -1981,4 +1986,35 @@ export function supportsAcpMode(runtime?: string | null): boolean {
     "hermes",
     "droid",
   ].includes(runtime || "");
+}
+
+export interface LocalSessionSource {
+  source_id: string;
+  runtime: "codex" | "claude" | "pi" | "opencode";
+  native_session_id: string;
+  cwd: string;
+  title: string;
+  origin?: string | null;
+  connected: boolean;
+}
+
+export interface LocalSessionRecovery {
+  group_id: string;
+  actor_id: string;
+  source_id: string;
+  /** Explicit qualification result; recovery data is revalidated independently. */
+  refresh_status?: "checked" | "unavailable" | "not_checked";
+  recovery: {
+    state:
+      | "connected"
+      | "disconnected"
+      | "host_exited"
+      | "session_ended"
+      | "integration_disabled"
+      | "unknown";
+    cwd: string | null;
+    shell: "posix" | "powershell";
+    /** Server-quoted command for the declared shell; manual use only. */
+    command: string;
+  };
 }

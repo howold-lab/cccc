@@ -198,6 +198,18 @@ async fn protocol_loop<S>(
     let mut turn_delegations = HashMap::new();
     let (terminal_error, diagnostic) = loop {
         tokio::select! {
+            _ = async {
+                if let Some(response) = pending_turn_start.and_then(|id| pending.get_mut(&id)) {
+                    response.response.closed().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                // A timed-out or cancelled owner can no longer resolve the admission
+                // barrier. Do not silently buffer every subsequent event forever,
+                // guess the turn's owner, or replay a possibly accepted request.
+                break ("correlated Codex turn/start lost its response owner".into(), json!({"code":"admission_response_lost"}));
+            }
             command = commands.recv() => match command {
                 Some(ProtocolCommand::Request(request)) => {
                     let id = next_id;
@@ -333,7 +345,9 @@ async fn protocol_loop<S>(
     if diagnostic["code"] != "client_closed" {
         // Packaged launches do not require a tracing subscriber. Keep this one-shot
         // report structural: no close reason, arbitrary error, protocol body or path.
-        eprintln!("[cccc] Managed Codex disconnected: {diagnostic}");
+        cccc_runtime::diagnostic(format_args!(
+            "[cccc] Managed Codex disconnected: {diagnostic}"
+        ));
     }
     for (_, pending_response) in pending {
         let _ = pending_response.response.send(Err(io::Error::new(

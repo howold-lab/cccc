@@ -1,3 +1,4 @@
+import { NativeSessionPanel } from "../features/localSessions/NativeSessionPanel";
 import { isWebModelRuntime } from "../types";
 import { useTerminalTitlePaging } from "./agentTerminal/useTerminalTitlePaging";
 import {
@@ -33,7 +34,8 @@ import { ActorAcpControls } from "./headless/ActorAcpControls";
 import { HeadlessRuntimePanel } from "./headless/HeadlessRuntimePanel";
 import { WebModelRuntimePanel } from "./webModel/WebModelRuntimePanel";
 import { DotsActorPanel } from "./webModel/DotsActorPanel";
-import type { DotsActorState } from "../services/api";
+import { GrokActorPanel } from "./webModel/GrokActorPanel";
+import type { DotsActorState, GrokActorState } from "../services/api";
 import { useModalStore } from "../stores";
 import {
   AlertIcon,
@@ -169,33 +171,47 @@ export function AgentTab({
   const isHeadless = effectiveRunner === "headless";
   const isWebModel = isWebModelRuntime(actor.runtime);
   const isDots = actor.runtime === "chatgpt_dots";
-  const lifecycleActive = isDots ? Boolean(actor.enabled) : isRunning;
+  const isGrok = actor.runtime === "grok_web_model";
+  const isEventActor = isDots || isGrok;
+  const isNativeSession = Boolean(actor.external_session_id);
+  const accessOnly = isWebModel || isNativeSession;
+  const lifecycleActive = accessOnly ? Boolean(actor.enabled) : isRunning;
+  const groupState = useGroupStore((state) =>
+    state.groupDoc?.group_id === groupId ? state.groupDoc.state : undefined,
+  );
+  const openActorEditor = useModalStore((state) => state.openActorEditor);
   const openSettingsTarget = useModalStore((state) => state.openSettingsTarget);
   const settingsOpen = useModalStore((state) => state.modals.settings);
   const canAccessGlobalSettings = useUIStore((state) => state.canAccessGlobalSettings !== false);
-  const [dotsSnapshot, setDotsSnapshot] = useState<{
+  const [eventSnapshot, setEventSnapshot] = useState<{
     groupId: string;
     actorId: string;
-    state: DotsActorState | null;
+    runtime: Actor["runtime"];
+    state: DotsActorState | GrokActorState | null;
   } | null>(null);
-  const currentActorRef = useRef({ groupId, actorId: actor.id });
-  currentActorRef.current = { groupId, actorId: actor.id };
-  const receiveDotsState = useCallback(
-    (state: DotsActorState | null) => {
+  const currentActorRef = useRef({ groupId, actorId: actor.id, runtime: actor.runtime });
+  currentActorRef.current = { groupId, actorId: actor.id, runtime: actor.runtime };
+  const receiveEventState = useCallback(
+    (state: DotsActorState | GrokActorState | null) => {
       if (
         currentActorRef.current.groupId !== groupId ||
-        currentActorRef.current.actorId !== actor.id
+        currentActorRef.current.actorId !== actor.id ||
+        currentActorRef.current.runtime !== actor.runtime
       )
         return;
       if (state && (state.group_id !== groupId || state.actor_id !== actor.id)) return;
-      setDotsSnapshot({ groupId, actorId: actor.id, state });
+      setEventSnapshot({ groupId, actorId: actor.id, runtime: actor.runtime, state });
     },
-    [groupId, actor.id],
+    [groupId, actor.id, actor.runtime],
   );
-  const dotsVisit = dotsSnapshot?.groupId === groupId && dotsSnapshot.actorId === actor.id;
-  const dotsState = dotsVisit && canAccessGlobalSettings ? dotsSnapshot.state : null;
-  const dotsStartKey = dotsState?.connected ? "dotsResume" : "dotsEnable";
-  const canStartNewSession = !isDots && actorSupportsNewSession(actor.runtime, actor.runtime_mode);
+  const eventVisit =
+    eventSnapshot?.groupId === groupId &&
+    eventSnapshot.actorId === actor.id &&
+    eventSnapshot.runtime === actor.runtime;
+  const eventState = eventVisit && canAccessGlobalSettings ? eventSnapshot.state : null;
+  const eventStartKey = isNativeSession || eventState?.connected ? "dotsResume" : "dotsEnable";
+  const canStartNewSession =
+    !accessOnly && actorSupportsNewSession(actor.runtime, actor.runtime_mode);
   const hasRuntimeResumeFailure = actorHasRuntimeResumeFailure(actor);
   const runtimeResumeError = String(actor.runtime_session_last_resume_error || "").trim();
   const canControl = !readOnly;
@@ -366,17 +382,36 @@ export function AgentTab({
     overflow: "hidden",
   };
 
+  const nativeStatusKey = (() => {
+    if (actor.enabled === false) return "webAccessPaused";
+    if (groupState === "paused") return "nativeSession.groupPaused";
+    if (groupState === "stopped") return "nativeSession.groupStopped";
+    if (actor.running === true) return "nativeSession.available";
+    if (
+      actor.enabled === true &&
+      actor.running === false &&
+      (groupState === "active" || groupState === "idle")
+    )
+      return "nativeSession.unavailable";
+    return "common:loading";
+  })();
   const runtimeIndicator = getRuntimeIndicatorState({
-    isRunning: isDots
-      ? ["ready", "pending", "delivering", "delivered", "working"].includes(dotsState?.phase || "")
-      : Boolean(isRunning),
-    workingState: isDots
-      ? dotsState?.phase === "working"
-        ? "working"
-        : dotsState?.phase === "failed" || dotsState?.phase === "interrupted"
-          ? "stuck"
-          : "waiting"
-      : workingState,
+    isRunning: isNativeSession
+      ? nativeStatusKey === "nativeSession.available"
+      : isEventActor
+        ? ["ready", "pending", "delivering", "delivered", "working"].includes(
+            eventState?.phase || "",
+          )
+        : Boolean(isRunning),
+    workingState: isNativeSession
+      ? "waiting"
+      : isEventActor
+        ? eventState?.phase === "working"
+          ? "working"
+          : eventState?.phase === "failed" || eventState?.phase === "interrupted"
+            ? "stuck"
+            : "waiting"
+        : workingState,
   });
   const statusTone = (() => {
     switch (runtimeIndicator.tone) {
@@ -406,16 +441,22 @@ export function AgentTab({
   })();
 
   const runtimeStatusText = (() => {
-    if (isDots)
+    if (isNativeSession) return t(nativeStatusKey);
+    if (isEventActor)
       return t(
         !canAccessGlobalSettings
-          ? "settings:dotsActor.adminStatus"
-          : dotsState
-            ? `settings:dotsActor.phases.${dotsState.phase}`
-            : dotsVisit
+          ? isDots
+            ? "settings:dotsActor.adminStatus"
+            : "settings:grokActor.adminManaged"
+          : eventState
+            ? isDots
+              ? `settings:dotsActor.phases.${eventState.phase}`
+              : `settings:grokWebhook.phase.${eventState.phase}`
+            : eventVisit
               ? "settings:dotsActor.unavailable"
               : "common:loading",
       );
+    if (isWebModel) return t(actor.enabled ? "webAccessEnabled" : "webAccessPaused");
     if (!isRunning) return t("stopped");
     if (workingState === "error") return t("common:error");
     if (workingState === "working" || workingState === "waiting" || workingState === "stuck")
@@ -713,17 +754,25 @@ export function AgentTab({
   const actorGroupRole = normalizeActorGroupRole(actor.role);
   const titlePaging = useTerminalTitlePaging(isVisible && compact ? onPage : undefined);
 
-  const compactStatusText = isDots
-    ? runtimeStatusText
-    : !isRunning
+  const compactStatusText =
+    isNativeSession || isEventActor
       ? runtimeStatusText
-      : !isHeadless && connectionStatus !== "connected"
-        ? t(connectionStatus === "disconnected" ? "connectionLost" : "chat:workView.connecting")
-        : workingState === "waiting" || workingState === "stuck" || workingState === "error"
-          ? runtimeStatusText
-          : !isHeadless && terminalReady && !terminalWritable
-            ? t("readOnlyConnection")
-            : "";
+      : !isRunning
+        ? runtimeStatusText
+        : !isHeadless && connectionStatus !== "connected"
+          ? t(connectionStatus === "disconnected" ? "connectionLost" : "chat:workView.connecting")
+          : workingState === "waiting" || workingState === "stuck" || workingState === "error"
+            ? runtimeStatusText
+            : !isHeadless && terminalReady && !terminalWritable
+              ? t("readOnlyConnection")
+              : "";
+
+  const compactIdentityTitle = [
+    actor.title || actor.id,
+    [rtInfo.label, isHeadless ? (actor.runtime_mode === "acp" ? "ACP" : "") : "TUI"]
+      .filter(Boolean)
+      .join(" · "),
+  ].join("\n");
 
   return (
     <div className="@container/actor-view flex min-h-0 min-w-0 flex-col h-full">
@@ -733,7 +782,7 @@ export function AgentTab({
           data-terminal-title-bar
           style={onPage ? { touchAction: "pan-y pinch-zoom" } : undefined}
           className={classNames(
-            "flex min-h-9 shrink-0 items-center border-b border-[var(--glass-border-subtle)] px-2 text-xs [@media(pointer:coarse)]:min-h-11",
+            "flex min-h-9 shrink-0 items-center border-b border-[var(--glass-border-subtle)] px-2 text-xs group-focus-within/runtime-pane:bg-[var(--glass-tab-bg-active)] [@media(pointer:coarse)]:min-h-11",
             navigation
               ? "flex-wrap @min-[480px]/actor-view:flex-nowrap @min-[480px]/actor-view:gap-2"
               : "gap-2",
@@ -745,25 +794,38 @@ export function AgentTab({
               Boolean(navigation) && "basis-full min-h-8 @min-[480px]/actor-view:basis-auto",
             )}
           >
-            <span
-              className={`h-2 w-2 shrink-0 rounded-full ${statusTone.dotClass}`}
-              role="img"
-              aria-label={runtimeStatusText}
-              title={[runtimeStatusText, !isDots && actor.effective_working_reason]
-                .filter(Boolean)
-                .join("\n")}
-            />
+            <div className="relative h-5 w-5 shrink-0" title={compactIdentityTitle}>
+              <span aria-hidden="true">
+                <ActorAvatar
+                  avatarUrl={actor.avatar_url || undefined}
+                  runtime={actor.runtime}
+                  title={actor.title || actor.id}
+                  isDark={isDark}
+                  sizeClassName="h-5 w-5"
+                  textClassName="text-[10px]"
+                  className="!border-0 !shadow-none"
+                />
+              </span>
+              <span
+                className={`absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 rounded-full ring-1 ring-[var(--color-bg-secondary)] ${statusTone.dotClass}`}
+                role="img"
+                aria-label={runtimeStatusText}
+                title={[runtimeStatusText, !isEventActor && actor.effective_working_reason]
+                  .filter(Boolean)
+                  .join("\n")}
+              />
+            </div>
             <span
               id={`runtime-inspector-${groupId}-${actor.id}`}
               className="min-w-0 flex-1 truncate font-semibold"
-              title={actor.title || actor.id}
+              title={compactIdentityTitle}
             >
               {actor.title || actor.id}
             </span>
             {compactStatusText ? (
               <span
                 className="max-w-[40%] shrink-0 truncate text-[var(--color-text-secondary)]"
-                title={[compactStatusText, !isDots && actor.effective_working_reason]
+                title={[compactStatusText, !isEventActor && actor.effective_working_reason]
                   .filter(Boolean)
                   .join("\n")}
               >
@@ -783,8 +845,8 @@ export function AgentTab({
             connected={terminalReady && connectionStatus === "connected"}
             connectionFailed={connectionFailed}
             canStartNewSession={canStartNewSession}
-            pauseCcccAccess={isDots}
-            dotsConnected={Boolean(dotsState?.connected)}
+            pauseCcccAccess={accessOnly}
+            dotsConnected={isNativeSession || Boolean(eventState?.connected)}
             unreadCount={unreadCount}
             onInterrupt={sendInterrupt}
             onLaunch={onLaunch}
@@ -805,7 +867,7 @@ export function AgentTab({
       <div
         className={classNames(
           compact ? "hidden" : "border-b px-4 py-2 sm:px-5",
-          isDots && "max-sm:pr-16",
+          isWebModel && "max-sm:pr-16",
           isDark
             ? "border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))]"
             : "border-black/6 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.88))]",
@@ -850,7 +912,7 @@ export function AgentTab({
             </div>
 
             <div className="flex min-w-0 items-center gap-3">
-              <div className={classNames("min-w-0", !isDots && "shrink-0")}>
+              <div className={classNames("min-w-0", !isWebModel && "shrink-0")}>
                 <div className="flex items-center gap-2 min-w-0">
                   <span
                     id={compact ? undefined : `runtime-inspector-${groupId}-${actor.id}`}
@@ -873,7 +935,7 @@ export function AgentTab({
                   {rtInfo?.label || t("custom")} • {runtimeStatusText}
                 </div>
                 {/* Mobile-only: condensed single-line agent state */}
-                {(!isDots || agentState) && (
+                {(!isEventActor || agentState) && (
                   <div
                     className={classNames(
                       "sm:hidden mt-1 text-xs truncate leading-tight",
@@ -888,7 +950,7 @@ export function AgentTab({
                 )}
               </div>
 
-              {(!isDots || agentState) && (
+              {(!isEventActor || agentState) && (
                 <div
                   className={classNames(
                     "hidden sm:grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-start gap-2 rounded-xl border px-3 py-1.5 backdrop-blur-sm",
@@ -969,12 +1031,20 @@ export function AgentTab({
         className={classNames("flex-1 min-h-0 relative", "bg-[var(--color-bg-secondary)]")}
         style={{ contain: "layout", overflow: "hidden" }}
       >
-        {isHeadless ? (
+        {isNativeSession ? (
+          <NativeSessionPanel
+            actor={actor}
+            groupId={groupId}
+            statusText={runtimeStatusText}
+            isVisible={isVisible && !settingsOpen}
+            canAccessRecovery={canAccessGlobalSettings && !readOnly}
+          />
+        ) : isHeadless ? (
           <div
             className={classNames(
               "flex h-full min-h-0 flex-col",
               compact
-                ? "p-2"
+                ? "p-0"
                 : isWebModel
                   ? "px-3 pb-3 pt-2 sm:px-4 sm:pb-4"
                   : "px-5 pb-5 pt-3 sm:px-7 sm:pb-6 sm:pt-3",
@@ -983,7 +1053,7 @@ export function AgentTab({
             <div
               className={classNames(
                 "mx-auto flex w-full min-h-0 flex-1 flex-col",
-                isWebModel ? "max-w-none gap-3" : "max-w-6xl gap-4",
+                compact ? "max-w-none gap-0" : isWebModel ? "max-w-none gap-3" : "max-w-6xl gap-4",
               )}
             >
               {isDots ? (
@@ -993,15 +1063,41 @@ export function AgentTab({
                   isRunning={isRunning}
                   isVisible={isVisible && !settingsOpen}
                   readOnly={readOnly}
+                  compact={compact}
+                  onExpand={onExpand}
+                  onSettings={() => openActorEditor(actor, "chatgpt")}
                   canAccessConnection={canAccessGlobalSettings}
-                  onStateChange={receiveDotsState}
+                  onStateChange={receiveEventState}
                   onOpenSharedSettings={
                     canControl && canAccessGlobalSettings
                       ? () =>
                           openSettingsTarget({
                             scope: "global",
                             tab: "webModels",
-                            webModelProvider: "dots",
+                            webModelProvider: "chatgpt_web",
+                            webModelSection: "connector",
+                          })
+                      : undefined
+                  }
+                />
+              ) : isGrok ? (
+                <GrokActorPanel
+                  groupId={groupId}
+                  actorId={actor.id}
+                  isVisible={isVisible && !settingsOpen}
+                  compact={compact}
+                  onExpand={onExpand}
+                  readOnly={readOnly}
+                  onStateChange={receiveEventState}
+                  canAccessConnection={canAccessGlobalSettings}
+                  onSettings={() => openActorEditor(actor, "chatgpt")}
+                  onOpenSharedSettings={
+                    canControl && canAccessGlobalSettings
+                      ? () =>
+                          openSettingsTarget({
+                            scope: "global",
+                            tab: "webModels",
+                            webModelProvider: "grok_web",
                           })
                       : undefined
                   }
@@ -1014,6 +1110,19 @@ export function AgentTab({
                   isDark={isDark}
                   isVisible={isVisible}
                   readOnly={readOnly}
+                  compact={compact}
+                  canAccessConnection={canAccessGlobalSettings}
+                  onOpenSharedSettings={
+                    canControl && canAccessGlobalSettings
+                      ? () =>
+                          openSettingsTarget({
+                            scope: "global",
+                            tab: "webModels",
+                            webModelProvider: "chatgpt_web",
+                            webModelSection: "login",
+                          })
+                      : undefined
+                  }
                 />
               ) : null}
               {hasManagedRuntimeControls(actor) && (
@@ -1174,13 +1283,13 @@ export function AgentTab({
                 onClick={onQuit}
                 disabled={isBusy}
                 className={`${secondaryActionButtonClass} flex-shrink-0 whitespace-nowrap`}
-                aria-label={t(isDots ? "dotsPause" : "quitAgent")}
-                title={isDots ? t("dotsPauseHint") : undefined}
+                aria-label={t(accessOnly ? "dotsPause" : "quitAgent")}
+                title={accessOnly ? t("dotsPauseHint") : undefined}
               >
                 <StopIcon size={16} />
-                {!isSmallScreen && t(isDots ? "dotsPause" : "quit")}
+                {!isSmallScreen && t(accessOnly ? "dotsPause" : "quit")}
               </button>
-              {!isDots ? (
+              {!accessOnly ? (
                 <button
                   onClick={sendInterrupt}
                   disabled={connectionStatus !== "connected" || !terminalWritable}
@@ -1191,7 +1300,7 @@ export function AgentTab({
                   ⌃C
                 </button>
               ) : null}
-              {!isDots ? (
+              {!accessOnly ? (
                 <button
                   onClick={onRelaunch}
                   disabled={isBusy}
@@ -1229,10 +1338,10 @@ export function AgentTab({
                 onClick={onLaunch}
                 disabled={isBusy}
                 className={`${primaryActionButtonClass} flex-shrink-0 whitespace-nowrap`}
-                aria-label={t(isDots ? dotsStartKey : "launchAgentLabel")}
+                aria-label={t(accessOnly ? eventStartKey : "launchAgentLabel")}
               >
                 <PlayIcon size={16} />
-                {isBusy ? t("common:loading") : t(isDots ? dotsStartKey : "launch")}
+                {isBusy ? t("common:loading") : t(accessOnly ? eventStartKey : "launch")}
               </button>
               {canStartNewSession ? (
                 <button

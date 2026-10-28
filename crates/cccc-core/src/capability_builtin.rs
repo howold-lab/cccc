@@ -29,7 +29,6 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
 ];
 
 const WEB_MODEL_EXTRA_TOOL_NAMES: &[&str] = &[
-    "cccc_project_info",
     "cccc_capability_state",
     "cccc_capability_enable",
     "cccc_capability_install",
@@ -69,6 +68,9 @@ pub fn actor_base_tool_names(
     };
     CORE_TOOL_NAMES.iter().chain(extra).copied()
 }
+
+/// Discovery and conversation entry point for explicitly enabled native sessions.
+pub const LOCAL_SESSION_TOOL_NAMES: &[&str] = &["cccc_session"];
 
 /// Local user-authority MCP sessions need the Group control plane without
 /// first mutating capability state. Actor sessions keep the smaller core and
@@ -133,7 +135,6 @@ pub fn all() -> Vec<Capability> {
             "pack:context-advanced",
             "Extended Context + Delegation",
             &[
-                "cccc_project_info",
                 "cccc_tracked_send",
                 "cccc_context_sync",
                 "cccc_memory",

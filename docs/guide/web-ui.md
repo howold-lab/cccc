@@ -19,9 +19,46 @@ Open http://127.0.0.1:8848/ in your browser.
 The Web UI has these main areas:
 
 - **Header**: Group title and controls, work view switch, and settings menu
-- **Sidebar**: Group list, navigation, and the persistent Codex Voice control
+- **Sidebar**: Group list, navigation, and the persistent Voice control
 - **Main Area**: Group message history or a paginated terminal view
 - **Input**: Message composer with @mention support
+
+The local Group list scrolls independently from the collapsible **CCCC Connect**
+section and the Voice dock below it. CCCC Connect starts collapsed; click its heading
+to expand or collapse the instance list. The section's information button opens the full
+local instance name and public address. Group rows are more compact, while their
+ordering stays unchanged; connection counts and action menus keep fixed positions,
+with menus visible on touchscreens.
+
+The composer uses one send control with an adjacent mode arrow. The primary action
+shows the selected mode; its tooltip includes the send shortcut. Recipient chips
+need no separate “To” caption. Quote text is the expand/collapse control, with a
+separate source-jump icon. Local messages addressed only to the user omit the
+redundant recipient label; cross-group routes and agent recipients remain explicit.
+User names remain accessible to screen readers without repeating a visible label
+above right-aligned local user messages. Message spacing is tighter, and the
+composer uses a subdued border that strengthens on focus.
+
+Image attachments in the composer show thumbnails before sending. Hovering or
+focusing a thumbnail opens a larger preview; the filename remains its accessible
+label and tooltip. Unsupported or unreadable images fall back to a filename chip,
+as do ordinary files. The attachment area scrolls when needed and local preview
+URLs are released when a file is replaced or removed.
+
+An empty, unfocused composer cycles through four localized typing hints for tasks,
+Skills (`/` and `/install`), Actors (`@`), and Groups (`#`). Focusing the composer
+pauses the hint; any draft text hides it, and a suggested reply takes precedence.
+Reduced-motion preferences show a static hint, and hidden tabs pause the animation.
+Hints are decorative and never become draft content or screen-reader live announcements.
+
+Message bubbles retain their framed surfaces. Sender, recipient routing, Mail mode
+and time share a compact header; delivery failures and reply/read status stay visible.
+Quoted replies show a two-line summary that can be expanded, with a separate jump
+to the original message. On hover-capable desktop screens, message actions appear
+on hover or keyboard focus; touch and narrow screens use a **More** menu. Read-only
+views retain status information without exposing these actions. The composer groups
+recipients, text and tools into one surface. Short, transform/opacity-only message
+entry feedback respects reduced-motion preferences.
 
 The header uses its existing Group status dot for page-connection health: red
 means disconnected, pulsing amber means reconnecting, and a connected page uses
@@ -29,7 +66,16 @@ the normal Group lifecycle color. The badge text still describes the Group's
 runtime state (for example, Idle); hover or focus exposes connection details.
 No separate connection subtitle or extra dot is shown on desktop or mobile.
 
+Opening a Group or message link selects that Group. Otherwise, the browser
+restores its last selected Group. If that Group is no longer available, the UI
+opens the first unarchived Group in sidebar order, or the first Group in that
+order when all are archived. Switching Groups updates the current tab's URL and
+clears the previous message link, so refreshing stays in the Group you selected.
+Reordering or archiving Groups does not move an existing selection.
+
 ### Group message and terminal views
+
+Use **Connect existing sessions** in the sidebar to admit user-owned Codex, Claude Code, Pi and OpenCode V2 CLI sessions. Their native applications retain runtime ownership; the Web shows Group access, receive availability and recovery guidance instead of a mirrored terminal. See [native session setup and lifecycle](./local-sessions).
 
 On desktop, Group editing, search, context and runtime controls stay directly in the header.
 **Group connections** is available under the current Group’s settings and in each Group’s sidebar **⋮** menu, including remote Groups
@@ -142,6 +188,28 @@ Presentation keeps four fixed slots. New Groups open a compact button rail by de
 Collapse returns to the compact rail; closing the sidebar only hides it and keeps its contents. The expand button restores the remembered width and opens an available slot. Dragging to the minimum width also returns to compact slots. The divider supports arrow keys, and Enter toggles density. The viewer can still open in a larger window, and phones retain full-screen surfaces.
 
 ### Message search and settings
+
+The conversation's **Sender** menu lets you check one or more senders. Each Actor
+appears once; the current Foreman has a role label. Checked senders are combined
+with OR, and the message-type tabs apply alongside them. **User** matches messages
+the user sent; the **User-related** tab also includes messages addressed to the user.
+Selections take effect immediately and the popup stays open for further choices.
+No checked senders means unrestricted. **Show all** and the sender's clear button
+remove only the sender condition; **All** resets only the message type. Each Group
+remembers the selected Actor identities in this browser, so changing the Foreman
+role does not retarget a selection. Older matching messages share one history
+cursor and remain available through pagination. A removed Actor's selected identity
+remains available to uncheck. Filtered history follows ledger append order and
+receives the same live read, reply and cancellation updates as the full conversation.
+Reconnect catch-up also covers messages beyond the bounded raw cache. Live arrivals
+are confirmed through a batched cursor read before joining the filtered rows, so
+an older replay cannot appear as the newest message. Failed reads keep a retry
+action; changing the filter or Group discards the departed view's pending reads.
+
+Sending keeps the filters. If they hide the sent message, a confirmation offers
+**View message**, including cross-Group sends; the action returns to the originating
+Group even if you have switched Groups. **View context** on a filtered message opens its surrounding
+conversation; returning to the conversation restores the filters.
 
 Message search shows the current Group name and Actor display names. Enter or **Search** submits the keywords; changing a filter reruns the submitted query. Typing new keywords does not change existing highlights or pagination until you submit again. Initial guidance, loading, no matches and failed requests are separate states. **Open** returns to the message context; reply and copying the event ID remain available.
 
@@ -307,9 +375,9 @@ navigation state. Use **Refresh** to load edits from disk; publishing a new card
 also updates the reader. They do not reload on the automatic image/Markdown
 refresh timer.
 
-### Codex Voice (Experimental)
+### Voice conversation (Experimental)
 
-The **Codex Voice** control below the Group list is a global assistant entry, not a Group roster item.
+The **Voice** control below the Group list is a global assistant entry, not a Group roster item.
 It has two stable actions: the main control always opens the Voice console, and the adjacent
 microphone/square control starts or stops live audio. The same meanings are preserved in the
 collapsed sidebar and active-call mobile bar. Settings, mute, and the Analyst terminal are not
@@ -317,8 +385,13 @@ separate Dock actions.
 
 The Voice console is one operational workspace. Call state, audio settings, mute, and Stop are in its
 top audio-control area. The conversation keeps up to 40 recent spoken entries from this call,
-updating streaming fragments with the final transcript. These entries stay in this browser's memory
-until the next call or page reload. The collapsible right pane embeds the selected Voice Analyst
+updating streaming fragments with the final transcript. The display stays in this browser's memory
+until the next call or page reload. Investigations include a bounded recent excerpt so the Analyst
+can understand follow-ups and retain your limits; that excerpt becomes part of its retained conversation.
+Voice is instructed to prepare a self-contained task and clarify essential ambiguity before handing it off.
+Handoffs follow the user's current request language and preserve technical identifiers and explicit
+output-language requirements; an already-clear request can keep its original wording.
+The collapsible right pane embeds the selected Voice Analyst
 runtime's writable TUI; its work status is independent of the live audio status. On desktop, drag
 the divider to adjust the pane widths; focus it and use Left/Right or Home/End for keyboard control.
 Double-click the divider to restore the default ratio. This browser remembers the chosen ratio,
@@ -328,16 +401,37 @@ Settings replace the console body inside the same panel; call controls stay avai
 **Back to conversation** or Escape returns to the console without disconnecting its terminal.
 Analyst drafts survive tab changes and panel minimization until explicitly saved or discarded.
 The minimize control keeps the call running; **Stop voice** ends live audio.
-Its tabs are **Voice & audio**, **Message notifications**, and **Voice Analyst**. Speaking voice,
-microphone and supported speaker choices remain in Voice & audio, alongside response detail
+Its settings tabs are **Call preferences**, **Message notifications**, and **Voice Analyst**.
+Microphone and supported speaker choices are shared with Voice Secretary in the global audio section.
+Call preferences contain the voice service and speaking voice, alongside response detail
 (concise / standard / detailed) and speaking style (natural / direct / patient). Expression defaults
 save automatically for the instance and apply to the next call, without restarting the Analyst.
 Detail applies to incoming Actor notifications as well as answers. Voice is instructed to identify
 each notification's Group and sender. Detailed asks it to retain substantive findings, numbers,
 conditions, qualifications and next steps in natural speech; raw tool traces remain in the Analyst terminal.
-Speaking voice and device choices are saved in this browser and also apply to the next call. Spoken
-instructions can override them. The host must already be signed in through `codex login`, and the browser must
-allow microphone access. That host login belongs only to the Realtime provider call.
+Choose **Codex Voice** or **Grok Voice** in the console title or **Call preferences**. The service
+and its speaking voice are fixed during a call; end it before changing them. This browser remembers
+the selected service and each service's voice independently. Microphone and speaker choices stay
+shared with Voice Secretary. Switching service does not change the independent Analyst runtime or
+its retained conversation. Spoken instructions can override expression defaults.
+
+On the CCCC host, **Codex Voice** uses `codex login`; **Grok Voice** uses a first-party Grok Build
+subscription login (`grok login`) and requires `grok` on CCCC's PATH. Neither path requires an extra
+API key. The console distinguishes a missing Grok executable from a missing login and offers a status
+refresh. Status reads do not start a CLI or refresh login; Start uses Grok's native authentication
+manager, including its credential lock, and gives the browser only a short-lived connection secret.
+Grok uses `grok-voice-3.0`, direct browser WebSocket audio and server voice-activity detection. The
+browser resamples its microphone to 24 kHz PCM and plays output through the shared selected speaker.
+An interrupted response stops locally at once. An investigation tool acknowledges reception after
+CCCC accepts it; the actual result returns later through the same global Analyst.
+
+The host advertises each service's supported voices and default; Web has no second voice allowlist.
+Codex offers 25 voices, including Himari, Miko, Rindo and Rivage, with Cove as its default. Grok
+currently offers 28 built-in voices with Eve as its default. The menu shows documented primary-language
+hints for new Codex voices and supports searching by language; these hints do not restrict the
+conversation language. A saved choice is preserved until the
+host catalog confirms it is unavailable. Account eligibility, service availability and subscription
+limits remain provider-owned; CCCC does not promise free or unlimited voice usage.
 
 #### Message notifications and source links
 
@@ -509,13 +603,15 @@ For Codex, CCCC removes conflicting host flags and pins app-server,
 Grok, CCCC accepts a direct root command with supported global provider/model options, then owns the
 private leader socket, ACP controller, native TUI attachment, YOLO policy, workspace, and per-session
 MCP binding. Grok subcommands, wrappers, prompt tails, and user-owned topology/session flags are
-rejected rather than routed through a second PTY path. For OpenCode and Kilo, CCCC owns the ACP process,
-generation-scoped authenticated loopback backend, session/load boundary, one-time permission policy,
-per-session MCP injection, and native `opencode attach` or `kilo attach` command. It preserves supported model, agent,
-pure-mode, and logging choices. Kilo's official Windows npm entrypoint uses Node and the installed
-launcher for both ACP and TUI. Custom wrappers, subcommands, prompt tails, and user-owned topology
-or session flags likewise fail explicitly. CCCC validates the live ACP and authenticated backend
-behavior during startup instead of maintaining a separate legacy-version compatibility branch.
+rejected rather than routed through a second PTY path. OpenCode V2 uses a private `serve --stdio` HTTP/SSE backend with its native
+`--server --session` TUI. Kilo uses its own ACP process and `kilo attach`.
+CCCC owns the session, authenticated loopback backend, one-time permissions
+and scoped MCP injection. Supported model, agent and logging choices remain
+configurable; pure mode is Kilo-only. Kilo's official Windows npm entrypoint
+uses Node and the installed launcher. Custom wrappers, subcommands, prompt tails,
+and user-owned topology or session flags fail explicitly. OpenCode requires
+V2 2.1.4 or newer; old V1 receipts and history are retained for explicit migration
+or a deliberate New session.
 These CCCC-owned values cannot be overridden.
 
 For Claude Code, CCCC requires both the launcher and background worker to report version 2.1.259
@@ -535,17 +631,17 @@ app-server and remote TUI receive the same executable, model, Profile, supported
 policy, and private environment. Claude's Agent View controller, transcript follower, and native TUI
 share one background session and one effective launch identity. Grok's leader, ACP client, and TUI share one resolved provider
 configuration, private environment, and exact session; CCCC adds topology arguments only to the
-processes that accept them. OpenCode and Kilo each use a stdio ACP controller and authenticated native TUI attach sharing
-one provider backend and exact session. CCCC injects the scoped MCP binding when it creates the
+processes that accept them. OpenCode V2 uses its HTTP/SSE controller; Kilo uses ACP. Both attach a native TUI to
+one authenticated provider backend and exact session. CCCC injects the scoped MCP binding when it creates the
 managed session,
 so the model reached from either client has the same CCCC tools. Opening the embedded terminal
 therefore observes and controls the existing Analyst session instead of starting another model
 conversation.
 
 If Realtime Voice reports a provider error, its error code is shown separately
-from Analyst failures. The browser console retains a bounded error explanation;
-CCCC's server log records only bounded code/type/event/parameter identifiers and
-the call generation, not the explanation or conversation content. A stopped
+from Analyst failures. Browser and server diagnostics retain only bounded
+code/type/event/parameter identifiers and the call generation. Provider explanations
+can quote conversation content or credentials and are not logged. A stopped
 audio call does not discard the warm Analyst session. Provider diagnostics do
 not retry requests or change the existing disconnect policy.
 
@@ -623,12 +719,13 @@ external terminal commands are deliberately not part of the product surface.
 The embedded native TUI remains writable while managed work is active. The receiving Runtime owns
 whether new terminal input steers the current turn or queues for the next one; CCCC registers exact
 Voice input before writing it and uses the Runtime's authoritative echo to associate the result with
-the correct delegation. OpenCode Analyst results remain available to Realtime Voice when the provider omits a
-live ACP prompt echo: CCCC acknowledges the request from the matching user message on OpenCode's
-authenticated backend stream, then uses the ACP response as the exact completion fence. A completed
-Voice turn with no result is reported as failed instead of silently returning an empty answer.
+the correct delegation. OpenCode V2 Analyst results follow consumed inbox IDs, model output and terminal
+execution events on the same ordered backend stream. Prompt admission alone is
+not completion. Exact-turn interruption is unavailable in V2's public API; use
+the native terminal to interrupt, or stop the owning session. A completed Voice
+turn with no result is reported as failed instead of silently returning an empty answer.
 
-The session manager keeps at most one Codex Voice call and one warm Voice Analyst per interactive
+The session manager keeps at most one voice call and one warm Voice Analyst per interactive
 Web host. The normal launcher permits one such Web process per `CCCC_HOME`, while the call also uses
 the existing daemon-owned global recording lease shared with Voice Secretary. Hiding the details
 panel, switching Groups, or leaving the tab in the background does not stop or retarget the call.
@@ -778,6 +875,15 @@ Continue with `Up` / `Down` to browse the already loaded message history. Editin
 the cursor leaves history mode. Recall restores message text only; recipients, reply context,
 attachments, and delivery options remain those currently shown in the composer.
 
+### Message attachments
+
+Click an image or a video's first frame to open its preview. Video frames load
+when their message comes into view; playback starts when you open the player.
+The player uses native browser controls and pauses other message videos.
+Escape or Close returns to the message. Downloads remain available when the
+browser cannot decode a video. Confirmed uploads play and download from the
+Group's stored blob, so they remain available after the local upload preview expires.
+
 ### Message diagrams
 
 In Chat and Inbox messages, a fenced code block labeled `mermaid` is rendered as a diagram after
@@ -809,19 +915,35 @@ Click the reply icon on a message to quote and reply.
 Open **Project Context** from the clipboard button in the Group header. The
 header identifies the Group being viewed.
 
-- **Coordination** combines the working summary, `PROJECT.md`, coordination log
-  and task board. The summary is a short steering brief; `PROJECT.md` remains
-  the fuller repository reference. Empty summaries keep an Edit action without
-  filling the page with empty fields.
-- **Tasks** retain Planned, Active and Done columns, including empty drop targets.
+A single navigation row opens **Tasks**, **AGENTS.md**, **Agent State**,
+**Coordination log**, or **Skills**. On narrow screens, scroll the row horizontally;
+keyboard users can move focus with Left/Right or Home/End and activate with
+Enter/Space. Switching sections retains summary/file drafts and task filters.
+
+- **Tasks** is the default section. The goal, current focus and warnings stay
+  visible above the board. Expand **Working summary** for background and
+  constraints, or use Edit directly. The disclosure stays open while editing.
+  The board retains Planned, Active and Done columns, including empty drop targets.
   Search and attention filters narrow the board. Open a task for requirements,
   steps, handoffs and completion details. Missing requirements or closeout records
   describe record completeness; they do not change an existing task's status.
+  A parent card shows how many of its direct, non-archived subtasks are done, even
+  when filters or paging hide some of them; the open task lists them, and each one
+  opens in the editor. Subtask progress never completes the parent.
+- **AGENTS.md** views and edits the file in the current workspace root, showing
+  its actual path. A missing file can be created explicitly; existing documents
+  are not renamed, merged, or overwritten as part of setup. Each runtime controls
+  instruction discovery and precedence. Saving does not reload running sessions;
+  the optional team notification asks relevant Actors to re-read the file.
+  This editor does not represent all instruction files loaded by every Actor.
+  Web Model and Dots Actors can read files through `cccc_file` when needed.
 - **Agent State** shows the latest saved reports, including their timestamps and
   staleness. Focus, next action and blockers remain visible. Expand working context
   or recovery cues when needed. A task named in a report does not prove that its
   Runtime is currently working on it.
-- **Self-Evolving Skills** shows candidates originating in this Group. Instance
+- **Coordination log** has a dedicated page for recent decisions and handoffs.
+  Viewing repository instructions or records does not keep a task board beneath them.
+- **Skills** shows self-evolving candidates originating in this Group. Instance
   capability governance has a wider scope; the two views do not replace each other.
 
 ## Settings Panel

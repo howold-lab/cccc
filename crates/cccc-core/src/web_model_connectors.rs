@@ -13,8 +13,9 @@ use crate::{HomeLayout, fs};
 const VERSION: u64 = 3;
 
 mod grok;
-pub use grok::{bind_grok, binding_for_token, grok_bot_url, grok_token};
+pub use grok::{bind_grok, grok_bot_url};
 mod dots;
+pub mod grok_webhook;
 pub use dots::{
     DOTS_URL, begin_dots_pairing, bind_dots, confirm_dots_pairing, dots_binding_for_token,
     dots_claim_binding, dots_invalidate, dots_subscription_binding, dots_subscription_token,
@@ -208,6 +209,10 @@ pub fn revoke(home: &HomeLayout, id: &str) -> io::Result<bool> {
         connector["revoked"] = json!(true);
         connector["updated_at"] = json!(cccc_contracts::utc_now());
         connector["pairings"] = json!({});
+        connector
+            .as_object_mut()
+            .expect("connector")
+            .remove("grok_webhooks");
         connector.as_object_mut().expect("connector").remove("dots");
         Ok(true)
     })
@@ -220,6 +225,43 @@ pub fn secret_matches(item: &Value, supplied: &str) -> bool {
 /// Credential-scoped correlation, not authentication. Never use model arguments
 /// or HTTP transport session IDs as a substitute for per-call host metadata.
 pub fn session_key(connector: &Value, metadata: &Value) -> io::Result<String> {
+    Ok(hash(
+        &Value::Array(session_parts(connector, metadata)?).to_string(),
+    ))
+}
+
+/// Diagnostic correlation only. Domain separation prevents these hashes from
+/// substituting for a session key; each component stays scoped to this connector.
+pub fn host_identity_fingerprints(connector: &Value, metadata: &Value) -> io::Result<Value> {
+    let parts = session_parts(connector, metadata)?;
+    let mut result = serde_json::Map::new();
+    for (index, field) in ["session", "subject", "organization"]
+        .into_iter()
+        .enumerate()
+    {
+        let value = &parts[index + 3];
+        result.insert(
+            field.into(),
+            if value.is_null() {
+                Value::Null
+            } else {
+                json!(hash(
+                    &json!([
+                        "cccc-host-identity-diagnostic-v1",
+                        parts[1],
+                        parts[2],
+                        field,
+                        value
+                    ])
+                    .to_string()
+                ))
+            },
+        );
+    }
+    Ok(Value::Object(result))
+}
+
+fn session_parts(connector: &Value, metadata: &Value) -> io::Result<Vec<Value>> {
     require_chatgpt(connector)?;
     let metadata = metadata
         .as_object()
@@ -244,7 +286,7 @@ pub fn session_key(connector: &Value, metadata: &Value) -> io::Result<String> {
             None => parts.push(Value::Null),
         }
     }
-    Ok(hash(&Value::Array(parts).to_string()))
+    Ok(parts)
 }
 
 pub fn binding_for_actor(
@@ -289,18 +331,24 @@ pub fn validate_binding(home: &HomeLayout, expected: &Value) -> io::Result<()> {
         .iter()
         .find(|a| a.id == actor_id)
         .ok_or_else(|| error("paired_actor_unavailable"))?;
-    if generation.is_empty()
-        || crate::actors::generation_identity(actor) != generation
-        || !actor.enabled
-        || actor.runtime.web_model_provider() != connector["provider"].as_str()
+    if generation.is_empty() || crate::actors::generation_identity(actor) != generation {
+        return Err(error("paired_actor_identity_changed"));
+    }
+    if actor.runtime.web_model_provider() != connector["provider"].as_str()
         || actor.runner != cccc_contracts::RunnerKind::Headless
     {
-        return Err(error("paired_actor_unavailable"));
+        return Err(error("paired_actor_runtime_changed"));
+    }
+    if !actor.enabled {
+        return Err(error("paired_actor_stopped"));
     }
     let current = binding_for_actor(&connector, group_id, actor_id, generation)
         .ok_or_else(|| error("conversation_not_paired"))?;
     if current["revision"] != expected["revision"] {
         return Err(error("conversation_pairing_changed"));
+    }
+    if actor.runtime == cccc_contracts::ActorRuntime::GrokWebModel {
+        grok_webhook::validate(&connector, expected, &group)?;
     }
     if current["transport"] == "mcp_events" {
         if actor.runtime != cccc_contracts::ActorRuntime::ChatgptDots {
@@ -589,7 +637,7 @@ fn retire(home: &HomeLayout, group: &str, actor: Option<&str>) -> io::Result<Vec
             .expect("validated store")
             .values_mut()
         {
-            for collection in ["bindings", "pairings"] {
+            for collection in ["bindings", "pairings", "grok_webhooks"] {
                 let keys = c[collection]
                     .as_object()
                     .into_iter()
@@ -654,7 +702,7 @@ pub fn restore(home: &HomeLayout, entries: &[Value]) -> io::Result<()> {
             }
             let collection = entry["collection"]
                 .as_str()
-                .filter(|v| matches!(*v, "bindings" | "pairings"))
+                .filter(|v| matches!(*v, "bindings" | "pairings" | "grok_webhooks"))
                 .ok_or_else(|| error("invalid route snapshot"))?;
             let key = entry["key"]
                 .as_str()

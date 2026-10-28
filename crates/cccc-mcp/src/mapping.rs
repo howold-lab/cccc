@@ -1,7 +1,9 @@
 use serde_json::{Map, Value};
 
 use crate::actions;
-use crate::argument_normalization::{alias, normalize_message_author, normalize_recipients};
+use crate::argument_normalization::{
+    alias, message_mode, normalize_message_author, normalize_recipients,
+};
 
 pub fn daemon_call(
     name: &str,
@@ -18,10 +20,7 @@ pub fn daemon_call(
         "cccc_message_send" => {
             alias(&mut args, "event_id", "reply_to");
             normalize_message_author(&mut args);
-            let mode = args
-                .remove("mode")
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "mail".into());
+            let mode = message_mode(&mut args, "mail")?;
             args.insert("message_mode".into(), Value::String(mode));
             if connect_destination(&mut args)? {
                 return Ok(("connect_send".into(), args));
@@ -51,10 +50,7 @@ pub fn daemon_call(
             alias(&mut args, "event_id", "reply_to");
             alias(&mut args, "idempotency_key", "client_id");
             normalize_message_author(&mut args);
-            let mode = args
-                .remove("mode")
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "send".into());
+            let mode = message_mode(&mut args, "send")?;
             args.insert("message_mode".into(), Value::String(mode));
             "reply"
         }
@@ -66,7 +62,10 @@ pub fn daemon_call(
             normalize_message_author(&mut args);
             "reply_request_cancel"
         }
-        "cccc_context_get" => "context_get",
+        "cccc_context_get" => {
+            bound_context_page(&mut args);
+            "context_get"
+        }
         "cccc_context_sync" => "context_sync",
         "cccc_capability_search" => "capability_search",
         "cccc_capability_state" => "capability_state",
@@ -84,7 +83,16 @@ pub fn daemon_call(
             alias(&mut args, "id", "capability_id");
             "capability_uninstall"
         }
-        "cccc_group" => return action(args, actions::group),
+        "cccc_group" => {
+            let (op, mut args) = action(args, actions::group)?;
+            if op == "group_set_state"
+                && args.get("state").and_then(Value::as_str) == Some("stopped")
+            {
+                args.remove("state");
+                return Ok(("group_stop".into(), args));
+            }
+            return Ok((op, args));
+        }
         "cccc_actor" => return action(args, actions::actor),
         "cccc_actor_notes" => return action(args, actions::actor_notes),
         "cccc_coordination" => return context_action(args, "coordination"),
@@ -225,6 +233,10 @@ fn task_action(
                     "task_type",
                     "notes",
                     "checklist",
+                    "if_task_rev",
+                    "client_request_id",
+                    "parent_ref",
+                    "blocked_by_refs",
                 ],
             );
             args.insert("op".into(), Value::String("task.create".into()));
@@ -235,6 +247,7 @@ fn task_action(
                 args.insert("task_type".into(), value);
             }
             let status = args.remove("status");
+            let guard = args.get("if_task_rev").cloned();
             let task_id = args.get("task_id").cloned();
             retain_fields(
                 &mut args,
@@ -251,9 +264,12 @@ fn task_action(
                     "task_type",
                     "notes",
                     "checklist",
+                    "if_task_rev",
                 ],
             );
-            let has_patch = args.keys().any(|key| key != "task_id");
+            let has_patch = args
+                .keys()
+                .any(|key| !matches!(key.as_str(), "task_id" | "if_task_rev"));
             if has_patch || status.is_none() {
                 args.insert("op".into(), Value::String("task.update".into()));
                 operations.push(Value::Object(args));
@@ -265,6 +281,11 @@ fn task_action(
                     movement.insert("task_id".into(), task_id);
                 }
                 movement.insert("status".into(), status);
+                if operations.is_empty()
+                    && let Some(guard) = guard
+                {
+                    movement.insert("if_task_rev".into(), guard);
+                }
                 operations.push(Value::Object(movement));
             }
         }
@@ -272,9 +293,9 @@ fn task_action(
             retain_fields(
                 &mut args,
                 if action_name == "move" {
-                    &["task_id", "status"]
+                    &["task_id", "status", "if_task_rev"]
                 } else {
-                    &["task_id"]
+                    &["task_id", "if_task_rev"]
                 },
             );
             args.insert(
@@ -301,6 +322,28 @@ fn task_action(
     }
     request.insert("ops".into(), Value::Array(operations));
     Ok(("context_sync".into(), request))
+}
+
+/// An Actor's context read is paged: at most 100 tasks and 256 KiB per answer
+/// (a caller may ask for less). Large groups otherwise return megabytes that
+/// providers reject, and the turn retries the same oversized read.
+const CONTEXT_PAGE_LIMIT: u64 = 100;
+const CONTEXT_PAGE_MAX_BYTES: u64 = 256 * 1024;
+
+fn bound_context_page(args: &mut Map<String, Value>) {
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(CONTEXT_PAGE_LIMIT)
+        .clamp(1, CONTEXT_PAGE_LIMIT);
+    let max_bytes = args
+        .get("max_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(CONTEXT_PAGE_MAX_BYTES)
+        .clamp(4096, CONTEXT_PAGE_MAX_BYTES);
+    args.insert("limit".into(), Value::from(limit));
+    args.insert("max_bytes".into(), Value::from(max_bytes));
+    args.entry("include_archived").or_insert(Value::Bool(false));
 }
 
 fn retain_fields(args: &mut Map<String, Value>, allowed: &[&str]) {
@@ -337,6 +380,39 @@ mod tests {
     use super::daemon_call;
     use crate::argument_normalization::normalize_message_author;
     use serde_json::{Map, json};
+
+    #[test]
+    fn group_set_state_stopped_uses_the_stop_operation_with_authority_intact() {
+        let input = json!({"action":"set_state", "state":"stopped", "group_id":"g", "by":"foreman", "_cccc_native_source_binding":{"revision":7}});
+        let (op, args) = daemon_call(
+            "cccc_group",
+            input.as_object().expect("Group arguments").clone(),
+        )
+        .expect("Group mapping");
+        assert_eq!(op, "group_stop");
+        assert!(!args.contains_key("state"));
+        assert_eq!(args["by"], "foreman");
+        assert_eq!(args["group_id"], "g");
+        assert_eq!(args["_cccc_native_source_binding"]["revision"], 7);
+    }
+
+    #[test]
+    fn context_reads_never_ask_for_more_than_one_bounded_page() {
+        let (op, args) = daemon_call("cccc_context_get", Map::new()).expect("mapping");
+        assert_eq!(op, "context_get");
+        assert_eq!(args["limit"], 100);
+        assert_eq!(args["max_bytes"], 256 * 1024);
+        assert_eq!(args["include_archived"], false);
+        let asked = json!({"limit":5000,"max_bytes":10_000_000,"include_archived":true});
+        let (_, args) = daemon_call(
+            "cccc_context_get",
+            asked.as_object().cloned().expect("args"),
+        )
+        .expect("mapping");
+        assert_eq!(args["limit"], 100);
+        assert_eq!(args["max_bytes"], 256 * 1024);
+        assert_eq!(args["include_archived"], true);
+    }
 
     #[test]
     fn connect_destination_is_qualified_even_when_group_ids_match() {
@@ -474,6 +550,50 @@ mod tests {
     }
 
     #[test]
+    fn message_modes_preserve_explicit_choices_and_existing_defaults() {
+        for (tool, default, modes) in [
+            (
+                "cccc_message_send",
+                "mail",
+                vec!["mail", "send", "request_reply"],
+            ),
+            ("cccc_message_reply", "send", vec!["mail", "send"]),
+        ] {
+            for mode in std::iter::once(None).chain(modes.into_iter().map(Some)) {
+                let mut input =
+                    json!({"group_id":"g_test","to":["peer"],"text":"Synthetic message"});
+                if let Some(mode) = mode {
+                    input["mode"] = json!(mode);
+                }
+                let (_, args) = daemon_call(tool, input.as_object().expect("args").clone())
+                    .expect("valid mode");
+                assert_eq!(args["message_mode"], mode.unwrap_or(default), "{tool}");
+                assert!(!args.contains_key("mode"));
+            }
+        }
+    }
+
+    #[test]
+    fn message_modes_reject_wire_fields_and_invalid_values_instead_of_defaulting() {
+        for tool in ["cccc_message_send", "cccc_message_reply"] {
+            for input in [
+                json!({"message_mode":"mail"}),
+                json!({"mode":"send","message_mode":"mail"}),
+                json!({"mode":"mail","message_mode":"mail"}),
+                json!({"mode":null}),
+                json!({"mode":false}),
+                json!({"mode":42}),
+                json!({"mode":"invalid"}),
+            ] {
+                let error = daemon_call(tool, input.as_object().expect("args").clone())
+                    .expect_err("invalid mode");
+                assert!(error.starts_with("invalid_args:"), "{tool}: {error}");
+                assert!(error.contains("mode"));
+            }
+        }
+    }
+
+    #[test]
     fn message_control_tools_map_to_existing_event_operations() {
         for (tool, expected) in [
             ("cccc_message_deliver", "message_deliver"),
@@ -568,6 +688,22 @@ mod tests {
     }
 
     #[test]
+    fn task_create_mapping_keeps_the_callers_ids_and_refs() {
+        let create = json!({
+            "action":"create","group_id":"g_test","actor_id":"lead","by":"lead",
+            "title":"publish","client_request_id":"publish","parent_ref":"release",
+            "blocked_by_refs":["build"]
+        })
+        .as_object()
+        .cloned()
+        .expect("create args");
+        let (_, args) = daemon_call("cccc_task", create).expect("create mapping");
+        assert_eq!(args["ops"][0]["client_request_id"], "publish");
+        assert_eq!(args["ops"][0]["parent_ref"], "release");
+        assert_eq!(args["ops"][0]["blocked_by_refs"], json!(["build"]));
+    }
+
+    #[test]
     fn actor_notes_actions_map_to_the_daemon_owned_help_contract() {
         for (action, expected) in [
             ("get", "actor_notes_get"),
@@ -602,5 +738,27 @@ mod tests {
         let (op, args) = daemon_call("cccc_message_send", args).expect("mapping");
         assert_eq!(op, "reply");
         assert_eq!(args["by"], "backend");
+    }
+
+    #[test]
+    fn task_revision_guard_is_preserved_once_in_compound_updates() {
+        for arguments in [
+            json!({"action":"update","task_id":"T792","waiting_on":"none","status":"active","if_task_rev":0}),
+            json!({"action":"update","task_id":"T792","status":"active","if_task_rev":0}),
+            json!({"action":"move","task_id":"T792","status":"active","if_task_rev":0}),
+            json!({"action":"restore","task_id":"T792","if_task_rev":0}),
+            json!({"action":"delete","task_id":"T792","if_task_rev":0}),
+        ] {
+            let (_, args) = daemon_call("cccc_task", arguments.as_object().expect("args").clone())
+                .expect("mapping");
+            let operations = args["ops"].as_array().expect("ops");
+            assert_eq!(operations[0]["if_task_rev"], 0);
+            assert!(
+                operations
+                    .iter()
+                    .skip(1)
+                    .all(|op| op.get("if_task_rev").is_none())
+            );
+        }
     }
 }

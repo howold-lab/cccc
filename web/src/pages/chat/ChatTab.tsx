@@ -20,14 +20,17 @@ import {
   PresentationMessageRef,
   TaskMessageRef,
   VoiceDocumentMessageRef,
+  isBrowserWebModelRuntime,
 } from "../../types";
 import { VirtualMessageList } from "../../components/VirtualMessageList";
 import { classNames } from "../../utils/classNames";
 import { ChatComposer } from "./ChatComposer";
 import { GroupWorkArea, type RuntimeActorRenderer } from "./GroupWorkArea";
 import { RuntimeDock } from "./RuntimeDock";
+import { ChatSenderFilter } from "./ChatSenderFilter";
 import { useChatTab } from "../../hooks/useChatTab";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 import { useComposerStore, useGroupStore, useModalStore, useUIStore } from "../../stores";
 import { getChatSession } from "../../stores/useUIStore";
 import { findPresentationSlot } from "../../utils/presentation";
@@ -222,6 +225,11 @@ export function ChatTab({
     hasAnyChatMessages,
     chatFilter,
     setChatFilter,
+    chatSenderFilter,
+    setChatSenderFilter,
+    senderHistoryError,
+    retrySenderHistory,
+    viewMessageContext,
     chatViewKey,
     chatWindowProps,
     chatInitialScrollTargetId,
@@ -339,7 +347,19 @@ export function ChatTab({
   const setQuotedPresentationRef = useComposerStore((state) => state.setQuotedPresentationRef);
   const setComposerDestGroupId = useComposerStore((state) => state.setDestGroupId);
   const liveWorkBucket = useGroupStore(
-    (state) => state.chatByGroup[String(selectedGroupId || "").trim()],
+    useShallow((state) => {
+      const bucket = state.chatByGroup[String(selectedGroupId || "").trim()];
+      if (!bucket) return undefined;
+      return {
+        events: bucket.events,
+        chatWindow: bucket.chatWindow,
+        latestActorPreviewByActorId: bucket.latestActorPreviewByActorId,
+        previewSessionsByActorId: bucket.previewSessionsByActorId,
+        latestActorTextByActorId: bucket.latestActorTextByActorId,
+        latestActorActivitiesByActorId: bucket.latestActorActivitiesByActorId,
+        replySessionsByPendingEventId: bucket.replySessionsByPendingEventId,
+      };
+    }),
   );
   const presentationAttention = useModalStore((state) =>
     selectedGroupId
@@ -348,11 +368,15 @@ export function ChatTab({
   );
   const webModelDeliveryStatusByEventId = useMemo(
     () =>
-      buildWebModelDeliveryStatusByEventId([
-        ...(liveWorkBucket?.events || []),
-        ...(liveWorkBucket?.chatWindow?.events || []),
-      ]),
-    [liveWorkBucket?.chatWindow?.events, liveWorkBucket?.events],
+      buildWebModelDeliveryStatusByEventId(
+        [...(liveWorkBucket?.events || []), ...(liveWorkBucket?.chatWindow?.events || [])],
+        new Set(
+          actors
+            .filter((actor) => isBrowserWebModelRuntime(actor.runtime))
+            .map((actor) => actor.id),
+        ),
+      ),
+    [actors, liveWorkBucket?.chatWindow?.events, liveWorkBucket?.events],
   );
   const [appPermissionHintDismissed, setAppPermissionHintDismissed] = useState(
     readChatGptAppPermissionHintDismissed,
@@ -650,7 +674,8 @@ export function ChatTab({
     ["mail", t("filterMail")],
     ["request_reply", t("filterNeedReply")],
   ];
-  const showMessageFilters = !readOnly && !chatWindowProps && hasAnyChatMessages;
+  const hasChatFilter = chatFilter !== "all" || chatSenderFilter.length > 0;
+  const showMessageFilters = !readOnly && !chatWindowProps && (hasAnyChatMessages || hasChatFilter);
   const showSetupNotice = !readOnly && (needsScope || needsActors) && chatMessages.length > 0;
 
   return (
@@ -722,7 +747,7 @@ export function ChatTab({
                               )}
                               onClick={exitChatWindow}
                             >
-                              {t("returnToLatest")}
+                              {t(hasChatFilter ? "returnToFilteredChat" : "returnToLatest")}
                             </button>
                           )}
                         </div>
@@ -798,30 +823,52 @@ export function ChatTab({
                       data-message-filters
                     >
                       <div
-                        className="chat-reading-width flex h-11 items-stretch gap-5 overflow-x-auto scrollbar-hide"
+                        className="chat-reading-width flex min-h-11 md:min-h-9 flex-wrap items-center gap-x-2"
                         role="group"
                         aria-label={t("chatFilters")}
                       >
-                        {filterOptions.map(([key, label]) => {
-                          const active = chatFilter === key;
-                          return (
-                            <button
-                              key={key}
-                              type="button"
-                              className={classNames(
-                                "shrink-0 px-0.5 text-[13px] whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--color-text-secondary)]",
-                                active
-                                  ? "font-semibold text-[var(--color-text-primary)] shadow-[inset_0_-2px_0_var(--color-text-primary)]"
-                                  : "font-medium text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]",
-                              )}
-                              onClick={() => setChatFilter(key)}
-                              aria-pressed={active}
-                            >
-                              {label}
-                            </button>
-                          );
-                        })}
+                        <div className="flex h-11 md:h-9 min-w-0 items-stretch gap-3 overflow-x-auto scrollbar-hide">
+                          {filterOptions.map(([key, label]) => {
+                            const active = chatFilter === key;
+                            return (
+                              <button
+                                key={key}
+                                type="button"
+                                className={classNames(
+                                  "shrink-0 px-0.5 text-[13px] leading-5 whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--color-text-secondary)]",
+                                  active
+                                    ? "font-semibold text-[var(--color-text-primary)] shadow-[inset_0_-2px_0_var(--color-text-primary)]"
+                                    : "font-medium text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]",
+                                )}
+                                onClick={() => setChatFilter(key)}
+                                aria-pressed={active}
+                              >
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <ChatSenderFilter
+                          value={chatSenderFilter}
+                          actors={actors}
+                          onChange={setChatSenderFilter}
+                        />
                       </div>
+                      {senderHistoryError ? (
+                        <div
+                          role="status"
+                          className="chat-reading-width flex items-center gap-2 pb-2 text-xs text-[var(--color-text-secondary)]"
+                        >
+                          <span>{t("senderHistoryFailed")}</span>
+                          <button
+                            type="button"
+                            className="min-h-9 underline"
+                            onClick={() => void retrySenderHistory()}
+                          >
+                            {t("common:retry")}
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   )}
 
@@ -878,17 +925,25 @@ export function ChatTab({
                       groupLabelById={messageGroupLabelById}
                       webModelDeliveryStatusByEventId={webModelDeliveryStatusByEventId}
                       viewKey={chatViewKey}
-                      followOnViewChangeKey={chatFilter}
+                      followOnViewChangeKey={chatViewKey}
                       initialScrollTargetId={chatInitialScrollTargetId}
                       initialScrollAnchorId={chatInitialScrollAnchorId}
                       initialScrollAnchorOffsetPx={chatInitialScrollAnchorOffsetPx}
                       initialScrollOffsetPx={chatInitialScrollOffsetPx}
                       highlightEventId={chatHighlightEventId}
+                      className={
+                        !chatWindowProps && runtimeActors.length > 0
+                          ? "pb-[calc(5rem_-_10px)] sm:pb-[calc(4rem_-_10px)]"
+                          : undefined
+                      }
                       scrollRef={scrollRef}
                       onReply={startReply}
                       onShowRecipients={showRecipients}
                       onCopyLink={copyMessageLink}
                       onCopyContent={copyMessageText}
+                      onViewContext={
+                        hasChatFilter && !chatWindowProps ? viewMessageContext : undefined
+                      }
                       onRelay={relayMessage}
                       onOpenSource={openSourceMessage}
                       onOpenPresentationRef={openPresentationRef}
@@ -913,7 +968,6 @@ export function ChatTab({
                         groupId={selectedGroupId}
                         runtimeActors={runtimeActors}
                         liveWorkCards={liveWorkCards}
-                        runtimeEvents={liveWorkBucket?.rawHeadlessEventsByActorId}
                         activeRuntimeActorId={activeRuntimeActorId}
                         isDark={isDark}
                         isSmallScreen={isSmallScreen}

@@ -1,3 +1,5 @@
+#[path = "suite/actor_context_cleanup.rs"]
+mod actor_context_cleanup;
 #[path = "suite/admin_ops.rs"]
 mod admin_ops;
 #[path = "suite/assistant_voice_ops.rs"]
@@ -10,6 +12,8 @@ mod capability_install_events;
 mod capability_install_events_support;
 #[path = "suite/capability_state.rs"]
 mod capability_state;
+#[path = "suite/cross_group_attachments.rs"]
+mod cross_group_attachments;
 #[path = "suite/cross_group_foreman_default.rs"]
 mod cross_group_foreman_default;
 #[path = "suite/cross_group_sender_snapshot.rs"]

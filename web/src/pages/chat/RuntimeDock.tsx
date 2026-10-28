@@ -1,3 +1,4 @@
+import { RuntimeDockRing } from "./RuntimeDockRing";
 import { memo, useId, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Mail } from "lucide-react";
@@ -5,6 +6,7 @@ import { Mail } from "lucide-react";
 import { ActorAvatar } from "../../components/ActorAvatar";
 import { PlusIcon } from "../../components/Icons";
 import { useActorDisplayState } from "../../hooks/useActorDisplayState";
+import { useGroupStore } from "../../stores";
 import type { Actor, HeadlessStreamEvent } from "../../types";
 import { classNames } from "../../utils/classNames";
 import { hasManagedRuntimeOutput } from "../../utils/headlessRuntimeSupport";
@@ -116,8 +118,7 @@ function RuntimeDockActorButtonView({
   });
   const ringTone = getRuntimeRingTone(item, isRunning, workingState);
   const ringPresentation = getRuntimeRingPresentation(ringTone, isDark);
-  const useRuntimeStatus =
-    workingState === "error" || (workingState === "working" && hasManagedRuntimeOutput(item.actor));
+  const useRuntimeStatus = hasManagedRuntimeOutput(item.actor) || workingState === "error";
   const statusLabel =
     item.liveWorkCard && !useRuntimeStatus
       ? getLiveWorkBadgeLabel(item.liveWorkCard, (key, options) => t(`chat:${key}`, options))
@@ -184,55 +185,12 @@ function RuntimeDockActorButtonView({
         aria-describedby={`runtime-dock-status-${item.actorId}`}
         title={[item.actorLabel, statusLabel, mailLabel, queuedLabel].filter(Boolean).join("\n")}
       >
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 44 44"
-          width={ringFrameSize}
-          height={ringFrameSize}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          className={classNames(
-            "runtime-dock-ring pointer-events-none absolute transition-colors duration-200",
-            ringPresentation.ringClassName,
-          )}
-        >
-          <circle
-            cx="22"
-            cy="22"
-            r="21"
-            strokeWidth={ringTone === "active" ? 2 : 1.5}
-            opacity={ringTone === "active" ? 0.12 : 1}
-          />
-          {ringTone === "active" ? (
-            <>
-              <defs>
-                <linearGradient
-                  id={activityGradientId}
-                  gradientUnits="userSpaceOnUse"
-                  x1="43"
-                  y1="22"
-                  x2="11.5"
-                  y2="40.2"
-                >
-                  <stop stopColor="currentColor" stopOpacity="0" />
-                  <stop offset="0.55" stopColor="currentColor" stopOpacity="0.85" />
-                  <stop offset="0.85" stopColor="currentColor" />
-                  <stop offset="1" stopColor="#FE8FB5" />
-                </linearGradient>
-              </defs>
-              <circle
-                className="runtime-dock-ring__activity"
-                cx="22"
-                cy="22"
-                r="21"
-                stroke={`url(#${activityGradientId})`}
-                strokeDasharray="44 88"
-                strokeLinecap="round"
-              />
-            </>
-          ) : null}
-        </svg>
+        <RuntimeDockRing
+          size={ringFrameSize}
+          active={ringTone === "active"}
+          colorClassName={ringPresentation.ringClassName}
+          gradientId={activityGradientId}
+        />
 
         <ActorAvatar
           avatarUrl={item.actor.avatar_url || undefined}
@@ -337,14 +295,18 @@ export function RuntimeDock({
   onOpenRuntimeActor,
 }: RuntimeDockProps) {
   const { t } = useTranslation("chat");
+  const storeRuntimeEvents = useGroupStore(
+    (state) => state.chatByGroup?.[String(groupId || "").trim()]?.rawHeadlessEventsByActorId,
+  );
+  const effectiveRuntimeEvents = runtimeEvents ?? storeRuntimeEvents;
 
   const items = useMemo(
     () => buildRuntimeDockItems({ actors: runtimeActors, liveWorkCards }),
     [runtimeActors, liveWorkCards],
   );
   const tickerEntries = useMemo(
-    () => buildRuntimeDockTickerEntries(items, runtimeEvents),
-    [items, runtimeEvents],
+    () => buildRuntimeDockTickerEntries(items, effectiveRuntimeEvents),
+    [items, effectiveRuntimeEvents],
   );
 
   if (items.length <= 0) return null;

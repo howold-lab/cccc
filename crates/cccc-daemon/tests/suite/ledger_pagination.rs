@@ -51,6 +51,73 @@ fn chat_pagination_filters_noise_before_applying_limit() {
 }
 
 #[test]
+fn sender_union_uses_one_history_cursor_and_filters_before_limiting() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"sender union"}));
+    let group_id = created.result["group"]["group_id"].as_str().expect("group");
+    for index in 0..10 {
+        let mut event = Event::new("chat.message", group_id);
+        event.id = format!("message-{index}");
+        event.by = ["lead", "other", "peer"][index % 3].into();
+        event.data.insert("text".into(), json!("matching text"));
+        call(&home, "event_append", json!({"event":event}));
+        append(&home, group_id, "actor.activity", &format!("noise-{index}"));
+    }
+    let query = json!({"group_id":group_id,"kind":"chat","by_any":["lead","peer"],"limit":3});
+    let latest = call(&home, "ledger_search", query.clone());
+    assert_eq!(ids(&latest), ["message-6", "message-8", "message-9"]);
+    assert_eq!(latest.result["has_more"], true);
+    let mut older = query.clone();
+    older["before"] = json!("message-6");
+    let older = call(&home, "ledger_search", older);
+    assert_eq!(ids(&older), ["message-2", "message-3", "message-5"]);
+    let mut oldest = query.clone();
+    oldest["before"] = json!("message-2");
+    let oldest = call(&home, "ledger_search", oldest);
+    assert_eq!(ids(&oldest), ["message-0"]);
+    assert_eq!(oldest.result["has_more"], false);
+    let mut after = query.clone();
+    after["after"] = json!("message-3");
+    after["limit"] = json!(2);
+    let after = call(&home, "ledger_search", after);
+    assert_eq!(ids(&after), ["message-5", "message-6"]);
+    assert_eq!(after.result["has_more"], true);
+    let mut exact = query;
+    exact["by"] = json!("lead");
+    assert_eq!(
+        ids(&call(&home, "ledger_search", exact)),
+        ["message-3", "message-6", "message-9"]
+    );
+}
+
+#[test]
+fn invalid_sender_collections_do_not_silently_remove_the_filter() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"invalid senders"}));
+    let group_id = created.result["group"]["group_id"].as_str().expect("group");
+    for value in [json!("lead"), json!(["lead", 1]), json!([""])] {
+        let response = call_raw(
+            &home,
+            "ledger_search",
+            json!({"group_id":group_id,"by_any":value}),
+        );
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.expect("invalid senders").code,
+            "invalid_args"
+        );
+    }
+    let empty = call(
+        &home,
+        "ledger_search",
+        json!({"group_id":group_id,"kind":"chat","by_any":[]}),
+    );
+    assert!(ids(&empty).is_empty());
+}
+
+#[test]
 fn message_window_is_centered_and_reports_both_directions() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
@@ -361,6 +428,40 @@ fn ids(response: &DaemonResponse) -> Vec<&str> {
         .collect()
 }
 
+#[test]
+fn ledger_maintenance_rejects_a_deleted_group_without_recreating_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"maintenance"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id")
+        .to_owned();
+    append(&home, &group_id, "chat.message", "before-delete");
+    call(&home, "ledger_snapshot", json!({"group_id":group_id}));
+    call(&home, "ledger_compact", json!({"group_id":group_id}));
+
+    call(
+        &home,
+        "group_delete",
+        json!({"group_id":group_id,"by":"user"}),
+    );
+    let group_dir = home.groups_dir().join(&group_id);
+    assert!(!group_dir.exists());
+    for op in ["ledger_snapshot", "ledger_compact"] {
+        let response = call_raw(&home, op, json!({"group_id":group_id}));
+        assert_eq!(
+            response.error.map(|error| error.code).as_deref(),
+            Some("group_not_found"),
+            "{op} must reject a deleted Group"
+        );
+        assert!(
+            !group_dir.exists(),
+            "{op} must not recreate the deleted Group's directory"
+        );
+    }
+}
+
 fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
     let response = call_raw(home, op, args);
     assert!(response.ok, "{op}: {:?}", response.error);
@@ -376,4 +477,138 @@ fn call_raw(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
             args: args.as_object().cloned().unwrap_or_else(Map::new),
         },
     )
+}
+
+#[test]
+fn recorded_ledger_recipient_and_time_filters_compose_with_pagination() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    let created = call(&home, "group_create", json!({"title":"ledger filters"}));
+    let group_id = created.result["group"]["group_id"].as_str().expect("group");
+    let mut events: Vec<Event> =
+        serde_json::from_str(include_str!("../fixtures/ledger-search/events.json"))
+            .expect("recorded events");
+    for event in &mut events {
+        event.group_id = group_id.into();
+        call(&home, "event_append", json!({"event":event}));
+    }
+    let selected = events
+        .iter()
+        .filter(|event| {
+            event
+                .data
+                .get("to")
+                .and_then(Value::as_array)
+                .is_some_and(|to| to.contains(&json!("actor-03")))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        selected.len() >= 4,
+        "recording must exercise multiple pages"
+    );
+    let since = &selected[1].ts;
+    let until = &selected[selected.len() - 2].ts;
+    let expected = selected
+        .iter()
+        .filter(|event| event.ts >= *since && event.ts <= *until)
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    let query = json!({"group_id":group_id,"kind":"chat","to":"actor-03","since_ts":since,"until_ts":until,"limit":1});
+    let latest = call(&home, "ledger_search", query.clone());
+    assert_eq!(ids(&latest), [*expected.last().expect("last")]);
+    assert_eq!(latest.result["has_more"], true);
+    let mut older = query.clone();
+    older["before"] = json!(expected.last().expect("cursor"));
+    assert_eq!(
+        ids(&call(&home, "ledger_search", older)),
+        [expected[expected.len() - 2]]
+    );
+    let mut forward = query.clone();
+    forward["after"] = json!(events[0].id);
+    assert_eq!(
+        ids(&call(&home, "ledger_search", forward.clone())),
+        [expected[0]]
+    );
+    forward["limit"] = json!(200);
+    assert_eq!(
+        ids(&call(&home, "ledger_search", forward.clone())),
+        expected
+    );
+    forward["by_any"] = json!([selected[1].by]);
+    let narrowed = selected
+        .iter()
+        .filter(|event| event.ts >= *since && event.ts <= *until && event.by == selected[1].by)
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids(&call(&home, "ledger_search", forward)), narrowed);
+    let only_since = call(
+        &home,
+        "ledger_search",
+        json!({"group_id":group_id,"to":"actor-03","since_ts":since}),
+    );
+    assert_eq!(
+        ids(&only_since),
+        selected
+            .iter()
+            .skip(1)
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    let only_until = call(
+        &home,
+        "ledger_search",
+        json!({"group_id":group_id,"to":"actor-03","until_ts":until}),
+    );
+    assert_eq!(
+        ids(&only_until),
+        selected
+            .iter()
+            .take(selected.len() - 1)
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    let wrong_sender = call(
+        &home,
+        "ledger_search",
+        json!({"group_id":group_id,"to":"actor-03","by":"actor-01"}),
+    );
+    assert!(ids(&wrong_sender).is_empty());
+    // RFC3339 offsets compare instants, not their string spelling.
+    let boundary = chrono::DateTime::parse_from_rfc3339(since)
+        .expect("timestamp")
+        .with_timezone(&chrono::FixedOffset::east_opt(3600).expect("offset"))
+        .to_rfc3339();
+    let exact = call(
+        &home,
+        "ledger_search",
+        json!({"group_id":group_id,"to":"actor-03","since_ts":boundary,"until_ts":since}),
+    );
+    assert_eq!(ids(&exact), [selected[1].id.as_str()]);
+    let none = call(
+        &home,
+        "ledger_search",
+        json!({"group_id":group_id,"to":"unknown-recipient"}),
+    );
+    assert!(ids(&none).is_empty());
+}
+
+#[test]
+fn ledger_search_rejects_invalid_recipient_and_time_filters() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    let created = call(&home, "group_create", json!({"title":"filter validation"}));
+    let group_id = created.result["group"]["group_id"].as_str().expect("group");
+    for patch in [
+        json!({"to":17}),
+        json!({"to":" "}),
+        json!({"since_ts":"yesterday"}),
+        json!({"until_ts":3}),
+        json!({"since_ts":"2026-10-22T10:00:00Z","until_ts":"2026-10-22T09:00:00Z"}),
+    ] {
+        let mut args = patch.as_object().expect("object").clone();
+        args.insert("group_id".into(), json!(group_id));
+        let response = call_raw(&home, "ledger_search", Value::Object(args));
+        assert!(!response.ok, "invalid filter accepted: {patch}");
+        assert_eq!(response.error.expect("error").code, "invalid_args");
+    }
 }

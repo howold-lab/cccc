@@ -1,5 +1,14 @@
 import type { CodexVoiceReadiness } from "../../services/api";
 import type { CodexVoiceSessionController } from "./useCodexVoiceSessionController";
+import { formatCodexVoiceName } from "./codexVoicePreferences";
+
+/** Active-call metadata takes precedence over the next-call selection. */
+export function codexVoiceDisplayIdentity(
+  controller: Pick<CodexVoiceSessionController, "call" | "preferences">,
+) {
+  const selection = controller.call || controller.preferences;
+  return { provider: selection.provider || "codex", voice: formatCodexVoiceName(selection.voice) };
+}
 
 /** One call-status projection for the dock, visible header and accessibility announcement. */
 export function codexVoiceCallStatus(
@@ -13,6 +22,7 @@ export function codexVoiceCallStatus(
     Boolean(
       controller.readiness &&
       (!controller.readiness.realtime_credentials_available ||
+        controller.readiness.realtime_runtime_available === false ||
         !controller.readiness.analyst_runtime_available),
     );
   const labelKey = controller.externalCall
@@ -56,7 +66,12 @@ export function codexVoiceCallReadinessProblem(
   t: (key: string, options?: Record<string, unknown>) => string,
   readiness: CodexVoiceReadiness | null,
 ): string {
-  if (!readiness || readiness.realtime_credentials_available) return "";
+  if (!readiness) return "";
+  if (readiness.realtime_provider === "grok") {
+    if (readiness.realtime_runtime_available === false) return t("codexVoiceGrokRuntimeRequired");
+    return readiness.realtime_credentials_available ? "" : t("codexVoiceGrokLoginRequired");
+  }
+  if (readiness.realtime_credentials_available) return "";
   return t("codexVoiceCodexLoginRequired");
 }
 

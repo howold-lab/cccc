@@ -67,8 +67,8 @@ pub(super) fn resolve(
         let token = request["params"]["arguments"]["actor_token"]
             .as_str()
             .unwrap_or_default();
-        web_model_connectors::binding_for_token(connector, token).ok_or_else(|| {
-            ApiError::forbidden("actor_token_invalid: use the Actor credential from this Bot's current CCCC task message")
+        web_model_connectors::grok_webhook::resolve(connector, token, request["params"]["name"].as_str().unwrap_or("")).ok_or_else(|| {
+            ApiError::forbidden("actor_token_invalid: Use this Bot's current Webhook event claim credential. Native business tools need the execution credential returned by the current claim. Never recover credentials from chat history")
         })?
     } else if request["params"]["arguments"].get("actor_token").is_some() {
         let token = request["params"]["arguments"]["actor_token"]
@@ -113,14 +113,24 @@ pub(super) fn resolve(
         .actors
         .iter()
         .find(|a| Some(a.id.as_str()) == binding["actor_id"].as_str())
-        .ok_or_else(|| ApiError::forbidden("paired Actor is unavailable"))?;
+        .ok_or_else(|| {
+            ApiError::forbidden("paired_actor_unavailable: The paired Actor no longer exists")
+        })?;
+    if binding["generation"] != cccc_core::actors::generation_identity(actor) {
+        return Err(ApiError::forbidden(
+            "paired_actor_identity_changed: The paired Actor was replaced; explicitly reconnect the intended Actor",
+        ));
+    }
     if actor.runtime.web_model_provider() != connector["provider"].as_str()
         || actor.runner != RunnerKind::Headless
-        || !actor.enabled
-        || binding["generation"] != cccc_core::actors::generation_identity(actor)
     {
         return Err(ApiError::forbidden(
-            "paired Actor is stopped or its identity changed",
+            "paired_actor_runtime_changed: The paired Actor's runtime changed; review its connection settings",
+        ));
+    }
+    if !actor.enabled {
+        return Err(ApiError::forbidden(
+            "paired_actor_stopped: CCCC access is paused. Pairing is retained; resume access in CCCC to receive work. Do not pair again",
         ));
     }
     if request["params"]["arguments"]
