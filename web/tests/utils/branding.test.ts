@@ -4,6 +4,7 @@ import {
   applyBrandingToDocument,
   APPLE_TOUCH_ICON_URL,
   DEFAULT_DOCUMENT_TITLE,
+  DEFAULT_PRODUCT_NAME,
   DEFAULT_WEB_BRANDING,
   resolveDocumentTitle,
   resolveWebAppManifestUrl,
@@ -46,7 +47,7 @@ describe("branding utils", () => {
   });
 
   it("keeps the default descriptive title for the built-in product name", () => {
-    expect(resolveDocumentTitle("CCCC")).toBe(DEFAULT_DOCUMENT_TITLE);
+    expect(resolveDocumentTitle(DEFAULT_PRODUCT_NAME)).toBe(DEFAULT_DOCUMENT_TITLE);
   });
 
   it("uses the custom product name as the document title", () => {

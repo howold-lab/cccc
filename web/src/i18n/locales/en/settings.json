@@ -209,7 +209,7 @@
     "productNameTitle": "Product Name",
     "productNameHint": "Shown in the sidebar, sign-in screen and browser tab. This does not rename the instance in Connect.",
     "productNameLabel": "Name",
-    "productNamePlaceholder": "CCCC",
+    "productNamePlaceholder": "直播工作台",
     "saveName": "Save name",
     "saved": "Branding saved.",
     "saveFailed": "Failed to save branding.",
