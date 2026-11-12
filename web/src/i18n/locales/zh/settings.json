@@ -206,7 +206,7 @@
     "productNameTitle": "产品名称",
     "productNameHint": "显示在侧边栏、登录页和浏览器标签中，不会修改 Connect 中的实例名称。",
     "productNameLabel": "名称",
-    "productNamePlaceholder": "直播工作台",
+    "productNamePlaceholder": "直播",
     "saveName": "保存名称",
     "saved": "品牌设置已保存。",
     "saveFailed": "保存品牌设置失败。",

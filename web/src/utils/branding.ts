@@ -1,10 +1,10 @@
 import type { WebBranding } from "../types";
 
-export const DEFAULT_PRODUCT_NAME = "直播工作台";
+export const DEFAULT_PRODUCT_NAME = "直播";
 export const DEFAULT_LOGO_ICON_URL = "/ui/logo.svg";
 export const DEFAULT_DARK_LOGO_ICON_URL = "/ui/logo-dark.svg";
 export const DEFAULT_FAVICON_URL = "/ui/logo.svg";
-export const DEFAULT_DOCUMENT_TITLE = "直播工作台";
+export const DEFAULT_DOCUMENT_TITLE = "直播";
 export const WEB_APP_MANIFEST_URL = "/ui/manifest.webmanifest";
 export const APPLE_TOUCH_ICON_URL = "/apple-touch-icon.png";
 
