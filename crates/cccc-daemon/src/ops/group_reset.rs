@@ -1,5 +1,4 @@
 use cccc_contracts::{DaemonRequest, GroupState};
-use cccc_core::group::AUTOMATION_TIMING_KEYS;
 use cccc_core::{GroupDoc, GroupStore, HomeLayout, Registry, active, permissions};
 use serde_json::{Map, Value, json};
 
@@ -20,6 +19,12 @@ pub(super) fn reset(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         &string_arg(request, "by").unwrap_or_else(|| "user".into()),
     )
     .map_err(OpError::invalid)?;
+    // An unfinished switch still writes into this Group's ledger, and its
+    // Retry starts the member: it is completed before a reset.
+    for actor in &old.actors {
+        super::actor_switch::refuse_pending(home, &group_id, &actor.id)?;
+    }
+    let browser_work = super::actor_runtime::hold_group_browser_work(home, &old)?;
     let was_active = active::get(home).map_err(OpError::io)?.as_deref() == Some(&group_id);
     let created = store.create(&old.title, &old.topic).map_err(OpError::io)?;
     let replacement = prepare_replacement(&store, &old, &created)
@@ -61,8 +66,12 @@ pub(super) fn reset(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     let old_delete_error = settle_old_delete(&store, &old, store.delete(&old.group_id));
     if old_delete_error.is_none() {
+        super::local_headless::clear_group_confirmation_pauses(&old.group_id)
+            .map_err(OpError::io)?;
         super::actor_secrets::remove_group(home, &old.group_id)?;
         super::voice_secretary::purge_deleted_group(home, &old.group_id).map_err(OpError::io)?;
+        drop(browser_work);
+        cccc_core::web_model_connectors::remove_browser_work_locks(home, &old.group_id);
     }
     object(json!({
         "old_group_id":old.group_id,
@@ -122,6 +131,11 @@ fn prepare_replacement(
                     );
                 }
             }
+            // Native sources members left still must not reclaim them.
+            cccc_core::runtime_switches::set_records(
+                document,
+                &cccc_core::runtime_switches::for_copy(old),
+            );
             for actor in &mut document.actors {
                 actor.avatar_asset_path.clear();
             }
@@ -149,17 +163,6 @@ fn reset_automation(group: &GroupDoc) -> Map<String, Value> {
     for key in ["version", "rules", "snippets", "snippet_overrides"] {
         if let Some(value) = group.automation.get(key) {
             automation.insert(key.into(), value.clone());
-        }
-    }
-    for key in AUTOMATION_TIMING_KEYS {
-        if let Some(value) = group.automation.get(*key).or_else(|| {
-            group
-                .extra
-                .get("settings")
-                .and_then(Value::as_object)
-                .and_then(|settings| settings.get(*key))
-        }) {
-            automation.insert((*key).into(), value.clone());
         }
     }
     automation
@@ -261,9 +264,10 @@ mod tests {
         assert_eq!(replacement.automation["version"], json!(7));
         assert_eq!(replacement.automation["rules"], json!([{"id":"keep-rule"}]));
         assert!(!replacement.automation.contains_key("nudge_after_seconds"));
-        assert_eq!(
-            replacement.automation["help_nudge_interval_seconds"],
-            json!(777)
+        assert!(
+            !replacement
+                .automation
+                .contains_key("help_nudge_interval_seconds")
         );
         assert!(!replacement.automation.contains_key("runtime_last_tick"));
         assert_eq!(

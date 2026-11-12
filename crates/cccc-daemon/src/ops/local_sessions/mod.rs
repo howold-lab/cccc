@@ -33,7 +33,14 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         "local_session_receiver_detach" => Operation::new(ResourceOwned, detach),
         "local_session_conversation" => Operation::new(GlobalWrite, conversations::create),
         "local_session_join" => Operation::new(Write, conversations::join),
-        "local_session_send" => Operation::new(Write, conversations::send),
+        "local_session_send" => Operation::new(Write, |home, request| {
+            // Before the send can create or reuse a conversation.
+            super::messaging::accept_arguments(
+                request,
+                cccc_contracts::message_args::MessageWrite::LocalSessionSend,
+            )?;
+            conversations::send(home, request)
+        }),
         "local_session_leave" => Operation::new(Write, conversations::leave),
         _ => return None,
     })
@@ -338,6 +345,24 @@ fn attach(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             receiver.source_id, error.code
         ));
     }
+    // Attach is a lifecycle event, unlike the frequent receive heartbeats.
+    // Establish a baseline for already joined Groups without making an
+    // unavailable instruction file or registry a failure of the receive lease.
+    if let Ok(groups) = GroupStore::new(home.clone())
+        && let Ok(entries) = groups.list()
+    {
+        for entry in entries {
+            if let Ok(group) = groups.load(&entry.group_id) {
+                for actor in group
+                    .actors
+                    .iter()
+                    .filter(|actor| actor.external_session_id == receiver.source_id)
+                {
+                    record_instruction_baseline(home, &group, actor);
+                }
+            }
+        }
+    }
     object(json!({"source":receiver.source()}))
 }
 
@@ -390,6 +415,33 @@ fn acknowledge(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     object(json!({"recorded":true}))
 }
 
+/// A connected source chosen as a member's new runtime.
+pub(super) fn switch_source(
+    home: &HomeLayout,
+    source_id: &str,
+) -> Result<cccc_contracts::local_session::LocalSessionSource, OpError> {
+    conversations::connected_source(home, source_id)
+}
+
+/// The working directory a switched member takes from its new source.
+pub(super) fn switch_scope(
+    source: &cccc_contracts::local_session::LocalSessionSource,
+    attached: &[cccc_core::Scope],
+) -> Result<cccc_core::Scope, OpError> {
+    conversations::source_scope(source, attached)
+}
+
+pub(super) fn provider(runtime: LocalSessionRuntime) -> ActorRuntime {
+    actor_runtime(runtime)
+}
+
+/// The title a native source reports for its conversation, if known.
+pub(super) fn source_title(home: &HomeLayout, source_id: &str) -> Option<String> {
+    cccc_core::local_sessions::read_record(home, source_id)
+        .ok()
+        .map(|record| record.title)
+}
+
 pub(super) fn connected(home: &HomeLayout, source_id: &str) -> bool {
     store::connected(home, source_id)
 }
@@ -408,7 +460,52 @@ pub(super) fn session_marker(home: &HomeLayout, source_id: &str) -> Option<Strin
     cccc_core::local_sessions::read(home, source_id)
         .ok()
         .filter(cccc_core::local_sessions::NativeSession::host_alive)
-        .map(|session| session.revision)
+        .map(|session| format!("{}:{}", session.revision, session.context_epoch))
+}
+
+/// Native instructions are associated with the working directory reported by
+/// the runtime, not the Group's next-launch workspace selection.
+pub(super) fn instruction_session(
+    home: &HomeLayout,
+    actor: &Actor,
+) -> Option<(String, std::path::PathBuf)> {
+    let session = cccc_core::local_sessions::read(home, &actor.external_session_id).ok()?;
+    if !session.host_alive() {
+        return None;
+    }
+    let root = std::path::Path::new(&session.cwd).canonicalize().ok()?;
+    if !root.is_dir() {
+        return None;
+    }
+    Some((
+        format!(
+            "native:{}:{}:{}",
+            session.source_id,
+            session.revision,
+            root.display()
+        ),
+        root,
+    ))
+}
+
+pub(super) fn record_instruction_baseline(home: &HomeLayout, group: &GroupDoc, actor: &Actor) {
+    let Some((session, root)) = instruction_session(home, actor) else {
+        return;
+    };
+    let Some(snapshot) = super::instruction_files::Snapshot::read(&root) else {
+        return;
+    };
+    super::instruction_files::record(home, &group.group_id, actor, &session, snapshot);
+}
+
+fn record_group_instruction_baselines(home: &HomeLayout, group: &GroupDoc) {
+    for actor in group
+        .actors
+        .iter()
+        .filter(|actor| !actor.external_session_id.is_empty())
+    {
+        record_instruction_baseline(home, group, actor);
+    }
 }
 
 pub(super) enum PreflightError {

@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "cccc"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "anyhow",
  "base64",
@@ -562,6 +562,7 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "retach",
+ "rustix",
  "rustls 0.23.37",
  "semver",
  "serde_json",
@@ -574,8 +575,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cccc-linux-memory"
+version = "0.4.54"
+
+[[package]]
 name = "cccc-pair-client"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "cccc-pair-contracts",
  "cccc-pair-core",
@@ -586,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-contracts"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "chrono",
  "serde",
@@ -596,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-core"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "aws-lc-rs",
  "base64",
@@ -627,6 +632,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+ "unicase",
  "url",
  "uuid",
  "zip",
@@ -634,11 +640,12 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-daemon"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "cccc-linux-memory",
  "cccc-pair-client",
  "cccc-pair-contracts",
  "cccc-pair-core",
@@ -652,6 +659,7 @@ dependencies = [
  "percent-encoding",
  "regex",
  "reqwest 0.12.28",
+ "rustix",
  "rustls 0.23.37",
  "same-file",
  "serde",
@@ -665,6 +673,7 @@ dependencies = [
  "tokio-rustls 0.26.4",
  "tokio-tungstenite 0.29.0",
  "tracing",
+ "tracing-subscriber",
  "unicode-width",
  "url",
  "uuid",
@@ -674,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-mcp"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "anyhow",
  "axum",
@@ -701,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-notebooklm"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "cookie",
  "mime_guess",
@@ -714,10 +723,11 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-runtime"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "cccc-pair-contracts",
  "cccc-windows-process",
+ "dunce",
  "filedescriptor",
  "futures-util",
  "nix 0.28.0",
@@ -726,10 +736,12 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "uuid",
  "win32job",
 ]
 
@@ -754,12 +766,13 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-web"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "aes",
  "anyhow",
  "async-stream",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "base64",
  "bzip2 0.6.1",
@@ -812,14 +825,14 @@ dependencies = [
 
 [[package]]
 name = "cccc-windows-console"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "cccc-windows-process"
-version = "0.4.45"
+version = "0.4.54"
 dependencies = [
  "windows-sys 0.61.2",
 ]

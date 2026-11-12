@@ -32,6 +32,7 @@ impl Fixture {
             title: "Claude native fixture".into(),
             origin: None,
             revision: "first-revision".into(),
+            context_epoch: 0,
             codex_home: None,
             codex_can_receive: false,
             codex_program: None,
@@ -115,6 +116,412 @@ impl Drop for Fixture {
         let _ = store::detach(&self.home, &self.source.source_id, "fixture-receiver");
     }
 }
+
+fn pending_instruction_notice(fixture: &Fixture, group: &GroupDoc, actor: &Actor) -> bool {
+    let (session, root) = instruction_session(&fixture.home, actor).expect("live native session");
+    super::super::instruction_files::check(&fixture.home, &group.group_id, actor, &session, &root)
+        .is_some_and(|pending| pending.delivery_line().contains("AGENTS.md"))
+}
+
+#[test]
+fn native_foreman_gets_startup_capabilities_without_granting_its_peer() {
+    let fixture = Fixture::new();
+    fixture.attach();
+    let mut peer = fixture.source.clone();
+    peer.source_id = "codex:peer-fixture".into();
+    peer.native_session_id = "peer-fixture".into();
+    peer.runtime = LocalSessionRuntime::Codex;
+    peer.codex_can_receive = true;
+    native::write(&fixture.home, peer.clone()).expect("peer source");
+    let args = json!({
+        "source_ids": [fixture.source.source_id, peer.source_id],
+        "direct": true,
+    });
+    let first = conversations::create(
+        &fixture.home,
+        &req("local_session_conversation", args.clone()),
+    )
+    .expect("create");
+    let group = GroupStore::new(fixture.home.clone())
+        .expect("store")
+        .load(first["group_id"].as_str().expect("group"))
+        .expect("created group");
+    let foreman = &group.actors[0];
+    let peer = &group.actors[1];
+    let caps = cccc_core::capabilities::CapabilityStore::new(fixture.home.clone());
+    let enabled = |id: &str, actor: &Actor| {
+        caps.is_enabled_for(id, &group.group_id, &actor.id, "actor")
+            .expect("capability state")
+    };
+    for id in ["pack:group-runtime", "pack:diagnostics"] {
+        assert!(enabled(id, foreman), "foreman is missing {id}");
+        assert!(!enabled(id, peer), "peer unexpectedly received {id}");
+    }
+
+    // Reusing the same direct Group is not another start and must not undo an
+    // explicit choice; an explicit Start does apply the ordinary startup defaults.
+    caps.set_enabled_for(
+        "pack:diagnostics",
+        false,
+        &group.group_id,
+        &foreman.id,
+        "actor",
+        3600,
+    )
+    .expect("disable");
+    let reused = conversations::create(&fixture.home, &req("local_session_conversation", args))
+        .expect("reuse");
+    assert_eq!(reused["reused"], true);
+    heartbeat(
+        &fixture.home,
+        &req(
+            "local_session_receiver_heartbeat",
+            json!({"source_id":fixture.source.source_id,"connection_id":"fixture-receiver"}),
+        ),
+    )
+    .expect("heartbeat");
+    assert!(!enabled("pack:diagnostics", foreman));
+    // A dormant managed autoload is not a native-session startup instruction.
+    GroupStore::new(fixture.home.clone())
+        .expect("store")
+        .mutate(&group.group_id, |group| {
+            group.actors[0].capability_autoload = vec!["pack:space".into()];
+            Ok(())
+        })
+        .expect("stored autoload");
+    fixture.call(
+        "actor_start",
+        json!({"group_id":group.group_id,"actor_id":foreman.id,"by":"user"}),
+    );
+    assert!(enabled("pack:diagnostics", foreman));
+    assert!(!enabled("pack:space", foreman));
+}
+
+#[test]
+fn joining_a_running_group_loads_defaults_and_a_stopped_group_waits_for_start() {
+    for running in [true, false] {
+        let fixture = Fixture::new();
+        fixture.attach();
+        let store = GroupStore::new(fixture.home.clone()).expect("store");
+        let mut group = store.create("existing group", "").expect("group");
+        group.running = running;
+        group.state = if running {
+            GroupState::Active
+        } else {
+            GroupState::Stopped
+        };
+        store.save(&group).expect("group state");
+        fixture.call(
+            "local_session_join",
+            json!({"group_id":group.group_id,"source_ids":[fixture.source.source_id],"by":"user"}),
+        );
+        let group = store.load(&group.group_id).expect("joined group");
+        let actor_id = &group.actors[0].id;
+        let caps = cccc_core::capabilities::CapabilityStore::new(fixture.home.clone());
+        let enabled = |id| {
+            caps.is_enabled_for(id, &group.group_id, actor_id, "actor")
+                .expect("state")
+        };
+        assert_eq!(enabled("pack:group-runtime"), running);
+        assert_eq!(enabled("pack:diagnostics"), running);
+
+        if !running {
+            fixture.call(
+                "group_start",
+                json!({"group_id":group.group_id,"by":"user"}),
+            );
+            assert!(enabled("pack:group-runtime"));
+            assert!(enabled("pack:diagnostics"));
+        }
+    }
+}
+
+#[test]
+fn native_foreman_restore_keeps_a_user_blocked_pack_blocked() {
+    let fixture = Fixture::new();
+    let group = fixture.conversation();
+    let actor_id = &group.actors[0].id;
+    let caps = cccc_core::capabilities::CapabilityStore::new(fixture.home.clone());
+    caps.set_blocked_for(
+        "pack:diagnostics",
+        true,
+        &group.group_id,
+        "fixture",
+        "user",
+        0,
+    )
+    .expect("block");
+    assert!(
+        !caps
+            .is_enabled_for("pack:diagnostics", &group.group_id, actor_id, "actor")
+            .expect("state")
+    );
+
+    super::super::runtime_restore::restore_running(&fixture.home).expect("daemon restore");
+
+    assert!(
+        caps.blocked_for_group("pack:diagnostics", &group.group_id)
+            .expect("block state")
+            .is_some()
+    );
+    assert!(
+        !caps
+            .is_enabled_for("pack:diagnostics", &group.group_id, actor_id, "actor")
+            .expect("state")
+    );
+    assert!(
+        caps.is_enabled_for("pack:group-runtime", &group.group_id, actor_id, "actor")
+            .expect("state")
+    );
+}
+
+#[test]
+fn instruction_baseline_is_set_at_conversation_creation_and_survives_heartbeat() {
+    let fixture = Fixture::new();
+    let instructions = fixture._temp.path().join("AGENTS.md");
+    std::fs::write(&instructions, "first").expect("original instructions");
+    let group = fixture.conversation();
+    std::fs::write(&instructions, "changed").expect("changed instructions");
+    heartbeat(
+        &fixture.home,
+        &req(
+            "local_session_receiver_heartbeat",
+            json!({"source_id": fixture.source.source_id, "connection_id": "fixture-receiver"}),
+        ),
+    )
+    .expect("heartbeat");
+    assert!(pending_instruction_notice(
+        &fixture,
+        &group,
+        &group.actors[0]
+    ));
+}
+
+#[test]
+fn instruction_baseline_is_set_when_a_native_session_joins() {
+    let fixture = Fixture::new();
+    let group = fixture.conversation();
+    let directory = fixture._temp.path().join("joined-workspace");
+    std::fs::create_dir(&directory).expect("workspace");
+    let instructions = directory.join("AGENTS.md");
+    std::fs::write(&instructions, "first").expect("original instructions");
+    let mut source = fixture.source.clone();
+    source.source_id = "codex:instruction-fixture".into();
+    source.native_session_id = "instruction-fixture".into();
+    source.runtime = LocalSessionRuntime::Codex;
+    source.cwd = directory.to_string_lossy().into_owned();
+    source.codex_can_receive = true;
+    native::write(&fixture.home, source.clone()).expect("native source");
+    fixture.call(
+        "local_session_join",
+        json!({"group_id":group.group_id,"source_ids":[source.source_id]}),
+    );
+    let group = GroupStore::new(fixture.home.clone())
+        .expect("store")
+        .load(&group.group_id)
+        .expect("joined Group");
+    let actor = group
+        .actors
+        .iter()
+        .find(|actor| actor.external_session_id == source.source_id)
+        .expect("joined actor");
+    std::fs::write(instructions, "changed").expect("changed instructions");
+    assert!(pending_instruction_notice(&fixture, &group, actor));
+}
+
+#[test]
+fn instruction_baseline_is_set_before_daemon_ipc_for_live_native_members() {
+    let fixture = Fixture::new();
+    let instructions = fixture._temp.path().join("AGENTS.md");
+    std::fs::write(&instructions, "first").expect("original instructions");
+    let group = fixture.conversation();
+    // A different native revision models the tracker state after a daemon
+    // restart without resetting global state shared by other parallel tests.
+    let mut restarted = fixture.source.clone();
+    restarted.native_session_id = "second-conversation".into();
+    restarted.revision = "second-revision".into();
+    native::write(&fixture.home, restarted).expect("updated native session");
+    super::super::runtime_restore::settle_stranded(&fixture.home).expect("startup sweep");
+    std::fs::write(instructions, "changed after startup").expect("changed instructions");
+    assert!(pending_instruction_notice(
+        &fixture,
+        &group,
+        &group.actors[0]
+    ));
+}
+
+#[test]
+fn instruction_baseline_is_set_on_receiver_attach_for_the_new_native_revision() {
+    let fixture = Fixture::new();
+    let instructions = fixture._temp.path().join("AGENTS.md");
+    std::fs::write(&instructions, "first").expect("original instructions");
+    let group = fixture.conversation();
+    let mut resumed = fixture.source.clone();
+    resumed.native_session_id = "resumed-conversation".into();
+    resumed.revision = "resumed-revision".into();
+    native::write(&fixture.home, resumed).expect("updated native session");
+    attach(
+        &fixture.home,
+        &req(
+            "local_session_receiver_attach",
+            json!({"source_id": fixture.source.source_id, "connection_id": "fixture-receiver"}),
+        ),
+    )
+    .expect("attach receiver");
+    std::fs::write(instructions, "changed after attach").expect("changed instructions");
+    assert!(pending_instruction_notice(
+        &fixture,
+        &group,
+        &group.actors[0]
+    ));
+}
+
+#[test]
+fn native_delivery_reoffers_instruction_notice_after_ambiguous_handoff() {
+    for runtime in [LocalSessionRuntime::Claude, LocalSessionRuntime::Pi] {
+        let fixture = Fixture::with_runtime(runtime);
+        let instructions = fixture._temp.path().join("AGENTS.md");
+        std::fs::write(&instructions, "first").expect("original instructions");
+        let group = fixture.conversation();
+        let actor = &group.actors[0];
+        let receiver = fixture.attach();
+        std::fs::write(instructions, "changed").expect("changed instructions");
+
+        let send = |text| {
+            fixture.call(
+                "message_send",
+                json!({"group_id":group.group_id,"by":"user","to":[actor.id],"message_mode":"send","text":text}),
+            )["event"]["id"]
+                .as_str()
+                .expect("event ID")
+                .to_owned()
+        };
+        let first_id = send("first");
+        let first = offered(&fixture.home, &receiver);
+        assert!(
+            first.text.contains("AGENTS.md changed"),
+            "{runtime:?}: {}",
+            first.text
+        );
+        // Reading message history is not a delivery receipt and must not
+        // acknowledge the notice while the native handoff is still pending.
+        fixture.call(
+            "message_history",
+            json!({"group_id":group.group_id,"actor_id":actor.id,"by":actor.id,"event_id":first_id}),
+        );
+        transport::acknowledge(
+            &fixture.home,
+            &receiver,
+            &first.handoff_id,
+            transport::Outcome::Ambiguous("synthetic unconfirmed handoff".into()),
+        )
+        .expect("ambiguous handoff");
+        fixture.wait_state(&group, &first_id, "ambiguous");
+
+        let second_id = send("second");
+        let second = offered(&fixture.home, &receiver);
+        assert!(
+            second.text.contains("AGENTS.md changed"),
+            "{runtime:?}: {}",
+            second.text
+        );
+        transport::acknowledge(
+            &fixture.home,
+            &receiver,
+            &second.handoff_id,
+            transport::Outcome::Accepted,
+        )
+        .expect("accepted handoff");
+        fixture.wait_state(&group, &second_id, "accepted");
+
+        let third_id = send("third");
+        let third = offered(&fixture.home, &receiver);
+        assert!(
+            !third.text.contains("AGENTS.md changed"),
+            "{runtime:?}: {}",
+            third.text
+        );
+        transport::acknowledge(
+            &fixture.home,
+            &receiver,
+            &third.handoff_id,
+            transport::Outcome::Accepted,
+        )
+        .expect("accepted handoff");
+        fixture.wait_state(&group, &third_id, "accepted");
+    }
+}
+
+#[test]
+fn native_rejection_and_uncertain_delivery_reach_the_original_agent_sender() {
+    let fixture = Fixture::new();
+    let group = fixture.conversation();
+    let recipient = &group.actors[0];
+    let receiver = fixture.attach();
+    fixture.call(
+        "actor_add",
+        json!({
+            "group_id":group.group_id,"actor_id":"sender","runtime":"custom",
+            "command":["unused-fixture"],"enabled":false,"by":"user"
+        }),
+    );
+    let path = GroupStore::new(fixture.home.clone())
+        .expect("store")
+        .ledger_path(&group.group_id)
+        .expect("ledger path");
+    for (outcome, state) in [
+        (
+            transport::Outcome::Rejected("private-fixture-reason".into()),
+            "failed",
+        ),
+        (
+            transport::Outcome::Ambiguous("private-fixture-reason".into()),
+            "ambiguous",
+        ),
+    ] {
+        let sent = fixture.call(
+            "message_send",
+            json!({
+                "group_id":group.group_id,"by":"sender","to":[recipient.id],
+                "message_mode":"send","text":"fixture work","insight":"fixture context"
+            }),
+        );
+        let event_id = sent["event"]["id"].as_str().expect("event id").to_owned();
+        let handoff = offered(&fixture.home, &receiver);
+        assert_eq!(handoff.event_ids, [event_id.clone()]);
+        transport::acknowledge(&fixture.home, &receiver, &handoff.handoff_id, outcome)
+            .expect("native acknowledgement");
+        fixture.wait_state(&group, &event_id, state);
+
+        // No daemon scheduler runs in this fixture; drive the same Group
+        // maintenance step once the delivery worker has queued the notice.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            super::super::actor_delivery::drain_group(&fixture.home, &group.group_id);
+            let notices = cccc_core::ledger::read_all(&path)
+                .expect("ledger")
+                .into_iter()
+                .filter(|event| {
+                    event.kind == "system.notify"
+                        && event.data["related_event_id"] == event_id
+                        && event.data["target_actor_id"] == "sender"
+                })
+                .collect::<Vec<_>>();
+            if let Some(notice) = notices.first() {
+                assert_eq!(notices.len(), 1);
+                assert_eq!(notice.data["context"]["state"], state);
+                assert!(!format!("{notice:?}").contains("private-fixture-reason"));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sender did not receive a {state} notice"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
 #[test]
 fn claude_compact_notification_recovers_full_message_and_instructions_without_redelivery() {
     let fixture = Fixture::new();
@@ -144,6 +551,16 @@ fn claude_compact_notification_recovers_full_message_and_instructions_without_re
     assert!(delivery.contains("CUSTOM_NATIVE_INSTRUCTIONS"));
     assert!(delivery.contains(&format!("You are {} (foreman)", actor.id)));
     assert!(delivery.contains("cccc_message_reply"));
+    let repeated = fixture.call(
+        "message_history",
+        json!({"group_id":group.group_id,"actor_id":actor.id,"by":actor.id,"event_id":id}),
+    );
+    let repeated = repeated["delivery_text"]
+        .as_str()
+        .expect("message remains readable");
+    assert!(repeated.starts_with("[CCCC] Receiving context:"));
+    assert!(repeated.contains(&body));
+    assert!(!repeated.contains("CUSTOM_NATIVE_INSTRUCTIONS"));
     fixture.wait_state(&group, id, "claimed");
     transport::acknowledge(
         &fixture.home,
@@ -157,6 +574,24 @@ fn claude_compact_notification_recovers_full_message_and_instructions_without_re
         transport::next(&fixture.home, &receiver)
             .expect("no replay")
             .is_none()
+    );
+}
+
+#[test]
+fn compaction_changes_the_delivery_marker_without_replacing_the_native_session() {
+    let fixture = Fixture::new();
+    let source = &fixture.source;
+    let before = session_marker(&fixture.home, &source.source_id).expect("initial marker");
+    let changed = native::write_after_compact(&fixture.home, source.clone(), Some(false))
+        .expect("compact callback");
+    assert_eq!(changed.revision, source.revision);
+    let after = session_marker(&fixture.home, &source.source_id).expect("compact marker");
+    assert_ne!(before, after);
+
+    native::write(&fixture.home, source.clone()).expect("ordinary callback");
+    assert_eq!(
+        session_marker(&fixture.home, &source.source_id).as_deref(),
+        Some(after.as_str())
     );
 }
 
@@ -1565,8 +2000,27 @@ fn native_codex_rejection_is_failed_and_not_replayed() {
     let receipts = fixture.wait_state(&id, "failed");
     assert_eq!(receipts.len(), 2);
     assert_ne!(receipts[1].data.get("retryable"), Some(&json!(true)));
+    let actor = &fixture.group.actors[0];
+    let read = fixture.fixture.call(
+        "message_history",
+        json!({
+            "group_id":fixture.group.group_id,"actor_id":actor.id,"by":actor.id,"event_id":id
+        }),
+    );
+    assert!(
+        read["delivery_text"]
+            .as_str()
+            .expect("failed message")
+            .contains("[CCCC] You are ")
+    );
     let next = fixture.send("Small message after known rejection");
     fixture.wait_state(&next, "accepted");
+    let payload = std::fs::read_to_string(fixture.provider.join(format!(
+        "payload-{}",
+        fixture.calls().last().expect("accepted call")
+    )))
+    .expect("provider payload");
+    assert!(payload.starts_with("[CCCC] Receiving context:"));
     fixture.assert_settled_not_replayed(2);
 }
 
@@ -1613,6 +2067,17 @@ fn native_codex_preserves_large_quoted_unicode_payload_and_receiving_context() {
         payload.contains(&body),
         "no truncation or implicit splitting"
     );
+    let read = fixture.fixture.call(
+        "message_history",
+        json!({
+            "group_id":fixture.group.group_id,"actor_id":actor.id,"by":actor.id,"event_id":id,
+            "_cccc_mcp_identity":{"version":"fixture","source_id":"fixture"}
+        }),
+    );
+    let delivery = read["delivery_text"].as_str().expect("native exact read");
+    assert!(delivery.starts_with("[CCCC] Receiving context:"));
+    assert!(delivery.contains(&body));
+    assert!(!delivery.contains("[CCCC] You are "));
     println!(
         "accepted exact rendered payload: raw={} bytes / {} chars, queue={} bytes",
         body.len(),
@@ -1786,6 +2251,7 @@ fn native_codex_preflight_preserves_existing_claim_and_terminal_states() {
             actor: actor.clone(),
             event,
             claimed: false,
+            transport: "local_session",
         }];
         assert_eq!(
             super::super::actor_delivery_worker::process_batch(
@@ -1855,6 +2321,7 @@ fn native_queue_failure_is_recorded_once_and_the_same_batch_continues() {
             actor: actor.clone(),
             event,
             claimed: false,
+            transport: "local_session",
         });
     }
     let original = jobs.clone();
@@ -1911,6 +2378,123 @@ fn native_queue_failure_is_recorded_once_and_the_same_batch_continues() {
 }
 
 #[test]
+fn source_directed_send_rejects_unknown_arguments_before_creating_a_conversation() {
+    let fixture = Fixture::new();
+    fixture.attach();
+    let groups = GroupStore::new(fixture.home.clone()).expect("store");
+    let before = groups.list().expect("Groups").len();
+    let result = crate::dispatch::dispatch(
+        &fixture.home,
+        &req(
+            "local_session_send",
+            json!({
+                "source_ids":[fixture.source.source_id],"text":"Typo","message_mode":"mail",
+                "mdoe":"mail"
+            }),
+        ),
+    );
+    let error = result.error.expect("unknown argument");
+    assert_eq!(error.code, "unknown_arguments");
+    assert_eq!(error.details["unknown"], json!(["mdoe"]));
+    assert_eq!(groups.list().expect("Groups").len(), before);
+    // The title names the conversation the send creates.
+    let sent = fixture.call(
+        "local_session_send",
+        json!({
+            "source_ids":[fixture.source.source_id],"text":"Fixed","message_mode":"mail",
+            "title":"Fixed conversation"
+        }),
+    );
+    let group_id = sent["group_id"].as_str().expect("Group ID");
+    assert_eq!(
+        groups.load(group_id).expect("Group").title,
+        "Fixed conversation"
+    );
+    assert_eq!(groups.list().expect("Groups").len(), before + 1);
+}
+
+#[test]
+fn captured_native_bindings_are_never_stored_with_messages() {
+    use cccc_contracts::local_session::{LocalSessionBinding, LocalSessionSourceBinding};
+    let fixture = Fixture::new();
+    fixture.attach();
+    let groups = GroupStore::new(fixture.home.clone()).expect("store");
+    let stored = |group_id: &str, key: &str| {
+        cccc_core::ledger::read_all(&groups.ledger_path(group_id).expect("ledger"))
+            .expect("events")
+            .iter()
+            .any(|event| event.kind == "chat.message" && event.data.contains_key(key))
+    };
+    // A second connected source to address directly.
+    let mut other = fixture.source.clone();
+    other.runtime = LocalSessionRuntime::Opencode;
+    other.source_id = LocalSessionRuntime::Opencode.source_id("ses_other");
+    other.native_session_id = "other-conversation".into();
+    other.revision = "other-revision".into();
+    other.opencode_server = Some(NativeHost::capture(std::process::id()).expect("host"));
+    native::write(&fixture.home, other.clone()).expect("other source");
+    let _receiver =
+        store::attach(&fixture.home, &other.source_id, "other-receiver").expect("receiver");
+
+    // A direct send carries the source binding, as native MCP sends it.
+    let direct = crate::dispatch::dispatch(
+        &fixture.home,
+        &req(
+            "local_session_send",
+            json!({
+                "source_id":fixture.source.source_id,"source_ids":[other.source_id],
+                "text":"Direct","message_mode":"mail","require_peer_insight":true,
+                "insight":"Shared view","_cccc_native_source_binding":LocalSessionSourceBinding {
+                    source_id:fixture.source.source_id.clone(),
+                    session_revision:fixture.source.revision.clone(),
+                }
+            }),
+        ),
+    );
+    assert!(direct.ok, "direct send: {:?}", direct.error);
+    let conversation = direct.result["group_id"].as_str().expect("conversation");
+    assert!(!stored(conversation, "_cccc_native_source_binding"));
+
+    // A cross-group send carries the member's binding; neither record keeps it.
+    let group = fixture.conversation();
+    let actor = group.actors[0].clone();
+    let destination = fixture.call(
+        "group_create",
+        json!({"title":"destination","by":"user"}),
+    )["group"]["group_id"]
+        .as_str()
+        .expect("destination")
+        .to_owned();
+    fixture.call(
+        "actor_add",
+        json!({
+            "group_id":destination,"actor_id":"peer","runtime":"custom",
+            "command":["/bin/true"],"by":"user"
+        }),
+    );
+    let relayed = crate::dispatch::dispatch(
+        &fixture.home,
+        &req(
+            "send_cross_group",
+            json!({
+                "group_id":group.group_id,"by":actor.id,"dst_group_id":destination,
+                "to":["peer"],"text":"Relayed","message_mode":"mail",
+                "_cccc_native_binding":LocalSessionBinding {
+                    group_id:group.group_id.clone(),
+                    actor_id:actor.id.clone(),
+                    actor_generation:cccc_core::actors::generation_identity(&actor),
+                    source_id:fixture.source.source_id.clone(),
+                    session_revision:fixture.source.revision.clone(),
+                }
+            }),
+        ),
+    );
+    assert!(relayed.ok, "cross-group send: {:?}", relayed.error);
+    assert!(!stored(&group.group_id, "_cccc_native_binding"));
+    assert!(!stored(&destination, "_cccc_native_binding"));
+}
+
+#[test]
 fn source_directed_send_does_not_broadcast_to_added_group_members() {
     let fixture = Fixture::new();
     fixture.attach();
@@ -1962,6 +2546,28 @@ fn source_directed_send_does_not_broadcast_to_added_group_members() {
         }),
     );
     assert_eq!(broadcast["event"]["data"]["to"], json!(["@all"]));
+
+    // Clients that fill unused optional lists with [] keep the mode they chose.
+    let directed = fixture.call(
+        "local_session_send",
+        json!({
+            "source_ids":[fixture.source.source_id],"to":[],"text":"Direct with an empty to",
+            "message_mode":"mail"
+        }),
+    );
+    assert_eq!(directed["group_id"], group_id);
+    assert_eq!(directed["event"]["data"]["to"], json!([native_actor]));
+    for unused in [
+        json!({"source_ids":[],"to":[]}),
+        json!({"source_ids":null,"to":null}),
+    ] {
+        let mut args = unused.as_object().expect("unused lists").clone();
+        args.insert("group_id".into(), json!(group_id));
+        args.insert("text".into(), json!("Group send with unused lists"));
+        args.insert("message_mode".into(), json!("mail"));
+        let sent = fixture.call("local_session_send", Value::Object(args));
+        assert_eq!(sent["event"]["data"]["to"], json!(["@all"]));
+    }
 }
 
 #[test]
@@ -2044,6 +2650,42 @@ fn captured_native_authority_rejects_replaced_members_and_conversations() {
     );
 }
 
+#[test]
+fn captured_native_authority_is_not_stored_in_a_notification() {
+    use cccc_contracts::local_session::LocalSessionBinding;
+    let fixture = Fixture::new();
+    fixture.attach();
+    let group = fixture.conversation();
+    let actor = &group.actors[0];
+    let binding = LocalSessionBinding {
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        actor_generation: cccc_core::actors::generation_identity(actor),
+        source_id: fixture.source.source_id.clone(),
+        session_revision: fixture.source.revision.clone(),
+    };
+    let response = crate::dispatch::dispatch(
+        &fixture.home,
+        &req(
+            "system_notify",
+            json!({
+                "group_id":group.group_id,"by":actor.id,"kind":"info",
+                "title":"Build finished","_cccc_native_binding":binding
+            }),
+        ),
+    );
+    assert!(response.ok, "native notification: {:?}", response.error);
+    let groups = GroupStore::new(fixture.home.clone()).expect("store");
+    let events = cccc_core::ledger::read_all(&groups.ledger_path(&group.group_id).expect("ledger"))
+        .expect("events");
+    let notice = events
+        .iter()
+        .find(|event| event.kind == "system.notify" && event.by == actor.id)
+        .expect("stored notification");
+    assert_eq!(notice.data["title"], "Build finished");
+    assert!(!notice.data.contains_key("_cccc_native_binding"));
+}
+
 #[tokio::test]
 async fn native_source_authority_is_rechecked_after_waiting_for_the_daemon_permit() {
     use crate::dispatch_concurrency::DispatchLocks;
@@ -2120,12 +2762,17 @@ fn native_deliveries_always_identify_the_receiving_group_and_member() {
         );
         let handoff = offered(&fixture.home, &receiver);
         assert_eq!(handoff.group_id, group.group_id);
-        assert!(handoff.text.contains(label));
-        assert!(
-            handoff
-                .text
-                .starts_with("[CCCC] Read full message and instructions:")
+        assert_eq!(
+            handoff.text.contains(label),
+            label == "A2",
+            "only a member's first notice in a Group withholds the message: {}",
+            handoff.text
         );
+        assert!(handoff.text.starts_with(if label == "A2" {
+            "[CCCC] Read full message:"
+        } else {
+            "[CCCC] Read full message and instructions:"
+        }));
         assert!(!handoff.text.contains("[CCCC] You are "));
         for identity in [
             group.group_id.as_str(),
@@ -2165,6 +2812,223 @@ fn native_deliveries_always_identify_the_receiving_group_and_member() {
             "accepted",
         );
     }
+}
+
+#[test]
+fn a_claude_member_reads_when_its_preamble_is_due_and_otherwise_gets_the_whole_message() {
+    let fixture = Fixture::new();
+    let group = fixture.conversation();
+    let receiver = fixture.attach();
+    let groups = GroupStore::new(fixture.home.clone()).expect("store");
+    groups
+        .mutate(&group.group_id, |doc| {
+            doc.actors.push(Actor::new("peer"));
+            Ok(())
+        })
+        .expect("add a peer");
+    let deliver = |text: &str| {
+        let sent = fixture.call(
+            "message_send",
+            json!({
+                "group_id":group.group_id,"by":"peer","to":[group.actors[0].id],
+                "message_mode":"send","text":text
+            }),
+        );
+        let handoff = offered(&fixture.home, &receiver);
+        transport::acknowledge(
+            &fixture.home,
+            &receiver,
+            &handoff.handoff_id,
+            transport::Outcome::Accepted,
+        )
+        .expect("accept handoff");
+        fixture.wait_state(
+            &group,
+            sent["event"]["id"].as_str().expect("message ID"),
+            "accepted",
+        );
+        handoff.text
+    };
+    let assert_read = |notice: &str, body: &str| {
+        assert!(
+            notice.starts_with("[CCCC] Read full message and instructions:"),
+            "{notice}"
+        );
+        assert!(!notice.contains(body), "{notice}");
+    };
+    let assert_whole = |notice: &str, body: &str| {
+        assert!(notice.starts_with("[CCCC] Message below."), "{notice}");
+        assert!(notice.contains(body), "{notice}");
+        assert!(notice.contains("cccc_message_reply"), "{notice}");
+    };
+
+    assert_read(&deliver("first body"), "first body");
+    assert_whole(&deliver("second body"), "second body");
+    assert_whole(&deliver("third body"), "third body");
+
+    cccc_core::group_prompts::write_preamble(&groups, &group.group_id, "New Group rules")
+        .expect("custom preamble");
+    assert_read(&deliver("fourth body"), "fourth body");
+    assert_whole(&deliver("fifth body"), "fifth body");
+
+    groups
+        .mutate(&group.group_id, |doc| {
+            doc.actors.push(Actor::new("another"));
+            Ok(())
+        })
+        .expect("add a member");
+    assert_read(&deliver("sixth body"), "sixth body");
+    assert_whole(&deliver("seventh body"), "seventh body");
+
+    let session = native::read(&fixture.home, &fixture.source.source_id).expect("session");
+    native::write_after_compact(&fixture.home, session, Some(false)).expect("compact callback");
+    assert_read(&deliver("eighth body"), "eighth body");
+    assert_whole(&deliver("ninth body"), "ninth body");
+}
+
+#[test]
+fn native_exact_history_tracks_rules_without_consuming_messages_or_admin_reads() {
+    let fixture = Fixture::new();
+    let group = fixture.conversation();
+    let actor = &group.actors[0];
+    let body = "Literal <markup> 界😀 remains message data.";
+    let sent = fixture.call(
+        "message_send",
+        json!({
+            "group_id":group.group_id,"by":"user","to":[actor.id],
+            "message_mode":"mail","text":body
+        }),
+    );
+    let id = sent["event"]["id"].as_str().expect("event ID");
+    let store = GroupStore::new(fixture.home.clone()).expect("store");
+    let path = store.ledger_path(&group.group_id).expect("ledger");
+    let before = cccc_core::ledger::read_all(&path).expect("ledger");
+    let read = |by: &str| {
+        fixture.call(
+            "message_history",
+            json!({
+                "group_id":group.group_id,"actor_id":actor.id,"by":by,"event_id":id
+            }),
+        )
+    };
+    assert!(
+        read("user")["delivery_text"]
+            .as_str()
+            .expect("admin read")
+            .contains("[CCCC] You are ")
+    );
+    let list = fixture.call(
+        "message_history",
+        json!({
+            "group_id":group.group_id,"actor_id":actor.id,"by":actor.id,"query":"Literal"
+        }),
+    );
+    assert!(list.get("delivery_text").is_none());
+    let unavailable = crate::dispatch::dispatch(
+        &fixture.home,
+        &req(
+            "message_history",
+            json!({
+                "group_id":group.group_id,"actor_id":actor.id,"by":actor.id,
+                "event_id":"00000000000000000000000000000000"
+            }),
+        ),
+    );
+    assert_eq!(
+        unavailable.error.expect("unavailable event").code,
+        "event_not_found"
+    );
+    let first = read(&actor.id);
+    assert!(
+        first["delivery_text"]
+            .as_str()
+            .expect("first own read")
+            .contains("[CCCC] You are ")
+    );
+    let next = read(&actor.id);
+    let next_text = next["delivery_text"].as_str().expect("second own read");
+    assert!(next_text.starts_with("[CCCC] Receiving context:"));
+    assert!(!next_text.contains("[CCCC] You are "));
+    assert!(next_text.contains(body));
+    assert_eq!(next["messages"][0]["data"]["text"], body);
+    assert_eq!(
+        cccc_core::ledger::read_all(&path).expect("ledger").len(),
+        before.len()
+    );
+    assert!(
+        super::super::runtime_delivery::latest_state(&fixture.home, &group.group_id, &actor.id, id)
+            .expect("delivery state")
+            .is_none()
+    );
+    let session = native::read(&fixture.home, &fixture.source.source_id).expect("session");
+    native::write_after_compact(&fixture.home, session, Some(false)).expect("compact");
+    assert!(
+        read(&actor.id)["delivery_text"]
+            .as_str()
+            .expect("after compact")
+            .contains("[CCCC] You are ")
+    );
+}
+
+#[test]
+fn reading_native_rules_before_the_first_claude_notice_preserves_the_message() {
+    let fixture = Fixture::new();
+    let group = fixture.conversation();
+    let actor = &group.actors[0];
+    GroupStore::new(fixture.home.clone())
+        .expect("store")
+        .mutate(&group.group_id, |doc| {
+            doc.actors.push(Actor::new("peer"));
+            Ok(())
+        })
+        .expect("add peer");
+    let mail = fixture.call(
+        "message_send",
+        json!({
+            "group_id":group.group_id,"by":"user","to":[actor.id],
+            "message_mode":"mail","text":"Read before a push"
+        }),
+    );
+    let read = fixture.call(
+        "message_history",
+        json!({
+            "group_id":group.group_id,"actor_id":actor.id,"by":actor.id,
+            "event_id":mail["event"]["id"]
+        }),
+    );
+    assert!(
+        read["delivery_text"]
+            .as_str()
+            .expect("rules")
+            .contains("[CCCC] You are ")
+    );
+    let receiver = fixture.attach();
+    let sent = fixture.call(
+        "message_send",
+        json!({
+            "group_id":group.group_id,"by":"peer","to":[actor.id],
+            "message_mode":"send","text":"This message arrives whole"
+        }),
+    );
+    let handoff = offered(&fixture.home, &receiver);
+    assert!(
+        handoff.text.starts_with("[CCCC] Message below."),
+        "{}",
+        handoff.text
+    );
+    assert!(handoff.text.contains("This message arrives whole"));
+    transport::acknowledge(
+        &fixture.home,
+        &receiver,
+        &handoff.handoff_id,
+        transport::Outcome::Accepted,
+    )
+    .expect("accept message");
+    fixture.wait_state(
+        &group,
+        sent["event"]["id"].as_str().expect("event"),
+        "accepted",
+    );
 }
 
 #[test]

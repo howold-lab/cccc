@@ -53,7 +53,8 @@ pub(super) fn claim(home: &HomeLayout, r: &DaemonRequest) -> OpResult {
                 if result["status"] == "work_available" {
                     s["execution"] = json!({
                         "event_id":s["wake"]["event_id"], "turn_id":result["turn"]["turn_id"],
-                        "event_ids":result["turn"]["event_ids"], "state":"active"
+                        "event_ids":result["turn"]["event_ids"], "state":"active",
+                        "claimed_at":result["turn"]["created_at"]
                     });
                     s["wake"]["state"] = json!("claimed");
                     result["actor_token"] = json!(private::token(
@@ -72,7 +73,20 @@ pub(super) fn claim(home: &HomeLayout, r: &DaemonRequest) -> OpResult {
         }
     })
     .map_err(state_error)??;
-    object(result)
+    let result = object(result)?;
+    if let Some(turn_id) = result
+        .get("turn")
+        .and_then(|turn| turn.get("turn_id"))
+        .and_then(Value::as_str)
+    {
+        super::super::runtime_state::confirm_pulled_instruction_notice(
+            home,
+            &g.group_id,
+            &a.id,
+            turn_id,
+        );
+    }
+    Ok(result)
 }
 
 pub(in crate::ops) fn completed(

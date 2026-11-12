@@ -74,12 +74,12 @@ pub(super) fn run(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         "query":query,
         "kind_counts":kind_counts,
         "sources":sources,
-        "source_instances":[],
         "blocked_capabilities":blocked_capabilities,
     }))
 }
 
 fn overview_row(capability: Capability, blocked: bool) -> Value {
+    let legacy_search_unverified = capability.is_unverified_remote_search();
     let kind = if capability.kind.is_empty() {
         inferred_kind(&capability.id).to_owned()
     } else {
@@ -101,6 +101,8 @@ fn overview_row(capability: Capability, blocked: bool) -> Value {
         "description_short":capability.description,
         "source_id":capability.source,
         "source_uri":capability.source_uri,
+        "sync_state":capability.sync_state,
+        "legacy_search_unverified":legacy_search_unverified,
         "tags":capability.tags,
         "capsule_text":capability.capsule_text,
         "tool_names":capability.tool_names,
@@ -173,8 +175,6 @@ fn source_counts(catalog: &[Capability]) -> BTreeMap<String, Value> {
                 source_id.clone(),
                 json!({
                     "source_id":source_id,
-                    "enabled":true,
-                    "sync_state":"synced",
                     "record_count":record_count,
                 }),
             )

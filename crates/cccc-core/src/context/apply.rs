@@ -1,8 +1,65 @@
 use cccc_contracts::utc_now;
 use serde_json::{Map, Value, json};
+use std::collections::HashSet;
 use std::io;
 
 use super::model::ContextDoc;
+
+const FINISHED_SINCE_REVIEW: &str = "finished_since_review_reminder";
+
+fn is_done(task: &Map<String, Value>) -> bool {
+    task.get("status").and_then(Value::as_str) == Some("done")
+}
+
+/// Top-level tasks that were not done before this write and are now. Restoring
+/// an archived task that was done is not new work.
+fn newly_finished_tasks(before: &ContextDoc, after: &ContextDoc) -> u64 {
+    let was_done = before
+        .tasks
+        .iter()
+        .filter(|task| super::task_is_completed(task))
+        .filter_map(|task| task.get("id").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    after
+        .tasks
+        .iter()
+        .filter(|task| {
+            is_done(task)
+                && task
+                    .get("parent_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                && task
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !was_done.contains(id))
+        })
+        .count() as u64
+}
+
+/// Adds the top-level tasks this write finished, whoever wrote it. A write that
+/// takes reminders (`every`) and reaches the count restarts it and returns it.
+/// Archiving or deleting finished tasks leaves the count alone.
+pub(super) fn count_finished_tasks(
+    before: &ContextDoc,
+    document: &mut ContextDoc,
+    every: Option<u64>,
+) -> Option<u64> {
+    let previous = document
+        .meta
+        .get(FINISHED_SINCE_REVIEW)
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let count = previous + newly_finished_tasks(before, document);
+    let due = every.is_some_and(|every| count >= every);
+    let next = if due { 0 } else { count };
+    if next != previous {
+        document
+            .meta
+            .insert(FINISHED_SINCE_REVIEW.into(), Value::from(next));
+    }
+    due.then_some(count)
+}
 
 pub fn apply_all(
     document: &mut ContextDoc,
@@ -46,7 +103,6 @@ fn apply_one(
 ) -> io::Result<()> {
     match name {
         "coordination.brief.update" => update_brief(document, operation, by),
-        "coordination.note.add" => add_note(document, operation, by),
         "task.update" => super::task_apply::update(document, operation),
         "task.move" => super::task_apply::move_task(document, operation),
         "task.restore" => super::task_apply::restore(document, operation),
@@ -79,29 +135,6 @@ fn update_brief(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) -> io::
     Ok(())
 }
 
-fn add_note(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) -> io::Result<()> {
-    let summary = required(op, "summary")?;
-    let kind = string(op, "kind").unwrap_or("decision");
-    let key = match kind {
-        "decision" => "recent_decisions",
-        "handoff" => "recent_handoffs",
-        _ => return Err(io::Error::other("note kind must be decision or handoff")),
-    };
-    let notes = doc.coordination.entry(key).or_insert_with(|| json!([]));
-    let target = notes
-        .as_array_mut()
-        .ok_or_else(|| io::Error::other("invalid notes"))?;
-    target.push(json!({
-        "at": utc_now(),
-        "summary": summary, "task_id": op.get("task_id").cloned().unwrap_or(Value::Null),
-        "by": by,
-    }));
-    if target.len() > 100 {
-        target.drain(..target.len() - 100);
-    }
-    Ok(())
-}
-
 fn merge_meta(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Result<()> {
     let data = op
         .get("data")
@@ -111,13 +144,4 @@ fn merge_meta(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Result<()> {
         doc.meta.insert("project_status".into(), value.clone());
     }
     Ok(())
-}
-
-fn required<'a>(op: &'a Map<String, Value>, key: &str) -> io::Result<&'a str> {
-    string(op, key)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| io::Error::other(format!("{key} is required")))
-}
-fn string<'a>(op: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
-    op.get(key).and_then(Value::as_str)
 }

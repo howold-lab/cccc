@@ -12,7 +12,7 @@ pub fn prepare_exited() -> BTreeMap<String, Vec<cccc_runtime::SessionStatus>> {
     let exited = match actor_runtime::reap_exited() {
         Ok(exited) => exited,
         Err(error) => {
-            tracing::warn!(message = %error.message, "runtime reap failed");
+            tracing::warn!(diagnostic_action = "runtime_reap", diagnostic_code = %error.code, message = %error.message, "runtime reap failed");
             Vec::new()
         }
     };
@@ -33,7 +33,7 @@ pub fn pending_delivery_group_ids() -> Vec<String> {
 pub fn maintain_group(home: &HomeLayout, group_id: &str, exited: Vec<cccc_runtime::SessionStatus>) {
     actor_delivery::drain_group(home, group_id);
     if let Err(error) = actor_runtime::reconcile_exited(home, exited) {
-        tracing::warn!(message = %error.message, %group_id, "runtime reconciliation failed");
+        tracing::warn!(diagnostic_action = "runtime_reconcile", diagnostic_code = %error.code, message = %error.message, %group_id, "runtime reconciliation failed");
     }
 }
 
@@ -41,7 +41,7 @@ pub fn group_ids(home: &HomeLayout) -> Vec<String> {
     match cccc_core::automation::group_ids(home) {
         Ok(group_ids) => group_ids,
         Err(error) => {
-            tracing::warn!(%error, "automation group discovery failed");
+            tracing::warn!(diagnostic_action = "automation_group_discovery", diagnostic_code = crate::diagnostic_log::io_code(&error), %error, "automation group discovery failed");
             Vec::new()
         }
     }
@@ -94,7 +94,9 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(%error, %group_id, "automation group tick failed"),
+        Err(error) => {
+            tracing::warn!(diagnostic_action = "automation_group_tick", diagnostic_code = crate::diagnostic_log::io_code(&error), %error, %group_id, "automation group tick failed")
+        }
     }
 }
 
@@ -160,6 +162,9 @@ fn notify_idle_mail_recipients_with(
 }
 
 fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
+    if let Some(error) = &result.rule_failure {
+        tracing::warn!(%error, "automation rule pass failed; committed notifications retained for delivery");
+    }
     if let Some(error) = &result.unread_failure {
         // An unread discovery or write failure must not discard earlier notices.
         tracing::warn!(%error, "unread notice pass failed; committed notifications retained for delivery");
@@ -167,6 +172,16 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
     let Ok(store) = GroupStore::new(home.clone()) else {
         return;
     };
+    for (group_id, rule_id) in &result.completed_rules {
+        call(
+            home,
+            "group_automation_manage",
+            json!({
+                "group_id":group_id, "by":"user",
+                "actions":[{"type":"set_rule_enabled","rule_id":rule_id,"enabled":false}]
+            }),
+        );
+    }
     let mut completed_notifications = BTreeSet::new();
     for event in &result.notifications {
         let rule_id = event
@@ -332,10 +347,12 @@ fn complete_rule(home: &HomeLayout, group_id: &str, rule_id: &str, fired_at: i64
 }
 
 fn call(home: &HomeLayout, op: &str, value: serde_json::Value) -> bool {
+    let mut args = value.as_object().cloned().unwrap_or_default();
+    args.insert(actor_runtime::AUTOMATIC_LIFECYCLE.into(), json!(true));
     let request = DaemonRequest {
         v: 1,
         op: op.into(),
-        args: value.as_object().cloned().unwrap_or_default(),
+        args,
     };
     let response = dispatch(home, &request);
     if !response.ok {
@@ -401,6 +418,7 @@ mod tests {
             actor: peer.clone(),
             event: first.clone(),
             claimed: true,
+            transport: "pty",
         };
         super::super::actor_delivery::withdraw_jobs(std::slice::from_ref(&job), "held");
 
@@ -695,3 +713,7 @@ mod mail_notice_repeat_tests;
 #[cfg(all(test, unix))]
 #[path = "automation_mail_tests.rs"]
 mod automation_mail_tests;
+
+#[cfg(test)]
+#[path = "automation_repeat_tests.rs"]
+mod repeat_tests;

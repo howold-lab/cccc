@@ -15,8 +15,12 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
-    t: (key: string, options?: { time?: string }) =>
-      options?.time ? `${key}: ${options.time}` : key,
+    t: (key: string, options?: { time?: string; elapsed?: string }) =>
+      options?.time
+        ? `${key}: ${options.time}`
+        : options?.elapsed
+          ? `${key}: ${options.elapsed}`
+          : key,
     i18n: { language: mocks.language },
   }),
 }));
@@ -88,6 +92,41 @@ const render = async (props: Partial<React.ComponentProps<typeof DotsActorPanel>
 };
 const button = (text: string) =>
   [...host.querySelectorAll("button")].find((b) => b.textContent === text)!;
+it("shows a matching turn's claim age and leaves unrelated status alone", async () => {
+  mocks.load.mockResolvedValue(
+    state({
+      connected: true,
+      subscribed: true,
+      phase: "working",
+      active_turn_id: "turn",
+      active_turn_elapsed_seconds: 3600,
+      pending_count: 3,
+    }),
+  );
+  await render();
+  const age = host.querySelector("[data-active-turn-age]");
+  expect(age?.textContent).toBe("nativeActor.claimedAgo: 1 hour ago");
+  expect(age?.closest('[role="status"]')).toBeNull();
+  expect(host.textContent).toContain("dotsActor.status.pending");
+});
+it("shows unknown when an unfinished turn has no claim time", async () => {
+  mocks.load.mockResolvedValue(state({ phase: "interrupted", active_turn_id: "turn" }));
+  await render();
+  expect(host.querySelector("[data-active-turn-age]")?.textContent).toBe(
+    "nativeActor.claimTimeUnknown",
+  );
+});
+it("hides the relative claim age when refreshing status fails", async () => {
+  mocks.load.mockResolvedValue(
+    state({ phase: "working", active_turn_id: "turn", active_turn_elapsed_seconds: 3600 }),
+  );
+  await render();
+  expect(host.querySelector("[data-active-turn-age]")).not.toBeNull();
+  mocks.load.mockResolvedValue({ ok: false, error: { message: "offline" } });
+  await act(async () => vi.advanceTimersByTimeAsync(2000));
+  expect(host.querySelector("[data-active-turn-age]")).toBeNull();
+  expect(host.textContent).toContain("offline");
+});
 it("distinguishes a paired paused Dot from an incomplete pairing without enabling it", async () => {
   mocks.load.mockResolvedValue(
     state({ connected: true, paired: true, enabled: false, phase: "stopped" }),
@@ -693,7 +732,7 @@ it.each([
   },
 );
 
-it("shows the current stage and spins only while sending notifications", async () => {
+it("shows the current stage and its working mark only while sending notifications", async () => {
   const cases = [
     ["pending", "notify", false],
     ["delivering", "notify", true],
@@ -710,13 +749,16 @@ it("shows the current stage and spins only while sending notifications", async (
     else await act(async () => vi.advanceTimersByTimeAsync(2_000));
     const current = host.querySelector('li[aria-current="step"]')!;
     expect(current.getAttribute("data-step")).toBe(stage);
-    expect(Boolean(current.querySelector(".animate-spin"))).toBe(spinning);
-    if (spinning)
-      expect(current.querySelector(".animate-spin")?.getAttribute("class")).toContain(
-        "motion-reduce:animate-none",
-      );
-    else if (phase !== "interrupted" && phase !== "failed")
+    if (spinning) {
+      // The working mark appears after a short delay, keeping brief sends still.
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(current.querySelector(".lcd-spinner[data-shown]")).not.toBeNull();
+    } else if (phase !== "interrupted" && phase !== "failed") {
+      expect(current.querySelector(".lcd-spinner")).toBeNull();
       expect(current.querySelector("svg")?.getAttribute("class")).toContain("clock");
+    } else {
+      expect(current.querySelector(".lcd-spinner")).toBeNull();
+    }
     if (phase === "delivering") expect(current.textContent).toContain("nativeActor.steps.sending");
     if (phase === "failed") {
       expect(current.textContent).toContain("nativeActor.failed");
@@ -886,8 +928,8 @@ it("leaves a connector created elsewhere untouched when the page was stale", asy
     result: { connectors: [], connector_base_url: "https://cccc.example.test" },
   });
   mocks.create.mockResolvedValue({
-    ok: false,
-    error: { code: "connector_exists", message: "exists" },
+    ok: true,
+    result: { outcome: "existing", connector: { connector_id: "shared" } },
   });
   await render({ onOpenSharedSettings: vi.fn() });
   await act(async () => button("dotsActor.setup.createConnector").click());

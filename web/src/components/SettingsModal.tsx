@@ -15,6 +15,7 @@ import { SettingsNavigation } from "./modals/settings/SettingsNavigation";
 import { useSettingsDiagnostics } from "./modals/settings/useSettingsDiagnostics";
 import { useSettingsIMBridge } from "./modals/settings/useSettingsIMBridge";
 import { useModalA11y } from "../hooks/useModalA11y";
+import { useChatObscuringView } from "../hooks/useChatObscuringView";
 
 const AutomationTab = lazy(() =>
   import("./modals/settings/AutomationTab").then((module) => ({ default: module.AutomationTab })),
@@ -70,6 +71,11 @@ const WebModelConnectorsTab = lazy(() =>
 const DeveloperTab = lazy(() =>
   import("./modals/settings/DeveloperTab").then((module) => ({ default: module.DeveloperTab })),
 );
+const NotificationsTab = lazy(() =>
+  import("./modals/settings/NotificationsTab").then((module) => ({
+    default: module.NotificationsTab,
+  })),
+);
 
 interface SettingsModalProps {
   codexVoice: import("../features/codexVoice/useCodexVoiceShell").CodexVoiceShellState;
@@ -82,6 +88,7 @@ interface SettingsModalProps {
   isDark: boolean;
   groupId?: string;
   groupDoc?: GroupDoc | null;
+  notificationsAllowed?: boolean;
 }
 
 function SettingsTabFallback() {
@@ -103,6 +110,7 @@ export function SettingsModal({
   isDark,
   groupId,
   groupDoc,
+  notificationsAllowed = false,
 }: SettingsModalProps) {
   const { t } = useTranslation("settings");
   const [voiceSection, setVoiceSection] = useState<"secretary" | "realtime">("secretary");
@@ -115,6 +123,7 @@ export function SettingsModal({
   };
   const initialVoiceFocus = useRef<HTMLElement | null>(null);
   const { modalRef } = useModalA11y(isOpen, requestClose, { initialFocusRef: initialVoiceFocus });
+  useChatObscuringView(isOpen);
   const [initialLocation] = useState(() => readSettingsLastLocation(Boolean(groupId)));
   const [scope, setScope] = useState<SettingsScope>(() => initialLocation.scope);
   const [groupTab, setGroupTab] = useState<GroupTabId>(() => initialLocation.groupTab);
@@ -134,16 +143,10 @@ export function SettingsModal({
     if (!isOpen) setWebModelFocusTarget(undefined);
   }, [isOpen]);
 
-  // Automation + delivery settings state
+  // Delivery settings state
   const [mailNoticeAfterSeconds, setMailNoticeAfterSeconds] = useState(1800);
   const [mailNoticeIdleAfterSeconds, setMailNoticeIdleAfterSeconds] = useState(60);
   const [replyNoticeAfterSeconds, setReplyNoticeAfterSeconds] = useState(900);
-  const [idleSeconds, setIdleSeconds] = useState(0);
-  const [keepaliveSeconds, setKeepaliveSeconds] = useState(120);
-  const [keepaliveMax, setKeepaliveMax] = useState(3);
-  const [silenceSeconds, setSilenceSeconds] = useState(0);
-  const [helpNudgeIntervalSeconds, setHelpNudgeIntervalSeconds] = useState(600);
-  const [helpNudgeMinMessages, setHelpNudgeMinMessages] = useState(10);
 
   // Messaging policy
   const [defaultSendTo, setDefaultSendTo] = useState<"foreman" | "broadcast">("foreman");
@@ -152,8 +155,6 @@ export function SettingsModal({
   const [terminalVisibility, setTerminalVisibility] = useState<"off" | "foreman" | "all">(
     "foreman",
   );
-  const [terminalNotifyTail, setTerminalNotifyTail] = useState(false);
-  const [terminalNotifyLines, setTerminalNotifyLines] = useState(20);
 
   const {
     tailActorId,
@@ -175,8 +176,6 @@ export function SettingsModal({
     devActors,
     developerMode,
     setDeveloperMode,
-    logLevel,
-    setLogLevel,
     terminalBacklogMiB,
     setTerminalBacklogMiB,
     terminalScrollbackLines,
@@ -310,32 +309,6 @@ export function SettingsModal({
         settings.reply_notice_after_seconds ?? 900,
       ),
     );
-    setIdleSeconds((current) =>
-      sync(current, previous?.actor_idle_timeout_seconds, settings.actor_idle_timeout_seconds),
-    );
-    setKeepaliveSeconds((current) =>
-      sync(current, previous?.keepalive_delay_seconds, settings.keepalive_delay_seconds),
-    );
-    setKeepaliveMax((current) =>
-      sync(current, previous?.keepalive_max_per_actor ?? 3, settings.keepalive_max_per_actor ?? 3),
-    );
-    setSilenceSeconds((current) =>
-      sync(current, previous?.silence_timeout_seconds, settings.silence_timeout_seconds),
-    );
-    setHelpNudgeIntervalSeconds((current) =>
-      sync(
-        current,
-        previous?.help_nudge_interval_seconds ?? 600,
-        settings.help_nudge_interval_seconds ?? 600,
-      ),
-    );
-    setHelpNudgeMinMessages((current) =>
-      sync(
-        current,
-        previous?.help_nudge_min_messages ?? 10,
-        settings.help_nudge_min_messages ?? 10,
-      ),
-    );
     setDefaultSendTo((current) =>
       sync(current, previous?.default_send_to || "foreman", settings.default_send_to || "foreman"),
     );
@@ -344,20 +317,6 @@ export function SettingsModal({
         current,
         previous?.terminal_transcript_visibility || "foreman",
         settings.terminal_transcript_visibility || "foreman",
-      ),
-    );
-    setTerminalNotifyTail((current) =>
-      sync(
-        current,
-        Boolean(previous?.terminal_transcript_notify_tail),
-        Boolean(settings.terminal_transcript_notify_tail),
-      ),
-    );
-    setTerminalNotifyLines((current) =>
-      sync(
-        current,
-        Number(previous?.terminal_transcript_notify_lines || 20),
-        Number(settings.terminal_transcript_notify_lines || 20),
       ),
     );
     previousSettings.current = { groupId, value: settings };
@@ -420,16 +379,8 @@ export function SettingsModal({
     mailNoticeAfterSeconds,
     mailNoticeIdleAfterSeconds,
     replyNoticeAfterSeconds,
-    idleSeconds,
-    keepaliveSeconds,
-    keepaliveMax,
-    silenceSeconds,
-    helpNudgeIntervalSeconds,
-    helpNudgeMinMessages,
     defaultSendTo,
     terminalVisibility,
-    terminalNotifyTail,
-    terminalNotifyLines,
   ]);
   const saveContextRef = useRef(saveContext);
   saveContextRef.current = saveContext;
@@ -470,32 +421,8 @@ export function SettingsModal({
     });
   };
 
-  const handleSaveAutomationSettings = async () => {
-    await saveGroupSettings({
-      actor_idle_timeout_seconds: idleSeconds,
-      keepalive_delay_seconds: keepaliveSeconds,
-      keepalive_max_per_actor: keepaliveMax,
-      silence_timeout_seconds: silenceSeconds,
-      help_nudge_interval_seconds: helpNudgeIntervalSeconds,
-      help_nudge_min_messages: helpNudgeMinMessages,
-    });
-  };
-
-  const handleResetAutomationSettingsDraft = () => {
-    setIdleSeconds(0);
-    setKeepaliveSeconds(120);
-    setKeepaliveMax(3);
-    setSilenceSeconds(0);
-    setHelpNudgeIntervalSeconds(600);
-    setHelpNudgeMinMessages(10);
-  };
-
   const handleSaveTranscriptSettings = async () => {
-    await saveGroupSettings({
-      terminal_transcript_visibility: terminalVisibility,
-      terminal_transcript_notify_tail: terminalNotifyTail,
-      terminal_transcript_notify_lines: terminalNotifyLines,
-    });
+    await saveGroupSettings({ terminal_transcript_visibility: terminalVisibility });
   };
 
   const handleSaveMessagingSettings = async () => {
@@ -522,6 +449,9 @@ export function SettingsModal({
       ...(currentBrowserSignedIn && !globalSettingsEnabled
         ? [{ id: "myProfiles" as const, label: t("tabs.myProfiles") }]
         : []),
+      ...(notificationsAllowed && (globalSettingsEnabled || currentBrowserSignedIn)
+        ? [{ id: "notifications" as const, label: t("tabs.notifications") }]
+        : []),
       ...(globalSettingsEnabled
         ? [
             { id: "branding" as const, label: t("tabs.branding") },
@@ -534,7 +464,7 @@ export function SettingsModal({
           ]
         : []),
     ],
-    [globalSettingsEnabled, currentBrowserSignedIn, t],
+    [globalSettingsEnabled, currentBrowserSignedIn, notificationsAllowed, t],
   );
 
   useEffect(() => {
@@ -663,7 +593,6 @@ export function SettingsModal({
     >
       <div className="min-h-0 flex-1 flex flex-col sm:flex-row overflow-hidden">
         <SettingsNavigation
-          isDark={isDark}
           groupId={groupId}
           groupTitle={groupDoc?.title}
           scope={scope}
@@ -691,6 +620,7 @@ export function SettingsModal({
           <div className="px-4 pt-5 pb-4 sm:px-8 sm:pt-7 lg:px-10 space-y-6">
             {scope === "global" && !globalSettingsEnabled && !currentBrowserSignedIn ? (
               <div
+                data-status-tone="warning"
                 className={`rounded-xl border p-6 ${isDark ? "border-amber-700/40 bg-amber-900/10 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-800"}`}
               >
                 <div className="text-sm font-semibold">{t("navigation.globalLockedTitle")}</div>
@@ -740,22 +670,12 @@ export function SettingsModal({
                   <AutomationTab
                     isDark={isDark}
                     groupId={groupId}
+                    groupState={
+                      groupDoc && groupDoc.group_id === groupId
+                        ? groupDoc.runtime_status?.lifecycle_state || groupDoc.state
+                        : undefined
+                    }
                     devActors={devActors}
-                    busy={busy}
-                    idleSeconds={idleSeconds}
-                    setIdleSeconds={setIdleSeconds}
-                    keepaliveSeconds={keepaliveSeconds}
-                    setKeepaliveSeconds={setKeepaliveSeconds}
-                    keepaliveMax={keepaliveMax}
-                    setKeepaliveMax={setKeepaliveMax}
-                    silenceSeconds={silenceSeconds}
-                    setSilenceSeconds={setSilenceSeconds}
-                    helpNudgeIntervalSeconds={helpNudgeIntervalSeconds}
-                    setHelpNudgeIntervalSeconds={setHelpNudgeIntervalSeconds}
-                    helpNudgeMinMessages={helpNudgeMinMessages}
-                    setHelpNudgeMinMessages={setHelpNudgeMinMessages}
-                    onSavePolicies={handleSaveAutomationSettings}
-                    onResetPolicies={handleResetAutomationSettingsDraft}
                   />
                 )}
 
@@ -835,10 +755,6 @@ export function SettingsModal({
                     devActors={devActors}
                     terminalVisibility={terminalVisibility}
                     setTerminalVisibility={setTerminalVisibility}
-                    terminalNotifyTail={terminalNotifyTail}
-                    setTerminalNotifyTail={setTerminalNotifyTail}
-                    terminalNotifyLines={terminalNotifyLines}
-                    setTerminalNotifyLines={setTerminalNotifyLines}
                     onSaveTranscriptSettings={handleSaveTranscriptSettings}
                     tailActorId={tailActorId}
                     setTailActorId={setTailActorId}
@@ -926,6 +842,8 @@ export function SettingsModal({
                   />
                 )}
 
+                {activeTab === "notifications" && notificationsAllowed && <NotificationsTab />}
+
                 {activeTab === "branding" && (
                   <BrandingTab
                     isDark={isDark}
@@ -973,8 +891,6 @@ export function SettingsModal({
                     runtimeInfoErr={runtimeInfoErr}
                     developerMode={developerMode}
                     setDeveloperMode={setDeveloperMode}
-                    logLevel={logLevel}
-                    setLogLevel={setLogLevel}
                     terminalBacklogMiB={terminalBacklogMiB}
                     setTerminalBacklogMiB={setTerminalBacklogMiB}
                     terminalScrollbackLines={terminalScrollbackLines}
@@ -1011,6 +927,7 @@ export function SettingsModal({
             {saveFeedback?.context === saveContext && (
               <p
                 role={saveFeedback.error ? "alert" : "status"}
+                data-status-tone={saveFeedback.error ? "error" : "ok"}
                 className={`text-sm ${saveFeedback.error ? "text-rose-700 dark:text-rose-300" : "text-[var(--color-accent-success)]"}`}
               >
                 {saveFeedback.message}

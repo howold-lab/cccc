@@ -25,31 +25,56 @@ and says how old it is.
 
 The Groups table has NAME, STATUS and RUNNING columns. STATUS uses the Web UI's
 words: Running, Idle, Paused, Offline and Stopped. Stopped means the Group was
-stopped. Offline means it was not stopped or paused, but no actor is running:
-for example a new Group, or one whose actors exited or whose native sessions are
-closed. RUNNING counts the managed actors that are running and the native
+stopped. Offline means it was not stopped or paused, but no agent is running:
+for example a new Group, or one whose agents exited or whose native sessions are
+closed. RUNNING counts the managed agents that are running and the native
 members ready to receive from that Group; it is neither the number of members
-nor the number of busy models.
+nor the number of busy models. The native sessions table has APP, DIRECTORY,
+STATUS and ID columns; ID is the end of the session's source id, which
+`/sessions` shows in full.
 
-On the main screen, Up/Down selects a Group and Enter opens it in `/groups`.
-Type `/` to list the commands: Up/Down moves through the list, Tab completes the
-selected command without running it, Enter runs it, and Esc closes the list.
-Left/Right, Home/End, Delete and Ctrl+A/E/U edit the command line. Pasting only
-inserts text: in terminals with bracketed paste, pasted newlines do not run a
-command. Commands:
+On the regular screens, browsing and every action use the arrow keys, Enter, Tab
+and Esc, without letter shortcuts. Up/Down moves the highlight, Enter opens or runs the highlighted
+row, and Esc goes back one level or cancels a confirmation. On the main screen, Up/Down selects a Group, PgUp/PgDn pages through a list
+longer than the screen, and Enter opens its page. Tab on an empty command line, or typing `/`, opens the command menu:
+Up/Down moves through it, Tab completes the selected command without running
+it, Enter runs it, and Esc closes it. Left/Right, Home/End, Delete and
+Ctrl+A/E/U edit a typed command. Pasting only inserts text: in terminals with
+bracketed paste, pasted newlines do not run a command.
 
-- `/groups` lists the Groups. Pick one with Up/Down (or j/k) to see its recorded
-  state, how many tasks it has in each state, its actors and a link that opens
-  it in the Web UI. `s` starts it (resumes a paused one) and `x` stops it, each
-  after a confirmation that names the Group and what will happen. Starting runs
-  the enabled actors and lets enabled native members receive again; stopping
-  stops the managed actors and stops delivery to native members, whose apps stay
-  open. `t` lists the Group's tasks: the unfinished ones (Active, then Planned),
-  or the Done ones after `d`; PgUp/PgDn pages through a long list. Enter shows
-  one task read-only, with its status, assignee, checklist, notes and outcome;
-  tasks are edited in the Web UI. `b` or Esc goes back one level.
+A Group's page shows its recorded state, how many tasks it has in each state,
+its agents and a link that opens it in the Web UI. Its rows are Tasks and the
+actions the Group's state allows: Start for a stopped Group (and Stop while it
+still reports running agents), Resume and Stop for a paused one, and Start and
+Stop otherwise. Each action asks for a confirmation
+that names the Group and what will happen. The confirmation starts on Cancel:
+choose the action with Up/Down and press Enter to run it, so pressing Enter
+twice changes nothing. Starting runs the enabled agents that
+are not running and lets enabled native members receive again, so Start also
+helps a running Group whose other agents have exited; stopping stops the managed
+agents and stops delivery to native members, whose apps stay open. Tasks lists the Group's tasks: Left/Right switches between the unfinished
+ones (Active, then Planned) and the Done ones, and PgUp/PgDn pages through a
+long list. Enter shows one task read-only, with its status, assignee,
+checklist, notes and outcome; tasks are edited in the Web UI.
+
+When agents wait for your answer in a Group, the main screen shows the number
+after its name (`[~3]` is from an earlier read, `[?]` cannot be confirmed), and
+its page adds a Waiting for you row. That row lists the open requests and
+PgUp/PgDn pages through them; Enter opens one. In a request, Up/Down moves
+between its options, Other and Send answer, and Enter selects the highlighted
+row: nothing is chosen until you press Enter on it. Other opens an editor where
+Ctrl+J starts a new line and Enter or Esc returns. Send answer records the
+answer; when the result is uncertain, only the same answer can be retried. A
+note added to a chosen option is written in the Web UI; here an answer is an
+option or Other.
+Requests that cannot be answered here, such as ones from another Group, say so
+and are answered in the Web conversation.
+
+Commands:
+
+- `/groups` opens the page of the Group selected on the main screen.
 - `/sessions` lists every native session this CCCC knows. Enter shows the
-  selected session's details, and `b` or Esc goes back.
+  selected session's details.
 - `/setup` connects Codex, Claude Code, Pi or OpenCode sessions; see
   [Native sessions](../guide/local-sessions).
 - `/help` lists the commands and keys. It scrolls with Up/Down when the terminal
@@ -79,12 +104,13 @@ it on port 9000.
 Check your environment and diagnose issues.
 
 ```bash
-cccc doctor             # Full environment check
+cccc doctor             # In a terminal: command, daemon, builds, agent CLIs, Web Model browser
+cccc doctor --json      # The full JSON report, which is also what a pipe or redirect gets
 ```
 
 Browser readiness uses the same Chrome/Edge discovery as the projected Web runtime on
 Linux, macOS, and Windows, and may additionally recognize system Chromium.
-On Linux, the report includes projected-browser readiness: system Chrome/Edge, required `Xvfb`
+On Linux, the JSON report includes projected-browser readiness: system Chrome/Edge, required `Xvfb`
 isolation, and the optional `x11vnc` VNC viewer. A missing `x11vnc` does not prevent browser
 isolation; CCCC falls back to its CDP screencast viewer.
 
@@ -141,7 +167,7 @@ cccc reach off         # Stop publication without removing local identity
 ```
 
 The token-bearing Web URL is shown here; keep it private. ChatGPT/Web Model
-connector credentials are actor-specific and are managed from that actor's Web
+connector credentials are agent-specific and are managed from that agent's Web
 Model settings. Windows helper installation is not included in this release
 candidate, so Reach is unavailable there.
 
@@ -188,21 +214,21 @@ cccc group create --title "my-group"         # Create group
 cccc group show <group_id>                   # Show group metadata
 cccc group update --group <id> --title "..." # Update title/topic
 cccc group use <group_id> .                  # Set active scope
-cccc group start --group <id>                # Start group actors
-cccc group stop --group <id>                 # Stop group actors
+cccc group start --group <id>                # Start the Group's agents
+cccc group stop --group <id>                 # Stop the Group's agents
 cccc group set-state idle --group <id>       # Set state: active/idle/paused/stopped
 cccc group detach-scope <scope_key> --group <id>
 cccc group delete --group <id> --confirm <id>
 ```
 
-`set-state stopped` is the same as `group stop`: it stops the Group's actors and
+`set-state stopped` is the same as `group stop`: it stops the Group's agents and
 delivery to its native members, never only its recorded state.
 
-## Actor Commands
+## Agent Commands {#actor-commands}
 
 ### `cccc actor add`
 
-Add a new actor to the group.
+Add a new agent to the Group.
 
 ```bash
 cccc actor add <actor_id> --runtime claude
@@ -215,12 +241,13 @@ Options:
 - `--runtime`: Agent runtime (claude, codex, web_model, droid, etc.)
 - `--command`: Custom command (for custom runtime)
 - `--title`: Display title
+- `--model-label`: Optional model name the operator declares for people and external tools; CCCC does not check it or use it to launch the runtime
 
-For the ChatGPT Web Model actor, create and start the actor from the target CCCC Web group, then finish ChatGPT sign-in, MCP URL, and chat binding in `Settings > Global > ChatGPT Web Model`.
+For a ChatGPT Web Model agent, create and start the agent from the target Group in the CCCC Web UI, then finish ChatGPT sign-in, MCP URL and chat binding in **Settings → This instance → Web Models → ChatGPT**.
 
 ### `cccc actor`
 
-Manage actors.
+Manage agents.
 
 ```bash
 cccc actor list                    # List actors
@@ -228,12 +255,14 @@ cccc actor add <actor_id> --scope /path/to/project
 cccc actor start <actor_id>        # Start actor
 cccc actor stop <actor_id>         # Stop actor
 cccc actor restart <actor_id>      # Restart actor
+cccc actor new-session <actor_id>  # Restart actor on a new session
 cccc actor remove <actor_id>       # Remove actor
 cccc actor update <actor_id> --scope /path/to/project
+cccc actor update <actor_id> --model-label "gpt-5-codex"   # An empty value clears it
 cccc actor secrets <actor_id> ...  # Manage runtime-only secrets
 ```
 
-Actor scope arguments are project paths at the CLI boundary. CCCC resolves them
+Agent scope arguments are project paths at the CLI boundary. CCCC resolves them
 to the attached scope key before persistence.
 
 ## Message Commands
@@ -245,7 +274,7 @@ Send a message.
 ```bash
 cccc send "Hello"                  # No --to: default recipient policy applies (default: foreman)
 cccc send "Hello" --to @foreman    # Send to foreman
-cccc send "Hello" --to peer-1      # Send to specific actor
+cccc send "Hello" --to peer-1      # Send to a specific agent
 cccc send "Announcement" --to @all # Explicit broadcast
 cccc send "Please answer" --to peer-1 --mode request-reply
 cccc send "For later" --to peer-1 --mode mail
@@ -308,14 +337,26 @@ cccc cancel-reply <event_id>
 
 ### `cccc inbox`
 
-Read and consume an actor's unread Mail, advancing its read cursor. This changes
-the actor's unread state; it is not a read-only view of the actor's responses.
+Read and consume an agent's unread Mail, advancing its read cursor. This changes
+the agent's unread state; it is not a read-only view of the agent's responses.
 Use `cccc tail` or Web chat to view recorded messages without consuming Mail.
 
 ```bash
 cccc inbox --actor-id <id>         # Read and consume the next unread Mail batch
 cccc inbox --actor-id <id> --limit 10
 ```
+
+### `cccc inbox-summary`
+
+Summarize the Mail still waiting for every agent in a Group, without consuming it.
+
+```bash
+cccc inbox-summary --cutoff 2026-10-30T00:00:00Z   # Per agent: waiting Mail, how much was sent at or before the cutoff, the oldest's age when known
+```
+
+It does not move read cursors, start agents or send notices, and returns no
+message text. The user, the system and the Group's Foreman may use it (`--by`,
+default `user`); peers may not.
 
 ### `cccc tail`
 
@@ -326,6 +367,25 @@ cccc tail                          # Show recent events
 cccc tail -n 50                    # Show last 50 events
 cccc tail -f                       # Follow new events
 ```
+
+### `cccc ledger search`
+
+Search the ledger through the daemon's `ledger_search` operation. Like
+`cccc tail`, it does not consume Mail.
+
+```bash
+cccc ledger search --by assistant                    # Events from one sender
+cccc ledger search --by-any peer-1 --by-any peer-2   # From any of several senders
+cccc ledger search --to user --kind chat             # Chat messages to one recipient
+cccc ledger search -q release --since 2026-11-01T00:00:00Z
+cccc ledger search --before <event_id> -n 20         # The page before an event
+```
+
+`--kind` accepts `all` (default), `chat` or `notify`. `--since` and `--until`
+are inclusive RFC 3339 times; `--before` and `--after` take event IDs and are
+exclusive. `-q` matches text anywhere in the event, ignoring case. The daemon
+clamps `--limit` (default 50) to 1–200. Without `--group`, the current Group
+is searched.
 
 ## IM Bridge Commands
 
@@ -413,7 +473,7 @@ a runtime choice. Use ordinary commands directly:
 
 ```bash
 cccc                 # launch daemon + Web
-cccc status          # show product, daemon, groups, actors, and agent runtimes
+cccc status          # show product, daemon, groups, agents and agent runtimes
 cccc doctor          # inspect the native installation and environment
 cccc daemon start    # explicit daemon lifecycle
 ```

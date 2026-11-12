@@ -222,6 +222,56 @@ async fn exact_history_read_returns_the_delivered_text_once_without_dropping_met
     let _ = daemon_task.await;
 }
 
+#[tokio::test]
+async fn a_tool_caller_cannot_take_back_a_batch_the_browser_staged() {
+    let _guard = daemon_fixture_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("initialize home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let mut group = store.create("staged batch", "").expect("group");
+    let mut actor = cccc_contracts::Actor::new("peer1");
+    actor.runtime = cccc_contracts::ActorRuntime::WebModel;
+    actor.normalize_runtime_constraints();
+    cccc_core::actors::add(&mut group, actor).expect("actor");
+    group.running = true;
+    store.save(&group).expect("save group");
+    let daemon_home = home.clone();
+    let daemon_task = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+    let client = DaemonClient::new(home.clone());
+    wait_for_daemon(&client).await;
+    send_message(&client, &group.group_id, "staged", "send").await;
+    let args = json!({
+        "group_id":group.group_id,"actor_id":"peer1","by":"peer1",
+        "transport":"web_model_browser"
+    });
+    let staged = daemon_call(&client, "runtime_wait_next_turn", args.clone()).await;
+    let turn_id = staged["turn"]["turn_id"].clone();
+    assert!(turn_id.is_string(), "{staged}");
+
+    let taken = mcp_call(
+        &home,
+        &group.group_id,
+        1,
+        "cccc_runtime_wait_next_turn",
+        json!({"transport":"web_model_browser","resume_turn_id":turn_id}),
+    )
+    .await;
+    assert_eq!(
+        taken["result"]["structuredContent"]["status"], "turn_in_progress",
+        "{taken}"
+    );
+
+    // The browser itself still takes it back.
+    let mut resume = args;
+    resume["resume_turn_id"] = turn_id;
+    let resumed = daemon_call(&client, "runtime_wait_next_turn", resume).await;
+    assert_eq!(resumed["status"], "work_available", "{resumed}");
+
+    daemon_task.abort();
+    let _ = daemon_task.await;
+}
+
 async fn daemon_call(client: &DaemonClient, op: &str, args: Value) -> Value {
     let response = client
         .call(&DaemonRequest {
@@ -310,6 +360,44 @@ async fn file_send_uses_daemon_owned_preflight_before_blob_storage() {
             .count(),
         1
     );
+
+    // An absolute path names the same file inside the scope; outside it, none.
+    let absolute = mcp_call(
+        &home,
+        &group.group_id,
+        12,
+        "cccc_file_send",
+        json!({"path": scope_root.join("note.txt"), "to": ["user"], "mode": "send"}),
+    )
+    .await;
+    assert_eq!(
+        absolute["result"]["structuredContent"]["sent"], true,
+        "{absolute}"
+    );
+    std::fs::write(temp.path().join("outside.txt"), "private").expect("outside file");
+    let outside = mcp_call(
+        &home,
+        &group.group_id,
+        13,
+        "cccc_file_send",
+        json!({"path": temp.path().join("outside.txt"), "to": ["user"], "mode": "send"}),
+    )
+    .await;
+    assert_eq!(outside["result"]["isError"], true, "{outside}");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(temp.path().join("outside.txt"), scope_root.join("link.txt"))
+            .expect("link");
+        let linked = mcp_call(
+            &home,
+            &group.group_id,
+            14,
+            "cccc_file_send",
+            json!({"path": scope_root.join("link.txt"), "to": ["user"], "mode": "send"}),
+        )
+        .await;
+        assert_eq!(linked["result"]["isError"], true, "{linked}");
+    }
 
     daemon_task.abort();
     let _ = daemon_task.await;
@@ -1137,6 +1225,84 @@ async fn scope_follow_group_changes_only_after_the_owner_exits() {
         std::fs::read_link(format!("/proc/{pid}/cwd")).expect("next launch follows B"),
         fixture.roots[1]
     );
+    fixture.stop().await;
+}
+
+/// Every call cccc_bootstrap suggests, with the key it is returned under.
+fn bootstrap_examples(payload: &Value) -> Vec<(String, String)> {
+    let text = |example: &Value| example.as_str().expect("example").to_owned();
+    payload["next_calls"]
+        .as_object()
+        .expect("next calls")
+        .iter()
+        .map(|(key, example)| (key.clone(), text(example)))
+        .chain(
+            [
+                "update_command",
+                "execution_update_command",
+                "mind_context_update_command",
+            ]
+            .map(|key| (key.to_owned(), text(&payload["context_hygiene"][key]))),
+        )
+        .collect()
+}
+
+/// Reads `tool(key="value", ...)  # comment`, the only form the examples use, into a tool
+/// name and its arguments. Any other shape fails here instead of being guessed.
+fn example_call(example: &str) -> (String, Value) {
+    let call = example.split("  #").next().expect("call").trim_end();
+    let (tool, rest) = call
+        .split_once('(')
+        .unwrap_or_else(|| panic!("not a call: {example}"));
+    let mut rest = rest
+        .strip_suffix(')')
+        .unwrap_or_else(|| panic!("unclosed call: {example}"));
+    let mut arguments = Map::new();
+    while !rest.is_empty() {
+        let (key, tail) = rest
+            .split_once("=\"")
+            .unwrap_or_else(|| panic!("unsupported argument: {example}"));
+        let (value, tail) = tail
+            .split_once('"')
+            .unwrap_or_else(|| panic!("unterminated value: {example}"));
+        assert!(
+            !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "unsupported argument name {key:?}: {example}"
+        );
+        arguments.insert(key.to_owned(), json!(value));
+        rest = if tail.is_empty() {
+            tail
+        } else {
+            tail.strip_prefix(", ")
+                .unwrap_or_else(|| panic!("unsupported separator: {example}"))
+        };
+    }
+    (tool.to_owned(), Value::Object(arguments))
+}
+
+/// A member CCCC starts talks to its own MCP process, which knows the Group and the member
+/// from its environment. Each call bootstrap suggests to it must run there exactly as
+/// returned. This checks that the arguments are accepted, not what an agent would write in
+/// them, and starts no runtime.
+#[tokio::test]
+async fn a_started_member_can_run_every_call_bootstrap_suggests() {
+    let fixture = ActorScopeFixture::new().await;
+    let accepted = |response: &Value| {
+        response.get("error").is_none()
+            && response["result"].is_object()
+            && response["result"]["isError"] != true
+    };
+    let bootstrap = fixture
+        .stdio_tool("follow", "cccc_bootstrap", json!({}))
+        .await;
+    assert!(accepted(&bootstrap), "{bootstrap}");
+    let examples = bootstrap_examples(&bootstrap["result"]["structuredContent"]);
+    assert_eq!(examples.len(), 8, "{examples:?}");
+    for (key, example) in examples {
+        let (tool, arguments) = example_call(&example);
+        let response = fixture.stdio_tool("follow", &tool, arguments).await;
+        assert!(accepted(&response), "{key}: {example}: {response}");
+    }
     fixture.stop().await;
 }
 

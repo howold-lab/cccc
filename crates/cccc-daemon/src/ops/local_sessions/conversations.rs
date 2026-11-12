@@ -81,6 +81,29 @@ fn resolve_scopes(
     Ok(scopes)
 }
 
+pub(super) fn connected_source(
+    home: &HomeLayout,
+    source_id: &str,
+) -> Result<LocalSessionSource, OpError> {
+    resolve_sources(home, &[source_id.to_owned()])?
+        .pop()
+        .ok_or_else(|| {
+            OpError::new(
+                "local_session_offline",
+                "The selected source is not connected",
+            )
+        })
+}
+
+pub(super) fn source_scope(
+    source: &LocalSessionSource,
+    attached: &[cccc_core::Scope],
+) -> Result<cccc_core::Scope, OpError> {
+    resolve_scopes(std::slice::from_ref(source), attached)?
+        .pop()
+        .ok_or_else(|| OpError::new("local_session_scope_conflict", "No working directory"))
+}
+
 pub(super) fn create(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     local(request)?;
     let source_ids = selected_source_ids(request)?;
@@ -116,6 +139,7 @@ pub(super) fn create(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                         .any(|a| &a.external_session_id == id && a.enabled)
                 })
             {
+                super::record_group_instruction_baselines(home, &group);
                 return object(
                     json!({"group_id":group.group_id,"group":super::super::group_runtime::group(home, group),"reused":true}),
                 );
@@ -148,9 +172,13 @@ pub(super) fn create(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         string_arg(request, "source_id").as_deref(),
     );
     match result {
-        Ok(group) => object(
-            json!({"group_id":group.group_id,"group":super::super::group_runtime::group(home, group),"reused":false}),
-        ),
+        Ok(group) => {
+            super::record_group_instruction_baselines(home, &group);
+            initialize_added_foremen(home, &group, &group.actors);
+            object(
+                json!({"group_id":group.group_id,"group":super::super::group_runtime::group(home, group),"reused":false}),
+            )
+        }
         Err(mut error) => {
             if let Err(cleanup) = store.delete(&created.group_id) {
                 error
@@ -186,6 +214,7 @@ pub(super) fn join(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         })
         .collect::<Vec<_>>();
     if sources.is_empty() {
+        super::record_group_instruction_baselines(home, &group);
         return object(
             json!({"group_id":group_id,"group":super::super::group_runtime::group(home, group),"reused":true}),
         );
@@ -194,7 +223,7 @@ pub(super) fn join(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     // scopes. Neither a new directory nor a new source changes Group defaults.
     let scopes = resolve_scopes(&sources, &group.scopes)?;
     let path = store.ledger_path(&group_id).map_err(OpError::io)?;
-    store
+    let added = store
         .mutate_with_rollback(
             &group_id,
             |group| {
@@ -218,9 +247,23 @@ pub(super) fn join(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         )
         .map_err(OpError::io)?;
     let group = store.load(&group_id).map_err(OpError::io)?;
+    super::record_group_instruction_baselines(home, &group);
+    initialize_added_foremen(home, &group, &added);
     object(
         json!({"group_id":group_id,"group":super::super::group_runtime::group(home, group),"reused":false}),
     )
+}
+
+/// A newly joined native member participates immediately only in a running Group.
+fn initialize_added_foremen(home: &HomeLayout, group: &GroupDoc, added: &[Actor]) {
+    if !group.running || matches!(group.state, GroupState::Paused | GroupState::Stopped) {
+        return;
+    }
+    for added_actor in added {
+        if let Some(actor) = actors::find(group, &added_actor.id) {
+            super::super::capabilities::apply_native_foreman_startup_baseline(home, group, actor);
+        }
+    }
 }
 
 fn add_sources(
@@ -318,9 +361,15 @@ pub(super) fn send(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     let explicit_group = string_arg(request, "group_id").filter(|id| !id.is_empty());
     let source_directed = explicit_group.is_none();
-    if (source_directed && request.args.contains_key("to"))
-        || (!source_directed && request.args.contains_key("source_ids"))
-    {
+    // CCCS treats an empty `to` as absent, and an empty `source_ids` selects
+    // no one. Some clients fill unused optional lists with [], so only a
+    // non-empty list chooses an addressing mode.
+    let addressed = |key: &str| {
+        request.args.get(key).is_some_and(|value| {
+            !value.is_null() && value.as_array().is_none_or(|items| !items.is_empty())
+        })
+    };
+    if (source_directed && addressed("to")) || (!source_directed && addressed("source_ids")) {
         return Err(OpError::new(
             "invalid_args",
             "Use source_ids for a direct send, or group_id with optional to for a Group send; do not combine addressing modes",
@@ -366,8 +415,15 @@ pub(super) fn send(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         .filter(|(k, _)| {
             !matches!(
                 k.as_str(),
-                "source_id" | "source_ids" | "direct" | "title" | "by" | "group_id"
-            )
+                "source_id"
+                    | "source_ids"
+                    | "direct"
+                    | "title"
+                    | "by"
+                    | "group_id"
+                    // Checked before dispatch; never message content.
+                    | "_cccc_native_source_binding"
+            ) && (k.as_str() != "to" || addressed("to"))
         })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<Map<_, _>>();

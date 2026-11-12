@@ -65,18 +65,18 @@ pub(super) async fn bridge(
             native_session_id: session_id.into(),
             host: host.clone(),
             cwd: cwd.to_string_lossy().into_owned(),
-            title: format!(
-                "{} · {} · {}",
+            title: default_session_title(
                 if runtime == LocalSessionRuntime::Pi {
                     "Pi"
                 } else {
                     "OpenCode"
                 },
-                cwd.file_name().unwrap_or_default().to_string_lossy(),
-                &session_id[session_id.len().saturating_sub(6)..]
+                cwd,
+                &session_id[session_id.len().saturating_sub(6)..],
             ),
             origin: None,
             revision: uuid::Uuid::new_v4().to_string(),
+            context_epoch: 0,
             codex_home: None,
             codex_can_receive: false,
             codex_program: None,
@@ -96,6 +96,7 @@ pub(super) async fn bridge(
     let mut stop = std::pin::pin!(stop_signal());
     let mut attached = false;
     let mut heartbeat = tokio::time::Instant::now() - Duration::from_secs(5);
+    let mut wait = super::RECEIVE_POLL;
     let run: Result<()> = async {
         output.write_all(b"{\"type\":\"ready\"}\n").await?;
         output.flush().await?;
@@ -113,7 +114,8 @@ pub(super) async fn bridge(
                         "reason":if state=="rejected" {Some("The native runtime refused this input")} else {None},
                     })).await;
                 }
-                () = tokio::time::sleep(Duration::from_millis(200)) => {
+                () = tokio::time::sleep(wait) => {
+                    wait = super::RECEIVE_POLL;
                     if !host.alive() || session.opencode_server.as_ref().is_some_and(|server|!server.alive()) { break }
                     let current = match local_sessions::read(home, &source_id) {
                         Ok(current) => current,
@@ -134,7 +136,7 @@ pub(super) async fn bridge(
                         Ok(next)=>next,
                         Err(_)=>{attached=false;continue;}
                     };
-                    if next["handoff"].is_null() {continue}
+                    if next["handoff"].is_null() {wait = super::IDLE_RECEIVE_POLL; continue}
                     let line=serde_json::to_vec(&json!({"type":"handoff","handoff":next["handoff"]}))?;
                     output.write_all(&line).await?;
                     output.write_all(b"\n").await?;

@@ -48,7 +48,7 @@ When a group appears stuck:
 
 1. Check daemon health.
 2. Check group state (`active/idle/paused/stopped`).
-3. Check actor runtime status.
+3. Check agent runtime status.
 4. Check runtime delivery, Inbox read state, pending replies, and tracked tasks.
 5. Check automation and delivery policy.
 
@@ -63,7 +63,7 @@ cccc tail -n 100 -f
 
 ## 4) Fast Recovery Playbook
 
-### Actor-level recovery (preferred)
+### Agent-level recovery (preferred) {#actor-level-recovery-preferred}
 
 ```bash
 cccc actor restart <actor_id>
@@ -88,7 +88,7 @@ cccc daemon start
 ## 5) Secure Remote Access
 
 Required baseline:
-- Create an **Admin Access Token** in **Settings > Web Access** before any non-local exposure.
+- Create an **Admin Access Token** in **Settings > This instance > Web Access** before any non-local exposure.
 - Use Cloudflare Access or Tailscale for network boundary.
 
 Do not:
@@ -131,7 +131,7 @@ cccc mcp
 
 Run a small end-to-end smoke:
 - create/attach group
-- add/start actor
+- add/start agent
 - send/reply
 - verify ledger and inbox behavior
 
@@ -160,13 +160,25 @@ Backup `CCCC_HOME`:
 - Prefer explicit recipients over broad broadcast when scope is narrow.
 - Keep automation focused on objective reminders, not chat noise.
 
+A new Mail sent within the same Group to explicitly named agents can return
+`mail_recipient_advisories` with a `mail_advisory` explanation. These report
+the daemon's snapshot when the Mail was written: an agent may be disabled, its
+Group paused or stopped, or its managed runtime reported as not running. Mail
+does not start an agent or resume a Group. Send, or delivery of the existing
+Mail, can request delivery to an enabled agent in an active Group; delivery can
+still fail or remain unconfirmed.
+
+The optional result does not assess the running state of native sessions or Web
+Models, and it is not returned for recipient selectors, retries, cross-Group or
+Connect sends. A result without the field does not mean the Mail was read.
+
 ## 9) Escalation Checklist
 
 If an issue repeats:
 
 1. Collect evidence:
    - group id
-   - actor id
+   - agent ID
    - event ids
    - recent `cccc tail -n 100`
 2. Capture reproducible sequence.
@@ -208,11 +220,4 @@ stored credential and disable provider access from this installation.
 Expected after disconnect:
 
 - Group Space operations may return degraded/disabled provider results.
-- Core CCCC chat/task/actor workflows continue normally.
-
-Optional throughput tuning:
-
-```bash
-export CCCC_SPACE_PROVIDER_MAX_INFLIGHT=1   # safer
-export CCCC_SPACE_PROVIDER_MAX_INFLIGHT=4   # faster
-```
+- Core CCCC chat, task and agent workflows continue normally.

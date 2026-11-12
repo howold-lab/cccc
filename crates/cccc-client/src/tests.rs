@@ -27,6 +27,7 @@ async fn test_server(name: &str) -> (PathBuf, HomeLayout, TcpListener) {
         port: listener.local_addr().expect("address").port(),
         pid: std::process::id(),
         version: "test".into(),
+        source_id: String::new(),
         ts: "test".into(),
     };
     tokio::fs::write(
@@ -44,6 +45,41 @@ fn request(op: &str) -> DaemonRequest {
         op: op.into(),
         args: Map::new(),
     }
+}
+
+#[test]
+fn host_client_does_not_inherit_an_assistant_origin() {
+    let home = HomeLayout::from_path(std::env::temp_dir().join("cccc-client-identity-test"))
+        .expect("home path");
+    let assistant = DaemonClient::new(home.clone());
+    let host = DaemonClient::new(home).without_voice_origin();
+    let marker = cccc_core::voice_notifications::ORIGIN_ARG;
+    for op in [
+        "send",
+        "connect_send",
+        "connect_send_files",
+        "message_upload_preflight",
+    ] {
+        let mut assistant_request = request(op);
+        assistant.apply_voice_origin(&mut assistant_request, Some("fixture-origin".into()));
+        assert_eq!(
+            assistant_request
+                .args
+                .get(marker)
+                .and_then(|value| value.as_str()),
+            Some("fixture-origin"),
+            "{op}"
+        );
+    }
+    let mut host_request = request("send");
+    host_request
+        .args
+        .insert(marker.into(), "caller-value".into());
+    host.apply_voice_origin(&mut host_request, Some("fixture-origin".into()));
+    assert!(!host_request.args.contains_key(marker));
+    let mut unrelated = request("group_list");
+    assistant.apply_voice_origin(&mut unrelated, Some("fixture-origin".into()));
+    assert!(!unrelated.args.contains_key(marker));
 }
 
 #[tokio::test]

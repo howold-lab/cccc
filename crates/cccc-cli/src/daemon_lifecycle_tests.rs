@@ -1,23 +1,84 @@
 use super::{
-    DaemonSlot, is_compatible, ownership_line, resolve_slot, wait_for_loss,
-    wait_until_ready_or_owner_exits,
+    DaemonSlot, different_daemon_version, is_compatible, ownership_line, resolve_slot,
+    wait_for_loss, wait_until_ready_or_owner_exits,
 };
 use crate::PRODUCT_VERSION;
 use crate::daemon_takeover::{LockState, probe_lock};
 use cccc_client::DaemonClient;
-use cccc_contracts::DaemonResponse;
+use cccc_contracts::{DaemonAddress, DaemonResponse, Transport};
 use cccc_core::HomeLayout;
 use fs2::FileExt;
 use serde_json::json;
 use std::fs::{File, OpenOptions};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
+
+const ISOLATED_DAEMON_CASE: &str = "CCCC_TEST_ISOLATED_DAEMON_CASE";
 
 fn home() -> (tempfile::TempDir, HomeLayout) {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     home.initialize().expect("initialize home");
     (temp, home)
+}
+
+// A daemon installs a process-wide guard that intentionally lasts for the
+// host's lifetime. Keep the test daemon in its own process so its guard cannot
+// outlive the fixture home in the test runner.
+async fn run_daemon_case_in_child(test: &str) -> bool {
+    if std::env::var_os(ISOLATED_DAEMON_CASE).as_deref() == Some(std::ffi::OsStr::new(test)) {
+        return false;
+    }
+
+    let temp = tempfile::tempdir().expect("isolated test process");
+    let root = temp.path();
+    for name in [
+        "home", "tmp", "codex", "claude", "pi", "grok", "config", "data", "cache",
+    ] {
+        std::fs::create_dir(root.join(name)).expect("isolated process directory");
+    }
+    let mut command =
+        tokio::process::Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", test, "--nocapture"])
+        .env_clear()
+        .env(ISOLATED_DAEMON_CASE, test)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", root.join("home"))
+        .env("USERPROFILE", root.join("home"))
+        .env("TMPDIR", root.join("tmp"))
+        .env("TMP", root.join("tmp"))
+        .env("TEMP", root.join("tmp"))
+        .env("CCCC_HOME", root.join("cccc"))
+        .env("CODEX_HOME", root.join("codex"))
+        .env("CLAUDE_CONFIG_DIR", root.join("claude"))
+        .env("PI_CODING_AGENT_DIR", root.join("pi"))
+        .env("GROK_HOME", root.join("grok"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .kill_on_drop(true);
+    // Windows needs its system directory to start the test executable.
+    #[cfg(windows)]
+    for name in ["SYSTEMROOT", "WINDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+
+    let output = tokio::time::timeout(Duration::from_secs(45), command.output())
+        .await
+        .expect("isolated daemon case timed out")
+        .expect("start isolated daemon case");
+    assert!(
+        output.status.success(),
+        "isolated daemon case failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    true
 }
 
 fn hold_daemon_lock(home: &HomeLayout) -> File {
@@ -79,11 +140,39 @@ fn distinguishes_rust_from_legacy_daemon_ping() {
     assert!(!is_compatible(&stale_rust));
 }
 
+#[test]
+fn different_known_versions_are_reported_without_assuming_compatibility() {
+    let response = |value: serde_json::Value| {
+        DaemonResponse::success(value.as_object().cloned().expect("object"))
+    };
+    let same = response(json!({"version":PRODUCT_VERSION}));
+    assert_eq!(different_daemon_version(&same), None);
+    let other = response(json!({"version":"0.4.44"}));
+    assert_eq!(different_daemon_version(&other), Some("0.4.44"));
+    let newer = response(json!({"version":"9.0.0-rc2"}));
+    assert_eq!(different_daemon_version(&newer), Some("9.0.0-rc2"));
+    for value in [
+        json!({}),
+        json!({"version":null}),
+        json!({"version":"broken"}),
+        json!({"version":5}),
+    ] {
+        assert_eq!(different_daemon_version(&response(value)), None);
+    }
+}
+
 /// The launch bug this guards: a healthy daemon busy enough to miss a short
 /// ping deadline was read as no daemon at all, so the launcher tried to
 /// start a second one into the lock the first still held.
 #[tokio::test]
 async fn a_running_daemon_is_adopted_rather_than_started_over() {
+    if run_daemon_case_in_child(
+        "daemon_lifecycle::tests::a_running_daemon_is_adopted_rather_than_started_over",
+    )
+    .await
+    {
+        return;
+    }
     let (_temp, home) = home();
     let daemon_home = home.clone();
     let daemon = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
@@ -174,6 +263,54 @@ async fn a_held_lock_without_a_daemon_to_ask_is_reported_not_seized() {
     assert_eq!(probe_lock(&home).expect("probe"), LockState::Held);
 }
 
+/// A daemon takes the lock before it can answer, so one unanswered ping must
+/// not turn a healthy start into a report that it may be stuck.
+#[tokio::test]
+async fn a_daemon_still_starting_is_adopted_once_it_answers() {
+    let (_temp, home) = home();
+    let _held_lock = hold_daemon_lock(&home);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("daemon listener");
+    let published = DaemonAddress {
+        v: 1,
+        transport: Transport::Tcp,
+        path: String::new(),
+        host: "127.0.0.1".into(),
+        port: listener.local_addr().expect("daemon address").port(),
+        pid: std::process::id(),
+        version: PRODUCT_VERSION.into(),
+        source_id: String::new(),
+        ts: String::new(),
+    };
+    let daemon_home = home.clone();
+    let daemon = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(
+            daemon_home.daemon_dir().join("ccccd.addr.json"),
+            serde_json::to_vec(&published).expect("address JSON"),
+        )
+        .expect("publish address");
+        let (stream, _) = listener.accept().await.expect("ping connection");
+        let mut stream = BufReader::new(stream);
+        let mut request = String::new();
+        stream.read_line(&mut request).await.expect("ping request");
+        let request = serde_json::from_str(&request).expect("ping JSON");
+        let mut reply = serde_json::to_vec(&cccc_daemon::handle_request(&daemon_home, &request))
+            .expect("ping response");
+        reply.push(b'\n');
+        stream.write_all(&reply).await.expect("ping reply");
+    });
+    let client = DaemonClient::new(home.clone()).with_timeout(Duration::from_millis(500));
+
+    let slot = resolve_slot(&home, &client)
+        .await
+        .expect("a daemon that answers is not stuck");
+
+    daemon.await.expect("starting daemon");
+    assert!(matches!(slot, DaemonSlot::Adopted { .. }), "{slot:?}");
+}
+
 #[tokio::test]
 async fn daemon_startup_wait_stops_when_the_embedded_daemon_exits() {
     let (_temp, home) = home();
@@ -195,6 +332,13 @@ async fn daemon_startup_wait_stops_when_the_embedded_daemon_exits() {
 
 #[tokio::test]
 async fn daemon_startup_wait_adopts_a_competing_owner() {
+    if run_daemon_case_in_child(
+        "daemon_lifecycle::tests::daemon_startup_wait_adopts_a_competing_owner",
+    )
+    .await
+    {
+        return;
+    }
     let (_temp, home) = home();
     let client = DaemonClient::new(home.clone()).with_timeout(Duration::from_millis(50));
     let (exit_tx, mut exit_rx) = watch::channel(false);
@@ -215,4 +359,19 @@ async fn daemon_startup_wait_adopts_a_competing_owner() {
     external.abort();
     let _ = external.await;
     assert!(ready, "a ready competing daemon should be adopted");
+}
+
+#[test]
+fn daemon_fixtures_do_not_break_a_later_process_launch() {
+    a_running_daemon_is_adopted_rather_than_started_over();
+    daemon_startup_wait_adopts_a_competing_owner();
+
+    // Listing the test binary starts no daemon or provider. It does pass through
+    // the same guarded process launcher used by other tests in this process.
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test executable"));
+    command.args(["--list", "--exact", "a_nonexistent_test"]);
+    let output =
+        cccc_runtime::capture_command_blocking(&mut command, None, Duration::from_secs(10), 1024)
+            .expect("daemon fixtures must not poison later launches");
+    assert!(output.status.success());
 }

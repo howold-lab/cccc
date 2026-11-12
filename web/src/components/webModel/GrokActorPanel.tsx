@@ -6,6 +6,7 @@ import { formatMessageTimestamp } from "../../utils/time";
 import { Button } from "../ui/button";
 import { inputClass } from "../modals/settings/types";
 import {
+  ActiveTurnAge,
   NativeActorDelivery,
   NativeActorSummary,
   nativeActorCard as card,
@@ -51,7 +52,7 @@ function Panel({
   onStateChange,
   onBusyChange,
 }: Props) {
-  const { t } = useTranslation("settings");
+  const { t, i18n } = useTranslation("settings");
   const [state, setState] = useState<GrokActorState | null>(null);
   const [readError, setReadError] = useState("");
   const [error, setError] = useState("");
@@ -192,17 +193,29 @@ function Panel({
   const notices = (
     <>
       {readError && (
-        <p role="status" className="text-xs text-amber-700 dark:text-amber-300">
+        <p
+          role="status"
+          className="text-xs text-amber-700 dark:text-amber-300"
+          data-status-tone="warning"
+        >
           {readError}
         </p>
       )}
       {error && (
-        <p role="alert" className="text-xs text-rose-600 dark:text-rose-400">
+        <p
+          role="alert"
+          className="text-xs text-rose-600 dark:text-rose-400"
+          data-status-tone="error"
+        >
           {error}
         </p>
       )}
       {state?.error_code && phase === "failed" && (
-        <p role="alert" className="text-xs text-rose-600 dark:text-rose-400">
+        <p
+          role="alert"
+          className="text-xs text-rose-600 dark:text-rose-400"
+          data-status-tone="error"
+        >
           {t("grokWebhook.deliveryError", { status: state.http_status || "—" })}
         </p>
       )}
@@ -283,6 +296,13 @@ function Panel({
                   ? t("grokWebhook.phase." + phase)
                   : t(readError ? "grokActor.unavailable" : "common:loading")}
               </p>
+            )}
+            {unresolved && !readError && (
+              <ActiveTurnAge
+                seconds={state?.active_turn_elapsed_seconds}
+                language={i18n?.language}
+                t={t}
+              />
             )}
           </div>
           {!compact && !setup && (

@@ -8,12 +8,14 @@ mod daemon_takeover;
 #[cfg(any(windows, test))]
 mod detached_daemon_owner;
 mod host_state;
+mod process_recovery;
 mod shutdown;
 mod tui;
 mod web_endpoint;
 mod web_host;
 mod web_instance;
 mod web_launch;
+mod web_voice_recovery;
 
 use anyhow::{Result, bail};
 use args::{Cli, CommandKind, DaemonAction, HermesAction, RuntimeAction, WebModeArg};
@@ -29,6 +31,7 @@ const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    cccc_core::build_info::initialize(env!("CCCC_SOURCE_ID"));
     #[cfg(windows)]
     let _console_encoding = console_encoding::use_utf8();
     // rustls refuses to choose a crypto backend once the graph enables both of
@@ -143,6 +146,9 @@ async fn main() -> Result<()> {
         }
         Some(CommandKind::Tail(args)) => commands::messaging::tail(&client, &home, args).await,
         Some(CommandKind::Inbox(args)) => commands::messaging::inbox(&client, &home, args).await,
+        Some(CommandKind::InboxSummary(args)) => {
+            commands::messaging::inbox_summary(&client, &home, args).await
+        }
         Some(CommandKind::Ledger(args)) => commands::messaging::ledger(&client, &home, args).await,
         Some(CommandKind::Daemon { action }) => daemon(action, home, &client).await,
         Some(CommandKind::Runtime { action }) => runtime(&client, action).await,
@@ -152,7 +158,7 @@ async fn main() -> Result<()> {
         Some(CommandKind::Reach { action }) => commands::membership::reach(&client, action).await,
         Some(CommandKind::Status) => commands::status::run(&home, PRODUCT_VERSION).await,
         Some(CommandKind::Doctor(args)) => {
-            commands::doctor::run(&home, PRODUCT_VERSION, args.all).await
+            commands::doctor::run(&home, PRODUCT_VERSION, args.all, args.json).await
         }
         Some(CommandKind::Setup(args)) => {
             // Setup owns synchronous provider commands and the explicit ACP login runtime.
@@ -164,7 +170,10 @@ async fn main() -> Result<()> {
 
 async fn daemon(action: DaemonAction, home: HomeLayout, client: &DaemonClient) -> Result<()> {
     match action {
-        DaemonAction::Run => cccc_daemon::run(home).await,
+        DaemonAction::ProcessRecovery { owner, action } => {
+            process_recovery::run(home, client, owner, action).await
+        }
+        DaemonAction::Run => cccc_daemon::run_with_diagnostics(home).await,
         DaemonAction::Stop => {
             let response = daemon_lifecycle::stop(client, &home).await?;
             if response.ok {

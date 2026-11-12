@@ -56,6 +56,21 @@ function renderModal(entries: RecipientEntry[], overrides: Partial<RecipientsMod
   );
 }
 
+/** Each recipient's status cell: [role, accessible name, visible text, shown as success]. */
+function statusCells(markup: string) {
+  return Array.from(
+    markup.matchAll(
+      /<div class="([^"]*tracking-tight[^"]*)"(?: role="([^"]*)" aria-label="([^"]*)")?>([^<]*)</g,
+    ),
+    ([, className, role, name, text]) => [
+      role ?? null,
+      name ?? null,
+      text,
+      className.includes("emerald"),
+    ],
+  );
+}
+
 describe("RecipientsModal", () => {
   it("offers one visible promotion action for unread Mail", () => {
     const markup = renderModal([entry()]);
@@ -73,6 +88,20 @@ describe("RecipientsModal", () => {
     expect(markup).not.toContain("Retry");
   });
 
+  it("says why a delivery failed or is uncertain, and only then", () => {
+    const reason = "The agent exited (code 1); check its terminal, then retry";
+
+    expect(renderModal([entry({ deliveryState: "failed", deliveryReason: reason })])).toContain(
+      reason,
+    );
+    expect(renderModal([entry({ deliveryState: "ambiguous", deliveryReason: reason })])).toContain(
+      reason,
+    );
+    expect(
+      renderModal([entry({ deliveryState: "accepted", deliveryReason: reason })]),
+    ).not.toContain(reason);
+  });
+
   it("labels ambiguous retry explicitly and exposes reply cancellation", () => {
     const markup = renderModal([entry({ deliveryState: "ambiguous" })], {
       statusKind: "reply",
@@ -86,6 +115,59 @@ describe("RecipientsModal", () => {
   });
 });
 
+it("does not color a cancelled request as replied and names each state", () => {
+  const markup = renderModal(
+    [
+      entry({ id: "a", cleared: true, replied: true, replyRequested: true }),
+      entry({ id: "b", cleared: true, cancelled: true, replyRequested: true }),
+      entry({ id: "c", replyRequested: true }),
+    ],
+    { statusKind: "reply", messageMode: "request_reply" },
+  );
+  expect(statusCells(markup)).toEqual([
+    ["img", "Replied", "↩", true],
+    [null, null, "Cancelled", false],
+    ["img", "Awaiting reply", "○", false],
+  ]);
+});
+
+it("names read states in the reader's language", () => {
+  const markup = renderModal([entry({ id: "a", cleared: true, read: true }), entry({ id: "b" })]);
+
+  expect(statusCells(markup)).toEqual([
+    ["img", "Read", "✓✓", true],
+    ["img", "Unread", "✓", false],
+  ]);
+});
+
+it("names delivery by its actual stage and does not mark an uncertain delivery as done", () => {
+  const local = renderModal(
+    [
+      entry({ id: "a", cleared: true, deliveryState: "accepted" }),
+      entry({ id: "b", cleared: true, deliveryState: "ambiguous" }),
+    ],
+    { statusKind: "delivery", messageMode: "send" },
+  );
+  expect(statusCells(local)).toEqual([
+    ["img", "Sent to runtime", "✓", true],
+    ["img", "Delivery uncertain", "?", false],
+  ]);
+
+  const sent = renderModal([entry({ cleared: true })], {
+    statusKind: "delivery",
+    messageMode: "send",
+    remoteDelivery: { state: "sent" },
+  });
+  expect(statusCells(sent)).toEqual([["img", "Delivered to remote Group", "✓", true]]);
+
+  const unconfirmed = renderModal([entry()], {
+    statusKind: "delivery",
+    messageMode: "send",
+    remoteDelivery: { state: "unconfirmed" },
+  });
+  expect(statusCells(unconfirmed)).toEqual([["img", "Remote delivery unconfirmed", "○", false]]);
+});
+
 it("does not offer local runtime delivery for a qualified remote recipient", () => {
   const markup = renderModal([entry({ id: "peer1", label: "Remote worker" })], {
     statusKind: "delivery",
@@ -96,4 +178,18 @@ it("does not offer local runtime delivery for a qualified remote recipient", () 
   expect(markup).not.toContain("Send now");
   expect(markup).not.toContain("In Inbox");
   expect(markup).not.toContain("Sent to runtime");
+});
+
+it("shows Chet by name with only its reply state, and nothing to deliver", () => {
+  const markup = renderModal([entry({ id: "svc:chet", label: "Chet", replyRequested: true })], {
+    statusKind: "reply",
+    messageMode: "request_reply",
+    toLabel: "Chet",
+    canCancelReply: true,
+  });
+  expect(markup).toContain(">Chet<");
+  expect(markup).not.toContain("svc:chet<");
+  // Chet takes messages in its own panel; the Group cannot deliver to it or report delivery.
+  expect(markup).not.toContain(modalsEn.recipients.sendNow);
+  expect(markup).not.toContain(modalsEn.recipients.notDelivered);
 });

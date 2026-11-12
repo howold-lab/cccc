@@ -12,8 +12,8 @@ pub use integrations::{
     SpaceCredentialAction, SpaceJobsAction,
 };
 pub use messaging::{
-    CancelReplyArgs, ConnectArgs, DeliverArgs, InboxArgs, LedgerAction, LedgerArgs, ReplyArgs,
-    SendArgs, TailArgs, TrackedSendArgs,
+    CancelReplyArgs, ConnectArgs, DeliverArgs, InboxArgs, InboxSummaryArgs, LedgerAction,
+    LedgerArgs, ReplyArgs, SendArgs, TailArgs, TrackedSendArgs,
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -80,6 +80,9 @@ pub struct DoctorArgs {
     /// Also list the custom runtime among the detected runtimes.
     #[arg(long)]
     pub all: bool,
+    /// Print the full report as JSON, as it always is when piped.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -125,19 +128,21 @@ pub enum CommandKind {
     },
     /// Show the active Group.
     Active,
-    /// Add, start, stop and manage Actors in a Group.
+    /// Add, start, stop and manage agents in a Group.
     Actor(ActorArgs),
     /// Work with user-owned native Codex, Claude, Pi and OpenCode sessions.
     Sessions(SessionsArgs),
-    /// Show the session prompt CCCC gives an Actor.
+    /// Show the session prompt CCCC gives an agent.
     Prompt(PromptArgs),
     /// Manage a Group's IM bridge.
     Im(ImArgs),
     /// Manage Group Space shared memory.
     Space(SpaceArgs),
-    /// Read and consume the next unread Mail batch for an actor.
+    /// Read and consume the next unread Mail batch for an agent.
     Inbox(InboxArgs),
-    /// Read cached same-account and Group connection directories. Does not connect or start Actors.
+    /// Summarize current awaiting Mail across a Group without consuming it.
+    InboxSummary(InboxSummaryArgs),
+    /// Read cached same-account and Group connection directories. Does not connect or start agents.
     Connect(ConnectArgs),
     /// Send a message to a Group.
     Send(SendArgs),
@@ -277,6 +282,43 @@ pub enum DaemonAction {
     Status,
     /// Run only the daemon in the foreground (no Web server or terminal panel).
     Run,
+    /// Review or resolve specific unconfirmed process-cleanup records.
+    ProcessRecovery {
+        /// Which process owner produced the evidence.
+        #[arg(long, global = true, value_enum, default_value = "daemon")]
+        owner: RecoveryOwner,
+        #[command(subcommand)]
+        action: RecoveryAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RecoveryOwner {
+    Daemon,
+    Web,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RecoveryAction {
+    /// List redacted pending evidence and its current version.
+    List,
+    /// Retry cleanup for exactly one reviewed record.
+    Retry {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        version: String,
+    },
+    /// Continue despite one reviewed record; old work may still be running.
+    Accept {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        version: String,
+        /// Acknowledge that accepting does not stop or verify the old work.
+        #[arg(long, required = true)]
+        accept_risk: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -310,7 +352,7 @@ pub enum HermesAction {
         #[arg(long)]
         force: bool,
     },
-    /// Run Hermes' MCP test against CCCC with a probe Actor.
+    /// Run Hermes' MCP test against CCCC with a probe agent.
     #[command(name = "mcp-test")]
     McpTest {
         /// Project directory used for runtime preparation.
@@ -319,7 +361,7 @@ pub enum HermesAction {
         /// Target Group ID.
         #[arg(long, default_value = "g_probe")]
         group_id: String,
-        /// Actor ID within the Group.
+        /// Agent ID within the Group.
         #[arg(long, default_value = "hermes-probe")]
         actor_id: String,
     },
@@ -328,6 +370,19 @@ pub enum HermesAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_and_port_option_launch_without_a_subcommand() {
+        let bare = Cli::try_parse_from(["cccc"]).expect("bare launch");
+        assert!(bare.command.is_none());
+        assert!(!bare.headless);
+        assert_eq!(bare.port, None);
+
+        let port = Cli::try_parse_from(["cccc", "--port", "0"]).expect("port launch");
+        assert!(port.command.is_none());
+        assert!(!port.headless);
+        assert_eq!(port.port, Some(0));
+    }
 
     #[test]
     fn parses_membership_verbs() {
@@ -539,5 +594,65 @@ mod tests {
             panic!("wrong command");
         };
         assert_eq!(args.event_id, "event-2");
+    }
+
+    #[test]
+    fn parses_the_actor_model_label_on_add_and_update() {
+        let cli = Cli::try_parse_from([
+            "cccc",
+            "actor",
+            "add",
+            "peer1",
+            "--runtime",
+            "codex",
+            "--model-label",
+            "gpt-5-codex",
+        ])
+        .expect("actor add");
+        let Some(CommandKind::Actor(ActorArgs {
+            action: ActorAction::Add { model_label, .. },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(model_label, "gpt-5-codex");
+
+        let cli = Cli::try_parse_from(["cccc", "actor", "update", "peer1", "--model-label", ""])
+            .expect("actor update");
+        let Some(CommandKind::Actor(ActorArgs {
+            action: ActorAction::Update { model_label, .. },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(model_label.as_deref(), Some(""));
+        for action in ["add", "update"] {
+            assert!(
+                Cli::try_parse_from(["cccc", "actor", action, "peer1", "--model", "label"])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_switch_refuses_options_its_target_would_ignore() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["cccc", "actor", "switch", "x"].iter().chain(args).copied())
+        };
+        assert!(parse(&["--session", "codex:a"]).is_ok());
+        assert!(parse(&["--runtime", "claude", "--no-start"]).is_ok());
+        assert!(parse(&["--profile", "shared", "--scope", "/repo"]).is_ok());
+        assert!(parse(&["--finish"]).is_ok());
+        for rejected in [
+            &["--session", "codex:a", "--no-start"][..],
+            &["--session", "codex:a", "--command", "codex"],
+            &["--session", "codex:a", "--scope", "/repo"],
+            &["--profile", "shared", "--runtime", "claude"],
+            &["--profile", "shared", "--env", "A=1"],
+            &["--finish", "--no-start"],
+            &["--finish", "--runtime", "claude"],
+        ] {
+            assert!(parse(rejected).is_err(), "{rejected:?}");
+        }
     }
 }

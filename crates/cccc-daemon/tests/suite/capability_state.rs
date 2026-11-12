@@ -365,6 +365,146 @@ fn legacy_registered_skills_are_projected_for_slash_commands() {
 }
 
 #[test]
+fn legacy_skillsmp_search_snapshots_are_not_recommended_or_deleted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("legacy capability search", "")
+        .expect("group");
+    let store = cccc_core::capabilities::CapabilityStore::new(home.clone());
+
+    for (suffix, source, tags, sync_state) in [
+        (
+            "old",
+            "skillsmp_remote",
+            vec!["remote_search"],
+            Some("remote"),
+        ),
+        ("unknown", "skillsmp_remote", vec!["remote_search"], None),
+        (
+            "imported",
+            "skillsmp_remote",
+            vec!["remote_search"],
+            Some("imported"),
+        ),
+        (
+            "different_tag",
+            "skillsmp_remote",
+            vec!["manual"],
+            Some("remote"),
+        ),
+        (
+            "different_source",
+            "local_import",
+            vec!["remote_search"],
+            Some("remote"),
+        ),
+    ] {
+        let id = format!("skill:test:{suffix}");
+        let mut record = json!({
+            "capability_id":id, "kind":"skill", "name":format!("search-marker {suffix}"),
+            "source_id":source, "source_uri":"https://example.test/skill",
+            "tags":tags, "capsule_text":"synthetic skill content",
+            "qualification_status":"qualified", "enable_supported":true
+        });
+        if let Some(sync_state) = sync_state {
+            record["sync_state"] = json!(sync_state);
+        }
+        store.import_record(record).expect("fixture record");
+    }
+
+    let search = call(
+        &home,
+        "capability_search",
+        json!({"group_id":group.group_id,"query":"search-marker"}),
+    );
+    let found = search["capabilities"].as_array().expect("search results");
+    let ids = found
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            "skill:test:different_source",
+            "skill:test:different_tag",
+            "skill:test:imported"
+        ]
+    );
+
+    let overview = call(
+        &home,
+        "capability_overview",
+        json!({"group_id":group.group_id,"query":"search-marker"}),
+    );
+    let rows = overview["items"].as_array().expect("overview rows");
+    assert_eq!(rows.len(), 5);
+    for row in rows {
+        let id = row["capability_id"].as_str().expect("capability id");
+        assert_eq!(
+            row["legacy_search_unverified"],
+            json!(matches!(id, "skill:test:old" | "skill:test:unknown"))
+        );
+        assert_eq!(row["qualification_status"], "qualified");
+        assert_eq!(row["enable_supported"], true);
+    }
+
+    let direct = call(
+        &home,
+        "capability_tool_call",
+        json!({"group_id":group.group_id,"capability_id":"skill:test:old","by":"user"}),
+    );
+    assert_eq!(
+        direct["capability"]["capsule_text"],
+        "synthetic skill content"
+    );
+    call(
+        &home,
+        "capability_enable",
+        json!({"group_id":group.group_id,"capability_id":"skill:test:old",
+            "scope":"group","enabled":true,"by":"user"}),
+    );
+    let state = call(
+        &home,
+        "capability_state",
+        json!({"group_id":group.group_id,"actor_id":"user","by":"user"}),
+    );
+    assert!(
+        state["enabled_capabilities"]
+            .as_array()
+            .expect("enabled capabilities")
+            .contains(&json!("skill:test:old"))
+    );
+
+    call(
+        &home,
+        "capability_import",
+        json!({"group_id":group.group_id,"by":"user","probe":false,"record":{
+            "capability_id":"skill:test:old","kind":"skill","name":"search-marker reviewed",
+            "source_id":"skillsmp_remote","source_uri":"https://example.test/skill",
+            "tags":["remote_search"],"capsule_text":"user supplied content"
+        }}),
+    );
+    let search = call(
+        &home,
+        "capability_search",
+        json!({"group_id":group.group_id,"query":"skill:test:old"}),
+    );
+    assert_eq!(search["capabilities"][0]["sync_state"], "imported");
+    assert_eq!(
+        search["capabilities"][0]["capsule_text"],
+        "user supplied content"
+    );
+    let overview = call(
+        &home,
+        "capability_overview",
+        json!({"group_id":group.group_id,"query":"skill:test:old"}),
+    );
+    assert_eq!(overview["items"][0]["legacy_search_unverified"], false);
+}
+
+#[test]
 fn unsupported_catalog_records_are_not_autoload_candidates() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
@@ -1069,6 +1209,78 @@ fn target_install_is_the_only_daemon_operation_name() {
         removed_alias.error.expect("removed alias").code,
         "unknown_op"
     );
+}
+
+#[test]
+fn builtin_catalog_entries_survive_stale_records_and_reject_imports() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let group = GroupStore::new(home.clone())
+        .expect("groups")
+        .create("built-in catalog", "")
+        .expect("group");
+    let path = home.root().join("state/capabilities/catalog.json");
+    cccc_core::fs::write_json(
+        &path,
+        &json!({"records":{
+            (SELF_EVOLUTION_CAPABILITY_ID): {
+                "capability_id":SELF_EVOLUTION_CAPABILITY_ID,"kind":"skill",
+            "name":"Old review","capsule_text":"old rules","source_id":"cccc_builtin",
+            "qualification_status":"blocked","enable_supported":false,
+            "install_mode":"npm","install_spec":{"package":"must-not-run"}
+            }
+        }}),
+    )
+    .expect("old catalog");
+    let saved = std::fs::read(&path).expect("catalog");
+
+    for dry_run in [true, false] {
+        let rejected = response(
+            &home,
+            "capability_import",
+            json!({
+                "group_id":group.group_id,"by":"user","dry_run":dry_run,
+                "record":{"capability_id":SELF_EVOLUTION_CAPABILITY_ID,"kind":"skill",
+                          "name":"Replacement","capsule_text":"new rules"}
+            }),
+        );
+        assert_eq!(
+            rejected.error.expect("reserved id").code,
+            "capability_import_invalid"
+        );
+        assert_eq!(std::fs::read(&path).expect("catalog"), saved);
+    }
+    let enabled = response(
+        &home,
+        "capability_install_target",
+        json!({
+            "group_id":group.group_id,"by":"user","scope":"group",
+            "target":SELF_EVOLUTION_CAPABILITY_ID
+        }),
+    );
+    assert!(enabled.ok, "{:?}", enabled.error);
+    let state = call(
+        &home,
+        "capability_state",
+        json!({
+            "group_id":group.group_id,"actor_id":"user","by":"user"
+        }),
+    );
+    let skill = state["active_capsule_skills"]
+        .as_array()
+        .expect("skills")
+        .iter()
+        .find(|skill| skill["capability_id"] == SELF_EVOLUTION_CAPABILITY_ID)
+        .expect("current skill");
+    let expected = cccc_core::capabilities::CapabilityStore::new(home.clone())
+        .require(SELF_EVOLUTION_CAPABILITY_ID)
+        .expect("built-in skill")
+        .capsule_text
+        .chars()
+        .take(240)
+        .collect::<String>();
+    assert_eq!(skill["capsule_preview"], expected);
+    assert_eq!(std::fs::read(&path).expect("catalog"), saved);
 }
 
 #[test]

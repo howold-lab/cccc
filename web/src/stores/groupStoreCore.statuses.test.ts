@@ -69,6 +69,37 @@ describe.each(Object.entries(mergers))("late %s response", (_, merge) => {
     );
   });
 
+  it("keeps a delivery's reason with its state", () => {
+    const failed = updateObligationAtIndex([source], 0, {
+      actorId: "worker",
+      deliveryState: "failed",
+      deliveryReason: "stopped",
+    });
+    expect(failed.next[0]._obligation_status?.worker.delivery_reason).toBe("stopped");
+
+    const failedAgain = updateObligationAtIndex(failed.next, 0, {
+      actorId: "worker",
+      deliveryState: "failed",
+      deliveryReason: "stopped again",
+    });
+    expect(failedAgain.changed).toBe(true);
+    expect(failedAgain.next[0]._obligation_status?.worker.delivery_reason).toBe("stopped again");
+
+    const repeated = updateObligationAtIndex(failedAgain.next, 0, {
+      actorId: "worker",
+      deliveryState: "failed",
+      deliveryReason: "stopped again",
+    });
+    expect(repeated.changed).toBe(false);
+
+    const retried = updateObligationAtIndex(failedAgain.next, 0, {
+      actorId: "worker",
+      deliveryState: "claimed",
+      deliveryReason: "",
+    });
+    expect(retried.next[0]._obligation_status?.worker.delivery_reason).toBe("");
+  });
+
   it("does not freeze retryable runtime delivery state", () => {
     const failed = {
       ...source,
@@ -80,4 +111,30 @@ describe.each(Object.entries(mergers))("late %s response", (_, merge) => {
     };
     expect(merge([failed], retrying)[0]._obligation_status?.worker.delivery_state).toBe("claimed");
   });
+});
+
+it("uses the authoritative requester state and does not retain it when that status is removed", () => {
+  const userRequest: LedgerEvent = {
+    id: "user-request",
+    kind: "chat.message",
+    by: "worker",
+    data: { message_mode: "request_reply", to: ["user"] },
+    _obligation_status: { user: pending },
+    _user_request: { question: "none", requester: "available" },
+  };
+  const changed = mergeLedgerEventStatuses([userRequest], {
+    "user-request": {
+      obligation_status: { user: pending },
+      user_request: { question: "none", requester: "unavailable" },
+    },
+  });
+  expect(changed[0]._user_request?.requester).toBe("unavailable");
+  const removed = mergeLedgerEventStatuses(changed, {
+    "user-request": { obligation_status: { user: pending } },
+  });
+  expect(removed[0]._user_request).toBeUndefined();
+  expect(
+    mergeLedgerEvents(changed, [{ ...userRequest, _user_request: undefined }], 100)[0]
+      ._user_request,
+  ).toBeUndefined();
 });

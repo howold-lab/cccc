@@ -47,6 +47,11 @@ it("switches the single send label without sending and preserves permission gate
     expect(host.querySelector('button[title="Send (⌘+Enter)"]')).not.toBeNull();
     await act(async () => toggle().click());
     expect(option("Send + Reply").disabled).toBe(true);
+    const reasonId = option("Send + Reply").getAttribute("aria-describedby")!;
+    expect(document.getElementById(reasonId)?.textContent).toBe("modeSendReplyRequiresConcrete");
+    expect(document.querySelector('[role="group"]')?.getAttribute("aria-describedby")).toBe(
+      reasonId,
+    );
     await act(async () => option("Mail").click());
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(host.textContent).toBe("Mail");
@@ -60,10 +65,53 @@ it("switches the single send label without sending and preserves permission gate
     expect(toggle().disabled).toBe(false);
     await act(async () => toggle().click());
     expect(option("Send + Reply").disabled).toBe(false);
+    expect(document.getElementById(reasonId)).toBeNull();
     await act(async () => option("Send + Reply").click());
     expect(host.textContent).toBe("Send + Reply");
     await act(async () => root.render(<Harness busy />));
     expect(Array.from(host.querySelectorAll("button")).every((b) => b.disabled)).toBe(true);
+    // While sending, the key's name and tip say so at once.
+    const primary = host.querySelector<HTMLButtonElement>("[data-composer-send-primary]")!;
+    expect(primary.getAttribute("aria-label")).toBe("sending");
+    expect(primary.getAttribute("title")).toBe("sending");
+    await act(async () => root.render(<Harness />));
+    expect(primary.getAttribute("title")).toBe("Send (⌘+Enter)");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+it("offers a stop control only while an attachment upload can be stopped", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const stop = vi.fn();
+  const render = (onStopUploadWaiting?: () => void) => (
+    <ComposerSendControl
+      mode="send"
+      options={[{ key: "send", label: "Send", description: "Send now" }]}
+      open={false}
+      onOpenChange={() => {}}
+      onModeChange={() => {}}
+      onSend={() => {}}
+      onStopUploadWaiting={onStopUploadWaiting}
+      busy
+      canSend={false}
+      modeDisabled
+      requestReplyReady
+      title="Send"
+    />
+  );
+  try {
+    await act(async () => root.render(render()));
+    expect(host.querySelector('button[aria-label="stopUploadWaiting"]')).toBeNull();
+    await act(async () => root.render(render(stop)));
+    const button = host.querySelector<HTMLButtonElement>('button[aria-label="stopUploadWaiting"]')!;
+    expect(button.title).toBe("stopUploadWaiting");
+    await act(async () => button.click());
+    expect(stop).toHaveBeenCalledOnce();
   } finally {
     await act(async () => root.unmount());
     host.remove();

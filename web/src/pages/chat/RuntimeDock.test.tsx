@@ -7,9 +7,14 @@ import { RuntimeDock } from "./RuntimeDock";
 import type { LiveWorkCard } from "./liveWorkCards";
 import { getRuntimeRingTone } from "./runtimeDockRingTone";
 
-const mocks = vi.hoisted(() => ({ events: [] as LedgerEvent[], workingState: "", open: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  events: [] as LedgerEvent[],
+  workingState: "",
+  open: vi.fn(),
+  store: {} as object,
+}));
 vi.mock("../../stores", () => ({
-  useGroupStore: (select: (state: object) => unknown) => select({}),
+  useGroupStore: (select: (state: object) => unknown) => select(mocks.store),
   selectChatBucketState: () => ({ events: mocks.events }),
 }));
 vi.mock("../../hooks/useActorDisplayState", () => ({
@@ -61,13 +66,14 @@ async function render(
   });
 }
 const badge = () => host.querySelector<HTMLElement>('span[title*="unread mail"]');
-const activity = () => host.querySelector(".runtime-dock-ring__activity");
+const activity = () => host.querySelector('.lcd-member-ring[data-ring="moving"]');
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(now);
   mocks.events = [];
   mocks.workingState = "";
+  mocks.store = {};
   mocks.open.mockReset();
   host = document.createElement("div");
   document.body.append(host);
@@ -106,12 +112,52 @@ it("uses refreshed unread counts instead of stale loaded read markers", async ()
   expect(badge()).toBeNull();
 });
 
-it("keeps the ring size stable as work starts, idles, needs attention, and stops", async () => {
+it("shows confirmation from refreshed Actors and keeps the existing terminal entry", async () => {
+  await render({ runtime_confirmation_required: true });
+  expect(host.textContent).toContain("actors:runtimeConfirmationPending");
+  expect(host.querySelector('button[data-tone="attention"]')).not.toBeNull();
+  await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+  expect(mocks.open).toHaveBeenCalledExactlyOnceWith("alpha");
+  await render({ runtime_confirmation_required: false });
+  expect(host.textContent).not.toContain("actors:runtimeConfirmationPending");
+});
+
+it("names a native session by whether it can receive, never as stopped", async () => {
+  const native = {
+    external_session_id: "codex:thread",
+    runner: undefined,
+    runtime_state_source: undefined,
+  };
+  mocks.store = { groupDoc: { group_id: "g1", state: "active" } };
+  await render({ ...native, running: false });
+  expect(host.textContent).toContain("actors:nativeSession.unavailable");
+  expect(host.textContent).not.toContain("Stopped");
+  await render({ ...native, running: true });
+  expect(host.textContent).toContain("actors:nativeSession.available");
+  mocks.store = { groupDoc: { group_id: "g1", state: "paused" } };
+  await render({ ...native, running: false });
+  expect(host.textContent).toContain("actors:nativeSession.groupPaused");
+  // Another Group's snapshot says nothing about this one.
+  mocks.store = { groupDoc: { group_id: "other", state: "active" } };
+  await render({ ...native, running: false });
+  expect(host.textContent).toContain("common:loading");
+  expect(host.textContent).not.toContain("Stopped");
+});
+
+it("names a closed confirmation only when the daemon reports the pause", async () => {
+  await render({ running: false, runtime_confirmation_paused: true });
+  expect(host.textContent).toContain("actors:runtimeConfirmationPaused");
+  expect(host.querySelector('button[data-tone="attention"]')).not.toBeNull();
+  for (const paused of [false, undefined]) {
+    await render({ running: false, runtime_confirmation_paused: paused });
+    expect(host.textContent).not.toContain("actors:runtimeConfirmationPaused");
+    expect(host.querySelector('button[data-tone="attention"]')).toBeNull();
+  }
+});
+
+it("moves the ring only while work is in progress", async () => {
   for (const state of ["working", "idle", "stuck", "stopped", "working"] as const) {
     await render({ effective_working_state: state, running: state !== "stopped" });
-    const ring = host.querySelector(".runtime-dock-ring");
-    expect(ring?.getAttribute("width")).toBe("44");
-    expect(ring?.getAttribute("height")).toBe("44");
     expect(Boolean(activity())).toBe(state === "working");
   }
 });
@@ -120,6 +166,8 @@ it("shows no persistent time labels or elapsed-time timers, including for idle A
   for (const state of ["working", "idle", "stopped"] as const) {
     await render({ effective_working_state: state, running: state !== "stopped" });
     expect(host.textContent).not.toMatch(/\d+[mh]/);
+    // A finished turn's brief light is the only timer, and it ends on its own.
+    await act(async () => vi.advanceTimersByTime(300));
     expect(vi.getTimerCount()).toBe(0);
   }
 });

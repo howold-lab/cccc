@@ -176,7 +176,7 @@ describe("MarkdownRenderer Mermaid contract", () => {
     host.remove();
   });
 
-  it("enables diagrams only on Chat and Inbox message surfaces", () => {
+  it("enables diagrams on messages, the Files preview and Presentation only", () => {
     const messageBubble = readFileSync(
       resolve(process.cwd(), "src/components/MessageBubble.tsx"),
       "utf8",
@@ -193,11 +193,26 @@ describe("MarkdownRenderer Mermaid contract", () => {
       resolve(process.cwd(), "src/components/document/MarkdownDocumentSurface.tsx"),
       "utf8",
     );
+    const read = (path: string) => readFileSync(resolve(process.cwd(), path), "utf8");
 
     expect(messageBubble).toContain('from "./messageBubble/MessageContent"');
     expect(messageContent).toContain("enableMermaid");
     expect(inbox).toContain("enableMermaid");
-    expect(documentSurface).not.toContain("enableMermaid");
+    expect(read("src/components/workspace/WorkspaceDocumentPreview.tsx")).toContain(
+      "enableMermaid",
+    );
+    expect(read("src/components/presentation/PresentationViewerModal.tsx")).toContain(
+      "enableMermaid",
+    );
+    // The shared document surface draws diagrams only for a caller that asks; the Secretary's
+    // live draft and library viewer do not.
+    expect(documentSurface).not.toMatch(/enableMermaid\s*=\s*true/);
+    expect(read("src/pages/chat/voice-secretary/VoiceSecretaryWorkspacePanel.tsx")).not.toContain(
+      "enableMermaid",
+    );
+    expect(read("src/pages/chat/voice-secretary/VoiceLibraryDialogs.tsx")).not.toContain(
+      "enableMermaid",
+    );
   });
 
   it("ships the complete message diagram labels in every supported locale", () => {
@@ -256,5 +271,52 @@ describe("MarkdownRenderer table contract", () => {
     expect(stylesheet).toMatch(
       /\.prose\.markdown-body \.markdown-table-scroll (?:th|th,)\s*[\s\S]*?min-width:\s*12rem;/,
     );
+  });
+});
+
+describe("MarkdownRenderer link contract", () => {
+  it("opens web addresses in a new tab, and leaves paths, anchors and mailto alone", () => {
+    const html = renderToStaticMarkup(
+      <MarkdownRenderer
+        content={
+          "See https://example.com/a?b=1, [the docs](HTTP://example.org/docs) and [a mirror](//example.net/x).\n\n[Write](mailto:team@example.com), [jump](#notes) or [open](/ui/push)."
+        }
+      />,
+    );
+    const anchors = [...new DOMParser().parseFromString(html, "text/html").querySelectorAll("a")];
+
+    expect(anchors.map((anchor) => anchor.getAttribute("href"))).toEqual([
+      "https://example.com/a?b=1",
+      "HTTP://example.org/docs",
+      "//example.net/x",
+      "mailto:team@example.com",
+      "#notes",
+      "/ui/push",
+    ]);
+    expect(anchors.map((anchor) => anchor.getAttribute("target"))).toEqual([
+      "_blank",
+      "_blank",
+      "_blank",
+      null,
+      null,
+      null,
+    ]);
+    expect(anchors.map((anchor) => anchor.getAttribute("rel"))).toEqual([
+      "noopener noreferrer",
+      "noopener noreferrer",
+      "noopener noreferrer",
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it("leaves link handling to a document preview that maps its own URLs", () => {
+    const html = renderToStaticMarkup(
+      <MarkdownRenderer content="[Site](https://example.com)" resolveUrl={(url) => url} />,
+    );
+
+    expect(html).toContain('href="https://example.com"');
+    expect(html).not.toContain("target=");
   });
 });

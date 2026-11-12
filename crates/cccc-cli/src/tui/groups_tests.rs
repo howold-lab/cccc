@@ -32,6 +32,9 @@ fn group_states_read_the_way_the_web_shows_them() {
     // No running actors does not change the recorded lifecycle.
     assert_eq!(started_empty.status, GroupStatus::Offline);
     assert_eq!(started_empty.state, "active");
+    let stopped_with_running = summary(&row("g8", "stopped", "stopped", true, 1)).expect("summary");
+    assert_eq!(stopped_with_running.status, GroupStatus::Stopped);
+    assert_eq!(stopped_with_running.running_actors, 1);
 }
 
 #[test]
@@ -126,10 +129,55 @@ fn members_are_named_by_state_and_kind() {
         let member = member(&value).expect("member");
         assert_eq!((member.state, member.native), (state, native), "{value}");
     }
+    assert_eq!(runtime_label("codex"), "Codex CLI");
     assert_eq!(runtime_label("claude"), "Claude Code");
     assert_eq!(runtime_label("opencode"), "OpenCode");
     assert_eq!(runtime_label("grok_web_model"), "Grok Web");
     assert_eq!(runtime_label("something-new"), "something-new");
+}
+
+#[test]
+fn managed_confirmation_needs_action_before_running_is_shown() {
+    let actor = |enabled: bool, running: bool, native: bool, required: bool, paused: bool| {
+        let mut value = json!({
+            "id":"claude", "runtime":"claude", "role":"peer", "enabled":enabled,
+            "running":running, "external_session_id":if native { "claude:s" } else { "" }
+        });
+        value["runtime_confirmation_required"] = json!(required);
+        value["runtime_confirmation_paused"] = json!(paused);
+        value
+    };
+    for (value, label) in [
+        (actor(true, true, false, true, false), "confirm Web"),
+        (actor(true, true, false, true, true), "confirm Web"),
+        (actor(true, false, false, false, true), "confirm retry"),
+        (actor(true, true, false, false, true), "confirm retry"),
+        (actor(true, false, false, false, false), "stopped"),
+        (actor(false, false, false, true, true), "off"),
+        (actor(true, false, true, true, true), "not receiving"),
+    ] {
+        assert_eq!(
+            member(&value).expect("member").state.label(),
+            label,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn web_model_access_does_not_claim_the_browser_is_running() {
+    for runtime in ["web_model", "chatgpt_dots", "grok_web_model"] {
+        for (enabled, running, state) in [
+            (true, true, MemberState::WebAccessEnabled),
+            (true, false, MemberState::WebAccessEnabled),
+            (false, false, MemberState::AccessPaused),
+        ] {
+            let value = json!({
+                "id":"web", "runtime":runtime, "enabled":enabled, "running":running
+            });
+            assert_eq!(member(&value).expect("member").state, state, "{value}");
+        }
+    }
 }
 
 #[test]

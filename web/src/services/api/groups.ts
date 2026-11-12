@@ -112,8 +112,9 @@ export function normalizeAssistantVoiceDocument(
     status: asOptionalString(record.status) || "active",
     storage_kind: asOptionalString(record.storage_kind) || undefined,
     workspace_path: asOptionalString(record.workspace_path) || undefined,
-    content: asOptionalString(record.content) || undefined,
+    content: typeof record.content === "string" ? record.content : undefined,
     content_sha256: asOptionalString(record.content_sha256) || undefined,
+    content_target_id: asOptionalString(record.content_target_id) || undefined,
     content_chars: Number.isFinite(Number(record.content_chars))
       ? Number(record.content_chars)
       : undefined,
@@ -862,6 +863,8 @@ export async function saveVoiceAssistantDocument(
     title?: string;
     content: string;
     status?: string;
+    expectedContentSha256?: string;
+    expectedTargetId?: string;
     createNew?: boolean;
     by?: string;
   },
@@ -876,6 +879,12 @@ export async function saveVoiceAssistantDocument(
   };
   if (payload.title !== undefined) {
     body.title = String(payload.title || "");
+  }
+  if (payload.expectedContentSha256 !== undefined) {
+    body.expected_content_sha256 = payload.expectedContentSha256;
+  }
+  if (payload.expectedTargetId !== undefined) {
+    body.expected_target_id = payload.expectedTargetId;
   }
   if (!payload.createNew || String(payload.content || "").trim()) {
     body.content = String(payload.content || "");
@@ -1230,12 +1239,13 @@ export function getPresentationAssetUrl(
 }
 
 export function getGroupBlobUrl(groupId: string, relPath: string): string {
+  const gid = String(groupId || "").trim();
   const normalized = String(relPath || "").trim();
-  if (!normalized.startsWith("state/blobs/")) return "";
+  if (!gid || !normalized.startsWith("state/blobs/")) return "";
   const blobName = normalized.split("/").pop() || "";
   if (!blobName) return "";
   return withAuthToken(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/blobs/${encodeURIComponent(blobName)}`,
+    `/api/v1/groups/${encodeURIComponent(gid)}/blobs/${encodeURIComponent(blobName)}`,
   );
 }
 
@@ -1262,7 +1272,13 @@ export async function fetchPresentationBrowserSurfaceSession(
 
 export async function startPresentationBrowserSurfaceSession(
   groupId: string,
-  payload: { slotId: string; url: string; width?: number; height?: number },
+  payload: {
+    slotId: string;
+    url: string;
+    width?: number;
+    height?: number;
+    reuseExistingSession?: boolean;
+  },
 ): Promise<ApiResponse<{ group_id: string; browser_surface: PresentationBrowserSurfaceState }>> {
   const resp = await apiJson<{ group_id?: unknown; browser_surface?: unknown }>(
     `/api/v1/groups/${encodeURIComponent(groupId)}/presentation/browser_surface/session`,
@@ -1274,6 +1290,7 @@ export async function startPresentationBrowserSurfaceSession(
         url: String(payload.url || "").trim(),
         width: Number.isFinite(Number(payload.width)) ? Number(payload.width) : 1280,
         height: Number.isFinite(Number(payload.height)) ? Number(payload.height) : 800,
+        ...(payload.reuseExistingSession ? { reuse_existing: true } : {}),
       }),
     },
   );

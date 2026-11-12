@@ -194,6 +194,12 @@ async fn connect_tools_use_local_actor_context_and_canonical_queue_through_ipc()
     assert_eq!(sent["structuredContent"]["accepted"], true);
     assert_eq!(sent["structuredContent"]["queued"], true);
     let event = &sent["structuredContent"]["source_event"];
+    assert!(event["data"].get("text").is_none());
+    assert!(event["data"].get("insight").is_none());
+    assert_eq!(
+        sent["structuredContent"]["mcp_omitted_fields"]["source_event"],
+        json!(["text", "insight"])
+    );
     assert_eq!(
         event["by"], "worker",
         "context overrides caller impersonation"
@@ -213,6 +219,15 @@ async fn connect_tools_use_local_actor_context_and_canonical_queue_through_ipc()
         .await
         .expect("file send");
     assert_eq!(file_sent["structuredContent"]["accepted"], true);
+    assert!(
+        file_sent["structuredContent"]["result"]["source_event"]["data"]
+            .get("insight")
+            .is_none()
+    );
+    assert_eq!(
+        file_sent["structuredContent"]["mcp_omitted_fields"]["result.source_event"],
+        json!(["insight"])
+    );
     assert!(
         file_sent["structuredContent"]["result"]["delivery_id"]
             .as_str()
@@ -244,6 +259,55 @@ async fn connect_tools_use_local_actor_context_and_canonical_queue_through_ipc()
             .expect("queue")
             .len(),
         2
+    );
+    // An absolute path names the same file inside the sender's scope; another
+    // Group's scope stays out of reach.
+    std::fs::write(worker_root.join("absolute.txt"), "absolute payload").expect("file");
+    let absolute = call(
+        "cccc_file_send",
+        json!({"path":worker_root.join("absolute.txt"),"dst_instance_id":remote.peer_id,"dst_group_id":group.group_id,"idempotency_key":"absolute-file","insight":"The remote task needs this attachment."}),
+    )
+    .await
+    .expect("absolute file send");
+    assert_eq!(
+        absolute["structuredContent"]["result"]["source_event"]["data"]["attachments"][0]["bytes"],
+        16
+    );
+    assert!(
+        call(
+            "cccc_file_send",
+            json!({"path":root.join("note.txt"),"dst_instance_id":remote.peer_id,"dst_group_id":group.group_id,"idempotency_key":"outside-file","insight":"The remote task needs this attachment."}),
+        )
+        .await
+        .is_err(),
+        "another Group's scope must not be readable"
+    );
+    // Without a mode, the file for the remote agents above was Mail; text and files for the
+    // remote user, who has no Inbox, are sent.
+    assert_eq!(
+        file_sent["structuredContent"]["result"]["source_event"]["data"]["dst_message_mode"],
+        "mail"
+    );
+    let text = call(
+        "cccc_message_send",
+        json!({"dst_instance_id":remote.peer_id,"dst_group_id":group.group_id,"to":["user"],"text":"For the remote user","idempotency_key":"user-text","insight":"The default mode follows the recipient."}),
+    )
+    .await
+    .expect("text for the remote user");
+    assert_eq!(
+        text["structuredContent"]["source_event"]["data"]["dst_message_mode"],
+        "send"
+    );
+    std::fs::write(worker_root.join("user.txt"), "user payload").expect("file");
+    let file = call(
+        "cccc_file_send",
+        json!({"path":"user.txt","dst_instance_id":remote.peer_id,"dst_group_id":group.group_id,"to":["user"],"idempotency_key":"user-file","insight":"The default mode follows the recipient."}),
+    )
+    .await
+    .expect("file for the remote user");
+    assert_eq!(
+        file["structuredContent"]["result"]["source_event"]["data"]["dst_message_mode"],
+        "send"
     );
     server.abort();
 }

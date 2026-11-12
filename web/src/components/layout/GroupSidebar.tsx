@@ -1,7 +1,6 @@
 import { useUIStore } from "../../stores/useUIStore";
 import { groupConnectionCount } from "../../features/connect/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Trash2 } from "lucide-react";
 import { instanceName } from "../../features/connect/instanceName";
 import { useTranslation } from "react-i18next";
 import { GroupMeta } from "../../types";
@@ -15,6 +14,8 @@ import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  ClockIcon,
+  GroupDeleteIcon,
   PlusIcon,
 } from "../Icons";
 import { GroupSidebarSectionHeader } from "./GroupSidebarSectionHeader";
@@ -34,6 +35,9 @@ import { ConnectSidebar } from "../../features/connect/ConnectSidebar";
 import type { ConnectWorkbench } from "../../features/connect/useConnectWorkbench";
 
 import { LocalSessionsButton } from "../../features/localSessions/LocalSessionsButton";
+import { useVisiblePendingSummary } from "../../features/pendingReplies/useVisiblePendingSummary";
+import { aggregatePendingIndicator } from "../../features/pendingReplies/indicator";
+import { PendingIndicatorText } from "../../features/pendingReplies/PendingIndicator";
 
 export interface GroupSidebarProps {
   canAccessLocalSessions?: boolean;
@@ -57,6 +61,8 @@ export interface GroupSidebarProps {
   onArchiveGroup: (groupId: string) => void;
   onRestoreGroup: (groupId: string) => void;
   onOpenGroupConnections?: (groupId: string) => void;
+  /** Open a group's Automation settings from its menu; omitted for read-only viewers. */
+  onOpenGroupAutomation?: (groupId: string) => void;
   /** Launch/pause/stop a group from its menu; omitted for read-only viewers. */
   onControlGroup?: (groupId: string, control: GroupControl) => void;
   /** Delete a group from its menu; the handler owns the confirmation. */
@@ -85,10 +91,12 @@ export function GroupSidebar({
   onArchiveGroup,
   onRestoreGroup,
   onOpenGroupConnections,
+  onOpenGroupAutomation,
   onControlGroup,
   onDeleteGroup,
 }: GroupSidebarProps) {
   const { t } = useTranslation("layout");
+  const pending = useVisiblePendingSummary();
   const controlsBusy = useUIStore((state) => state.busy.startsWith("group-"));
   const branding = useBrandingStore((s) => s.branding);
   const logoSrc = resolveThemeAwareLogoUrl(branding.logo_icon_url, isDark);
@@ -104,6 +112,18 @@ export function GroupSidebar({
     () => orderedGroups.filter((g) => archivedSet.has(String(g.group_id || "").trim())),
     [archivedSet, orderedGroups],
   );
+  const archivedPending = pending
+    ? aggregatePendingIndicator(
+        pending.summaries,
+        archivedGroups.map((group) => group.group_id),
+      )
+    : null;
+  const totalPending = pending
+    ? aggregatePendingIndicator(
+        pending.summaries,
+        orderedGroups.map((group) => group.group_id),
+      )
+    : null;
   const collapsedGroups = useMemo(() => {
     if (!isCollapsed) return workingGroups;
     const selectedArchived = archivedGroups.find(
@@ -175,16 +195,30 @@ export function GroupSidebar({
 
   const runActionsFor = useCallback(
     (group: GroupMeta) => {
-      if (!onControlGroup || readOnly) return [];
+      if (readOnly) return [];
       const gid = String(group.group_id || "");
-      return groupRunMenuActions(
-        getGroupStatusFromSource(group).key,
-        t,
-        (control) => onControlGroup(gid, control),
-        controlsBusy,
-      );
+      const runActions = onControlGroup
+        ? groupRunMenuActions(
+            getGroupStatusFromSource(group).key,
+            t,
+            (control) => onControlGroup(gid, control),
+            controlsBusy,
+          )
+        : [];
+      // Automation schedules what the group runs, so it sits with the run controls.
+      const automation = onOpenGroupAutomation
+        ? [
+            {
+              label: t("groupAutomation"),
+              icon: <ClockIcon size={15} />,
+              section: "automation",
+              onClick: () => onOpenGroupAutomation(gid),
+            },
+          ]
+        : [];
+      return [...runActions, ...automation];
     },
-    [onControlGroup, readOnly, t, controlsBusy],
+    [onControlGroup, onOpenGroupAutomation, readOnly, t, controlsBusy],
   );
 
   const trailingActionsFor = useCallback(
@@ -195,7 +229,7 @@ export function GroupSidebar({
         {
           label: t("deleteGroup"),
           disabled: controlsBusy,
-          icon: <Trash2 size={15} />,
+          icon: <GroupDeleteIcon size={15} />,
           tone: "danger" as const,
           section: "danger",
           onClick: () => onDeleteGroup(gid),
@@ -204,6 +238,18 @@ export function GroupSidebar({
     },
     [onDeleteGroup, readOnly, t, controlsBusy],
   );
+
+  const localSessionsEntry = (collapsed: boolean) =>
+    !readOnly && canAccessLocalSessions ? (
+      <LocalSessionsButton
+        collapsed={collapsed}
+        isDark={isDark}
+        onSelectGroup={(groupId) => {
+          onSelectGroup(groupId);
+          if (window.matchMedia("(max-width: 767px)").matches) onClose();
+        }}
+      />
+    ) : null;
 
   const renderGroupList = useCallback(
     (groups: GroupMeta[], section: "working" | "archived") => {
@@ -310,7 +356,7 @@ export function GroupSidebar({
         <div className="flex h-14 min-h-[44px] shrink-0 items-center md:h-11 md:min-h-0 [@media(pointer:coarse)]:min-h-[44px] border-b border-[var(--glass-border-subtle)] px-3">
           <div
             className={classNames(
-              "flex w-full items-center gap-1.5",
+              "@container/brand flex w-full items-center gap-1.5",
               isCollapsed ? "justify-center" : "justify-between",
             )}
           >
@@ -330,9 +376,14 @@ export function GroupSidebar({
                   className={classNames("object-contain", isCollapsed ? "w-6 h-6" : "h-7 w-7")}
                 />
               </div>
+              {/* A larger text size leaves the fixed-width row too narrow for the name;
+                  the logo then stands alone rather than cutting the name short. */}
               {!isCollapsed && (
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[15px] font-semibold tracking-[-0.035em] text-[var(--color-text-primary)]">
+                <div className="min-w-0 flex-1 @max-[13rem]/brand:hidden">
+                  <div
+                    className="truncate text-[15px] font-semibold tracking-[-0.035em] text-[var(--color-text-primary)]"
+                    data-brand-name
+                  >
                     {branding.product_name}
                   </div>
                 </div>
@@ -390,11 +441,20 @@ export function GroupSidebar({
               type="button"
               variant="secondary"
               size="touch"
-              className="text-[var(--color-text-primary)]"
+              className="relative text-[var(--color-text-primary)]"
               onClick={onToggleCollapse}
-              label={t("expandSidebar")}
+              label={
+                totalPending
+                  ? `${t("expandSidebar")} · ${t("pendingRepliesIndicator", { value: totalPending.text })}`
+                  : t("expandSidebar")
+              }
             >
               <ChevronRightIcon size={18} />
+              {totalPending && (
+                <span className="absolute -right-1 -top-1">
+                  <PendingIndicatorText indicator={totalPending} />
+                </span>
+              )}
             </IconButton>
             {!readOnly && onCreateGroup && (
               <IconButton
@@ -406,6 +466,7 @@ export function GroupSidebar({
                 <PlusIcon size={18} />
               </IconButton>
             )}
+            {localSessionsEntry(true)}
           </div>
         )}
 
@@ -418,6 +479,7 @@ export function GroupSidebar({
                 : undefined
             }
             instanceOrigin={connect?.ownInstance?.public_origin}
+            action={localSessionsEntry(false)}
           />
         )}
         <div className={groupSidebarScrollClass(isCollapsed)}>
@@ -440,6 +502,7 @@ export function GroupSidebar({
                   <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)]">
                     {archivedGroups.length}
                   </span>
+                  {archivedPending && <PendingIndicatorText indicator={archivedPending} />}
                 </div>
                 <ChevronDownIcon
                   size={16}
@@ -473,22 +536,12 @@ export function GroupSidebar({
                 {t("noGroupsDescription")}
               </div>
               {!readOnly && onCreateGroup && (
-                <Button type="button" onClick={onCreateGroup}>
+                <Button type="button" className="w-full whitespace-normal" onClick={onCreateGroup}>
                   {t("createFirstGroup")}
                 </Button>
               )}
             </div>
           )}
-          {!readOnly && canAccessLocalSessions ? (
-            <LocalSessionsButton
-              collapsed={isCollapsed}
-              isDark={isDark}
-              onSelectGroup={(groupId) => {
-                onSelectGroup(groupId);
-                if (window.matchMedia("(max-width: 767px)").matches) onClose();
-              }}
-            />
-          ) : null}
         </div>
 
         {connect ? (

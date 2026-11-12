@@ -1,4 +1,6 @@
 pub mod actor;
+pub mod backlog;
+pub mod chet;
 pub mod codex_voice;
 pub mod connect;
 pub mod connect_groups;
@@ -9,6 +11,9 @@ pub mod event;
 pub mod ipc;
 pub mod local_session;
 pub mod message;
+pub mod message_args;
+pub mod message_pins;
+pub mod reply_question;
 pub mod voice_notifications;
 pub mod voice_secretary;
 
@@ -19,10 +24,11 @@ pub use actor::{
 pub use codex_voice::{AgentRuntimeSettings, CodexVoiceAnalystSettings, CodexVoiceSettings};
 pub use deepseek::{
     DEEPSEEK_ACP_APP_PACKAGE, DEEPSEEK_ACP_APP_VERSION, DEEPSEEK_ACP_PACKAGE,
-    DEEPSEEK_ACP_SDK_VERSION, DEEPSEEK_ACP_VERSION, DEEPSEEK_LLM_ADAPTER_PACKAGE,
-    DEEPSEEK_LLM_ADAPTER_VERSION, DEEPSEEK_MAX_OUTPUT_TOKENS, DEEPSEEK_MCP_CLIENT_PACKAGE,
-    DEEPSEEK_MCP_CLIENT_VERSION, DEEPSEEK_NODE_RANGE, DEEPSEEK_NPM_BEFORE,
-    DEEPSEEK_PROTOCOL_VERSION, DEEPSEEK_RELEASE_VERSION, DEEPSEEK_TURN_TIMEOUT_SECONDS,
+    DEEPSEEK_ACP_SDK_VERSION, DEEPSEEK_ACP_VERSION, DEEPSEEK_DEFAULT_MODEL,
+    DEEPSEEK_LLM_ADAPTER_PACKAGE, DEEPSEEK_LLM_ADAPTER_VERSION, DEEPSEEK_MAX_OUTPUT_TOKENS,
+    DEEPSEEK_MCP_CLIENT_PACKAGE, DEEPSEEK_MCP_CLIENT_VERSION, DEEPSEEK_MODEL_ENV,
+    DEEPSEEK_NODE_RANGE, DEEPSEEK_NPM_BEFORE, DEEPSEEK_PROTOCOL_VERSION, DEEPSEEK_RELEASE_VERSION,
+    DEEPSEEK_TURN_TIMEOUT_SECONDS,
 };
 pub use event::Event;
 pub use ipc::{DaemonAddress, DaemonError, DaemonRequest, DaemonResponse, Transport};

@@ -1,11 +1,33 @@
 import type { ReactNode } from "react";
+import { formatElapsed } from "../../utils/time";
 import { AlertIcon, CheckIcon, ClockIcon, RefreshIcon } from "../Icons";
+import { LcdSpinner } from "../LcdSpinner";
 import { DELIVERY_STEPS, deliveryProgress, type StepState } from "./nativeActorStatus";
 
 type T = (key: string, options?: Record<string, unknown>) => string;
 
 export const nativeActorCard =
   "rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)]";
+
+export function ActiveTurnAge({
+  seconds,
+  language,
+  t,
+}: {
+  seconds: number | null | undefined;
+  language: string | undefined;
+  t: T;
+}) {
+  let text = t("nativeActor.claimTimeUnknown");
+  if (typeof seconds === "number" && Number.isSafeInteger(seconds) && seconds >= 0) {
+    text = t("nativeActor.claimedAgo", { elapsed: formatElapsed(seconds, language) });
+  }
+  return (
+    <span data-active-turn-age className="text-xs text-[var(--color-text-muted)]">
+      {text}
+    </span>
+  );
+}
 
 export function NativeActorSummary({
   cells,
@@ -44,6 +66,15 @@ const stepDot: Record<StepState, string> = {
   current: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
   error: "bg-rose-500/15 text-rose-700 dark:text-rose-300",
   todo: "border border-[var(--glass-border-subtle)] text-[var(--color-text-muted)]",
+};
+
+// The LCD look reads a step's state through the shared status hooks; the current step
+// waits on the user, like other things that wait on you.
+const stepTone: Record<StepState, "ok" | "warning" | "error" | undefined> = {
+  done: "ok",
+  current: "warning",
+  error: "error",
+  todo: undefined,
 };
 
 export function NativeActorDelivery({
@@ -109,6 +140,7 @@ export function NativeActorDelivery({
             >
               <span
                 className={`inline-flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${stepDot[stepState]}`}
+                data-status-tone={stepTone[stepState]}
                 aria-hidden="true"
               >
                 {stepState === "done" ? (
@@ -116,7 +148,9 @@ export function NativeActorDelivery({
                 ) : stepState === "error" ? (
                   <AlertIcon className="size-3.5" />
                 ) : sending ? (
-                  <RefreshIcon className="size-3.5 animate-spin motion-reduce:animate-none" />
+                  <LcdSpinner className="size-3.5">
+                    <RefreshIcon className="size-3.5" />
+                  </LcdSpinner>
                 ) : stepState === "current" ? (
                   <ClockIcon className="size-3.5" />
                 ) : (

@@ -1,9 +1,12 @@
+import i18n from "../../i18n";
 import { useGroupStore, useModalStore, useUIStore } from "../../stores";
 import { groupMessagesVisible } from "../../stores/useUIStore";
+import { signalBacklogChanged } from "../../stores/backlogSignals";
 import type { Actor, ChatMessageData, LedgerEvent } from "../../types";
 import {
   extractMailReadData,
   extractCancelledSourceEventId,
+  extractFailedExit,
   extractRuntimeDeliveryData,
   getActorRefreshMode,
   getRecipientActorIdsForEvent,
@@ -35,6 +38,7 @@ type UiState = ReturnType<typeof useUIStore.getState>;
 type ModalState = ReturnType<typeof useModalStore.getState>;
 
 export type LedgerEventProcessorDeps = {
+  alreadyProcessed?: boolean;
   actors: Actor[];
   activeTab: string;
   chatAtBottom: boolean;
@@ -53,6 +57,7 @@ export type LedgerEventProcessorDeps = {
   refreshActors: GroupState["refreshActors"];
   refreshPresentation: GroupState["refreshPresentation"];
   incrementChatUnread: UiState["incrementChatUnread"];
+  showError: UiState["showError"];
   markPresentationSlotAttention: ModalState["markPresentationSlotAttention"];
   clearPresentationSlotAttention: ModalState["clearPresentationSlotAttention"];
 };
@@ -62,8 +67,30 @@ export function processLedgerEvent(
   event: LedgerEvent,
   deps: LedgerEventProcessorDeps,
 ): void {
+  const eventId = String(event.id || "").trim();
+  const bucket = useGroupStore.getState().chatByGroup[groupId];
+  const alreadyApplied = !!eventId && !!deps.alreadyProcessed;
+  // A sparse-view fetch can beat the live event without the reader reaching
+  // it. It does not suppress the chat count; its actor badges need a refresh
+  // because their last server snapshot may already include this event.
+  const seenElsewhere =
+    !!eventId &&
+    [bucket?.events, bucket?.senderHistory?.events, bucket?.chatWindow?.events].some((events) =>
+      events?.some((item) => item.id === eventId),
+    );
   if (isContextSyncEvent(event)) {
-    deps.onContextSync();
+    // A backlog write is a file change, not a Context write: it carries no version, and the
+    // task board has nothing to read again unless the same event also changed tasks.
+    const data = event.data as { backlog?: unknown; changes?: unknown } | undefined;
+    if (data?.backlog) signalBacklogChanged(groupId);
+    const changes = Array.isArray(data?.changes) ? data.changes : [];
+    const backlogOnly =
+      !!data?.backlog &&
+      changes.length > 0 &&
+      changes.every((change) =>
+        String((change as { op?: unknown } | null)?.op || "").startsWith("backlog."),
+      );
+    if (!backlogOnly) deps.onContextSync();
     return;
   }
   if (isActorActivityEvent(event)) {
@@ -109,7 +136,7 @@ export function processLedgerEvent(
     if (data) {
       deps.updateObligationStatus(
         data.eventId,
-        { actorId: data.actorId, deliveryState: data.state },
+        { actorId: data.actorId, deliveryState: data.state, deliveryReason: data.reason },
         groupId,
       );
     }
@@ -130,7 +157,22 @@ export function processLedgerEvent(
   const nextEvent = reconciliation.event;
   initializeReadStatus(nextEvent, deps.actors);
   initializeObligationStatus(nextEvent, deps.actors);
-  deps.appendEvent(nextEvent, groupId);
+  // A read can beat the live event. appendEvent deduplicates the live list;
+  // processed events may have been trimmed and must not be appended again.
+  if (!deps.alreadyProcessed) deps.appendEvent(nextEvent, groupId);
+
+  // Nothing else says so: Start Group would just look ignored.
+  const exit = deps.alreadyProcessed ? null : extractFailedExit(nextEvent);
+  if (exit) {
+    const actor = deps.actors.find((item) => item.id === exit.actorId);
+    deps.showError(
+      i18n.t("actors:memberExited", {
+        name: actor?.title || exit.actorId,
+        code: exit.code,
+        defaultValue: "{{name}} stopped (exit code {{code}}). Check its terminal.",
+      }),
+    );
+  }
 
   if (isChatMessageEvent(nextEvent)) {
     const data = nextEvent.data as ChatMessageData;
@@ -163,16 +205,26 @@ export function processLedgerEvent(
         }
       }
     }
-    if (data?.message_mode === "mail") {
+    if (!alreadyApplied && data?.message_mode === "mail") {
       const recipients = getRecipientActorIdsForEvent(nextEvent, deps.actors);
-      if (recipients.length > 0) deps.incrementActorUnread(recipients);
-    } else if (data?.message_mode === "send" || data?.message_mode === "request_reply") {
+      if (recipients.length > 0) {
+        if (seenElsewhere) void deps.refreshActors(groupId, { includeUnread: true });
+        else deps.incrementActorUnread(recipients);
+      }
+    } else if (
+      !alreadyApplied &&
+      (data?.message_mode === "send" || data?.message_mode === "request_reply")
+    ) {
       const recipients = getRecipientActorIdsForEvent(nextEvent, deps.actors);
-      if (recipients.length > 0) deps.incrementWebModelQueued(recipients);
+      if (recipients.length > 0) {
+        if (seenElsewhere) void deps.refreshActors(groupId, { includeUnread: true });
+        else deps.incrementWebModelQueued(recipients);
+      }
     }
   }
 
   if (
+    !alreadyApplied &&
     shouldIncrementUnread(
       nextEvent,
       deps.activeTab === "chat" && groupMessagesVisible(groupId, useUIStore.getState()),

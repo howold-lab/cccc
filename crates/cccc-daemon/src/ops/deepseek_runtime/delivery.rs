@@ -23,6 +23,7 @@ pub enum TurnDelivery {
 /// caller records a cursor completion. Anything but `Completed` leaves the
 /// source event unread; permanent deployment/context failures also block
 /// automatic restart until the actor is explicitly started again.
+#[cfg(test)]
 pub fn deliver(
     home: &HomeLayout,
     group: &GroupDoc,
@@ -30,16 +31,39 @@ pub fn deliver(
     event: &Event,
     cancelled: &AtomicBool,
 ) -> TurnDelivery {
-    deliver_with_timeout(
+    deliver_marked(
+        home,
+        group,
+        actor,
+        event,
+        cancelled,
+        &AtomicBool::new(false),
+    )
+}
+
+/// As [`deliver`], setting `started` right before the request is handed to
+/// the provider. A started request may have reached DeepSeek even when the
+/// delivery ends incomplete.
+pub fn deliver_marked(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    event: &Event,
+    cancelled: &AtomicBool,
+    started: &AtomicBool,
+) -> TurnDelivery {
+    deliver_with_timeout_marked(
         home,
         group,
         actor,
         event,
         cancelled,
         Duration::from_secs(cccc_contracts::DEEPSEEK_TURN_TIMEOUT_SECONDS),
+        started,
     )
 }
 
+#[cfg(test)]
 pub(super) fn deliver_with_timeout(
     home: &HomeLayout,
     group: &GroupDoc,
@@ -47,6 +71,26 @@ pub(super) fn deliver_with_timeout(
     event: &Event,
     cancelled: &AtomicBool,
     turn_timeout: Duration,
+) -> TurnDelivery {
+    deliver_with_timeout_marked(
+        home,
+        group,
+        actor,
+        event,
+        cancelled,
+        turn_timeout,
+        &AtomicBool::new(false),
+    )
+}
+
+fn deliver_with_timeout_marked(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    event: &Event,
+    cancelled: &AtomicBool,
+    turn_timeout: Duration,
+    started: &AtomicBool,
 ) -> TurnDelivery {
     if cancelled.load(Ordering::Acquire) {
         return TurnDelivery::Incomplete;
@@ -75,6 +119,19 @@ pub(super) fn deliver_with_timeout(
         payload.push_str("\n\n[cccc] ");
         payload.push_str(cccc_core::system_prompt::NEW_MESSAGE_MODE_GUIDANCE);
     }
+    let instruction_notice = holder.workspace.clone().for_actor(actor).and_then(|scope| {
+        crate::ops::instruction_files::check(
+            home,
+            &group.group_id,
+            actor,
+            &format!("deepseek:{}", holder.generation),
+            &scope.path,
+        )
+    });
+    if let Some(notice) = &instruction_notice {
+        payload.push_str("\n\n");
+        payload.push_str(&notice.delivery_line());
+    }
     if !holder.running.load(Ordering::Acquire) {
         return TurnDelivery::Incomplete;
     }
@@ -84,6 +141,7 @@ pub(super) fn deliver_with_timeout(
     let Some(session_id) = supervisor.session_id().map(str::to_owned) else {
         return TurnDelivery::Incomplete;
     };
+    started.store(true, Ordering::Release);
     let request_id = match supervisor.enqueue(payload).and_then(|_| {
         supervisor
             .flush_one(&session_id)
@@ -92,7 +150,8 @@ pub(super) fn deliver_with_timeout(
         Ok(id) if id > 0 => id,
         _ => return TurnDelivery::Incomplete,
     };
-    let turn_deadline = Instant::now() + turn_timeout;
+    // The deadline is a silence window: provider progress below moves it.
+    let mut turn_deadline = Instant::now() + turn_timeout;
     macro_rules! fail {
         ($terminal_seen:expr) => {{
             fail_sent_request(
@@ -231,6 +290,7 @@ pub(super) fn deliver_with_timeout(
             {
                 fail!(false);
             }
+            turn_deadline = Instant::now() + turn_timeout;
             continue;
         }
         if frame.get("method") == Some(&Value::String("session/request_permission".into())) {
@@ -264,11 +324,18 @@ pub(super) fn deliver_with_timeout(
             {
                 fail!(false);
             }
+            turn_deadline = Instant::now() + turn_timeout;
             continue;
         }
         if frame.get("id") == Some(&json!(request_id)) {
             let projection = projection!();
-            return persist_terminal(&holder, &mut supervisor, &projection, &frame);
+            let outcome = persist_terminal(&holder, &mut supervisor, &projection, &frame);
+            if outcome == TurnDelivery::Completed
+                && let Some(notice) = instruction_notice
+            {
+                notice.delivered();
+            }
+            return outcome;
         }
         // A response for an unknown id is rejected by the strict parser. A
         // notification with an unknown method is ignored only after protocol

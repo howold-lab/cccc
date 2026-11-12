@@ -4,8 +4,10 @@ mod actor_assets;
 mod actor_profiles;
 mod actors;
 mod assistants;
+mod backlog;
 mod blob_download;
 mod capabilities;
+mod chet;
 mod codex_voice;
 mod connect;
 mod context;
@@ -26,6 +28,7 @@ mod im;
 mod im_authorization;
 mod local_sessions;
 mod membership;
+mod message_pins;
 mod messaging;
 mod messaging_cross_group;
 mod nomcp;
@@ -36,6 +39,7 @@ mod nomcp_resources;
 mod nomcp_send;
 mod presentation;
 mod presentation_browser;
+pub(crate) mod process_recovery;
 mod realtime;
 mod remote_access;
 mod remote_access_projection;
@@ -102,9 +106,11 @@ pub fn router() -> Router<AppState> {
         .merge(headless::routes())
         .merge(im::routes())
         .merge(messaging::routes())
+        .merge(message_pins::routes())
         .merge(messaging_cross_group::routes())
         .merge(presentation::routes())
         .merge(presentation_browser::routes())
+        .merge(process_recovery::routes())
         .merge(web_model_connectors::routes())
         .merge(web_model_dots::routes())
         .merge(grok_webhook::routes())
@@ -113,6 +119,7 @@ pub fn router() -> Router<AppState> {
         .merge(web_model_shared_browser::routes())
         .merge(nomcp::routes())
         .merge(context::routes())
+        .merge(backlog::routes())
         .merge(codex_voice::routes())
         .merge(diagnostics::routes())
         .merge(membership::routes())
@@ -120,11 +127,13 @@ pub fn router() -> Router<AppState> {
         .merge(remote_access::routes())
         .merge(settings::routes())
         .merge(capabilities::routes())
+        .merge(chet::routes())
         .merge(streams::routes())
         .merge(realtime::routes())
         .merge(terminal::routes())
 }
 
+pub(crate) use assistants::spawn_voice_model_cleanup;
 pub(crate) use grok_webhook::spawn as spawn_grok_webhooks;
 pub(crate) use web_model_dots::spawn as spawn_dots_events;
 pub(crate) use web_model_supervisor::spawn as spawn_web_model_supervisor;

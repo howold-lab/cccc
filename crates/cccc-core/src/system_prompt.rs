@@ -9,6 +9,10 @@ pub const NEW_MESSAGE_MODE_GUIDANCE: &str = "New messages: use mode=\"mail\" unl
 pub const NATIVE_MESSAGE_MODE_GUIDANCE: &str = "Native collaboration defaults to mode=\"send\" for timely communication. Use mode=\"request_reply\" when a concrete reply is required; choose mode=\"mail\" explicitly for asynchronous Inbox work, whose notification may be delayed. Do not send routine noise. Mail is agent-only; keep user and agent audiences in separate messages.";
 pub const EXISTING_MESSAGE_REPLY_GUIDANCE: &str =
     "For an existing event, use cccc_message_reply instead of cccc_message_send.";
+/// A reply cannot carry a question, so this follows the reply rule.
+pub const USER_QUESTION_GUIDANCE: &str = "When the user's decision or information is needed, send a new request_reply message to user with a question (options for a choice, free text otherwise) unless the user asked for another channel. Do not ask what you can responsibly decide yourself.";
+pub const TASK_GUIDANCE: &str = "Track user requests and commitments that need multiple steps, coordination or follow-up in `cccc_task`: reuse a matching task, otherwise create one; keep one task per coherent piece of work, with routine steps in its checklist. Update it when you start, hand off, get blocked or a decision changes it, and close it with the outcome once its last step is done. Quick answers need no task.";
+pub const BACKLOG_GUIDANCE: &str = "An observed issue or a user's idea that you defer and judge worth keeping goes in the project's already configured backlog file through `cccc_backlog`: reuse a matching entry and say why it waits and when to revisit; recording it does not start the work. When a decision or finished work settles an entry, close it with the outcome.";
 
 #[must_use]
 pub fn render(group: &GroupDoc, actor: &Actor) -> String {
@@ -108,7 +112,10 @@ fn render_with_body(
             "effective_scope: {} ({}; CCCC tools)",
             scope.scope_key, scope.source
         ));
-        lines.push(format!("workspace: {}", scope.path.display()));
+        lines.push(format!(
+            "workspace: {}",
+            cccc_runtime::compatible_path(&scope.path).display()
+        ));
     } else {
         lines.push("effective_scope: unavailable (CCCC tools)".into());
     }
@@ -130,7 +137,8 @@ fn render_with_body(
             } else {
                 ""
             };
-            format!("  {label}: {}{active}", scope.url)
+            let path = cccc_runtime::compatible_path(std::path::Path::new(&scope.url));
+            format!("  {label}: {}{active}", path.display())
         })
         .collect::<Vec<_>>();
     if !scope_lines.is_empty() {
@@ -144,22 +152,24 @@ fn render_with_body(
         "CCCC Protocol:".into(),
         format!("- {}", if actor.external_session_id.is_empty() { NEW_MESSAGE_MODE_GUIDANCE } else { NATIVE_MESSAGE_MODE_GUIDANCE }),
         format!("- {EXISTING_MESSAGE_REPLY_GUIDANCE}"),
+        format!("- {USER_QUESTION_GUIDANCE}"),
         "- Before replying, verify `event_id`; before any message, verify `to` and make the audience explicit when it differs."
             .into(),
         "- Terminal output is not delivered.".into(),
+        format!("- {TASK_GUIDANCE}"),
+        format!("- {BACKLOG_GUIDANCE}"),
     ]);
     if !actor.external_session_id.is_empty() {
         lines.push(format!("- Pass group_id=\"{}\" to every Group tool. On cold start or context reset, call cccc_bootstrap({{\"group_id\":\"{}\"}}).", group.group_id, group.group_id));
     }
     if enabled.len() > 1 {
-        lines.push(
-            if role == "foreman" {
-                crate::peer_insight::FOREMAN_TEAM_MODE_SEED
-            } else {
-                crate::peer_insight::TEAM_MODE_SEED
-            }
-            .into(),
-        );
+        if role == "foreman" {
+            lines.push(crate::peer_insight::FOREMAN_TEAM_MODE_SEED.into());
+            lines.push(crate::peer_insight::FOREMAN_TEAM_FIT_SEED.into());
+        } else {
+            lines.push(crate::peer_insight::TEAM_MODE_SEED.into());
+        }
+        lines.push(crate::peer_insight::TEAM_FEEDBACK_SEED.into());
     }
     let header = lines.join("\n").trim_end().to_owned();
     let body = body.trim();
@@ -180,8 +190,8 @@ fn enum_name(value: impl serde::Serialize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXISTING_MESSAGE_REPLY_GUIDANCE, NATIVE_MESSAGE_MODE_GUIDANCE, NEW_MESSAGE_MODE_GUIDANCE,
-        render, render_session,
+        BACKLOG_GUIDANCE, EXISTING_MESSAGE_REPLY_GUIDANCE, NATIVE_MESSAGE_MODE_GUIDANCE,
+        NEW_MESSAGE_MODE_GUIDANCE, TASK_GUIDANCE, USER_QUESTION_GUIDANCE, render, render_session,
     };
     use crate::GroupStore;
     use crate::home::HomeLayout;
@@ -201,8 +211,11 @@ mod tests {
         assert!(prompt.contains("use MCP tool `cccc_bootstrap`"));
         assert_eq!(prompt.matches(NEW_MESSAGE_MODE_GUIDANCE).count(), 1);
         assert_eq!(prompt.matches(EXISTING_MESSAGE_REPLY_GUIDANCE).count(), 1);
+        assert_eq!(prompt.matches(USER_QUESTION_GUIDANCE).count(), 1);
         assert!(prompt.contains("Before replying, verify `event_id`"));
         assert!(prompt.contains("Terminal output is not delivered."));
+        assert_eq!(prompt.matches(TASK_GUIDANCE).count(), 1);
+        assert_eq!(prompt.matches(BACKLOG_GUIDANCE).count(), 1);
         assert!(!prompt.contains("Current Context Snapshot"));
     }
 
@@ -253,6 +266,28 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn shows_drive_paths_without_the_verbatim_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = GroupStore::new(HomeLayout::from_path(temp.path().join("home")).expect("home"))
+            .expect("store");
+        let mut group = store.create("verbatim scope", "").expect("group");
+        group.scopes.push(crate::Scope {
+            scope_key: "scope_demo".into(),
+            url: r"\\?\C:\work\demo".into(),
+            label: "demo".into(),
+            git_remote: String::new(),
+        });
+        group.active_scope_key = "scope_demo".into();
+        let actor = Actor::new("peer1");
+        group.actors.push(actor.clone());
+        let prompt = render(&group, &actor);
+        assert!(prompt.contains(r"workspace: C:\work\demo"), "{prompt}");
+        assert!(prompt.contains(r"  demo: C:\work\demo *"), "{prompt}");
+        assert!(!prompt.contains(r"\\?\"), "{prompt}");
+    }
+
     #[test]
     fn session_prompt_uses_python_compatible_group_override_without_context_snapshot() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -286,11 +321,20 @@ mod tests {
         assert!(!render(&group, &actor).contains(crate::peer_insight::FOREMAN_TEAM_MODE_SEED));
         group.actors.push(Actor::new("peer1"));
         assert!(render(&group, &actor).contains(crate::peer_insight::FOREMAN_TEAM_MODE_SEED));
+        assert!(render(&group, &actor).contains(crate::peer_insight::FOREMAN_TEAM_FIT_SEED));
+        assert!(render(&group, &actor).contains(crate::peer_insight::TEAM_FEEDBACK_SEED));
         assert!(!render(&group, &actor).contains(crate::peer_insight::TEAM_MODE_SEED));
 
         let peer = group.actors.last().expect("peer");
+        for member in [&actor, peer] {
+            let prompt = render(&group, member);
+            assert_eq!(prompt.matches(TASK_GUIDANCE).count(), 1);
+            assert_eq!(prompt.matches(BACKLOG_GUIDANCE).count(), 1);
+        }
         assert!(render(&group, peer).contains(crate::peer_insight::TEAM_MODE_SEED));
+        assert!(render(&group, peer).contains(crate::peer_insight::TEAM_FEEDBACK_SEED));
         assert!(!render(&group, peer).contains(crate::peer_insight::FOREMAN_TEAM_MODE_SEED));
+        assert!(!render(&group, peer).contains(crate::peer_insight::FOREMAN_TEAM_FIT_SEED));
     }
 
     #[test]
@@ -310,6 +354,9 @@ mod tests {
         std::fs::write(prompt_dir.join("CCCC_PREAMBLE.md"), "custom startup").expect("custom body");
         let prompt = render_session(&home, &group, &actor);
         assert_eq!(prompt.matches(NATIVE_MESSAGE_MODE_GUIDANCE).count(), 1);
+        assert_eq!(prompt.matches(USER_QUESTION_GUIDANCE).count(), 1);
+        assert_eq!(prompt.matches(TASK_GUIDANCE).count(), 1);
+        assert_eq!(prompt.matches(BACKLOG_GUIDANCE).count(), 1);
         assert!(!prompt.contains(NEW_MESSAGE_MODE_GUIDANCE));
         assert!(prompt.contains(&format!(
             "cccc_bootstrap({{\"group_id\":\"{}\"}})",

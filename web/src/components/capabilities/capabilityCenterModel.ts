@@ -1,7 +1,10 @@
+import type { TFunction } from "i18next";
 import type {
   CapabilityOverviewItem,
   CapabilitySourceState,
   CapabilityStateResult,
+  CapabilityUsageActorEntry,
+  CapabilityUsageSummary,
 } from "../../types";
 import {
   canManageSlashCommandVisibility,
@@ -17,7 +20,7 @@ export type CapabilityCenterStateFilter =
   | "slash_hidden"
   | "blocked"
   | "needs_setup";
-export type CapabilityCenterRemovalAction = "delete" | "remove" | "uninstall" | "disable" | "none";
+export type CapabilityCenterRemovalAction = "delete" | "remove" | "uninstall" | "none";
 export type CapabilityCenterSourceRemovalAction = "delete" | "none";
 export type CapabilityCenterSurface = "overlay" | "page";
 
@@ -53,7 +56,8 @@ export function capabilityCenterRemovalAction(
 ): CapabilityCenterRemovalAction {
   const sourceId = String(row.source_id || "").trim();
   if (!sourceId) return "none";
-  if (sourceId === "cccc_builtin") return input?.enabled ? "disable" : "none";
+  // A built-in cannot be removed; the Group switch is the one place that turns it off.
+  if (sourceId === "cccc_builtin") return "none";
   const type = capabilityCenterType(row);
   if (type === "skill" && sourceId === "agent_self_proposed") return "delete";
   const hasLocalFootprint = Boolean(
@@ -82,7 +86,7 @@ export function capabilityCenterSourceRemovalAction(
 }
 
 export function capabilityCenterSourcesGridClass(): string {
-  return "grid grid-cols-[minmax(0,1fr)_76px] items-start gap-3 rounded-lg border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-3 py-3 text-sm md:grid-cols-[minmax(220px,1fr)_110px_110px_minmax(150px,1fr)_76px] md:items-center md:py-2";
+  return "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-3 py-3 text-sm md:py-2";
 }
 
 export function capabilityCenterRootClass(surface: CapabilityCenterSurface): string {
@@ -158,6 +162,28 @@ export function capabilityCenterTypeLabel(type: "skill" | "mcp" | "pack"): strin
   return "Skill";
 }
 
+/** CCCC's own capabilities, described in the reader's language. Their ids are reserved.
+ *  Names stay as the daemon gives them: they are what the reader searches for and types. */
+export const BUILTIN_CAPABILITY_DESCRIPTION_KEYS: ReadonlyMap<string, string> = new Map([
+  ["skill:cccc:self-evolution", "chat:slashDescriptions.selfEvolution"],
+  ["pack:group-runtime", "capabilityCenter.builtin.groupRuntime"],
+  ["pack:file-im", "capabilityCenter.builtin.imBind"],
+  ["pack:space", "capabilityCenter.builtin.space"],
+  ["pack:automation", "capabilityCenter.builtin.automation"],
+  ["pack:context-advanced", "capabilityCenter.builtin.contextDelegation"],
+  ["pack:headless-notify", "capabilityCenter.builtin.headlessNotify"],
+  ["pack:diagnostics", "capabilityCenter.builtin.workspaceUtilities"],
+  ["pack:capability-admin", "capabilityCenter.builtin.capabilityAdmin"],
+]);
+
+export function capabilityCenterDescription(
+  row: Pick<CapabilityOverviewItem, "description_short" | "capability_id">,
+  t: TFunction,
+): string {
+  const key = BUILTIN_CAPABILITY_DESCRIPTION_KEYS.get(String(row.capability_id || "").trim());
+  return key ? t(key) : String(row.description_short || "").trim();
+}
+
 export function capabilityCenterDisplayName(
   row: Pick<CapabilityOverviewItem, "name" | "capability_id">,
 ): string {
@@ -180,6 +206,58 @@ export function capabilityCenterEnabledIds(
     if (value) ids.add(value);
   }
   return ids;
+}
+
+/** A capability state the center can show: a successful read without the enabled list
+ *  (which the IPC contract always returns) is not taken as "nothing enabled". */
+export function capabilityCenterStateReadable(
+  state: CapabilityStateResult | null | undefined,
+): state is CapabilityStateResult {
+  return Boolean(state) && Array.isArray(state?.enabled_capabilities);
+}
+
+export type CapabilityBindingScope = "group" | "actor" | "session";
+
+/** What keeps a capability enabled for the user in this Group, as its usage reports it: the
+ *  Group's binding and the user's own actor or session binding. Bindings another Actor made
+ *  for itself stay. Null when the usage, or any of those three fields, is missing, so no
+ *  scope is guessed. */
+export function capabilityCenterDisableScopes(
+  usage: CapabilityUsageSummary | null | undefined,
+): CapabilityBindingScope[] | null {
+  if (
+    !usage ||
+    typeof usage.group_enabled !== "boolean" ||
+    !Array.isArray(usage.actor_enabled) ||
+    !Array.isArray(usage.session_enabled)
+  ) {
+    return null;
+  }
+  const heldByUser = (entries: CapabilityUsageActorEntry[] | undefined) =>
+    (entries || []).some((entry) => String(entry?.actor_id || "").trim() === "user");
+  const scopes: CapabilityBindingScope[] = [];
+  if (usage.group_enabled) scopes.push("group");
+  if (heldByUser(usage.actor_enabled)) scopes.push("actor");
+  if (heldByUser(usage.session_enabled)) scopes.push("session");
+  return scopes;
+}
+
+/** Turns those bindings off one request at a time. Nothing is written when the usage cannot
+ *  be read. A failed write stops the rest, and `confirmed` tells whether an earlier write was
+ *  confirmed. A failed request may still have taken effect, so the caller reads the state
+ *  back after any write rather than assuming either outcome. */
+export async function capabilityCenterTurnOff(io: {
+  readUsage: () => Promise<CapabilityUsageSummary | null>;
+  turnOff: (scope: CapabilityBindingScope) => Promise<boolean>;
+}): Promise<{ result: "unread" | "failed" | "done"; confirmed: boolean }> {
+  const scopes = capabilityCenterDisableScopes(await io.readUsage());
+  if (!scopes) return { result: "unread", confirmed: false };
+  let confirmed = false;
+  for (const scope of scopes) {
+    if (!(await io.turnOff(scope))) return { result: "failed", confirmed };
+    confirmed = true;
+  }
+  return { result: "done", confirmed };
 }
 
 export function capabilityCenterHiddenIds(
@@ -263,9 +341,9 @@ export function capabilityCenterIsReadonlySystem(
 ): boolean {
   const sourceId = String(row.source_id || "").trim();
   if (sourceId !== "cccc_builtin") return false;
+  // A built-in the Group has not turned on is a system row; an enabled one stays in view.
   const capId = String(row.capability_id || "").trim();
-  const enabled = capabilityCenterEnabledIds(state).has(capId);
-  return capabilityCenterRemovalAction(row, { enabled }) === "none";
+  return !capabilityCenterEnabledIds(state).has(capId);
 }
 
 export function capabilityCenterIsSlashVisible(

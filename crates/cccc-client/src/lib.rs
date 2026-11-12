@@ -11,6 +11,12 @@ mod connection;
 use connection::Connection;
 pub use connection::DaemonStream;
 
+/// The address file the running daemon writes for its clients.
+#[must_use]
+pub fn address_path(home: &HomeLayout) -> PathBuf {
+    home.daemon_dir().join("ccccd.addr.json")
+}
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("daemon address unavailable at {0}")]
@@ -32,6 +38,7 @@ pub struct DaemonClient {
     home: HomeLayout,
     timeout: Duration,
     shared: Arc<ClientShared>,
+    use_voice_origin: bool,
 }
 
 #[derive(Debug, Default)]
@@ -60,6 +67,7 @@ impl DaemonClient {
             home,
             timeout: Duration::from_secs(60),
             shared: Arc::new(ClientShared::default()),
+            use_voice_origin: true,
         }
     }
 
@@ -69,18 +77,47 @@ impl DaemonClient {
         self
     }
 
-    pub async fn call(&self, request: &DaemonRequest) -> Result<DaemonResponse, ClientError> {
-        let mut request = request.clone();
+    /// Host services do not inherit an assistant subprocess's identity.
+    #[must_use]
+    pub fn without_voice_origin(mut self) -> Self {
+        self.use_voice_origin = false;
+        self
+    }
+
+    fn apply_voice_origin(&self, request: &mut DaemonRequest, origin: Option<String>) {
+        if !self.use_voice_origin {
+            request
+                .args
+                .remove(cccc_core::voice_notifications::ORIGIN_ARG);
+            return;
+        }
         if matches!(
             request.op.as_str(),
-            "send" | "message_send" | "send_files" | "reply" | "tracked_send" | "send_cross_group"
-        ) && let Ok(origin) = std::env::var(cccc_core::voice_notifications::ORIGIN_ENV)
+            "send"
+                | "message_send"
+                | "send_files"
+                | "reply"
+                | "tracked_send"
+                | "send_cross_group"
+                | "connect_send"
+                | "connect_send_files"
+                | "message_upload_preflight"
+        ) && let Some(origin) = origin
         {
             request.args.insert(
                 cccc_core::voice_notifications::ORIGIN_ARG.into(),
                 serde_json::Value::String(origin),
             );
         }
+    }
+
+    pub async fn call(&self, request: &DaemonRequest) -> Result<DaemonResponse, ClientError> {
+        let mut request = request.clone();
+        let origin = self
+            .use_voice_origin
+            .then(|| std::env::var(cccc_core::voice_notifications::ORIGIN_ENV).ok())
+            .flatten();
+        self.apply_voice_origin(&mut request, origin);
         let exchange_started = AtomicBool::new(false);
         match tokio::time::timeout(self.timeout, self.call_inner(&request, &exchange_started)).await
         {
@@ -204,7 +241,7 @@ impl DaemonClient {
         if let Some(address) = self.shared.address.read().await.clone() {
             return Ok(address);
         }
-        let path = self.home.daemon_dir().join("ccccd.addr.json");
+        let path = address_path(&self.home);
         let raw = tokio::fs::read(&path)
             .await
             .map_err(|_| ClientError::AddressUnavailable(path))?;

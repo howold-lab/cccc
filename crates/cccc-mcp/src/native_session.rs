@@ -6,6 +6,41 @@ pub(super) struct Context {
     runtime: String,
     host_source_id: Option<String>,
     opencode_server: Option<cccc_core::local_sessions::NativeHost>,
+    /// The verified Codex source of the current call: (source, revision, can receive).
+    receive: Option<(String, String, bool)>,
+    receive_notice: ReceiveNotice,
+}
+
+const RECEIVE_NOTICE_KEY: &str = "cccc_receive_notice";
+const RECEIVE_NOTICE: &str = "CCCC receive notice: CCCC last could not confirm that it can deliver messages into this Codex session. Your tools still work, but new messages may not reach you unless you look. Check your Groups' recent messages for anything you missed, and ask the user to check this member's receive status (Refresh status on its panel); the session may need to be resumed in a Codex connected to the shared app-server. See https://chesterra.github.io/cccc/guide/local-sessions#codex-shared-app-server";
+
+/// One notice per Codex source and lifecycle revision every six hours; a source
+/// that becomes able to receive again is told again if it loses that later.
+#[derive(Default)]
+struct ReceiveNotice(std::collections::HashMap<String, (String, std::time::Instant)>);
+
+impl ReceiveNotice {
+    fn annotate(
+        &mut self,
+        (source, revision, can_receive): (String, String, bool),
+        response: &mut Value,
+        now: std::time::Instant,
+    ) {
+        if can_receive {
+            self.0.remove(&source);
+            return;
+        }
+        if self.0.get(&source).is_some_and(|(noticed, last)| {
+            *noticed == revision
+                && now.saturating_duration_since(*last)
+                    < std::time::Duration::from_secs(6 * 60 * 60)
+        }) {
+            return;
+        }
+        if crate::version_notice::attach_notice(response, RECEIVE_NOTICE_KEY, RECEIVE_NOTICE) {
+            self.0.insert(source, (revision, now));
+        }
+    }
 }
 
 impl Context {
@@ -23,6 +58,8 @@ impl Context {
             } else {
                 None
             },
+            receive: None,
+            receive_notice: ReceiveNotice::default(),
             host_source_id: if !matches!(runtime, "codex" | "opencode") {
                 let host = match host_pid {
                     Some(pid) => cccc_core::local_sessions::NativeHost::capture(pid)?,
@@ -64,15 +101,17 @@ impl Context {
                     .map(|mut tool| {
                         if tool["name"] != "cccc_session" {
                             let schema = &mut tool["inputSchema"];
-                            if schema["properties"].get("group_id").is_none() {
-                                schema["properties"]["group_id"] = json!({"type":"string","description":"Explicit Group ID from the CCCC message or cccc_session list self_memberships; no active-Group fallback"});
-                            }
+                            // Native calls require an explicit group_id rather than the shared environment fallback.
+                            schema["properties"]["group_id"] = json!({"type":"string","description":"Explicit Group ID from the CCCC message or cccc_session list self_memberships; no active-Group fallback"});
                             let required = schema.as_object_mut().expect("tool schema")
                                 .entry("required").or_insert(json!([])).as_array_mut().expect("required array");
                             if !required.contains(&json!("group_id")) { required.push(json!("group_id")); }
                         }
+                        if tool["name"] == "cccc_file_send" {
+                            tool["inputSchema"]["properties"]["mode"]["default"] = json!("send");
+                        }
                         if tool["name"] == "cccc_message_send" {
-                            tool["description"] = json!("Send a new message in this native collaboration Group. Defaults to mode=send for timely collaboration; choose mail explicitly for asynchronous Inbox work, or request_reply when a concrete reply is required. For an existing event, use cccc_message_reply with its event_id. Choose recipients deliberately; keep user and agent audiences separate, and avoid routine noise. Pass the explicit group_id from the received message or cccc_session list.");
+                            tool["description"] = json!("Send a new message in this native collaboration Group. Defaults to mode=send for timely collaboration; choose mail explicitly for asynchronous Inbox work, or request_reply when a concrete reply is required. When the user's decision or information is needed, send request_reply to user alone with a question they answer in place. For an existing event, use cccc_message_reply with its event_id. Choose recipients deliberately; keep user and agent audiences separate, and avoid routine noise. Pass the explicit group_id from the received message or cccc_session list.");
                             tool["inputSchema"]["properties"]["mode"]["default"] = json!("send");
                         }
                         if tool["name"] == "cccc_bootstrap" {
@@ -96,6 +135,7 @@ impl Context {
                         );
                     }
                 };
+                self.receive = None;
                 match self.call(home, client, request, name, args).await {
                     Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
                     Err(error) => {
@@ -104,6 +144,15 @@ impl Context {
                 }
             }
             _ => super::handle(home, client, request, None).await,
+        }
+    }
+
+    /// Tells a Codex session, after any version notice, that CCCC last could
+    /// not confirm it can receive pushed messages.
+    pub fn annotate_receive(&mut self, response: &mut Value) {
+        if let Some(receive) = self.receive.take() {
+            self.receive_notice
+                .annotate(receive, response, std::time::Instant::now());
         }
     }
 
@@ -124,8 +173,9 @@ impl Context {
             args.remove("by");
             let action = session_action(&args)?;
             let mode = if action == "send" {
+                let default = crate::argument_normalization::default_new_message_mode(&args, true);
                 Some(crate::argument_normalization::message_mode(
-                    &mut args, "send",
+                    &mut args, default,
                 )?)
             } else {
                 None
@@ -159,6 +209,14 @@ impl Context {
             .map_err(|_| "Native lifecycle identity is unavailable; reload the integration and submit a native prompt")?;
         if session.runtime.as_str() != self.runtime || !session.host.alive() {
             return Err("This native session no longer has a live lifecycle identity".into());
+        }
+        if self.runtime == "codex" {
+            // Read-only: the notice reports the recorded qualification and never changes it.
+            self.receive = Some((
+                source_id.clone(),
+                session.revision.clone(),
+                session.codex_can_receive,
+            ));
         }
         if self.runtime == "opencode"
             && (session.opencode_server.as_ref() != self.opencode_server.as_ref()
@@ -208,6 +266,14 @@ impl Context {
         let group_id = args.get("group_id").and_then(Value::as_str).filter(|s|!s.is_empty())
             .ok_or("Pass the explicit group_id from the CCCC message; native sessions do not use the global active Group")?.to_owned();
         let actors = daemon(client, "actor_list", json!({"group_id":group_id})).await?;
+        let member = actors["actors"]
+            .as_array()
+            .is_some_and(|actors| actors.iter().any(|a| a["external_session_id"] == source_id));
+        if !member
+            && let Some(error) = replaced_session(client, &group_id, &source_id, &actors).await
+        {
+            return Err(error);
+        }
         let actor = actors["actors"]
             .as_array()
             .and_then(|actors| {
@@ -335,6 +401,56 @@ fn validate_session_args(
     Ok(())
 }
 
+/// The user switched a member this source used to run to another runtime.
+/// Tell the old session to stop instead of asking for it to be reconnected.
+async fn replaced_session(
+    client: &DaemonClient,
+    group_id: &str,
+    source_id: &str,
+    actors: &Value,
+) -> Option<ToolCallError> {
+    let shown = daemon(client, "group_show", json!({"group_id": group_id}))
+        .await
+        .ok()?;
+    let generation = |actor: &Value| match actor["generation"].as_str() {
+        Some(generation) if !generation.is_empty() => generation.to_owned(),
+        _ => format!(
+            "legacy:{}",
+            actor["created_at"].as_str().unwrap_or_default()
+        ),
+    };
+    let record = shown["group"]["runtime_switches"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|record| {
+            record["from"]["kind"] == "native"
+                && record["from"]["source_id"] == source_id
+                && actors["actors"].as_array().is_some_and(|actors| {
+                    actors.iter().any(|actor| {
+                        actor["id"] == record["actor_id"]
+                            && record["actor_generation"].as_str() == Some(&generation(actor))
+                    })
+                })
+        })?;
+    let actor_id = record["actor_id"].as_str().unwrap_or_default();
+    let successor = if record["to"]["kind"] == "native" {
+        "another native session"
+    } else {
+        "a runtime managed by CCCC"
+    };
+    Some(ToolCallError::new(
+        "native_session_replaced",
+        format!(
+            "This session no longer runs member {actor_id} in Group {group_id}: the user switched that member to {successor}. Stop working on this Group's tasks and do not reconnect this session to it; ask the user if anything is unclear."
+        ),
+        json!({"group_id": group_id, "source_id": source_id, "actor_id": actor_id})
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+    ))
+}
+
 async fn daemon(
     client: &DaemonClient,
     op: &str,
@@ -398,6 +514,175 @@ mod action_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every call cccc_bootstrap suggests, with the key it is returned under.
+    fn bootstrap_examples(payload: &Value) -> Vec<(String, String)> {
+        let text = |example: &Value| example.as_str().expect("example").to_owned();
+        payload["next_calls"]
+            .as_object()
+            .expect("next calls")
+            .iter()
+            .map(|(key, example)| (key.clone(), text(example)))
+            .chain(
+                [
+                    "update_command",
+                    "execution_update_command",
+                    "mind_context_update_command",
+                ]
+                .map(|key| (key.to_owned(), text(&payload["context_hygiene"][key]))),
+            )
+            .collect()
+    }
+
+    /// Reads `tool(key="value", ...)  # comment`, the only form the examples use, into a
+    /// tool name and its arguments. Any other shape fails here instead of being guessed.
+    fn example_call(example: &str) -> (String, Value) {
+        let call = example.split("  #").next().expect("call").trim_end();
+        let (tool, rest) = call
+            .split_once('(')
+            .unwrap_or_else(|| panic!("not a call: {example}"));
+        let mut rest = rest
+            .strip_suffix(')')
+            .unwrap_or_else(|| panic!("unclosed call: {example}"));
+        let mut arguments = Map::new();
+        while !rest.is_empty() {
+            let (key, tail) = rest
+                .split_once("=\"")
+                .unwrap_or_else(|| panic!("unsupported argument: {example}"));
+            let (value, tail) = tail
+                .split_once('"')
+                .unwrap_or_else(|| panic!("unterminated value: {example}"));
+            assert!(
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "unsupported argument name {key:?}: {example}"
+            );
+            arguments.insert(key.to_owned(), json!(value));
+            rest = if tail.is_empty() {
+                tail
+            } else {
+                tail.strip_prefix(", ")
+                    .unwrap_or_else(|| panic!("unsupported separator: {example}"))
+            };
+        }
+        (tool.to_owned(), Value::Object(arguments))
+    }
+
+    #[test]
+    fn example_call_reads_the_forms_bootstrap_returns() {
+        assert_eq!(
+            example_call("cccc_help()  # when a route is unclear"),
+            ("cccc_help".to_owned(), json!({}))
+        );
+        assert_eq!(
+            example_call("cccc_agent_state(group_id=\"g_1\", action=\"update\", focus=\"...\")"),
+            (
+                "cccc_agent_state".to_owned(),
+                json!({"group_id":"g_1","action":"update","focus":"..."})
+            )
+        );
+    }
+
+    #[test]
+    fn receive_notice_repeats_only_after_a_change_a_new_loss_or_six_hours() {
+        use std::time::Duration;
+        let now = std::time::Instant::now();
+        let fresh =
+            || json!({"result":{"content":[{"type":"text","text":"{}"}],"structuredContent":{}}});
+        let state = |revision: &str, ready| ("codex:t".to_owned(), revision.to_owned(), ready);
+        let noticed = |response: &Value| {
+            response["result"]["structuredContent"][RECEIVE_NOTICE_KEY] == RECEIVE_NOTICE
+                && response["result"]["content"][1]["text"] == RECEIVE_NOTICE
+        };
+        let mut notice = ReceiveNotice::default();
+        let steps = [
+            ("r1", false, 0, true),
+            ("r1", false, 60, false),
+            ("r2", false, 61, true),
+            ("r2", true, 62, false),
+            ("r2", false, 63, true),
+            ("r2", false, 63 + 6 * 60 * 60, true),
+        ];
+        for (revision, ready, seconds, expected) in steps {
+            let mut response = fresh();
+            let at = now + Duration::from_secs(seconds);
+            notice.annotate(state(revision, ready), &mut response, at);
+            assert_eq!(noticed(&response), expected, "{revision} {ready} {seconds}");
+            if !expected {
+                assert_eq!(response, fresh());
+            }
+        }
+        // A tool's own field is never replaced; the notice waits for a later result.
+        let mut own =
+            json!({"result":{"content":[],"structuredContent":{RECEIVE_NOTICE_KEY:"tool"}}});
+        notice.annotate(("codex:u".into(), "r".into(), false), &mut own, now);
+        assert_eq!(
+            own["result"]["structuredContent"][RECEIVE_NOTICE_KEY],
+            "tool"
+        );
+        let mut later = fresh();
+        notice.annotate(("codex:u".into(), "r".into(), false), &mut later, now);
+        assert!(noticed(&later));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_codex_call_reports_its_recorded_receive_state_without_changing_it() {
+        use cccc_contracts::local_session::LocalSessionRuntime;
+        use cccc_core::local_sessions::{self as native, NativeHost, NativeSession};
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        native::write(
+            &home,
+            NativeSession {
+                source_id: "codex:thread".into(),
+                runtime: LocalSessionRuntime::Codex,
+                native_session_id: "thread".into(),
+                host: NativeHost::capture(std::process::id()).expect("host"),
+                cwd: temp.path().to_string_lossy().into_owned(),
+                title: "Codex".into(),
+                origin: None,
+                revision: "revision".into(),
+                context_epoch: 0,
+                codex_home: Some(temp.path().join("codex")),
+                codex_can_receive: false,
+                codex_program: None,
+                claude_config_dir: None,
+                pi_agent_dir: None,
+                opencode_config_dir: None,
+                opencode_server: None,
+                retired: None,
+            },
+        )
+        .expect("native lifecycle");
+        let mut context = Context::new("codex", None).expect("context");
+        let client = DaemonClient::new(home.clone());
+        let call = |meta: Value| {
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"cccc_message_history","arguments":{"group_id":"g_none"},"_meta":meta}})
+        };
+        let carries = |response: &Value| {
+            response["result"]["content"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["text"] == RECEIVE_NOTICE))
+        };
+        // No daemon runs here: the membership lookup fails after the session check.
+        let mut response = context
+            .handle(&home, &client, &call(json!({"threadId":"thread"})))
+            .await;
+        context.annotate_receive(&mut response);
+        assert!(carries(&response), "{response}");
+        assert!(
+            !native::read(&home, "codex:thread")
+                .expect("record")
+                .codex_can_receive
+        );
+        // Without the native thread identity there is no verified session to describe.
+        let mut anonymous = context.handle(&home, &client, &call(json!({}))).await;
+        context.annotate_receive(&mut anonymous);
+        assert!(!carries(&anonymous), "{anonymous}");
+    }
+
     #[test]
     fn native_identity_comes_only_from_current_request_metadata() {
         assert_eq!(
@@ -443,6 +728,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn codex_metadata_protocol_uses_only_the_top_level_thread_id() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "codex_metadata_protocol_uses_only_the_top_level_thread_id"
+        )) {
+            return;
+        }
         use cccc_contracts::{Actor, DaemonRequest, local_session::LocalSessionRuntime};
         use cccc_core::local_sessions::{self as native, NativeHost, NativeSession};
 
@@ -463,6 +755,7 @@ mod tests {
                     title: id.into(),
                     origin: None,
                     revision: thread_id.into(),
+                    context_epoch: 0,
                     codex_home: Some(temp.path().join("codex")),
                     codex_can_receive: false,
                     codex_program: None,
@@ -682,6 +975,13 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[tokio::test]
     async fn claude_stdio_uses_the_direct_parent_unless_an_explicit_host_is_supplied() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "claude_stdio_uses_the_direct_parent_unless_an_explicit_host_is_supplied"
+        )) {
+            return;
+        }
         use cccc_core::local_sessions::NativeHost;
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -871,17 +1171,31 @@ mod tests {
             history["inputSchema"]["properties"]["event_id"]["type"], "string",
             "fresh MCP discovery must declare the exact read used by Monitor"
         );
-        let ordinary = super::tools::catalog()
-            .into_iter()
-            .find(|tool| tool["name"] == "cccc_message_send")
-            .expect("ordinary send");
+        let file_send = tools
+            .iter()
+            .find(|tool| tool["name"] == "cccc_file_send")
+            .expect("native file send");
         assert_eq!(
-            ordinary["inputSchema"]["properties"]["mode"]["default"],
-            "mail"
+            file_send["inputSchema"]["properties"]["mode"]["default"],
+            "send"
         );
-        for tool in tools.iter().filter(|tool| tool["name"] != "cccc_session") {
+        // The ordinary default depends on the recipient, so the shared schema states none.
+        for name in ["cccc_message_send", "cccc_file_send"] {
+            let ordinary = super::tools::catalog()
+                .into_iter()
+                .find(|tool| tool["name"] == name)
+                .expect("ordinary tool");
             assert!(
-                tool["inputSchema"]["properties"].get("group_id").is_some(),
+                ordinary["inputSchema"]["properties"]["mode"]
+                    .get("default")
+                    .is_none(),
+                "{name}"
+            );
+        }
+        for tool in tools.iter().filter(|tool| tool["name"] != "cccc_session") {
+            assert_eq!(
+                tool["inputSchema"]["properties"]["group_id"]["description"],
+                "Explicit Group ID from the CCCC message or cccc_session list self_memberships; no active-Group fallback",
                 "{}",
                 tool["name"]
             );
@@ -899,6 +1213,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn native_members_can_discover_and_reply_without_a_receive_channel() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "native_members_can_discover_and_reply_without_a_receive_channel"
+        )) {
+            return;
+        }
         use cccc_contracts::{
             Actor, ActorRuntime, DaemonRequest, Event, GroupState,
             local_session::LocalSessionRuntime,
@@ -919,6 +1240,7 @@ mod tests {
                 title: "Native fixture".into(),
                 origin: None,
                 revision: "after-clear-revision".into(),
+                context_epoch: 0,
                 codex_home: None,
                 codex_can_receive: false,
                 codex_program: None,
@@ -942,6 +1264,17 @@ mod tests {
         recipient.runtime = ActorRuntime::Claude;
         recipient.external_session_id = "claude:offline-fixture".into();
         cccc_core::actors::add(&mut member_group, recipient).expect("offline recipient");
+        // A workspace with a file, for the native file sends below.
+        let project = temp.path().join("native-project");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::write(project.join("native-note.txt"), "native file").expect("fixture file");
+        member_group.scopes.push(cccc_core::group::Scope {
+            scope_key: "native-project".into(),
+            url: project.to_string_lossy().into(),
+            label: String::new(),
+            git_remote: String::new(),
+        });
+        member_group.active_scope_key = "native-project".into();
         groups.save(&member_group).expect("save Group");
         let mut paused = member_group.clone();
         paused.group_id = groups
@@ -1029,6 +1362,39 @@ mod tests {
             )
             .await;
         assert_ne!(bootstrapped["result"]["isError"], true, "{bootstrapped}");
+        let examples = &bootstrapped["result"]["structuredContent"];
+        let named = format!("(group_id=\"{}\"", member_group.group_id);
+        assert_eq!(
+            examples["next_calls"]["inbox_read"],
+            format!("cccc_inbox_read{named})")
+        );
+        // Each suggested call runs exactly as returned. This checks that the arguments are
+        // accepted, not what an agent would write in them.
+        let call = |tool: &str, arguments: Value| {
+            json!({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{
+                "name":tool,"arguments":arguments
+            }})
+        };
+        let accepted = |response: &Value| {
+            response.get("error").is_none()
+                && response["result"].is_object()
+                && response["result"]["isError"] != true
+        };
+        for (key, example) in bootstrap_examples(examples) {
+            assert!(example.contains(&named), "{example}");
+            assert!(!example.contains("actor_id"), "{example}");
+            let (tool, arguments) = example_call(&example);
+            let response = context
+                .handle(&home, &client, &call(&tool, arguments))
+                .await;
+            assert!(accepted(&response), "{key}: {example}: {response}");
+        }
+        let identity = &bootstrapped["result"]["structuredContent"]["mcp_server"];
+        assert_eq!(identity["version"], env!("CARGO_PKG_VERSION"));
+        assert!(
+            identity.get("source_id").is_none(),
+            "this test embeds MCP without an application identity"
+        );
         let members = bootstrapped["result"]["structuredContent"]["session"]["members"]
             .as_array()
             .expect("basic collaboration includes its recipients");
@@ -1100,6 +1466,48 @@ mod tests {
                 explicit_mode.unwrap_or("send")
             );
         }
+        // A file takes the same native default as a message, on the whole route: to an agent or
+        // the user, directly and through capability_use; explicit Mail stays Mail.
+        for (to, explicit_mode, nested) in [
+            (recipient_id.as_str(), None, false),
+            ("user", None, false),
+            (recipient_id.as_str(), Some("mail"), false),
+            (recipient_id.as_str(), None, true),
+        ] {
+            let mut args = json!({"group_id":member_group.group_id,"to":[to],"path":"native-note.txt","text":"Synthetic native file","insight":"Synthetic native file verification"});
+            if let Some(mode) = explicit_mode {
+                args["mode"] = json!(mode);
+            }
+            let (tool, args) = if nested {
+                (
+                    "cccc_capability_use",
+                    json!({"group_id":member_group.group_id,"capability_id":"core","tool_name":"cccc_file_send","tool_arguments":args}),
+                )
+            } else {
+                ("cccc_file_send", args)
+            };
+            let sent = context
+                .handle(
+                    &home,
+                    &client,
+                    &json!({"id":9,"method":"tools/call","params":{"name":tool,"arguments":args}}),
+                )
+                .await;
+            assert_ne!(sent["result"]["isError"], true, "{to}: {sent}");
+            let payload = &sent["result"]["structuredContent"];
+            let payload = if nested {
+                &payload["tool_result"]
+            } else {
+                payload
+            };
+            let event = &payload["result"]["event"];
+            assert_eq!(
+                event["data"]["message_mode"],
+                explicit_mode.unwrap_or("send"),
+                "{to}"
+            );
+            assert_eq!(event["data"]["attachments"][0]["bytes"], 11, "{to}");
+        }
         let ledger_path = groups.ledger_path(&member_group.group_id).expect("ledger");
         let message_count = || {
             cccc_core::ledger::read_all(&ledger_path)
@@ -1118,7 +1526,11 @@ mod tests {
                 json!({"mode":false}),
                 json!({"mode":"invalid"}),
             ] {
-                let mut args = json!({"action":"send","group_id":member_group.group_id,"to":["offline-peer"],"event_id":incoming.id,"text":"This message must not be appended","insight":"Synthetic invalid mode verification"});
+                let mut args = json!({"action":"send","group_id":member_group.group_id,"to":["offline-peer"],"text":"This message must not be appended","insight":"Synthetic invalid mode verification"});
+                // Only a reply takes an existing event; a send would fail on that first.
+                if tool == "cccc_message_reply" {
+                    args["event_id"] = json!(incoming.id);
+                }
                 args.as_object_mut()
                     .expect("args")
                     .extend(invalid.as_object().expect("invalid mode").clone());
@@ -1134,6 +1546,31 @@ mod tests {
                     "{tool} must not send on invalid mode"
                 );
             }
+        }
+        // A send starts a new message on the native route and through capability_use.
+        for nested in [false, true] {
+            let args = json!({"group_id":member_group.group_id,"to":["offline-peer"],"event_id":incoming.id,"mode":"request_reply","text":"This message must not be appended","insight":"Synthetic reply target verification"});
+            let (tool, args) = if nested {
+                (
+                    "cccc_capability_use",
+                    json!({"group_id":member_group.group_id,"capability_id":"core","tool_name":"cccc_message_send","tool_arguments":args}),
+                )
+            } else {
+                ("cccc_message_send", args)
+            };
+            let rejected = context
+                .handle(
+                    &home,
+                    &client,
+                    &json!({"id":8,"method":"tools/call","params":{"name":tool,"arguments":args}}),
+                )
+                .await;
+            assert_eq!(rejected["result"]["isError"], true, "{tool}: {rejected}");
+            assert!(
+                rejected.to_string().contains("cccc_message_reply"),
+                "{tool}: {rejected}"
+            );
+            assert_eq!(message_count(), before, "{tool} must not answer an event");
         }
         let binding = cccc_contracts::local_session::LocalSessionBinding {
             group_id: member_group.group_id.clone(),

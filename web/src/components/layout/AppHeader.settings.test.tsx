@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { AppHeader, type AppHeaderProps } from "./AppHeader";
 import { useModalA11y } from "../../hooks/useModalA11y";
-import { useUIStore } from "../../stores/useUIStore";
+import { groupMessagesVisible, useUIStore } from "../../stores/useUIStore";
 import { useModalStore } from "../../stores/useModalStore";
 import type { TextScale, Theme } from "../../types";
 
@@ -73,6 +73,19 @@ afterEach(async () => {
 });
 
 describe("header settings menu", () => {
+  it("does not hide chat while the compact settings menu is open", async () => {
+    useUIStore.setState({
+      activeTab: "chat",
+      chatSessions: {},
+      isSmallScreen: false,
+      workspaceFileViewerGroupId: "",
+      chatObscuringViews: 0,
+    });
+    await mount();
+    expect(await openMenu()).not.toBeNull();
+    expect(groupMessagesVisible("group-1", useUIStore.getState())).toBe(true);
+  });
+
   it("retains group shortcuts and routes account through the menu", async () => {
     const onOpenAccount = vi.fn();
     const onOpenContext = vi.fn();
@@ -98,12 +111,29 @@ describe("header settings menu", () => {
     expect(document.querySelector("[data-app-settings-menu]")).toBeNull();
   });
 
+  it("leads with the account and all settings, then the appearance choices", async () => {
+    await mount({});
+    const panel = await openMenu();
+    const order = [
+      ...panel.querySelectorAll(
+        "[data-app-settings-account], [data-app-settings-open-all], [data-appearance-preferences]",
+      ),
+    ].map((element) =>
+      element.hasAttribute("data-app-settings-account")
+        ? "account"
+        : element.hasAttribute("data-app-settings-open-all")
+          ? "all settings"
+          : "appearance",
+    );
+    expect(order).toEqual(["account", "all settings", "appearance"]);
+  });
+
   it("keeps browser preferences usable without granting settings or account access", async () => {
     await mount({ canAccessAccount: false, selectedGroupId: "" });
     const panel = await openMenu();
     expect(
       panel.querySelectorAll('[data-appearance-preferences] [role="radiogroup"]'),
-    ).toHaveLength(3);
+    ).toHaveLength(7);
     expect(buttonByText(panel, "account")).toBeUndefined();
     expect(buttonByText(panel, "allSettings").disabled).toBe(true);
     await act(async () => root.render(<AppHeader {...props} canAccessAccount={false} />));
@@ -139,6 +169,9 @@ describe("header settings menu", () => {
     expect(checked("theme")).toBe("themeSystem");
     expect(checked("textScale")).toBe("100%");
     await act(async () => buttonByText(choice("theme"), "themeDark").click());
+    await act(async () =>
+      panel.querySelector<HTMLButtonElement>("[data-appearance-more]")!.click(),
+    );
     await act(async () => buttonByText(choice("textScale"), "125%").click());
     await act(async () => buttonByText(choice("language"), "日本語").click());
     expect(checked("theme")).toBe("themeDark");

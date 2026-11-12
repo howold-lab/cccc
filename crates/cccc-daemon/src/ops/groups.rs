@@ -35,6 +35,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
             actor_notes_write(home, request, true)
         }),
         "group_resolve" => Operation::new(Read, resolve),
+        "group_activity" => Operation::new(Read, super::group_activity::activity),
         "group_update" => Operation::new(GlobalWrite, update),
         "group_delete" => Operation::new(GlobalWrite, delete),
         "group_reset" => Operation::new(Write, super::group_reset::reset),
@@ -141,7 +142,9 @@ fn show(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     object(json!({
         "group": group_runtime::group(home, group),
         // A caller-scoped read projection, outside GroupDoc/Actor persistence.
-        "effective_scope": scope.map_or_else(|| json!({}), |scope| json!(scope)),
+        "effective_scope": scope
+            .map(actor_runtime::displayed_scope)
+            .map_or_else(|| json!({}), |scope| json!(scope)),
     }))
 }
 
@@ -572,6 +575,7 @@ fn group_update_patch(request: &DaemonRequest) -> Result<serde_json::Map<String,
 fn delete(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     authorize(&group, request)?;
+    let browser_work = actor_runtime::hold_group_browser_work(home, &group)?;
     super::voice_secretary::cancel_group(home, &group.group_id).map_err(OpError::io)?;
     actor_delivery::shutdown_group(&group.group_id);
     actor_runtime::stop_group(home, &group)?;
@@ -584,8 +588,12 @@ fn delete(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     let deleted = store(home)?.delete(&group.group_id).map_err(OpError::io)?;
     if deleted {
+        super::local_headless::clear_group_confirmation_pauses(&group.group_id)
+            .map_err(OpError::io)?;
         super::actor_secrets::remove_group(home, &group.group_id)?;
         super::voice_secretary::purge_deleted_group(home, &group.group_id).map_err(OpError::io)?;
+        drop(browser_work);
+        cccc_core::web_model_connectors::remove_browser_work_locks(home, &group.group_id);
     }
     if active::get(home).map_err(OpError::io)?.as_deref() == Some(&group.group_id) {
         active::clear(home).map_err(OpError::io)?;
@@ -656,6 +664,16 @@ fn running(home: &HomeLayout, request: &DaemonRequest, value: bool) -> OpResult 
             .map_err(OpError::io)?;
     }
     let runtimes = if value {
+        // Scheduler requests also use by=user, so their source marker must retain
+        // confirmation pauses. User controls may retry an Active or Stopped Group.
+        if actor_runtime::user_confirmation_retry(request) {
+            for actor in group.actors.iter().filter(|actor| actor.enabled) {
+                if !actor_runtime::actor_is_running(&group, actor) {
+                    super::local_headless::retry_confirmation(&group.group_id, &actor.id)
+                        .map_err(OpError::io)?;
+                }
+            }
+        }
         actor_runtime::start_group(home, &group)?
     } else {
         if group.actors.iter().any(|a| a.runtime.is_web_model()) {

@@ -1,6 +1,7 @@
 import { ComposerSendControl } from "./ComposerSendControl";
 import { ComposerTypingPlaceholder } from "./ComposerTypingPlaceholder";
 import { ComposerResizeHandle } from "./ComposerResizeHandle";
+import { ComposerFailedSends } from "./ComposerFailedSends";
 import { useComposerHeightResize } from "./useComposerHeightResize";
 
 // ChatComposer renders the chat message composer.
@@ -34,10 +35,11 @@ import {
 } from "../../utils/slashCommands";
 import { getComposerCanSend, hasConcreteReplyRecipients } from "./chatComposerActions";
 import { ComposerFilePreview } from "./ComposerFilePreview";
+import { ComposerMentionOverlay } from "./ComposerMentionOverlay";
 import { getMentionMenuLeft, getMentionTriggerX } from "./mentionMenuPosition";
 import { ChatMentionMenu } from "./ChatMentionMenu";
+import { useComposerMentionInput } from "./useComposerMentionInput";
 import {
-  getComposerGroupMentionInsertToken,
   resolveComposerHashRouting,
   type ComposerMentionKind,
   type ComposerMentionSuggestion,
@@ -47,11 +49,8 @@ import type {
   ComposerGroupMentionToken,
 } from "../../hooks/composerGroupMentions";
 import {
-  createComposerAgentMentionToken,
-  createComposerGroupMentionToken,
   pruneComposerAgentMentionTokens,
   pruneComposerGroupMentionTokens,
-  resolveControlledComposerMentionContext,
 } from "../../hooks/composerGroupMentions";
 import {
   composerTargetAllowsSuggestedUserMessage,
@@ -61,6 +60,10 @@ import {
 } from "../../utils/suggestedUserMessage";
 import { ComposerRecipientsRow } from "./ComposerRecipientsRow";
 import { useComposerTextareaAutoResize } from "./useComposerTextareaAutoResize";
+import { mergeVoiceComposerDraftText } from "./voice-secretary/voiceComposerDraftRouting";
+import { useShortTouchViewport } from "../../hooks/useShortTouchViewport";
+import { CHET_SELECTOR } from "../../utils/chetIdentity";
+import { messageModeForRecipients } from "../../stores/composerMessageMode";
 import {
   buildComposerHistoryEntries,
   canStartComposerHistory,
@@ -77,10 +80,23 @@ import {
 
 const SLASH_COMMAND_PAGE_SIZE = 8;
 const MENTION_MENU_DESKTOP_WIDTH = 320;
+const COLLAPSE_AFTER_TAP_MS = 350;
 
-function getAgentMentionDisplayToken(selected: ComposerMentionSuggestion): string {
-  const label = String(selected.label || selected.value || "").trim();
-  return label.startsWith("@") ? label : `@${label}`;
+/** A tap moves focus just before its click. Collapsing the composer at once
+ *  would slide the controls above it out from under that click. */
+function afterTap(apply: () => void) {
+  window.setTimeout(apply, COLLAPSE_AFTER_TAP_MS);
+}
+
+/** As afterTap, for a press still held: a slow tap is a tap too. */
+function afterRelease(apply: () => void) {
+  const released = () => {
+    window.removeEventListener("pointerup", released, true);
+    window.removeEventListener("pointercancel", released, true);
+    afterTap(apply);
+  };
+  window.addEventListener("pointerup", released, true);
+  window.addEventListener("pointercancel", released, true);
 }
 
 function cleanVoicePromptContextText(value: unknown, maxLen = 240): string {
@@ -110,6 +126,7 @@ function buildRecentChatExcerptForVoicePrompt(events: LedgerEvent[]): string {
 export interface ChatComposerProps {
   isDark: boolean;
   isSmallScreen: boolean;
+  keepExpanded?: boolean;
   selectedGroupId: string;
   actors: Actor[];
   recipientActorsBusy?: boolean;
@@ -120,6 +137,9 @@ export interface ChatComposerProps {
   selectedGroupActorsHydrating?: boolean;
   destGroupScopeLabel?: string;
   busy: string;
+  sendInFlight: boolean;
+  uploadInFlight?: boolean;
+  onStopUploadWaiting?: () => void;
   recentMessages?: LedgerEvent[];
   suggestionSourceMessages?: LedgerEvent[];
 
@@ -134,6 +154,7 @@ export interface ChatComposerProps {
 
   // Recipients
   toTokens: string[];
+  unavailableRecipients?: string[];
   onToggleRecipient: (token: string) => void;
   onClearRecipients: () => void;
 
@@ -161,6 +182,7 @@ export interface ChatComposerProps {
   setMentionKind: Dispatch<SetStateAction<ComposerMentionKind>>;
   setMentionActorScope: Dispatch<SetStateAction<"selected" | "destination">>;
   setMentionTargetGroupId: Dispatch<SetStateAction<string>>;
+  setMentionTriggerIndex?: Dispatch<SetStateAction<number | null>>;
   composerGroupMentionTokens: ComposerGroupMentionToken[];
   setComposerGroupMentionTokens: Dispatch<SetStateAction<ComposerGroupMentionToken[]>>;
   composerAgentMentionTokens: ComposerAgentMentionToken[];
@@ -171,6 +193,7 @@ export interface ChatComposerProps {
 export function ChatComposer({
   isDark,
   isSmallScreen,
+  keepExpanded = false,
   selectedGroupId,
   actors,
   recipientActorsBusy,
@@ -181,6 +204,9 @@ export function ChatComposer({
   selectedGroupActorsHydrating,
   destGroupScopeLabel: _destGroupScopeLabel,
   busy,
+  sendInFlight,
+  uploadInFlight,
+  onStopUploadWaiting,
   recentMessages = [],
   suggestionSourceMessages,
   replyTarget,
@@ -191,6 +217,7 @@ export function ChatComposer({
   onQuoteVoiceDocumentRef,
   onClearQuotedVoiceDocumentRef,
   toTokens,
+  unavailableRecipients = [],
   onToggleRecipient,
   onClearRecipients,
   composerFiles,
@@ -212,6 +239,7 @@ export function ChatComposer({
   setMentionKind,
   setMentionActorScope,
   setMentionTargetGroupId,
+  setMentionTriggerIndex,
   composerGroupMentionTokens,
   setComposerGroupMentionTokens,
   composerAgentMentionTokens,
@@ -221,9 +249,14 @@ export function ChatComposer({
   // The draft text is owned here, not by ChatTab: only the composer needs a
   // re-render per keystroke.
   const composerText = useComposerStore((s) => s.composerText);
+  const isWebAdmin = useUIStore((s) => s.isWebAdmin);
   const composerHistoryRef = useRef<ComposerHistorySession | null>(null);
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [composerFocused, setComposerFocused] = useState(false);
+  const [expandedGroup, setExpandedGroup] = useState("");
+  const [voiceBlocksCompact, setVoiceBlocksCompact] = useState(false);
+  const shortTouchViewport = useShortTouchViewport();
+  const compactViewport = isSmallScreen || shortTouchViewport;
   const composerHelpId = useId();
   const [hintMinHeight, setHintMinHeight] = useState(0);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -260,23 +293,32 @@ export function ChatComposer({
   const composerResize = useComposerHeightResize({
     footerRef,
     composerRef,
-    enabled: !isSmallScreen,
+    enabled: !compactViewport,
     scale: rootFontScale,
   });
-  const baseComposerHeight = (isSmallScreen ? 44 : 48) * rootFontScale;
-  const minComposerHeight = isSmallScreen
-    ? Math.max(baseComposerHeight + 6, 52)
-    : composerResize.minHeight;
-  const maxComposerHeight = isSmallScreen ? 128 * rootFontScale : composerResize.maxHeight;
   const composerFontSize = (isSmallScreen ? 15 : 13) * rootFontScale;
   const composerLineHeight = (isSmallScreen ? 24 : 20) * rootFontScale;
-
-  useComposerTextareaAutoResize({
-    composerRef,
-    value: composerText,
-    minHeight: minComposerHeight,
-    maxHeight: maxComposerHeight,
-  });
+  const minComposerHeight = compactViewport
+    ? Math.max(44, composerLineHeight + 16 * rootFontScale)
+    : composerResize.minHeight;
+  const maxComposerHeight = compactViewport ? 128 * rootFontScale : composerResize.maxHeight;
+  const expandedMinHeight = compactViewport
+    ? `${minComposerHeight}px`
+    : `var(--composer-min-height, ${minComposerHeight}px)`;
+  const expandedMaxHeight = compactViewport
+    ? `${maxComposerHeight}px`
+    : `var(--composer-max-height, ${maxComposerHeight}px)`;
+  useEffect(() => {
+    if (!compactViewport) return;
+    const closeWhenOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element) || footerRef.current?.contains(target)) return;
+      if (target.closest('[role="dialog"], [role="menu"], [role="listbox"]')) return;
+      afterRelease(() => setExpandedGroup(""));
+    };
+    document.addEventListener("pointerdown", closeWhenOutside, true);
+    return () => document.removeEventListener("pointerdown", closeWhenOutside, true);
+  }, [compactViewport]);
 
   const exitComposerHistory = useCallback(() => {
     composerHistoryRef.current = null;
@@ -331,6 +373,22 @@ export function ChatComposer({
     },
     [composerRef, isSmallScreen],
   );
+  const { clearActiveMention, rememberSelection, selectMention, updateMenu, updateText } =
+    useComposerMentionInput({
+      text: composerText,
+      composerRef,
+      setText: setComposerText,
+      setGroupTokens: setComposerGroupMentionTokens,
+      setAgentTokens: setComposerAgentMentionTokens,
+      setShowMenu: setShowMentionMenu,
+      setSelectedIndex: setMentionSelectedIndex,
+      setFilter: setMentionFilter,
+      setKind: setMentionKind,
+      setActorScope: setMentionActorScope,
+      setTargetGroupId: setMentionTargetGroupId,
+      setTriggerIndex: setMentionTriggerIndex,
+      updateMenuPosition: updateMentionMenuPosition,
+    });
 
   useEffect(() => {
     const observer = new MutationObserver(() => {
@@ -381,32 +439,6 @@ export function ChatComposer({
     [composerAgentMentionTokens, composerText],
   );
 
-  const mentionOverlay = useMemo(() => {
-    const ranges = [
-      ...liveGroupMentionTokens.map((token) => ({ ...token, kind: "group" as const })),
-      ...liveAgentMentionTokens.map((token) => ({ ...token, kind: "agent" as const })),
-    ];
-    if (ranges.length === 0) return "";
-    const sorted = ranges.sort((a, b) => a.start - b.start);
-    let cursor = 0;
-    const escapeHtml = (value: string) =>
-      value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const parts: string[] = [];
-    for (const token of sorted) {
-      if (token.start < cursor) continue;
-      parts.push(escapeHtml(composerText.slice(cursor, token.start)));
-      const className =
-        token.kind === "group"
-          ? "rounded-md bg-sky-400/25 text-transparent ring-1 ring-inset ring-sky-300/60"
-          : "rounded-md bg-violet-400/25 text-transparent ring-1 ring-inset ring-violet-300/60";
-      parts.push(
-        `<mark class="${className}">${escapeHtml(composerText.slice(token.start, token.end))}</mark>`,
-      );
-      cursor = token.end;
-    }
-    parts.push(escapeHtml(composerText.slice(cursor)));
-    return parts.join("");
-  }, [composerText, liveAgentMentionTokens, liveGroupMentionTokens]);
   const consumedSuggestedUserMessageIds = useMemo(() => {
     void selectedGroupId;
     const ids = readConsumedSuggestedUserMessageIds();
@@ -529,13 +561,7 @@ export function ChatComposer({
     if (showSuggestedUserMessage && val.trim()) {
       markSuggestedUserMessageConsumed();
     }
-    setComposerText(val);
-    setComposerGroupMentionTokens((tokens) =>
-      pruneComposerGroupMentionTokens({ text: val, tokens }),
-    );
-    setComposerAgentMentionTokens((tokens) =>
-      pruneComposerAgentMentionTokens({ text: val, tokens }),
-    );
+    const caret = updateText(val, e.target.selectionStart, e.target.selectionEnd);
     const slashModeActive =
       val === val.trimStart() &&
       normalizeSlashCommandInput(val).startsWith("/") &&
@@ -562,71 +588,20 @@ export function ChatComposer({
       setMentionActorScope("selected");
       setMentionTargetGroupId("");
       setMentionFilter("");
+      clearActiveMention();
       return;
     }
     setShowSlashMenu(false);
     setSlashVisibleCount(SLASH_COMMAND_PAGE_SIZE);
-
-    // Detect @ agent mentions for the recipient helper menu.
-    const lastAt = val.lastIndexOf("@");
-    if (lastAt >= 0) {
-      const afterAt = val.slice(lastAt + 1);
-      if (
-        (lastAt === 0 || val[lastAt - 1] === " " || val[lastAt - 1] === "\n") &&
-        !afterAt.includes(" ") &&
-        !afterAt.includes("\n")
-      ) {
-        // Context-sensitive scope: a valid, same-segment `#group` before this
-        // `@` targets that group's actors; otherwise it's a local mention. A
-        // bare `@` (no in-segment `#group`) always stays local.
-        const mentionCtx = resolveControlledComposerMentionContext({
-          text: val,
-          atIndex: lastAt,
-          tokens: composerGroupMentionTokens,
-        });
-        setMentionKind("agent");
-        setMentionActorScope(mentionCtx.scope);
-        setMentionTargetGroupId(mentionCtx.mentionTargetGroupId);
-        setMentionFilter(afterAt);
-        setShowMentionMenu(true);
-        setMentionSelectedIndex(0);
-        requestAnimationFrame(() => updateMentionMenuPosition(val.slice(0, lastAt + 1)));
-        return;
-      }
-    }
-
-    // Detect # group route mentions for the destination group helper menu.
-    const lastHash = val.lastIndexOf("#");
-    if (lastHash >= 0) {
-      const afterHash = val.slice(lastHash + 1);
-      if (
-        (lastHash === 0 || val[lastHash - 1] === " " || val[lastHash - 1] === "\n") &&
-        !afterHash.includes(" ") &&
-        !afterHash.includes("\n")
-      ) {
-        setMentionKind("group");
-        setMentionActorScope("selected");
-        setMentionTargetGroupId("");
-        setMentionFilter(afterHash);
-        setShowMentionMenu(true);
-        setMentionSelectedIndex(0);
-        requestAnimationFrame(() => updateMentionMenuPosition(val.slice(0, lastHash + 1)));
-      } else {
-        setShowMentionMenu(false);
-        setMentionActorScope("selected");
-        setMentionTargetGroupId("");
-        setMentionFilter("");
-      }
-    } else {
-      setShowMentionMenu(false);
-      setMentionActorScope("selected");
-      setMentionTargetGroupId("");
-      setMentionFilter("");
-    }
+    updateMenu(val, caret, Math.min(e.target.selectionEnd, val.length));
   };
 
   // Handle keyboard shortcuts and mention navigation.
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // While an input method is composing, Enter, Tab, arrows and Escape belong
+    // to it. Safari can report the confirming Enter with key "Enter" and keyCode 229.
+    const nativeKeyboardEvent = e.nativeEvent as KeyboardEvent & { keyCode?: number };
+    if (nativeKeyboardEvent.isComposing || nativeKeyboardEvent.keyCode === 229) return;
     if (showSlashMenu && visibleSlashSuggestions.length > 0) {
       const maxIndex = visibleSlashSuggestions.length - 1;
       if (e.key === "ArrowDown") {
@@ -680,6 +655,7 @@ export function ChatComposer({
         e.preventDefault();
         setShowMentionMenu(false);
         setMentionSelectedIndex(0);
+        clearActiveMention();
         return;
       }
     }
@@ -701,8 +677,6 @@ export function ChatComposer({
       return;
     }
 
-    const nativeKeyboardEvent = e.nativeEvent as KeyboardEvent & { keyCode?: number };
-    const isComposing = nativeKeyboardEvent.isComposing || nativeKeyboardEvent.keyCode === 229;
     const hasModifier = e.shiftKey || e.ctrlKey || e.metaKey || e.altKey;
     let historySession = composerHistoryRef.current;
     if (historySession && historySession.groupId !== selectedGroupId) {
@@ -716,7 +690,7 @@ export function ChatComposer({
         exitComposerHistory();
         return;
       }
-      if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !isComposing && !hasModifier) {
+      if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !hasModifier) {
         e.preventDefault();
         const move = moveComposerHistory(historySession, e.key === "ArrowUp" ? "older" : "newer");
         composerHistoryRef.current = move.session;
@@ -736,7 +710,6 @@ export function ChatComposer({
         selectedGroupId,
         busy,
         menuOpen: showSlashMenu || showMentionMenu,
-        isComposing,
         hasModifier,
       })
     ) {
@@ -750,7 +723,7 @@ export function ChatComposer({
       }
     }
 
-    if (e.key === "Enter" && !showMentionMenu) {
+    if (e.key === "Enter" && (!showMentionMenu || mentionSuggestions.length === 0)) {
       if (showSlashMenu) return;
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
@@ -758,70 +731,11 @@ export function ChatComposer({
       }
     } else if (e.key === "Escape") {
       setShowMentionMenu(false);
+      clearActiveMention();
       setShowSlashMenu(false);
       setShowModeMenu(false);
       onCancelReply();
     }
-  };
-
-  // Select an agent from @ or a destination group from #.
-  const selectMention = (selected: ComposerMentionSuggestion | undefined) => {
-    if (!selected) return;
-    if (selected.kind === "agent") {
-      const lastAt = composerText.lastIndexOf("@");
-      const mentionScope =
-        lastAt >= 0
-          ? resolveControlledComposerMentionContext({
-              text: composerText,
-              atIndex: lastAt,
-              tokens: composerGroupMentionTokens,
-            }).scope
-          : "selected";
-      if (lastAt >= 0) {
-        const before = composerText.slice(0, lastAt);
-        const tokenText = getAgentMentionDisplayToken(selected);
-        const nextText = before + tokenText + " ";
-        setComposerText(nextText);
-        const token = createComposerAgentMentionToken({
-          actorId: selected.value,
-          token: tokenText,
-          start: before.length,
-          scope: mentionScope,
-        });
-        if (token) {
-          setComposerAgentMentionTokens((tokens) =>
-            pruneComposerAgentMentionTokens({ text: before, tokens }).concat([token]),
-          );
-        }
-      }
-      // @ mentions are text references/autocomplete only. Delivery routing is
-      // controlled by explicit recipient chips / the serialized `to` field.
-      setShowMentionMenu(false);
-      setMentionSelectedIndex(0);
-      return;
-    }
-
-    const lastHash = composerText.lastIndexOf("#");
-    if (lastHash >= 0) {
-      const before = composerText.slice(0, lastHash);
-      const tokenText = getComposerGroupMentionInsertToken(selected);
-      setComposerText(before + tokenText + " ");
-      const token = createComposerGroupMentionToken({
-        groupId: selected.value,
-        remote: selected.remote,
-        token: tokenText,
-        start: before.length,
-      });
-      if (token) {
-        setComposerGroupMentionTokens((tokens) =>
-          pruneComposerGroupMentionTokens({ text: before, tokens }).concat([token]),
-        );
-      }
-    }
-    // Inserting a `#<group>` token is a local-group delegation hint only — it
-    // must NOT set a cross-group destination. The destination stays local.
-    setShowMentionMenu(false);
-    setMentionSelectedIndex(0);
   };
 
   const selectSlashCommand = (selected: SlashCommandItem | undefined) => {
@@ -837,21 +751,27 @@ export function ChatComposer({
     { key: "request_reply", label: t("modeSendReply"), description: t("modeSendReplyDesc") },
     { key: "mail", label: t("modeMail"), description: t("modeMailDesc") },
   ];
-  const modeOptions = replyTarget
-    ? allModeOptions.filter((option) => option.key !== "request_reply")
-    : allModeOptions;
+  const toChet = toTokens.includes(CHET_SELECTOR) || !!replyTarget?.toChet;
+  const modeOptions = allModeOptions.filter(
+    (option) =>
+      !(replyTarget && option.key === "request_reply") && !(toChet && option.key === "mail"),
+  );
 
-  const effectiveMessageMode: ComposerMessageMode = replyTarget
-    ? normalizeReplyMessageMode(messageMode)
-    : messageMode;
-  const requestReplyRecipientsReady = hasConcreteReplyRecipients(toTokens);
-  const canSend = getComposerCanSend({
-    composerText,
-    composerFilesCount: composerFiles.length,
-    recipientResolutionBusy: selectedGroupActorsHydrating || recipientActorsBusy,
-    messageMode: effectiveMessageMode,
+  const effectiveMessageMode: ComposerMessageMode = messageModeForRecipients(
+    replyTarget ? normalizeReplyMessageMode(messageMode) : messageMode,
     toTokens,
-  });
+    !!replyTarget?.toChet,
+  );
+  const requestReplyRecipientsReady = hasConcreteReplyRecipients(toTokens);
+  const canSend =
+    !sendInFlight &&
+    getComposerCanSend({
+      composerText,
+      composerFilesCount: composerFiles.length,
+      recipientResolutionBusy: selectedGroupActorsHydrating || recipientActorsBusy,
+      messageMode: effectiveMessageMode,
+      toTokens,
+    });
 
   const recentChatExcerpt = useMemo(
     () => buildRecentChatExcerptForVoicePrompt(recentMessages),
@@ -896,11 +816,9 @@ export function ChatComposer({
     (draft: string, opts?: { mode?: "replace" | "append" }) => {
       const text = String(draft || "").trim();
       if (!text) return;
-      setComposerText((current) => {
-        const existing = String(current || "");
-        if (opts?.mode === "replace" || !existing.trim()) return text;
-        return `${existing.replace(/\s+$/g, "")}\n\n${text}`;
-      });
+      setComposerText((current) =>
+        mergeVoiceComposerDraftText(String(current || ""), text, opts?.mode ?? "append"),
+      );
       focusComposerAfterSpeech();
     },
     [focusComposerAfterSpeech, setComposerText],
@@ -920,14 +838,17 @@ export function ChatComposer({
     }
     return "Ctrl+Enter";
   }, []);
-  const sendButtonTitle =
-    effectiveMessageMode === "request_reply" && !requestReplyRecipientsReady
-      ? t("modeSendReplyRequiresConcrete")
-      : t("sendMessageWithShortcut", {
-          shortcut: sendShortcutLabel,
-          defaultValue: "Send message ({{shortcut}})",
-        });
+  // Send + Reply needs concrete recipients; say why Send is off where the recipients are chosen.
+  const replyRecipientsBlocked =
+    effectiveMessageMode === "request_reply" && !requestReplyRecipientsReady;
+  const sendButtonTitle = replyRecipientsBlocked
+    ? t("modeSendReplyRequiresConcrete")
+    : t("sendMessageWithShortcut", {
+        shortcut: sendShortcutLabel,
+        defaultValue: "Send message ({{shortcut}})",
+      });
   const showTypingPlaceholder = Boolean(
+    !compactViewport &&
     selectedGroupId &&
     composerGroupSettled &&
     busy !== "send" &&
@@ -937,25 +858,111 @@ export function ChatComposer({
   const composerPlaceholder =
     showSuggestedUserMessage || showTypingPlaceholder
       ? ""
-      : isSmallScreen
+      : compactViewport
         ? t("messagePlaceholder")
         : t("messagePlaceholderDesktop");
+  const compact = Boolean(
+    compactViewport &&
+    selectedGroupId &&
+    composerGroupSettled &&
+    !keepExpanded &&
+    expandedGroup !== selectedGroupId &&
+    !composerFocused &&
+    !composerText &&
+    composerFiles.length === 0 &&
+    !replyTarget &&
+    !quotedPresentationRef &&
+    !quotedVoiceDocumentRef &&
+    !showSuggestedUserMessage &&
+    !showModeMenu &&
+    !showMentionMenu &&
+    !showSlashMenu &&
+    !voiceBlocksCompact &&
+    !busy &&
+    effectiveMessageMode === "send" &&
+    (!destGroupId || destGroupId === selectedGroupId),
+  );
+  const visibleUnavailableRecipients =
+    selectedGroupActorsHydrating || recipientActorsBusy ? [] : unavailableRecipients;
+  const recipientTitles = [
+    ...visibleUnavailableRecipients.map((name) => t("unavailableRecipient", { name })),
+    ...toTokens.map((token) => actors.find((actor) => actor.id === token)?.title || token),
+  ];
+  const compactRecipients = recipientTitles.length
+    ? `${recipientTitles[0]}${recipientTitles.length > 1 ? ` +${recipientTitles.length - 1}` : ""}`
+    : "";
+  useComposerTextareaAutoResize({
+    composerRef,
+    value: composerText,
+    minHeight: compact ? 44 : minComposerHeight,
+    maxHeight: compact ? 44 : maxComposerHeight,
+  });
+
+  const focusSelectedRecipient = () => {
+    requestAnimationFrame(() => {
+      const row = footerRef.current?.querySelector<HTMLElement>("[data-composer-recipient-row]");
+      (
+        row?.querySelector<HTMLButtonElement>("[data-unavailable-recipient]") ||
+        row?.querySelector<HTMLButtonElement>('button[aria-pressed="true"]') ||
+        row?.querySelector<HTMLButtonElement>("button")
+      )?.focus();
+    });
+  };
 
   return (
     <footer
       ref={footerRef}
+      data-composer-compact={compact ? "true" : undefined}
+      onPointerDownCapture={(event) => {
+        if (
+          compactViewport &&
+          event.target instanceof Element &&
+          event.currentTarget.contains(event.target) &&
+          event.target.closest("button")
+        ) {
+          // The compact chip leaves the DOM as soon as the row expands, before
+          // a touch click fires. Restore focus after that row is rendered.
+          if (compact && event.target.closest(".compact-composer-recipients")) {
+            setExpandedGroup(selectedGroupId);
+            focusSelectedRecipient();
+          } else if (!compact) {
+            // Keep an already expanded row open while focus moves from the
+            // textarea to a recipient, attachment, or voice control.
+            setExpandedGroup(selectedGroupId);
+          }
+        }
+      }}
+      onClickCapture={(event) => {
+        if (compact && event.target instanceof Element && event.target.closest("button")) {
+          // Let the first tap reach the compact control before the layout moves.
+          setExpandedGroup(selectedGroupId);
+        }
+      }}
+      onBlurCapture={(event) => {
+        const next = event.relatedTarget;
+        if (
+          next instanceof Element &&
+          !event.currentTarget.contains(next) &&
+          !next.closest('[role="dialog"], [role="menu"], [role="listbox"]')
+        ) {
+          afterTap(() => setExpandedGroup(""));
+        }
+      }}
       className={classNames(
-        "relative z-40 flex-shrink-0 px-2 pt-2 pb-[calc(0.375rem+env(safe-area-inset-bottom,0px)*0.6)] sm:px-4 sm:pb-[calc(0.5rem+env(safe-area-inset-bottom,0px)*0.6)]",
+        "relative z-40 flex-shrink-0 px-2 pb-[max(0.375rem,env(safe-area-inset-bottom,0px))] sm:px-4 sm:pb-[max(0.5rem,env(safe-area-inset-bottom,0px))]",
+        compactViewport ? "pt-1" : "pt-2",
         "bg-[var(--color-chat-bg)]",
       )}
     >
-      {!isSmallScreen ? (
+      {!compactViewport ? (
         <ComposerResizeHandle {...composerResize} label={t("layout:resizeComposer")} />
       ) : null}
       <div
         data-composer-surface
-        className="chat-reading-width rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-1 pt-1 shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--color-border-secondary)] motion-reduce:transition-none"
+        className="@container/composer chat-reading-width rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-1 pt-1 shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--color-border-secondary)] motion-reduce:transition-none"
       >
+        <ComposerFailedSends groupId={selectedGroupId} isDark={isDark} />
+
         {/* Reply indicator */}
         {replyTarget && (
           <div
@@ -1107,77 +1114,101 @@ export function ChatComposer({
 
         {/* Integrated composer */}
         <div className="flex flex-col">
-          <div className="relative flex min-w-0 flex-1 flex-col">
+          <div className="relative flex min-w-0 flex-1 flex-col" data-composer-inner>
             <ComposerRecipientsRow
               isDark={isDark}
               isSmallScreen={isSmallScreen}
               selectedGroupId={selectedGroupId}
               busy={busy}
               actors={actors}
+              allowChet={isWebAdmin === true && (!destGroupId || destGroupId === selectedGroupId)}
               selectedGroupActorsHydrating={selectedGroupActorsHydrating}
               toTokens={toTokens}
+              unavailableRecipients={visibleUnavailableRecipients}
               onToggleRecipient={onToggleRecipient}
               onClearRecipients={onClearRecipients}
             />
+            {replyRecipientsBlocked ? (
+              <p
+                data-composer-send-blocked
+                className="px-3 pb-1 text-xs text-[var(--color-text-secondary)]"
+              >
+                {t("modeSendReplyRequiresConcrete")}
+              </p>
+            ) : null}
 
             <div ref={setVoiceStatusTarget} data-voice-mobile-status-slot />
 
             {/* Row 2 — Textarea */}
-            <div className="relative min-w-0 flex-1">
-              {mentionOverlay ? (
-                <div
-                  className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words border-none px-4 py-3 text-transparent"
-                  style={{
-                    minHeight: isSmallScreen
-                      ? `${minComposerHeight}px`
-                      : `var(--composer-min-height, ${minComposerHeight}px)`,
-                    maxHeight: isSmallScreen
-                      ? `${maxComposerHeight}px`
-                      : `var(--composer-max-height, ${maxComposerHeight}px)`,
-                    fontSize: `${composerFontSize}px`,
-                    lineHeight: `${composerLineHeight}px`,
-                    border: "none",
+            <div className="relative min-w-0 flex-1" data-composer-input>
+              {compact && compactRecipients ? (
+                <button
+                  type="button"
+                  className="compact-composer-recipients"
+                  aria-label={`${t("to", "To")}: ${recipientTitles.join(", ")}`}
+                  title={recipientTitles.join(", ")}
+                  onClick={() => {
+                    setExpandedGroup(selectedGroupId);
+                    focusSelectedRecipient();
                   }}
-                  aria-hidden="true"
                 >
-                  <div
-                    style={{ transform: `translateY(-${composerScrollTop}px)` }}
-                    dangerouslySetInnerHTML={{ __html: mentionOverlay }}
-                  />
-                </div>
+                  <span>{compactRecipients}</span>
+                </button>
+              ) : null}
+              {liveGroupMentionTokens.length || liveAgentMentionTokens.length ? (
+                <ComposerMentionOverlay
+                  text={composerText}
+                  groupTokens={liveGroupMentionTokens}
+                  agentTokens={liveAgentMentionTokens}
+                  scrollTop={composerScrollTop}
+                  compact={compactViewport}
+                  minHeight={expandedMinHeight}
+                  maxHeight={expandedMaxHeight}
+                  fontSize={composerFontSize}
+                  lineHeight={composerLineHeight}
+                />
               ) : null}
               <textarea
                 ref={composerRef as RefObject<HTMLTextAreaElement>}
                 className={classNames(
-                  "relative w-full bg-transparent border-none py-3 resize-none overflow-y-auto scrollbar-hide focus:outline-none focus:ring-0 focus-visible:shadow-none text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
+                  "relative w-full bg-transparent border-none resize-none overflow-y-auto scrollbar-hide focus:outline-none focus:ring-0 focus-visible:shadow-none text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)]",
+                  compactViewport ? "py-2" : "py-3",
                   showSuggestedUserMessage ? "pl-11 pr-4" : "px-4",
                 )}
                 style={{
-                  minHeight: showTypingPlaceholder
-                    ? `max(${hintMinHeight}px, ${isSmallScreen ? `${minComposerHeight}px` : `var(--composer-min-height, ${minComposerHeight}px)`})`
-                    : isSmallScreen
-                      ? `${minComposerHeight}px`
-                      : `var(--composer-min-height, ${minComposerHeight}px)`,
-                  maxHeight: isSmallScreen
-                    ? `${maxComposerHeight}px`
-                    : `var(--composer-max-height, ${maxComposerHeight}px)`,
+                  minHeight: compact
+                    ? "44px"
+                    : showTypingPlaceholder
+                      ? `max(${hintMinHeight}px, ${expandedMinHeight})`
+                      : expandedMinHeight,
+                  maxHeight: compact ? "44px" : expandedMaxHeight,
                   fontSize: `${composerFontSize}px`,
                   lineHeight: `${composerLineHeight}px`,
                   border: "none",
                   outline: "none",
                   boxShadow: "none",
+                  ...(compact ? { padding: "6px" } : {}),
                 }}
                 placeholder={composerPlaceholder}
                 rows={1}
                 value={composerText}
                 onPaste={handlePaste}
+                onBeforeInput={(event) => rememberSelection(event.currentTarget)}
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
                 onPointerDown={exitComposerHistory}
+                onSelect={(event) => {
+                  const input = event.currentTarget;
+                  rememberSelection(input);
+                  if (showMentionMenu)
+                    updateMenu(input.value, input.selectionStart, input.selectionEnd);
+                }}
                 onScroll={(event) => setComposerScrollTop(event.currentTarget.scrollTop)}
                 onFocus={() => setComposerFocused(true)}
                 onBlur={() => {
-                  setComposerFocused(false);
+                  afterTap(() =>
+                    setComposerFocused(document.activeElement === composerRef.current),
+                  );
                   setTimeout(() => setShowMentionMenu(false), 150);
                 }}
                 aria-label={t("messageInput")}
@@ -1217,9 +1248,7 @@ export function ChatComposer({
                     isDark ? "text-white/22" : "text-gray-400/80",
                   )}
                   style={{
-                    maxHeight: isSmallScreen
-                      ? `${maxComposerHeight}px`
-                      : `var(--composer-max-height, ${maxComposerHeight}px)`,
+                    maxHeight: expandedMaxHeight,
                     fontSize: `${composerFontSize}px`,
                     lineHeight: `${composerLineHeight}px`,
                   }}
@@ -1276,13 +1305,18 @@ export function ChatComposer({
             <div
               data-composer-action-bar
               className={classNames(
-                "flex flex-wrap items-center gap-2 px-2 pb-2 pt-1 sm:flex-nowrap sm:justify-between",
+                "flex flex-wrap items-center gap-2 px-2 @min-[600px]/composer:flex-nowrap @min-[600px]/composer:justify-between",
+                compactViewport ? "pb-1 pt-0" : "pb-2 pt-1",
               )}
             >
-              <div className="contents sm:flex sm:min-w-0 sm:flex-1 sm:items-center sm:gap-1.5">
+              <div
+                data-composer-action-group
+                className="contents @min-[600px]/composer:flex @min-[600px]/composer:min-w-0 @min-[600px]/composer:flex-1 @min-[600px]/composer:items-center @min-[600px]/composer:gap-1.5"
+              >
                 <button
+                  data-composer-attach
                   className={classNames(
-                    "flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors duration-150 disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:opacity-60 sm:h-9 sm:w-9",
+                    "flex h-[44px] w-[44px] items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors duration-150 disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:opacity-60 @min-[600px]/composer:h-9 @min-[600px]/composer:w-9",
                     busy !== "send" && selectedGroupId
                       ? isDark
                         ? "hover:bg-white/10 hover:text-[var(--color-text-primary)]"
@@ -1297,7 +1331,7 @@ export function ChatComposer({
                   <AttachmentIcon size={18} />
                 </button>
 
-                <div className="min-w-0 shrink-0 sm:shrink">
+                <div data-composer-voice className="min-w-0 shrink-0 @min-[600px]/composer:shrink">
                   <LazyVoiceSecretaryComposerControl
                     isDark={isDark}
                     selectedGroupId={selectedGroupId}
@@ -1312,6 +1346,7 @@ export function ChatComposer({
                     onQuoteDocument={onQuoteVoiceDocumentRef}
                     onPromptDraft={fillPromptDraftFromSpeech}
                     onFocusComposer={focusComposerAfterSpeech}
+                    onCompactBlockChange={setVoiceBlocksCompact}
                   />
                 </div>
               </div>
@@ -1323,7 +1358,8 @@ export function ChatComposer({
                 onOpenChange={setShowModeMenu}
                 onModeChange={setMessageMode}
                 onSend={onSendMessage}
-                busy={busy === "send"}
+                busy={busy === "send" || sendInFlight}
+                onStopUploadWaiting={uploadInFlight ? onStopUploadWaiting : undefined}
                 canSend={canSend}
                 modeDisabled={busy === "send" || !selectedGroupId}
                 requestReplyReady={requestReplyRecipientsReady}

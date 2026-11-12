@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 mod command;
+mod confirmation;
 mod control;
 mod resume_failure;
 mod transcript;
@@ -26,12 +27,23 @@ mod transcript_path;
 mod workspace_trust;
 
 pub(super) use command::prepare;
+pub(crate) use confirmation::ConfirmationLaunch;
+pub(super) use confirmation::launch as confirmation_launch;
 pub(super) use resume_failure::diagnostic as resume_diagnostic;
 pub(super) use workspace_trust::untrusted_workspace;
 
 #[cfg(test)]
 pub(super) fn workspace_refusal(detail: &str, workspace: &Path) -> Option<io::Error> {
-    workspace_trust::WorkspaceUntrusted::from_refusal(detail, workspace, "claude", workspace)
+    workspace_trust::WorkspaceUntrusted::from_refusal(
+        detail,
+        workspace,
+        ConfirmationLaunch {
+            executable: "claude".into(),
+            config_dir: workspace.to_owned(),
+            environment: BTreeMap::new(),
+            arguments: Vec::new(),
+        },
+    )
 }
 
 pub(super) fn remove_actor_settings(
@@ -67,6 +79,14 @@ pub(super) struct LaunchedClaude {
     pub(super) tui_command: Vec<String>,
     pub(super) environment: BTreeMap<String, String>,
     pub(super) cleanup_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+pub(super) struct LaunchFailure {
+    pub(super) error: io::Error,
+    /// False when a PATH-only candidate found a live job and selected a new
+    /// conversation instead. Its startup error is not a failed resume.
+    pub(super) resume_selected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -107,8 +127,23 @@ pub(super) async fn launch(
     generation: &str,
     purpose: SessionPurpose,
     requested_session_id: Option<&str>,
-) -> io::Result<LaunchedClaude> {
-    launch_inner(prepared, cwd, generation, purpose, requested_session_id).await
+    cold_only: bool,
+) -> Result<LaunchedClaude, LaunchFailure> {
+    let mut resume_selected = requested_session_id.is_some();
+    launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        requested_session_id,
+        cold_only,
+        &mut resume_selected,
+    )
+    .await
+    .map_err(|error| LaunchFailure {
+        error,
+        resume_selected,
+    })
 }
 
 async fn launch_inner(
@@ -116,10 +151,24 @@ async fn launch_inner(
     cwd: &Path,
     generation: &str,
     purpose: SessionPurpose,
-    requested_session_id: Option<&str>,
+    mut requested_session_id: Option<&str>,
+    cold_only: bool,
+    resume_selected: &mut bool,
 ) -> io::Result<LaunchedClaude> {
     command::require_supported_version(&prepared.executable, cwd, &prepared.launch_environment)
         .await?;
+    let live_job = if let Some(session_id) = requested_session_id {
+        validate_session_id(session_id)?;
+        find_live_job(&prepared.config_dir, session_id).await?
+    } else {
+        None
+    };
+    if cold_only && live_job.is_some() {
+        // The existing worker may have work of its own and still uses the old
+        // PATH. Do not adopt or stop it; keep the prior fresh-launch behavior.
+        requested_session_id = None;
+        *resume_selected = false;
+    }
     // Inspect durable job metadata BEFORE respawn can replace it. A receipt
     // alone does not imply that this session ever received its first prompt.
     let skip_existing_transcript = match requested_session_id {
@@ -127,22 +176,21 @@ async fn launch_inner(
         None => false,
     };
 
-    if let Some(session_id) = requested_session_id {
-        validate_session_id(session_id)?;
-        if let Some((endpoint, job)) = find_live_job(&prepared.config_dir, session_id).await? {
-            validate_worker_version(&job)?;
-            await_settled(&prepared.config_dir, &job, cwd).await?;
-            return connect_launched(
-                prepared,
-                endpoint,
-                job,
-                generation,
-                true,
-                skip_existing_transcript,
-                false,
-            )
-            .await;
-        }
+    if requested_session_id.is_some()
+        && let Some((endpoint, job)) = live_job
+    {
+        validate_worker_version(&job)?;
+        await_settled(&prepared.config_dir, &job, cwd).await?;
+        return connect_launched(
+            prepared,
+            endpoint,
+            job,
+            generation,
+            true,
+            skip_existing_transcript,
+            false,
+        )
+        .await;
     }
 
     let name = format!(
@@ -198,26 +246,15 @@ async fn launch_inner(
         if let Some(error) = workspace_trust::WorkspaceUntrusted::from_refusal(
             detail,
             cwd,
-            &prepared.executable,
-            &prepared.config_dir,
+            ConfirmationLaunch::from_prepared(&prepared),
         ) {
             return Err(error);
         }
-        let guidance = if detail
-            .contains("--bg with bypassPermissions requires accepting the disclaimer first")
-        {
-            format!(
-                " For this session, run the configured executable '{}' interactively with \
-                 --dangerously-skip-permissions and CLAUDE_CONFIG_DIR set to '{}'. \
-                 After accepting the disclaimer, exit that session and retry in CCCC.",
-                prepared.executable,
-                prepared.config_dir.display(),
-            )
-        } else {
-            String::new()
-        };
+        if let Some(error) = confirmation::refusal(detail, cwd, &prepared) {
+            return Err(error);
+        }
         return Err(io::Error::other(format!(
-            "Claude Agent View launch failed: {detail}{guidance}"
+            "Claude Agent View launch failed: {detail}"
         )));
     }
     let short = parse_short_id(&stdout)
@@ -2252,6 +2289,7 @@ mod tests {
             "generation-12345678",
             SessionPurpose::Actor,
             re_adopt.then_some(session_id),
+            false,
         )
         .await
         .expect("launch Agent View");

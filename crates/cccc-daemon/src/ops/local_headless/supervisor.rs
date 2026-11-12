@@ -105,6 +105,7 @@ pub(super) fn launch_managed(
     actor: &Actor,
     cwd: &std::path::Path,
 ) -> io::Result<AnalystSession> {
+    let instruction_snapshot = super::super::instruction_files::Snapshot::read(cwd);
     let mut env = actor.env.clone();
     env.insert(
         "CCCC_HOME".into(),
@@ -123,13 +124,23 @@ pub(super) fn launch_managed(
         environment: env,
     };
     let launch_home = home.clone();
-    run_managed_launch(
+    let app = run_managed_launch(
         async move { AnalystSession::launch_actor(&launch_home, config).await }.instrument(
             tracing::info_span!(
                 "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
             ),
         ),
-    )
+    )?;
+    if let Some(snapshot) = instruction_snapshot {
+        super::super::instruction_files::record(
+            home,
+            &group.group_id,
+            actor,
+            &format!("headless:{}", app.generation()),
+            snapshot,
+        );
+    }
+    Ok(app)
 }
 
 pub(super) fn attach_managed(
@@ -156,6 +167,7 @@ pub(super) fn attach_managed(
             command: app.actor_tui_command(),
             env: app.tui_environment(),
             cwd: cwd.clone(),
+            submit: actor.submit,
         })),
         status: Mutex::new(HeadlessStatus {
             status: "idle".into(),
@@ -214,6 +226,7 @@ pub(super) fn attach_managed(
         return Err(cleanup_failed_start(&item, error));
     }
     super::output::emit(&item, "headless.session.started", Map::new());
+    super::super::runtime_session::announce_replaced(home, &group.group_id, &actor.id);
     Ok(())
 }
 
@@ -239,6 +252,12 @@ fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Resu
     let _start = StartGuard::acquire(&key)?;
     if lookup(&key).is_some_and(|item| item.running()) {
         return Ok(());
+    }
+    if actor.runtime == ActorRuntime::Claude {
+        super::confirmation_pause::ensure_allowed(&key)?;
+    } else {
+        // A prior Claude confirmation does not govern another provider's next launch.
+        super::confirmation_pause::retry(&key)?;
     }
     stop_locked(&key)?;
 
@@ -313,13 +332,19 @@ fn lifecycle_keys() -> io::Result<HashSet<Key>> {
 }
 
 pub fn stop_group(group_id: &str) -> io::Result<()> {
-    let actor_ids = lifecycle_keys()?
+    let mut actor_ids = lifecycle_keys()?
         .into_iter()
         .filter(|key| key.0 == group_id)
         .map(|key| key.1)
-        .collect::<Vec<_>>();
+        .collect::<HashSet<_>>();
+    // A cancelled watcher may leave its protected terminal alive after launch
+    // preparation fails; it still belongs to the Group being paused.
+    actor_ids.extend(super::confirmation_terminal::group_actor_ids(group_id)?);
     for actor_id in actor_ids {
         stop(group_id, &actor_id)?;
+        // Group pause stops managed owners. A pending confirmation has no
+        // managed owner yet, so retire its protected terminal separately.
+        super::confirmation_terminal::stop_owned(group_id, &actor_id)?;
     }
     Ok(())
 }
@@ -396,6 +421,12 @@ pub(crate) fn registered_running(group_id: &str, actor_id: &str) -> Option<bool>
     lookup(&(group_id.to_owned(), actor_id.to_owned())).map(|item| item.running())
 }
 
+/// The registered session's generation, and whether it is running.
+pub(crate) fn registered_generation(group_id: &str, actor_id: &str) -> Option<(String, bool)> {
+    let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
+    Some((item.managed.generation().to_owned(), item.running()))
+}
+
 pub(crate) fn registered_workspace(
     group_id: &str,
     actor_id: &str,
@@ -417,12 +448,34 @@ pub fn status(group_id: &str, actor_id: &str) -> Option<HeadlessStatus> {
     Some(state.clone())
 }
 
+#[cfg(test)]
 pub fn submit_batch(
     home: &HomeLayout,
     group: &GroupDoc,
     actor: &Actor,
     source_events: &[Event],
     cancelled: &AtomicBool,
+) -> BatchSubmission {
+    submit_batch_marked(
+        home,
+        group,
+        actor,
+        source_events,
+        cancelled,
+        &AtomicBool::new(false),
+    )
+}
+
+/// As [`submit_batch`], setting `started` right before input is handed to the
+/// managed session or written to its terminal. Input may have arrived even
+/// when the submission then reports `Deferred`.
+pub fn submit_batch_marked(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    source_events: &[Event],
+    cancelled: &AtomicBool,
+    started: &AtomicBool,
 ) -> BatchSubmission {
     let Some(item) = lookup(&(group.group_id.clone(), actor.id.clone())) else {
         return BatchSubmission::Deferred;
@@ -434,7 +487,7 @@ pub fn submit_batch(
         return BatchSubmission::Deferred;
     }
     item.admit_batch(source_events, || {
-        submit_admitted(home, group, actor, source_events, cancelled, &item)
+        submit_admitted(home, group, actor, source_events, cancelled, started, &item)
     })
 }
 
@@ -452,9 +505,10 @@ fn submit_admitted(
     actor: &Actor,
     source_events: &[Event],
     cancelled: &AtomicBool,
+    started: &AtomicBool,
     item: &Session,
 ) -> BatchSubmission {
-    let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
+    let Some(mut delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
         &actor.id,
@@ -462,6 +516,19 @@ fn submit_admitted(
     ) else {
         return BatchSubmission::Deferred;
     };
+    let mut instruction_notice = item.workspace.clone().for_actor(actor).and_then(|scope| {
+        super::super::instruction_files::check(
+            home,
+            &group.group_id,
+            actor,
+            &format!("headless:{}", item.managed.generation()),
+            &scope.path,
+        )
+    });
+    if let Some(notice) = &instruction_notice {
+        delivery.push_str("\n\n");
+        delivery.push_str(&notice.delivery_line());
+    }
     // OpenCode V2's terminal is a view of the owned HTTP session. Admit CCCC
     // input through that session's durable queue, including during TUI startup.
     // Writing the terminal can be acknowledged before its composer is ready.
@@ -481,6 +548,7 @@ fn submit_admitted(
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                 return false;
             }
+            started.store(true, Ordering::Release);
             match super::block_on_managed(async {
                 tokio::select! {
                     biased;
@@ -537,6 +605,11 @@ fn submit_admitted(
                 }
             }
         });
+        if outcome == BatchSubmission::Accepted
+            && let Some(notice) = instruction_notice.take()
+        {
+            notice.delivered();
+        }
         return outcome;
     }
     if let Err(error) = item.reattach_viewer() {
@@ -549,14 +622,19 @@ fn submit_admitted(
         return BatchSubmission::Deferred;
     }
     if item.has_terminal() {
+        let launched = item.launched(actor);
         let accepted = submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
+            started.store(true, Ordering::Release);
             super::super::actor_delivery::submit_terminal_text(
                 &group.group_id,
-                actor,
+                &launched,
                 prepared,
                 cancelled,
             )
         });
+        if accepted && let Some(notice) = instruction_notice.take() {
+            notice.delivered();
+        }
         return if accepted {
             BatchSubmission::Accepted
         } else {
@@ -587,16 +665,19 @@ fn submit_with_startup_prompt(
 
 #[cfg(test)]
 fn render_turn(event: &Event) -> Option<(String, String)> {
-    super::super::actor_delivery_render::render_batch(std::slice::from_ref(event)).map(|text| {
-        (
-            text,
-            if event.kind == "system.notify" {
-                "system_notify".into()
-            } else {
-                String::new()
-            },
-        )
-    })
+    let group = super::super::actor_delivery_render::test_group();
+    super::super::actor_delivery_render::render_batch(&group, std::slice::from_ref(event)).map(
+        |text| {
+            (
+                text,
+                if event.kind == "system.notify" {
+                    "system_notify".into()
+                } else {
+                    String::new()
+                },
+            )
+        },
+    )
 }
 
 fn lookup(key: &Key) -> Option<Arc<Session>> {

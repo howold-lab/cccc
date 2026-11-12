@@ -138,7 +138,7 @@ pub(crate) async fn launch(
     if daemon_missing {
         let daemon_home = home.clone();
         embedded_daemon = Some(tokio::spawn(async move {
-            let result = cccc_daemon::run(daemon_home).await;
+            let result = cccc_daemon::run_with_diagnostics(daemon_home).await;
             let _ = daemon_exit_tx.send(true);
             result
         }));
@@ -195,6 +195,7 @@ pub(crate) async fn launch(
     } else {
         DaemonState::External { pid: external_pid }
     };
+    let voice_recovery = crate::web_voice_recovery::new(&home, daemon_owned);
 
     let (mut interface, startup_error) = if let Some(control) = terminal_control.as_mut() {
         if control.controller.is_requested() {
@@ -213,19 +214,31 @@ pub(crate) async fn launch(
         (None, None)
     };
 
-    // The plain host retains its existing signal behavior. The TUI's controller
-    // also receives raw key events and keeps running through Web restarts.
+    // The plain host retains its existing signal behavior, except that its first
+    // interrupt requests the same stop as the TUI's controller. The TUI's
+    // controller also receives raw key events and keeps running through Web
+    // restarts. Its listener is registered here, before the Web starts.
     let owned_home = daemon_owned.then(|| home.clone());
+    let plain_stop = (!terminal).then(crate::shutdown::Controller::new);
     #[cfg(windows)]
-    let plain_watchdog = (!terminal).then(|| {
-        tokio::spawn(crate::shutdown::watch_for_interrupt(
+    let plain_watching = plain_stop.clone().map(|controller| {
+        crate::shutdown::watch_for_interrupt(
+            controller,
             owned_home,
             std::sync::Arc::clone(&detached_daemon),
-        ))
+        )
     });
     #[cfg(not(windows))]
-    let plain_watchdog =
-        (!terminal).then(|| tokio::spawn(crate::shutdown::watch_for_interrupt(owned_home)));
+    let plain_watching = plain_stop
+        .clone()
+        .map(|controller| crate::shutdown::watch_for_interrupt(controller, owned_home));
+    let plain_watchdog = plain_watching.and_then(|watching| {
+        watching
+            .inspect_err(|error| {
+                cccc_runtime::diagnostic(format_args!("could not listen for interrupts: {error}"))
+            })
+            .ok()
+    });
 
     let mode = web_mode.unwrap_or_else(cccc_web::WebMode::from_env);
     let mut result = if let Some(error) = startup_error {
@@ -236,7 +249,8 @@ pub(crate) async fn launch(
             let mut daemon_exited = daemon_exit_rx.clone();
             let controller = terminal_control
                 .as_ref()
-                .map(|control| control.controller.clone());
+                .map(|control| control.controller.clone())
+                .or_else(|| plain_stop.clone());
             if controller
                 .as_ref()
                 .is_some_and(|controller| controller.is_requested())
@@ -266,13 +280,14 @@ pub(crate) async fn launch(
                 }
             };
             let outcome = {
-                let serving = cccc_web::serve_until_mode_supervised(
+                let serving = cccc_web::serve_until_mode_supervised_with_voice_recovery(
                     home.clone(),
                     &binding.host,
                     binding.port,
                     mode,
                     shutdown,
                     interface.as_ref().map(Interface::listening),
+                    voice_recovery.clone(),
                 );
                 tokio::pin!(serving);
                 if let Some(control) = &terminal_control {
@@ -299,7 +314,9 @@ pub(crate) async fn launch(
                 Ok(cccc_web::ServeOutcome::RestartRequested) => {
                     if terminal_control
                         .as_ref()
-                        .is_some_and(|control| control.controller.is_requested())
+                        .map(|control| &control.controller)
+                        .or(plain_stop.as_ref())
+                        .is_some_and(|controller| controller.is_requested())
                     {
                         break Ok(());
                     }

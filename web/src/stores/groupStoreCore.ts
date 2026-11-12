@@ -38,6 +38,8 @@ export type ChatWindowState = {
   events: LedgerEvent[];
   hasMoreBefore: boolean;
   hasMoreAfter: boolean;
+  isLoadingAfter?: boolean;
+  afterError?: boolean;
 };
 
 export type GroupChatBucket = {
@@ -970,6 +972,9 @@ export function mergeLedgerEventStatuses(
           ? mergeReadStatus(patch.read_status, event._read_status)
           : undefined,
       _obligation_status: mergeObligationStatus(patch.obligation_status, event._obligation_status),
+      _user_request:
+        patch.user_request ??
+        (patch.obligation_status === undefined ? event._user_request : undefined),
       _retired_bridge: patch.retired_bridge || event._retired_bridge,
       _connect_delivery: mergeConnectDelivery(patch.connect_delivery, event._connect_delivery),
       _connect_cancellation: mergeConnectDelivery(
@@ -1013,6 +1018,7 @@ export type ObligationStatusPatch = {
   replied?: true;
   cancelled?: true;
   deliveryState?: string;
+  deliveryReason?: string;
 };
 
 export function updateObligationAtIndex(
@@ -1045,13 +1051,15 @@ export function updateObligationAtIndex(
     }
     const previous = obligationStatus[recipientId] as ObligationStatus;
     const updated = { ...previous };
-    if (patch.deliveryState !== undefined && updated.delivery_state !== patch.deliveryState) {
+    if (patch.deliveryState !== undefined) {
       updated.delivery_state = patch.deliveryState;
+      updated.delivery_reason = patch.deliveryReason;
     }
     if ((patch.reply || patch.replied) && !updated.cancelled) updated.replied = true;
     if (patch.cancelled && !updated.replied) updated.cancelled = true;
     if (
       updated.delivery_state === previous.delivery_state &&
+      (updated.delivery_reason || "") === (previous.delivery_reason || "") &&
       updated.replied === previous.replied &&
       updated.cancelled === previous.cancelled
     ) {

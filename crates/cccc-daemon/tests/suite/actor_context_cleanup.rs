@@ -136,6 +136,62 @@ fn removed_actor_loses_open_task_references_and_working_state_before_recreation(
 }
 
 #[test]
+fn context_reads_show_only_current_members_without_changing_stored_state() {
+    let fixture = Fixture::new();
+    fixture.call(
+        "context_sync",
+        json!({"by":"user","ops":[
+            {"op":"agent_state.update","actor_id":"leaving","focus":"old generation"},
+            {"op":"agent_state.update","actor_id":"staying","focus":"still a member"}
+        ]}),
+    );
+    fixture.call("actor_remove", json!({"actor_id":"leaving","by":"user"}));
+
+    let stored = fixture.context();
+    assert!(stored.agent_states.contains_key("leaving"));
+    let contexts = ContextStore::new(fixture.home.clone()).expect("context store");
+    let stored_version = contexts.version(&stored).expect("stored version");
+    for detail in ["overview", "summary", "full"] {
+        for paged in [false, true] {
+            let mut args = json!({"detail":detail});
+            if paged {
+                args["limit"] = json!(1);
+                args["max_bytes"] = json!(4096);
+            }
+            let result = fixture.call("context_get", args);
+            let states = result["agent_states"].as_array().expect("states");
+            assert_eq!(states.len(), 1, "{detail}, paged={paged}");
+            assert_eq!(states[0]["id"], "staying");
+            assert_eq!(states[0]["hot"]["focus"], "still a member");
+            assert_eq!(result["version"], stored_version);
+        }
+    }
+    assert_eq!(fixture.context().agent_states, stored.agent_states);
+
+    // A response version remains usable for optimistic writes even though the
+    // response omits the removed member's stored entry.
+    fixture.call(
+        "context_sync",
+        json!({"by":"user","if_version":stored_version,"ops":[
+            {"op":"agent_state.update","actor_id":"staying","focus":"updated"}
+        ]}),
+    );
+
+    // The fixture's members are disabled. Existence, rather than runtime status
+    // or non-empty state, decides whether a member's saved state is returned.
+    fixture.add_actor("leaving");
+    let recreated = fixture.call("context_get", json!({"detail":"overview"}));
+    let states = recreated["agent_states"].as_array().expect("states");
+    assert_eq!(states.len(), 2);
+    let state = states
+        .iter()
+        .find(|state| state["id"] == "leaving")
+        .expect("recreated member");
+    assert_eq!(state["hot"], json!({}));
+    assert_eq!(state["warm"], json!({}));
+}
+
+#[test]
 fn removed_actor_working_state_is_cleared_without_any_open_tasks() {
     let fixture = Fixture::new();
     fixture.call(
@@ -170,4 +226,84 @@ fn rejected_actor_removal_preserves_context() {
     let after = fixture.context();
     assert_eq!(after.tasks, before.tasks);
     assert_eq!(after.agent_states, before.agent_states);
+}
+
+#[test]
+fn a_peer_can_claim_only_a_task_nobody_holds() {
+    let fixture = Fixture::new();
+    let created = fixture.call(
+        "context_sync",
+        json!({"by":"user","ops":[
+            {"op":"task.create","title":"free","status":"planned"},
+            {"op":"task.create","title":"free for notes","status":"planned"},
+            {"op":"task.create","title":"free for another","status":"planned"},
+            {"op":"task.create","title":"held","status":"planned","assignee":"leaving"},
+            {"op":"task.create","title":"handed","status":"planned","handoff_to":"leaving"},
+            {"op":"task.create","title":"finished","status":"planned"},
+            {"op":"task.create","title":"archived","status":"planned"},
+        ]}),
+    );
+    let ids: Vec<&str> = created["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|change| change["task_id"].as_str().expect("task id"))
+        .collect();
+    let [
+        free,
+        notes_only,
+        for_another,
+        held,
+        handed,
+        finished,
+        archived,
+    ] = ids[..]
+    else {
+        panic!("seven tasks");
+    };
+    fixture.call(
+        "context_sync",
+        json!({"by":"user","ops":[
+            {"op":"task.move","task_id":finished,"status":"done"},
+            {"op":"task.move","task_id":archived,"status":"archived"},
+        ]}),
+    );
+
+    // One request takes the task up and starts it, as the task tool sends both.
+    fixture.call(
+        "context_sync",
+        json!({"by":"staying","ops":[
+            {"op":"task.update","task_id":free,"assignee":"staying","notes":"mine"},
+            {"op":"task.move","task_id":free,"status":"active"},
+        ]}),
+    );
+    let context = fixture.context();
+    let claimed = context
+        .tasks
+        .iter()
+        .find(|task| task["id"] == free)
+        .expect("claimed task");
+    assert_eq!(claimed["assignee"], "staying");
+    assert_eq!(claimed["status"], "active");
+
+    let refused = [
+        json!({"op":"task.update","task_id":notes_only,"notes":"no claim"}),
+        json!({"op":"task.move","task_id":notes_only,"status":"active"}),
+        json!({"op":"task.delete","task_id":notes_only}),
+        json!({"op":"task.update","task_id":for_another,"assignee":"leaving"}),
+        json!({"op":"task.update","task_id":held,"assignee":"staying"}),
+        json!({"op":"task.update","task_id":handed,"assignee":"staying"}),
+        json!({"op":"task.update","task_id":finished,"assignee":"staying"}),
+        json!({"op":"task.update","task_id":archived,"assignee":"staying"}),
+    ];
+    for operation in refused {
+        let response = fixture.request(
+            "context_sync",
+            json!({"by":"staying","ops":[operation.clone()]}),
+        );
+        let error = response
+            .error
+            .unwrap_or_else(|| panic!("allowed: {operation}"));
+        assert_eq!(error.code, "permission_denied", "{operation}");
+    }
 }

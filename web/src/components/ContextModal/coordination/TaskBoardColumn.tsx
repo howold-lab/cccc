@@ -19,9 +19,11 @@ export function TaskBoardColumn({
   tr,
   ui,
   syncBusy,
+  searchQuery,
   selectedTaskId,
   onSelectTask,
   onMoveTaskToStatus,
+  onRestoreTask,
   onLoadMore,
 }: {
   columnKey: BoardStatus;
@@ -34,9 +36,11 @@ export function TaskBoardColumn({
   tr: ContextTranslator;
   ui: ContextModalUi;
   syncBusy: boolean;
+  searchQuery: string;
   selectedTaskId: string;
   onSelectTask: (task: Task) => void;
   onMoveTaskToStatus: (task: Task, nextStatus: BoardStatus) => void;
+  onRestoreTask: (task: Task) => void;
   onLoadMore: (status: BoardStatus) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({
@@ -49,7 +53,11 @@ export function TaskBoardColumn({
   return (
     <section
       ref={setNodeRef}
+      aria-label={label}
       data-task-column={columnKey}
+      data-drop-target={isOver || undefined}
+      // The phone column jump moves focus here, so Tab continues in this column.
+      tabIndex={-1}
       data-rendered-task-count={items.length}
       data-total-task-count={totalCount}
       className={classNames(
@@ -59,15 +67,18 @@ export function TaskBoardColumn({
           : "glass-panel",
       )}
     >
-      <div className="flex items-center justify-between gap-2">
+      <div data-task-column-head className="flex items-center justify-between gap-2">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-[var(--color-text-primary)]">{label}</div>
         </div>
-        <span className="rounded-full px-2 py-0.5 text-xs glass-panel text-[var(--color-text-tertiary)]">
+        <span
+          data-task-column-count
+          className="rounded-full px-2 py-0.5 text-xs glass-panel text-[var(--color-text-tertiary)]"
+        >
           {totalCount}
         </span>
       </div>
-      <div className="mt-3 space-y-2">
+      <div data-task-column-items className="mt-3 space-y-2">
         {items.length > 0 ? (
           items.map((task) => (
             <TaskCard
@@ -75,15 +86,19 @@ export function TaskBoardColumn({
               task={task}
               subtasks={subtaskProgress.get(task.id)}
               tr={tr}
-              ui={ui}
               syncBusy={syncBusy}
+              searchQuery={searchQuery}
               selected={selectedTaskId === task.id}
               onSelectTask={onSelectTask}
               onMoveTaskToStatus={onMoveTaskToStatus}
+              onRestoreTask={onRestoreTask}
             />
           ))
         ) : (
-          <div className="rounded-lg border border-dashed border-[var(--glass-border-subtle)] px-3 py-5 text-xs text-[var(--color-text-muted)]">
+          <div
+            data-task-column-empty
+            className="rounded-lg border border-dashed border-[var(--glass-border-subtle)] px-3 py-5 text-xs text-[var(--color-text-muted)]"
+          >
             {tr(`context.empty.${columnKey}`, "No tasks here")}
           </div>
         )}
@@ -94,6 +109,7 @@ export function TaskBoardColumn({
           onClick={() => onLoadMore(columnKey)}
           disabled={loading}
           className={classNames(ui.buttonSecondaryClass, "mt-3 w-full justify-center")}
+          data-task-column-more
         >
           {loading
             ? tr("context.loadingTasks", "Loading tasks…")

@@ -61,6 +61,7 @@ fn ensure_with(
     // enabled. Preserve an explicit actor or user value when one exists.
     env.entry(NODE_USE_ENV_PROXY.into())
         .or_insert_with(|| "1".into());
+    bypass_proxy_for_loopback_base(env);
     prepend_local_bin(env, &dsh_home);
     let command = vec!["dsh-acp-demo".into()];
     if let Err(error) = external_preflight(&command, env)
@@ -111,6 +112,40 @@ fn ensure_with(
         })
     })
     .map_err(|error| error.to_string())
+}
+
+fn bypass_proxy_for_loopback_base(env: &mut BTreeMap<String, String>) {
+    let Some(url) = env
+        .get("DEEPSEEK_BASE_URL")
+        .and_then(|base| url::Url::parse(base).ok())
+        .filter(cccc_core::local_network::is_loopback_url)
+    else {
+        return;
+    };
+    let Some(host) = url.host_str() else {
+        return;
+    };
+    // Node prefers lowercase no_proxy whenever it is present, even when empty.
+    // Updating only the effective list preserves its other exclusions.
+    let key = if env.contains_key("no_proxy") {
+        "no_proxy"
+    } else {
+        "NO_PROXY"
+    };
+    let exclusions = env.entry(key.into()).or_default();
+    // Node treats a bare `*` as bypass-all, but not `*,other-host`.
+    if exclusions.as_str() == "*" {
+        return;
+    }
+    if !exclusions
+        .split(',')
+        .any(|entry| entry.trim().eq_ignore_ascii_case(host))
+    {
+        if !exclusions.is_empty() {
+            exclusions.push(',');
+        }
+        exclusions.push_str(host);
+    }
 }
 
 fn prepend_local_bin(env: &mut BTreeMap<String, String>, dsh_home: &Path) {
@@ -259,7 +294,7 @@ fn write_profile_files(profile: &Path, executable: &Path) -> std::io::Result<()>
     // backslash is literal in this scalar style and must not be doubled.
     let cccc_path = executable.to_string_lossy().replace('\'', "''");
     let config = format!(
-        "- id: llm-deepseek\n  name: '@deepseek-ai/dsh-llm-deepseek'\n  config:\n    maxTokens: {DEEPSEEK_MAX_OUTPUT_TOKENS}\n- id: acp-demo\n  name: '@deepseek-ai/dsh-acp-demo'\n  config:\n    provider: deepseek-official\n    model: deepseek-v4-flash\n    workspaceContext: false\n    persistenceRoot: !!js process.env.CCCC_DEEPSEEK_SESSION_ROOT\n- id: cccc-mcp\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    transport: stdio\n    serverName: cccc\n    command: '{cccc_path}'\n    args: [mcp]\n    env:\n      CCCC_HOME: !!js process.env.CCCC_HOME\n      CCCC_GROUP_ID: !!js process.env.CCCC_GROUP_ID\n      CCCC_ACTOR_ID: !!js process.env.CCCC_ACTOR_ID\n    failOnStartupError: true\n"
+        "- id: llm-deepseek\n  name: '@deepseek-ai/dsh-llm-deepseek'\n  config:\n    maxTokens: {DEEPSEEK_MAX_OUTPUT_TOKENS}\n- id: acp-demo\n  name: '@deepseek-ai/dsh-acp-demo'\n  config:\n    provider: deepseek-official\n    model: !!js process.env.DEEPSEEK_MODEL\n    workspaceContext: false\n    persistenceRoot: !!js process.env.CCCC_DEEPSEEK_SESSION_ROOT\n- id: cccc-mcp\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    transport: stdio\n    serverName: cccc\n    command: '{cccc_path}'\n    args: [mcp]\n    env:\n      CCCC_HOME: !!js process.env.CCCC_HOME\n      CCCC_GROUP_ID: !!js process.env.CCCC_GROUP_ID\n      CCCC_ACTOR_ID: !!js process.env.CCCC_ACTOR_ID\n    failOnStartupError: true\n"
     );
     cccc_core::fs::atomic_write(&profile.join("cordis.yml"), config.as_bytes())?;
     match fs::remove_file(profile.join("cordis.patch.yml")) {

@@ -51,14 +51,30 @@ pub(crate) async fn call_with_context(
     if name == "cccc_voice_secretary_task" {
         return Err("This tool requires a host-issued secretary task grant".into());
     }
+    if is_message_operation(name)
+        && let Some(key) = arguments
+            .keys()
+            .find(|key| cccc_contracts::message_args::IM.contains(&key.as_str()))
+    {
+        return Err(format!("IM provenance is host-owned: {key}").into());
+    }
     crate::tools::apply_default_action(name, &mut arguments);
+    remove_untrusted_authority(&mut arguments);
     add_runtime_context(home, &mut arguments);
     arguments.remove("_cccc_web_binding");
     arguments.remove("_cccc_native_binding");
-    if name == "cccc_message_send"
-        && context.is_some_and(|context| context.native_binding.is_some())
-    {
-        arguments.entry("mode").or_insert(json!("send"));
+    apply_mcp_identity(
+        name,
+        &mut arguments,
+        context.is_some_and(|context| context.native_binding.is_some()),
+    );
+    if matches!(name, "cccc_message_send" | "cccc_file_send") {
+        crate::argument_normalization::check_recipients(&arguments)?;
+        if !arguments.contains_key("mode") {
+            let native = context.is_some_and(|context| context.native_binding.is_some());
+            let mode = crate::argument_normalization::default_new_message_mode(&arguments, native);
+            arguments.insert("mode".into(), json!(mode));
+        }
     }
     if let Some(context) = context {
         if let Some(binding) = context.native_binding {
@@ -94,6 +110,7 @@ pub(crate) async fn call_with_context(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            crate::response_projection::EchoedFields::capture(&arguments),
         )
     });
     if message_operation {
@@ -107,9 +124,11 @@ pub(crate) async fn call_with_context(
             return group_help(client, arguments).await;
         }
         "cccc_bootstrap" => {
-            return Ok(tool_result(
-                crate::bootstrap::build(home, client, arguments).await?,
-            ));
+            let mut payload = crate::bootstrap::build(home, client, arguments).await?;
+            if context.is_none_or(|context| context.native_binding.is_some()) {
+                payload["mcp_server"] = current_mcp_identity();
+            }
+            return Ok(tool_result(payload));
         }
         "cccc_runtime_list" => json!({"runtimes": cccc_runtime::detect_runtimes()
             .into_iter()
@@ -118,8 +137,9 @@ pub(crate) async fn call_with_context(
         name if is_repo_tool(name) => {
             let result = crate::local_tools::call(home, client, name, arguments).await?;
             return Ok(if message_operation {
-                let (group_id, actor_id) = message_context.as_ref().expect("message context");
-                with_post_message_context(home, result, group_id, actor_id)
+                let (group_id, actor_id, fields) =
+                    message_context.as_ref().expect("message context");
+                with_post_message_context(home, result, group_id, actor_id, name, fields)
             } else {
                 result
             });
@@ -152,6 +172,9 @@ pub(crate) async fn call_with_context(
             let mut result = daemon(client, &op, args).await?;
             crate::context_projection::apply(name, &mut result, &arguments);
             crate::history_projection::apply(name, &mut result, &arguments);
+            if name == "cccc_backlog" {
+                crate::backlog_projection::apply(&mut result, &arguments)?;
+            }
             if name == "cccc_task" {
                 postprocess_task_result(&mut result, &arguments)?;
                 if is_task_mail_boundary(&arguments) {
@@ -174,8 +197,8 @@ pub(crate) async fn call_with_context(
     };
     let result = tool_result(payload);
     Ok(if message_operation {
-        let (group_id, actor_id) = message_context.as_ref().expect("message context");
-        with_post_message_context(home, result, group_id, actor_id)
+        let (group_id, actor_id, fields) = message_context.as_ref().expect("message context");
+        with_post_message_context(home, result, group_id, actor_id, name, fields)
     } else {
         result
     })
@@ -213,9 +236,12 @@ fn authorize_tool(
     {
         let role = cccc_core::actors::effective_role(group, actor_id)
             .unwrap_or(cccc_contracts::ActorRole::Peer);
+        // The daemon authorizes each automation change by the caller's role, so a peer
+        // manages only reminders to itself; a Web Model peer may reach it like any peer.
+        let open_to_peers = name == "cccc_automation";
         if cccc_core::web_model_tool_names().any(|tool| tool == name)
             || (via_capability_use
-                && role == cccc_contracts::ActorRole::Foreman
+                && (role == cccc_contracts::ActorRole::Foreman || open_to_peers)
                 && cccc_core::is_builtin_capability_pack_tool(name))
         {
             return Ok(());
@@ -434,7 +460,7 @@ async fn capability_use(
         .unwrap_or(&requested_scope)
         .to_owned();
     if !enabled || tool_name.is_empty() {
-        return Ok(tool_result(json!({
+        let mut result = json!({
             "group_id":group_id,
             "actor_id":actor_id,
             "capability_id":capability_id,
@@ -448,7 +474,15 @@ async fn capability_use(
                 .unwrap_or(false),
             "enable_result":enable_result,
             "tool_called":false,
-        })));
+        });
+        // A skill has no tool to call: its rules are what the caller came for.
+        if enabled && capability_id.starts_with("skill:") {
+            let skill = cccc_core::capabilities::CapabilityStore::new(home.clone())
+                .require(&capability_id)
+                .map_err(|error| error.to_string())?;
+            result["capsule_text"] = Value::String(skill.capsule_text);
+        }
+        return Ok(tool_result(result));
     }
 
     let mut tool_arguments = arguments
@@ -551,27 +585,24 @@ fn postprocess_task_result(
         .get("action")
         .and_then(Value::as_str)
         .unwrap_or("list");
-    if !matches!(action, "get" | "list")
-        || arguments
-            .get("include_archived")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
+    if !matches!(action, "get" | "list") {
         return Ok(());
     }
-    if result
-        .get("task")
-        .and_then(Value::as_object)
-        .and_then(|task| task.get("status"))
-        .and_then(Value::as_str)
-        == Some("archived")
+    let include_archived = arguments
+        .get("include_archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !include_archived
+        && result
+            .get("task")
+            .and_then(Value::as_object)
+            .and_then(|task| task.get("status"))
+            .and_then(Value::as_str)
+            == Some("archived")
     {
         return Err("archived_hidden: archived task is hidden by default".into());
     }
-    if let Some(tasks) = result.get_mut("tasks").and_then(Value::as_array_mut) {
-        tasks.retain(|task| task.get("status").and_then(Value::as_str) != Some("archived"));
-    }
-    Ok(())
+    crate::task_summary::list_page(result, arguments)
 }
 
 fn is_task_mail_boundary(arguments: &Map<String, Value>) -> bool {
@@ -767,6 +798,14 @@ fn apply_actor_context(args: &mut Map<String, Value>, actor: Option<&str>) {
     }
 }
 
+fn remove_untrusted_authority(args: &mut Map<String, Value>) {
+    // These fields belong to authenticated human-facing ports. MCP arguments are
+    // model-controlled; Actor authority is supplied separately through `by`.
+    for key in ["caller_id", "is_admin", "allowed_groups"] {
+        args.remove(key);
+    }
+}
+
 fn apply_request_context(name: &str, args: &mut Map<String, Value>, context: RequestContext<'_>) {
     // A remote connector is bound to exactly one actor and group. Its request
     // arguments are model-controlled, so the request-scoped binding is authoritative.
@@ -793,7 +832,7 @@ pub(crate) fn tool_result(payload: Value) -> Value {
     json!({"content":[{"type":"text","text":text}],"structuredContent":payload})
 }
 
-fn is_message_operation(name: &str) -> bool {
+pub(crate) fn is_message_operation(name: &str) -> bool {
     matches!(
         name,
         "cccc_message_send" | "cccc_tracked_send" | "cccc_message_reply" | "cccc_file_send"
@@ -805,12 +844,15 @@ fn with_post_message_context(
     mut result: Value,
     group_id: &str,
     actor_id: &str,
+    name: &str,
+    fields: &crate::response_projection::EchoedFields,
 ) -> Value {
     if let Some(payload) = result
         .get_mut("structuredContent")
         .and_then(Value::as_object_mut)
     {
         insert_mail_pending_context(home, payload, group_id, actor_id);
+        crate::response_projection::apply(name, payload, fields);
         let text = serde_json::to_string_pretty(payload).unwrap_or_else(|_| "{}".into());
         result["content"] = json!([{"type":"text","text":text}]);
     }
@@ -855,15 +897,154 @@ fn is_repo_tool(name: &str) -> bool {
     )
 }
 
+fn current_mcp_identity() -> Value {
+    let mut identity = cccc_core::build_info::current();
+    identity["version"] = json!(env!("CARGO_PKG_VERSION"));
+    identity
+}
+
+/// Diagnostic metadata describes this request's native MCP, not Actor authority.
+fn apply_mcp_identity(name: &str, arguments: &mut Map<String, Value>, native: bool) {
+    arguments.remove("_cccc_mcp_identity");
+    if native
+        && name == "cccc_message_history"
+        && arguments
+            .get("event_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        arguments.insert("_cccc_mcp_identity".into(), current_mcp_identity());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         apply_actor_context, apply_request_context, help_markdown, is_message_operation,
-        is_task_mail_boundary, postprocess_task_result, prepare_task_arguments, runtime_group_id,
-        with_post_message_context,
+        is_task_mail_boundary, postprocess_task_result, prepare_task_arguments,
+        remove_untrusted_authority, runtime_group_id, with_post_message_context,
     };
     use crate::RequestContext;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn message_tools_reject_model_supplied_im_provenance() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "message_tools_reject_model_supplied_im_provenance"
+        )) {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let groups = cccc_core::GroupStore::new(home.clone()).expect("groups");
+        let mut group = groups.create("message origin", "").expect("group");
+        for id in ["writer", "receiver"] {
+            let mut actor = cccc_contracts::Actor::new(id);
+            actor.runtime = cccc_contracts::ActorRuntime::Custom;
+            actor.command = vec!["/bin/true".into()];
+            cccc_core::actors::add(&mut group, actor).expect("actor");
+        }
+        groups.save(&group).expect("save");
+        let client = cccc_client::DaemonClient::new(home.clone());
+        let ledger = groups.ledger_path(&group.group_id).expect("ledger");
+        let before = std::fs::read(&ledger).expect("events before");
+        let base = json!({
+            "group_id":group.group_id,"by":"writer","actor_id":"writer",
+            "text":"model message","to":["receiver"],"mode":"mail",
+            "src_group_id":"g_reference","src_event_id":"reference-event",
+            "insight":"Connector origin must remain separate from model-authored content."
+        });
+        // No daemon exists yet: these errors must come from the actual router,
+        // before IPC, local file handling or any message-side effect.
+        for tool in [
+            "cccc_message_send",
+            "cccc_message_reply",
+            "cccc_file_send",
+            "cccc_tracked_send",
+        ] {
+            for key in [
+                "transport",
+                "im_platform",
+                "im_chat_id",
+                "im_thread_id",
+                "source_platform",
+                "source_user_id",
+                "source_message_id",
+            ] {
+                let mut args = base.as_object().expect("args").clone();
+                args.insert(key.into(), json!("do-not-echo-source-value"));
+                let error = super::call(&home, &client, tool, args)
+                    .await
+                    .expect_err("IM origin rejected");
+                assert_eq!(
+                    error.to_string(),
+                    format!("IM provenance is host-owned: {key}")
+                );
+                assert!(!error.to_string().contains("do-not-echo-source-value"));
+            }
+        }
+        assert_eq!(std::fs::read(&ledger).expect("events after"), before);
+
+        let daemon_home = home.clone();
+        let daemon = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+        for _ in 0..100 {
+            if home.daemon_dir().join("ccccd.addr.json").is_file() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let sent = super::call(
+            &home,
+            &client,
+            "cccc_message_send",
+            base.as_object().expect("args").clone(),
+        )
+        .await
+        .expect("ordinary message");
+        assert_eq!(sent["structuredContent"]["event"]["by"], "writer");
+        let event_id = sent["structuredContent"]["event"]["id"]
+            .as_str()
+            .expect("event id");
+        let stored = cccc_core::ledger::read_all(&ledger).expect("stored events");
+        let event = stored
+            .iter()
+            .find(|event| event.id == event_id)
+            .expect("stored message");
+        assert_eq!(event.data["text"], "model message");
+        assert_eq!(
+            sent["structuredContent"]["event"]["data"]["src_group_id"],
+            "g_reference"
+        );
+        let _ = client
+            .call(&cccc_contracts::DaemonRequest {
+                v: 1,
+                op: "shutdown".into(),
+                args: serde_json::Map::new(),
+            })
+            .await;
+        daemon.await.expect("daemon task").expect("daemon");
+    }
+
+    #[test]
+    fn exact_native_history_identifies_this_server_not_the_supplied_value() {
+        let mut args = json!({"event_id":"event", "_cccc_mcp_identity":{"version":"forged"}})
+            .as_object()
+            .expect("arguments")
+            .clone();
+        super::apply_mcp_identity("cccc_message_history", &mut args, true);
+        assert_eq!(args["_cccc_mcp_identity"], super::current_mcp_identity());
+
+        super::apply_mcp_identity("cccc_message_history", &mut args, false);
+        assert!(!args.contains_key("_cccc_mcp_identity"));
+        args.remove("event_id");
+        super::apply_mcp_identity("cccc_message_history", &mut args, true);
+        assert!(!args.contains_key("_cccc_mcp_identity"));
+        args.insert("event_id".into(), json!("event"));
+        super::apply_mcp_identity("cccc_task", &mut args, true);
+        assert!(!args.contains_key("_cccc_mcp_identity"));
+    }
 
     #[test]
     fn an_explicit_empty_runtime_group_never_inherits_the_active_group() {
@@ -927,6 +1108,10 @@ mod tests {
                 .expect_err("peer management call must fail"),
             "cccc_actor requires a Web Model foreman actor"
         );
+        // Automation is decided per change by the daemon, so a Web Model peer may reach
+        // it through capability use, though not by naming it directly.
+        assert!(super::authorize_tool(&home, "cccc_automation", &peer_args, true).is_ok());
+        assert!(super::authorize_tool(&home, "cccc_automation", &peer_args, false).is_err());
         let native_peer_args = json!({
             "group_id":peer_group.group_id,
             "by":"native-peer"
@@ -942,7 +1127,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_use_returns_the_rules_of_a_skill() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "capability_use_returns_the_rules_of_a_skill"
+        )) {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let group = cccc_core::GroupStore::new(home.clone())
+            .and_then(|store| store.create("skill use", ""))
+            .expect("group");
+        let daemon_home = home.clone();
+        let daemon_task = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+        let client = cccc_client::DaemonClient::new(home.clone());
+        for _ in 0..100 {
+            if client
+                .call(&cccc_contracts::DaemonRequest {
+                    v: 1,
+                    op: "group_list".into(),
+                    args: serde_json::Map::new(),
+                })
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let context = |group_id| {
+            Some(RequestContext {
+                native_binding: None,
+                binding: None,
+                group_id,
+                actor_id: "user",
+            })
+        };
+        let args = |capability_id: &str| {
+            json!({"capability_id":capability_id,"scope":"session"})
+                .as_object()
+                .cloned()
+                .expect("use args")
+        };
+
+        let skill = super::call_with_context(
+            &home,
+            &client,
+            "cccc_capability_use",
+            args("skill:cccc:self-evolution"),
+            context(&group.group_id),
+            false,
+        )
+        .await
+        .expect("use skill");
+        assert_eq!(skill["structuredContent"]["enabled"], true);
+        assert!(
+            skill["structuredContent"]["capsule_text"]
+                .as_str()
+                .expect("skill rules")
+                .contains("## Review")
+        );
+
+        let pack = super::call_with_context(
+            &home,
+            &client,
+            "cccc_capability_use",
+            args("pack:space"),
+            context(&group.group_id),
+            false,
+        )
+        .await
+        .expect("use pack");
+        assert!(pack["structuredContent"].get("capsule_text").is_none());
+
+        super::daemon(
+            &client,
+            "capability_block",
+            json!({
+                "group_id":group.group_id,"actor_id":"user","by":"user",
+                "capability_id":"skill:cccc:self-evolution","scope":"group","blocked":true,
+            })
+            .as_object()
+            .cloned()
+            .expect("block args"),
+        )
+        .await
+        .expect("block skill");
+        let blocked = super::call_with_context(
+            &home,
+            &client,
+            "cccc_capability_use",
+            args("skill:cccc:self-evolution"),
+            context(&group.group_id),
+            false,
+        )
+        .await
+        .expect("use blocked skill");
+        assert_eq!(blocked["structuredContent"]["enabled"], false);
+        assert!(blocked["structuredContent"].get("capsule_text").is_none());
+
+        daemon_task.abort();
+    }
+
+    #[tokio::test]
     async fn capability_use_enables_hidden_pack_and_calls_inferred_builtin() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "capability_use_enables_hidden_pack_and_calls_inferred_builtin"
+        )) {
+            return;
+        }
         let temp = tempfile::tempdir().expect("tempdir");
         let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
         let group = cccc_core::GroupStore::new(home.clone())
@@ -1010,10 +1307,12 @@ mod tests {
             &home,
             &client,
             "cccc_capability_use",
-            json!({"tool_name":"cccc_memory","tool_arguments":{"action":"layout_get"}})
-                .as_object()
-                .cloned()
-                .expect("call args"),
+            json!({"tool_name":"cccc_context_sync","tool_arguments":{
+                "dry_run":true,"ops":[{"op":"coordination.brief.update","current_focus":"fixture"}]
+            }})
+            .as_object()
+            .cloned()
+            .expect("call args"),
             context,
             false,
         )
@@ -1024,13 +1323,123 @@ mod tests {
             "pack:context-advanced"
         );
         assert_eq!(called["structuredContent"]["tool_called"], true);
-        assert_eq!(called["structuredContent"]["tool_name"], "cccc_memory");
+        assert_eq!(
+            called["structuredContent"]["tool_name"],
+            "cccc_context_sync"
+        );
+
+        daemon_task.abort();
+    }
+
+    #[tokio::test]
+    async fn bound_notifications_reach_their_recipients_and_never_widen_a_target() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "bound_notifications_reach_their_recipients_and_never_widen_a_target"
+        )) {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("groups");
+        let mut group = store.create("notify routing", "").expect("group");
+        for id in ["lead", "peer", "other"] {
+            cccc_core::actors::add(&mut group, cccc_contracts::Actor::new(id)).expect("actor");
+        }
+        store.save(&group).expect("save group");
+        let daemon_home = home.clone();
+        let daemon_task = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+        let client = cccc_client::DaemonClient::new(home.clone());
+        for _ in 0..100 {
+            if client
+                .call(&cccc_contracts::DaemonRequest {
+                    v: 1,
+                    op: "group_list".into(),
+                    args: serde_json::Map::new(),
+                })
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let context = Some(RequestContext {
+            native_binding: None,
+            binding: None,
+            group_id: &group.group_id,
+            actor_id: "lead",
+        });
+        for (route, recipients) in [
+            // No target is a broadcast to everyone but the sender.
+            (json!({}), vec!["peer", "other"]),
+            (json!({"target_actor_id":"peer"}), vec!["peer"]),
+            // A target naming the sender reaches no one rather than everyone.
+            (json!({"target_actor_id":"lead"}), vec![]),
+            // The caller's identity must not override the recipients it names.
+            (json!({"to":["peer"]}), vec!["peer"]),
+        ] {
+            let mut args = route.as_object().cloned().expect("route");
+            args.insert("title".into(), json!("Build finished"));
+            let result =
+                super::call_with_context(&home, &client, "cccc_notify", args, context, false)
+                    .await
+                    .expect("notify");
+            let event: cccc_contracts::Event =
+                serde_json::from_value(result["structuredContent"]["event"].clone())
+                    .expect("stored notification");
+            assert_eq!(event.kind, "system.notify", "{route}");
+            assert_eq!(event.by, "lead", "{route}");
+            assert!(!event.data.contains_key("actor_id"), "{route}");
+            let reached: Vec<_> = ["lead", "peer", "other"]
+                .into_iter()
+                .filter(|actor| cccc_core::inbox::is_for_actor(&group, &event, actor))
+                .collect();
+            assert_eq!(reached, recipients, "{route}");
+        }
+
+        // Delivery bookkeeping may still be appended, so count notifications.
+        let ledger = store.ledger_path(&group.group_id).expect("ledger path");
+        let notifications = || {
+            cccc_core::ledger::read_all(&ledger)
+                .expect("ledger")
+                .iter()
+                .filter(|event| event.kind == "system.notify")
+                .count()
+        };
+        let before = notifications();
+        for refused in [
+            // The tool promises an internal notification.
+            json!({"im_visibility":"public"}),
+            // Routing cannot read these, and would treat them as no target.
+            json!({"target_actor_id":["peer"]}),
+            json!({"to":[7]}),
+        ] {
+            let mut args = refused.as_object().cloned().expect("refused");
+            args.insert("title".into(), json!("Build finished"));
+            assert!(
+                super::call_with_context(&home, &client, "cccc_notify", args, context, false)
+                    .await
+                    .is_err(),
+                "{refused}"
+            );
+        }
+        assert_eq!(notifications(), before);
 
         daemon_task.abort();
     }
 
     #[tokio::test]
     async fn user_control_plane_routes_an_explicit_cross_group_target() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "user_control_plane_routes_an_explicit_cross_group_target"
+        )) {
+            return;
+        }
         let temp = tempfile::tempdir().expect("tempdir");
         let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
         let store = cccc_core::GroupStore::new(home.clone()).expect("groups");
@@ -1125,6 +1534,26 @@ mod tests {
 
         assert_eq!(args["actor_id"], "backend");
         assert_eq!(args["by"], "backend");
+    }
+
+    #[test]
+    fn model_arguments_cannot_supply_human_profile_authority() {
+        let mut args = json!({
+            "caller_id":"profile-owner",
+            "is_admin":true,
+            "allowed_groups":["g_other"],
+            "view":"all"
+        })
+        .as_object()
+        .expect("args")
+        .clone();
+
+        remove_untrusted_authority(&mut args);
+
+        assert!(!args.contains_key("caller_id"));
+        assert!(!args.contains_key("is_admin"));
+        assert!(!args.contains_key("allowed_groups"));
+        assert_eq!(args["view"], "all");
     }
 
     #[test]
@@ -1251,8 +1680,14 @@ mod tests {
             json!({"receipt":{"status":"failed"}}),
             json!({"error":{"code":"invalid_recipient","message":"unknown actor"}}),
         ] {
-            let result =
-                with_post_message_context(&home, super::tool_result(payload.clone()), "", "");
+            let result = with_post_message_context(
+                &home,
+                super::tool_result(payload.clone()),
+                "",
+                "",
+                "cccc_message_send",
+                &Default::default(),
+            );
             assert_eq!(result["structuredContent"], payload);
             let text: serde_json::Value =
                 serde_json::from_str(result["content"][0]["text"].as_str().expect("text"))
@@ -1278,11 +1713,18 @@ mod tests {
         cccc_core::ledger::append(&store.ledger_path(&group.group_id).expect("ledger"), &mail)
             .expect("append mail");
 
+        let fields = crate::response_projection::EchoedFields::capture(
+            json!({"text":"my update"}).as_object().expect("args"),
+        );
         let success = with_post_message_context(
             &home,
-            super::tool_result(json!({"event":{"id":"event-1"}})),
+            super::tool_result(
+                json!({"event":{"id":"event-1","kind":"chat.message","data":{"text":"my update"}}}),
+            ),
             &group.group_id,
             "peer1",
+            "cccc_message_send",
+            &fields,
         );
         assert_eq!(success["structuredContent"]["event"]["id"], "event-1");
         assert!(
@@ -1291,12 +1733,30 @@ mod tests {
                 .is_none()
         );
         assert_eq!(success["structuredContent"]["mail_pending"]["count"], 1);
+        assert!(
+            success["structuredContent"]["event"]["data"]
+                .get("text")
+                .is_none()
+        );
+        assert_eq!(
+            success["structuredContent"]["mcp_omitted_fields"]["event"],
+            json!(["text"])
+        );
+        let content: serde_json::Value = serde_json::from_str(
+            success["content"][0]["text"]
+                .as_str()
+                .expect("text content"),
+        )
+        .expect("JSON payload");
+        assert_eq!(content, success["structuredContent"]);
 
         let incomplete = with_post_message_context(
             &home,
             super::tool_result(json!({"partial_failure":true})),
             &group.group_id,
             "peer1",
+            "cccc_message_send",
+            &Default::default(),
         );
         assert!(incomplete["structuredContent"]["post_message_nudge"].is_null());
         assert_eq!(incomplete["structuredContent"]["mail_pending"]["count"], 1);

@@ -1,6 +1,7 @@
 pub mod antigravity_acp_setup;
 mod connect_transport;
 pub mod deepseek_setup;
+mod diagnostic_log;
 mod direct_channel;
 mod direct_tls;
 mod dispatch;
@@ -17,12 +18,14 @@ mod server_connection;
 mod server_connections;
 mod server_events_stream;
 mod server_lifecycle;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod server_memory;
 mod server_terminal_attach;
 
 pub use dispatch::dispatch as handle_request;
 pub use paths::DaemonPaths;
 pub use process::{DetachedDaemon, StartOutcome};
-pub use server::run;
+pub use server::{run, run_with_diagnostics};
 pub use server_lifecycle::stop_every_runtime;
 
 /// Best-effort provider stop requests for managed Actor sessions registered in
@@ -55,6 +58,6 @@ pub mod experimental_codex_voice {
         validate_provider_voice, validate_realtime_voice,
     };
     pub use crate::ops::codex_voice_lifecycle::{
-        AnalystLifecycleEvent, AnalystTurnOrigin, VoiceDelegationAdmission,
+        AnalystCompletionSource, AnalystLifecycleEvent, AnalystTurnOrigin, VoiceDelegationAdmission,
     };
 }

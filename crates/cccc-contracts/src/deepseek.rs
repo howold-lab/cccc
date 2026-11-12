@@ -15,9 +15,14 @@ pub const DEEPSEEK_ACP_APP_VERSION: &str = DEEPSEEK_RELEASE_VERSION;
 pub const DEEPSEEK_LLM_ADAPTER_PACKAGE: &str = "@deepseek-ai/dsh-llm-deepseek";
 pub const DEEPSEEK_LLM_ADAPTER_VERSION: &str = DEEPSEEK_RELEASE_VERSION;
 pub const DEEPSEEK_NODE_RANGE: &str = "^22.19.0 || >=24.0.0";
+pub const DEEPSEEK_MODEL_ENV: &str = "DEEPSEEK_MODEL";
+pub const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-flash";
 pub const DEEPSEEK_PROTOCOL_VERSION: u64 = 1;
 /// ACP SDK baseline locked for this preview wire contract.
 pub const DEEPSEEK_ACP_SDK_VERSION: &str = "0.25.1";
+/// A turn fails when the provider sends nothing for this long. Every ACP
+/// update or permission request restarts the window, so a turn that keeps
+/// working is not cut off.
 pub const DEEPSEEK_TURN_TIMEOUT_SECONDS: u64 = 300;
 /// Output budget that preserves room for prompt and MCP tool context.
 pub const DEEPSEEK_MAX_OUTPUT_TOKENS: u64 = 65536;

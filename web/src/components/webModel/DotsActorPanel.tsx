@@ -6,6 +6,7 @@ import { Button } from "../ui/button";
 import { formatMessageTimestamp } from "../../utils/time";
 import { DotsSettingRow, DotsSetupStep, DotsSetupTips } from "./DotsActorSections";
 import {
+  ActiveTurnAge,
   NativeActorDelivery,
   NativeActorSummary,
   nativeActorCard as dotsCard,
@@ -319,7 +320,7 @@ function ActorPanel({
   const notices = (
     <>
       {state?.error_code ? (
-        <p className="text-xs text-rose-600 dark:text-rose-400">
+        <p className="text-xs text-rose-600 dark:text-rose-400" data-status-tone="error">
           {t(deliveryErrorKeys[state.error_code] || "dotsActor.executionError")}
         </p>
       ) : null}
@@ -327,12 +328,20 @@ function ActorPanel({
         <p className="text-xs text-[var(--color-text-muted)]">{t("dotsActor.notifyAgain")}</p>
       ) : null}
       {readError ? (
-        <p className="text-xs text-amber-700 dark:text-amber-300" role="status">
+        <p
+          className="text-xs text-amber-700 dark:text-amber-300"
+          role="status"
+          data-status-tone="warning"
+        >
           {readError}
         </p>
       ) : null}
       {actionError ? (
-        <p className="text-xs text-rose-600 dark:text-rose-400" role="alert">
+        <p
+          className="text-xs text-rose-600 dark:text-rose-400"
+          role="alert"
+          data-status-tone="error"
+        >
           {actionError}
         </p>
       ) : null}
@@ -409,6 +418,13 @@ function ActorPanel({
                   ? t(`dotsActor.phases.${state.phase}`)
                   : t(readError ? "dotsActor.unavailable" : "common:loading")}
               </p>
+            )}
+            {unresolved && !readError && (
+              <ActiveTurnAge
+                seconds={state?.active_turn_elapsed_seconds}
+                language={i18n?.language}
+                t={t}
+              />
             )}
           </div>
           {!setup && (

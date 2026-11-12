@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { WorkspaceFile } from "../../types";
 import { workspaceContentUrl } from "../../services/api/workspace";
 import { LazyMarkdownRenderer } from "../LazyMarkdownRenderer";
-import { parseWorkspaceTable, workspaceLink } from "./workspacePreview";
+import { absoluteDocumentUrl, parseWorkspaceTable, workspaceLink } from "./workspacePreview";
 
 import { staticWorkspaceHtml } from "./workspaceHtml";
 import { scrollWorkspaceFragment } from "./workspaceFragment";
@@ -46,11 +46,8 @@ export function WorkspaceDocumentPreview({
   const resourceEndpoint = endpoint.origin + endpoint.pathname;
   const resolveUrl = useCallback(
     (href: string, target: "image" | "link") => {
-      if (href.startsWith("#")) return target === "link" ? href : "";
-      if (/^https?:\/\//i.test(href)) return href;
-      if (target === "link" && /^mailto:/i.test(href)) return href;
-      if (target === "image" && /^data:image\/(png|gif|jpeg|webp|svg\+xml)[;,]/i.test(href))
-        return href;
+      const absolute = absoluteDocumentUrl(href, target);
+      if (absolute !== null) return absolute;
       const local = workspaceLink(file.path, href);
       return local ? workspaceContentUrl(groupId, { ...file, path: local.path }) + local.hash : "";
     },
@@ -135,6 +132,7 @@ export function WorkspaceDocumentPreview({
         className="min-h-0 flex-1 overflow-auto p-3"
         tabIndex={0}
         aria-label={t("workspaceTablePreview")}
+        data-workspace-scroll
       >
         {table.error ? (
           <p role="alert">{t("workspaceTableInvalid")}</p>
@@ -178,6 +176,7 @@ export function WorkspaceDocumentPreview({
     <div
       ref={viewport}
       className="min-h-0 flex-1 overflow-auto p-4"
+      data-workspace-scroll
       onClick={(event) => followLink(event, event.currentTarget)}
     >
       <LazyMarkdownRenderer

@@ -9,6 +9,12 @@ import { Button } from "../../components/ui/button";
 import { useGroupStore } from "../../stores/useGroupStore";
 import { copyTextToClipboard } from "../../utils/copy";
 
+const codexRecoveryHints: Partial<Record<LocalSessionRecovery["recovery"]["state"], string>> = {
+  disconnected: "disconnectedCodex",
+  host_exited: "hostExitedCodex",
+  session_ended: "sessionEndedCodex",
+};
+
 export function NativeSessionPanel({
   actor,
   groupId,
@@ -28,7 +34,7 @@ export function NativeSessionPanel({
       <p role="status" className="font-medium text-[var(--color-text-primary)]">
         {statusText}
       </p>
-      <p>{t("nativeSession.hint")}</p>
+      <p>{t(actor.runtime === "codex" ? "nativeSession.codexHint" : "nativeSession.hint")}</p>
       {isVisible && canAccessRecovery && groupId && actor.external_session_id ? (
         <RecoveryGuidance
           // Private data lives only for this visible, authorized binding.
@@ -154,6 +160,8 @@ function RecoveryGuidance({ actor, groupId }: { actor: Actor; groupId: string })
     if (active.current) setCopyResult({ field, value, success });
   };
   const shell = recovery ? { posix: "Bash/zsh", powershell: "PowerShell" }[recovery.shell] : "";
+  const codexHint =
+    recovery && actor.runtime === "codex" ? codexRecoveryHints[recovery.state] : undefined;
   const busy = loading || refreshing;
 
   return (
@@ -195,13 +203,16 @@ function RecoveryGuidance({ actor, groupId }: { actor: Actor; groupId: string })
             refreshOutcome === "connected"
               ? "nativeSession.recovery.refreshConnected"
               : refreshOutcome === "unavailable"
-                ? "nativeSession.recovery.refreshUnavailable"
+                ? actor.runtime === "codex"
+                  ? "nativeSession.recovery.refreshUnavailableCodex"
+                  : "nativeSession.recovery.refreshUnavailable"
                 : "nativeSession.recovery.refreshFailed",
           )}
         </p>
       ) : null}
-      {recovery && !refreshOutcome ? (
-        <p>{t(`nativeSession.recovery.hints.${recovery.state}`)}</p>
+      {recovery &&
+      (!refreshOutcome || (actor.runtime === "codex" && refreshOutcome !== "connected")) ? (
+        <p>{t(`nativeSession.recovery.hints.${codexHint ?? recovery.state}`)}</p>
       ) : null}
       {actor.enabled === false || groupState === "paused" || groupState === "stopped" ? (
         <p className="text-xs">{t("nativeSession.recovery.admissionHint")}</p>

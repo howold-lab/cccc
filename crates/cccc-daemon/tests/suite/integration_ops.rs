@@ -912,6 +912,37 @@ fn scope_lifecycle_uses_canonical_receipts_state_and_events() {
     assert_eq!(store.load(group_id).expect("unchanged group"), before);
 }
 
+/// Holds a loopback port as the Web address and closes the one request it receives
+/// unanswered, so the daemon sees an unavailable Web without reaching a real one.
+fn closing_web(home: &HomeLayout) -> (std::net::TcpListener, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Web stand-in");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let held = listener.try_clone().expect("held listener");
+    let mut global = cccc_core::settings::load(home).expect("settings");
+    global.remote_access =
+        json!({"web_host":"127.0.0.1","web_port":listener.local_addr().expect("address").port()})
+            .as_object()
+            .cloned()
+            .expect("remote access");
+    cccc_core::settings::save(home, &global).expect("settings");
+    let closer = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return drop(stream),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("expected the delegated start request: {error}"),
+            }
+        }
+    });
+    (held, closer)
+}
+
 #[test]
 fn prompt_im_space_and_voice_operations_share_rust_state() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -947,7 +978,12 @@ fn prompt_im_space_and_voice_operations_share_rust_state() {
         "im_set",
         json!({"group_id":group_id,"platform":"telegram","token_env":"TELEGRAM_TOKEN"}),
     );
+    // Without a configured port the start request would go to the default 8848, where a live
+    // Web may be listening; send it to a port this test holds and closes unanswered.
+    let (web, closer) = closing_web(&home);
     let start = raw_call(&home, "im_start", json!({"group_id":group_id}));
+    closer.join().expect("closing Web");
+    drop(web);
     assert!(!start.ok);
     assert_eq!(
         start.error.as_ref().map(|error| error.code.as_str()),
@@ -1199,53 +1235,43 @@ fn prompt_im_space_and_voice_operations_share_rust_state() {
         invalid_query_option.error.expect("invalid option").code,
         "invalid_args"
     );
+}
 
-    let memory_layout = call(
-        &home,
-        "memory_reme_layout_get",
-        json!({"group_id":group_id}),
-    );
-    assert!(memory_layout.result["memory_root"].is_string());
-    assert!(memory_layout.result["today_daily_file"].is_string());
-    assert_eq!(memory_layout.result["backend"]["name"], "local");
+#[test]
+fn retired_group_memory_operations_leave_existing_files_untouched() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"legacy memory"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let root = store.state_dir(group_id).expect("state dir").join("memory");
+    std::fs::create_dir_all(root.join("daily")).expect("memory dir");
+    let main = root.join("MEMORY.md");
+    let daily = root.join("daily").join("2026-11-07__legacy.md");
+    std::fs::write(&main, "retained memory").expect("main memory");
+    std::fs::write(&daily, "retained daily record").expect("daily memory");
 
-    let missing_date = raw_call(
-        &home,
+    for op in [
+        "memory_reme_search",
         "memory_reme_write",
-        json!({"group_id":group_id,"target":"daily","content":"entry"}),
+        "memory_reme_daily_flush",
+    ] {
+        let response = raw_call(&home, op, json!({"group_id":group_id}));
+        assert_eq!(
+            response.error.as_ref().map(|e| e.code.as_str()),
+            Some("unknown_op")
+        );
+    }
+    call(&home, "context_get", json!({"group_id":group_id}));
+    assert_eq!(
+        std::fs::read_to_string(main).expect("main memory"),
+        "retained memory"
     );
-    assert!(!missing_date.ok);
-    let memory_write = call(
-        &home,
-        "memory_reme_write",
-        json!({"group_id":group_id,"target":"memory","content":"durable fact","mode":"append","idempotency_key":"memory-1"}),
-    );
-    assert_eq!(memory_write.result["status"], "written");
-    let memory_dedup = call(
-        &home,
-        "memory_reme_write",
-        json!({"group_id":group_id,"target":"memory","content":"changed payload","idempotency_key":"memory-1"}),
-    );
-    assert_eq!(memory_dedup.result["reason"], "persistence_idempotency_key");
-    let memory_replace = call(
-        &home,
-        "memory_reme_write",
-        json!({"group_id":group_id,"target":"memory","content":"replacement","mode":"replace"}),
-    );
-    assert_eq!(memory_replace.result["status"], "written");
-    let index = call(
-        &home,
-        "memory_reme_index_sync",
-        json!({"group_id":group_id,"mode":"scan"}),
-    );
-    assert!(index.result["indexed_files"].as_u64().unwrap_or(0) >= 2);
-    assert!(index.result["indexed_chunks"].as_u64().unwrap_or(0) >= 1);
-    assert!(
-        index.result["watched_paths"]
-            .as_array()
-            .is_some_and(|paths| paths
-                .iter()
-                .all(|path| path.as_str().is_some_and(|path| path.ends_with(".md"))))
+    assert_eq!(
+        std::fs::read_to_string(daily).expect("daily memory"),
+        "retained daily record"
     );
 }
 
@@ -1426,6 +1452,84 @@ fn rust_daemon_provider_auth_mutations_do_not_report_synthetic_lifecycle() {
         json!({"provider":"notebooklm","by":"user","action":"unknown"}),
     );
     assert_eq!(invalid.error.expect("invalid action").code, "invalid_args");
+}
+
+#[test]
+fn an_actor_carries_the_model_label_its_operator_gives_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"models"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    let added = call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"peer1",
+            "runtime":"custom",
+            "command":["sh"],
+            "enabled":false,
+            "model_label":"  gpt-5-codex  ",
+            "by":"user"
+        }),
+    );
+    assert_eq!(added.result["actor"]["model_label"], "gpt-5-codex");
+    assert_eq!(
+        added.result["event"]["data"]["actor"]["model_label"],
+        "gpt-5-codex"
+    );
+    let row = |home: &HomeLayout| {
+        call(home, "actor_list", json!({"group_id":group_id})).result["actors"]
+            .as_array()
+            .expect("actors")
+            .iter()
+            .find(|actor| actor["id"] == "peer1")
+            .cloned()
+            .expect("peer1 row")
+    };
+    let original = row(&home);
+    assert_eq!(original["model_label"], "gpt-5-codex");
+
+    let update = |label: Value| {
+        raw_call(
+            &home,
+            "actor_update",
+            json!({"group_id":group_id,"actor_id":"peer1","by":"user","patch":{"model_label":label}}),
+        )
+    };
+    assert!(update(json!("claude-sonnet-4-5")).ok);
+    assert_eq!(row(&home)["model_label"], "claude-sonnet-4-5");
+    for key in [
+        "runtime",
+        "runtime_mode",
+        "command",
+        "env",
+        "enabled",
+        "submit",
+        "external_session_id",
+    ] {
+        assert_eq!(row(&home)[key], original[key], "label update changed {key}");
+    }
+    for invalid in [json!("x".repeat(129)), json!("two\nlines")] {
+        let refused = update(invalid);
+        assert!(!refused.ok, "{:?}", refused.result);
+        assert_eq!(row(&home)["model_label"], "claude-sonnet-4-5");
+    }
+    assert!(update(json!("")).ok);
+    assert!(row(&home).get("model_label").is_none());
+    let path = cccc_core::GroupStore::new(home.clone())
+        .expect("store")
+        .ledger_path(group_id)
+        .expect("ledger path");
+    let events = cccc_core::ledger::read_all(&path).expect("ledger");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind.as_str(), "actor.start" | "actor.restart")),
+        "label-only updates must not produce lifecycle events"
+    );
 }
 
 #[test]
