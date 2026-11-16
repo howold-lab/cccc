@@ -79,16 +79,16 @@ describe("LCD appearance preferences", () => {
 
     store.setUiStylePrefs({ lcdBody: "pixel" });
     expect(root.dataset.lcdBody).toBe("pixel");
-    expect(root.dataset.lcdWidth).toBe("column");
+    expect(root.dataset.lcdWidth).toBe("full");
     expect(window.localStorage.getItem(LCD_BODY_STORAGE_KEY)).toBe("pixel");
     expect(listener).toHaveBeenCalledTimes(1);
 
     store.setUiStylePrefs({ lcdBody: "pixel" });
     expect(listener).toHaveBeenCalledTimes(1);
 
-    store.setUiStylePrefs({ lcdWidth: "full" });
-    expect(root.dataset.lcdWidth).toBe("full");
-    expect(window.localStorage.getItem(LCD_WIDTH_STORAGE_KEY)).toBe("full");
+    store.setUiStylePrefs({ lcdWidth: "column" });
+    expect(root.dataset.lcdWidth).toBe("column");
+    expect(window.localStorage.getItem(LCD_WIDTH_STORAGE_KEY)).toBe("column");
     expect(listener).toHaveBeenCalledTimes(2);
     unsubscribe();
   });

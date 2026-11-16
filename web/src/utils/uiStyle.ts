@@ -23,7 +23,7 @@ const STORAGE_KEYS: Record<keyof UiStylePrefs, string> = {
 
 export const DEFAULT_UI_STYLE_PREFS: UiStylePrefs = {
   lcdBody: "proportional",
-  lcdWidth: "column",
+  lcdWidth: "full",
   lcdMotion: "on",
 };
 
@@ -34,7 +34,7 @@ export function normalizeUiStylePrefs(raw: {
 }): UiStylePrefs {
   return {
     lcdBody: raw.lcdBody === "pixel" || raw.lcdBody === "mono" ? raw.lcdBody : "proportional",
-    lcdWidth: raw.lcdWidth === "wide" || raw.lcdWidth === "full" ? raw.lcdWidth : "column",
+    lcdWidth: raw.lcdWidth === "column" || raw.lcdWidth === "wide" ? raw.lcdWidth : "full",
     lcdMotion: raw.lcdMotion === "off" ? "off" : "on",
   };
 }
