@@ -1,3 +1,5 @@
+import { useOverviewStore } from "../../stores/useOverviewStore";
+import { OverviewPage } from "../../features/overview/OverviewPage";
 import { requestWorkspaceNavigation } from "../../stores/workspaceNavigation";
 import { WorkspaceNavigationDialog } from "../workspace/WorkspaceNavigationDialog";
 import { useCallback, useState, type CSSProperties } from "react";
@@ -221,9 +223,13 @@ export function AppShell({
   const [mobileReadingHidden, setMobileReadingHidden] = useState(false);
   const [mobileReadingOverlay, setMobileReadingOverlay] = useState(false);
   const messagesVisible = useUIStore((state) => groupMessagesVisible(selectedGroupId, state));
+  const overviewOpen = useOverviewStore((state) => state.open) && !remoteWorkspace && !connectEmbedded;
+  const archivedSet = new Set(archivedGroupIds);
+  const workingGroups = orderedGroups.filter((group) => !archivedSet.has(group.group_id));
   const openPendingReplies = useCallback(
     (groupId: string) => {
       requestWorkspaceNavigation(() => {
+        useOverviewStore.getState().hide();
         onSelectGroup(groupId);
         useGroupStore.getState().closeChatWindow(groupId);
         const ui = useUIStore.getState();
@@ -270,7 +276,13 @@ export function AppShell({
             connect={connect}
             orderedGroups={orderedGroups}
             archivedGroupIds={archivedGroupIds}
-            selectedGroupId={remoteWorkspace ? "" : selectedGroupId}
+            selectedGroupId={remoteWorkspace || overviewOpen ? "" : selectedGroupId}
+            overviewActive={overviewOpen}
+            onOpenOverview={
+              remoteWorkspace || connectEmbedded
+                ? undefined
+                : () => useOverviewStore.getState().show()
+            }
             isOpen={sidebarOpen}
             isCollapsed={sidebarCollapsed}
             sidebarWidth={sidebarWidth}
@@ -279,6 +291,7 @@ export function AppShell({
             canAccessLocalSessions={canAccessAccount}
             codexVoice={canUseVoice ? codexVoice : undefined}
             onSelectGroup={(groupId) => {
+              useOverviewStore.getState().hide();
               if (!remoteWorkspace && groupId === selectedGroupId) onSelectGroup(groupId);
               else requestWorkspaceNavigation(() => onSelectGroup(groupId));
             }}
@@ -303,6 +316,22 @@ export function AppShell({
           data-group-shell
           className="absolute inset-0 flex h-full min-h-0 flex-col overflow-hidden md:relative md:inset-auto bg-transparent md:bg-[var(--color-chat-bg)]"
         >
+          {overviewOpen ? (
+            <div className="absolute inset-0 z-30 flex min-h-0 flex-col" data-overview-layer>
+              <ErrorBoundary>
+                <OverviewPage
+                  groups={workingGroups}
+                  readOnly={webReadOnly}
+                  onOpenGroup={(groupId) => {
+                    useOverviewStore.getState().hide();
+                    if (groupId === selectedGroupId) onSelectGroup(groupId);
+                    else requestWorkspaceNavigation(() => onSelectGroup(groupId));
+                  }}
+                  onOpenPending={openPendingReplies}
+                />
+              </ErrorBoundary>
+            </div>
+          ) : null}
           {remoteWorkspace || (
             <>
               <AppHeader
@@ -338,7 +367,8 @@ export function AppShell({
                 ref={contentRef}
                 className={`relative flex min-h-0 flex-1 flex-col overflow-hidden transition-opacity duration-150 ${
                   isTransitioning ? "opacity-0" : "opacity-100"
-                }`}
+                } ${overviewOpen ? "invisible" : ""}`}
+                inert={overviewOpen ? true : undefined}
                 onTouchStart={onTouchStart}
                 onTouchEnd={onTouchEnd}
               >

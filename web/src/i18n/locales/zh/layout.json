@@ -349,5 +349,37 @@
     "emptyHint": "在运行 CCCC 的机器上为原应用启用接入，会话会自动出现在这里。",
     "setupRuntime": "选择应用",
     "setupExampleHeading": "从原会话发起协作"
+  },
+  "overview": {
+    "nav": "总览",
+    "title": "总览",
+    "loading": "正在读取…",
+    "refresh": "刷新",
+    "updatedAt": "更新于 {{time}}",
+    "statPending": "待我处理",
+    "statPendingNote": "所有组里等你答复的问题",
+    "statGroups": "运行中的组",
+    "statGroupsNote": "运行中 / 全部",
+    "statAgents": "在线成员",
+    "statAgentsNote": "{{count}} 个正在工作",
+    "statStuck": "卡住的成员",
+    "statStuckNote": "报告了阻塞或长时间没进展",
+    "pendingTitle": "待我处理",
+    "pendingAside": "{{count}} 项",
+    "pendingEmpty": "没有等你处理的事。",
+    "awaitingYou": "待你答复",
+    "recommended": "推荐",
+    "sending": "发送中…",
+    "answerFailed": "没有发出去，请到组里回答。",
+    "openInGroup": "去组里看",
+    "agentsTitle": "AI 成员在做什么",
+    "agentsAside": "{{groups}} 个组 · {{agents}} 个成员",
+    "state": {
+      "working": "工作中",
+      "waiting": "等待中",
+      "stuck": "卡住了",
+      "idle": "空闲",
+      "stopped": "已停止"
+    }
   }
 }

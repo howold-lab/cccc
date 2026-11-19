@@ -349,5 +349,37 @@
     "emptyHint": "Set up an app on the machine running CCCC. Its sessions will appear here automatically.",
     "setupRuntime": "App to connect",
     "setupExampleHeading": "Start from a native session"
+  },
+  "overview": {
+    "nav": "Overview",
+    "title": "Overview",
+    "loading": "Loading…",
+    "refresh": "Refresh",
+    "updatedAt": "Updated {{time}}",
+    "statPending": "Waiting on you",
+    "statPendingNote": "Questions to you across Groups",
+    "statGroups": "Running Groups",
+    "statGroupsNote": "Running / all",
+    "statAgents": "Agents online",
+    "statAgentsNote": "{{count}} working",
+    "statStuck": "Stuck agents",
+    "statStuckNote": "Reported a blocker or stalled",
+    "pendingTitle": "Waiting on you",
+    "pendingAside": "{{count}} items",
+    "pendingEmpty": "Nothing is waiting on you.",
+    "awaitingYou": "Reply",
+    "recommended": "Recommended",
+    "sending": "Sending…",
+    "answerFailed": "Not sent. Answer it in the Group.",
+    "openInGroup": "Open in Group",
+    "agentsTitle": "What the agents are doing",
+    "agentsAside": "{{groups}} Groups · {{agents}} agents",
+    "state": {
+      "working": "Working",
+      "waiting": "Waiting",
+      "stuck": "Stuck",
+      "idle": "Idle",
+      "stopped": "Stopped"
+    }
   }
 }

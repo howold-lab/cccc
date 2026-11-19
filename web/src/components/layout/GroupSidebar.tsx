@@ -17,6 +17,7 @@ import {
   ClockIcon,
   GroupDeleteIcon,
   PlusIcon,
+  HomeIcon,
 } from "../Icons";
 import { GroupSidebarSectionHeader } from "./GroupSidebarSectionHeader";
 import { GroupSidebarItem } from "./GroupSidebarItem";
@@ -67,6 +68,10 @@ export interface GroupSidebarProps {
   onControlGroup?: (groupId: string, control: GroupControl) => void;
   /** Delete a group from its menu; the handler owns the confirmation. */
   onDeleteGroup?: (groupId: string) => void;
+  /** Whether the cross-Group overview is the page on show. */
+  overviewActive?: boolean;
+  /** Opens the cross-Group overview; omitted where it is unavailable. */
+  onOpenOverview?: () => void;
 }
 
 export function GroupSidebar({
@@ -94,6 +99,8 @@ export function GroupSidebar({
   onOpenGroupAutomation,
   onControlGroup,
   onDeleteGroup,
+  overviewActive = false,
+  onOpenOverview,
 }: GroupSidebarProps) {
   const { t } = useTranslation("layout");
   const pending = useVisiblePendingSummary();
@@ -238,6 +245,42 @@ export function GroupSidebar({
     },
     [onDeleteGroup, readOnly, t, controlsBusy],
   );
+
+  const overviewEntry = (collapsed: boolean) =>
+    onOpenOverview ? (
+      collapsed ? (
+        <IconButton
+          type="button"
+          size="touch"
+          variant={overviewActive ? "secondary" : undefined}
+          onClick={onOpenOverview}
+          label={t("overview.nav")}
+          aria-current={overviewActive ? "page" : undefined}
+        >
+          <HomeIcon size={18} />
+        </IconButton>
+      ) : (
+        <button
+          type="button"
+          onClick={() => {
+            onOpenOverview();
+            if (window.matchMedia("(max-width: 767px)").matches) onClose();
+          }}
+          aria-current={overviewActive ? "page" : undefined}
+          className={classNames(
+            "mx-2 mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+            overviewActive
+              ? "bg-[var(--color-sidebar-item-active)] font-semibold text-[var(--color-text-primary)]"
+              : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]",
+          )}
+          data-overview-entry
+        >
+          <HomeIcon size={16} />
+          <span className="min-w-0 flex-1 truncate">{t("overview.nav")}</span>
+          {totalPending && <PendingIndicatorText indicator={totalPending} />}
+        </button>
+      )
+    ) : null;
 
   const localSessionsEntry = (collapsed: boolean) =>
     !readOnly && canAccessLocalSessions ? (
@@ -466,9 +509,12 @@ export function GroupSidebar({
                 <PlusIcon size={18} />
               </IconButton>
             )}
+            {overviewEntry(true)}
             {localSessionsEntry(true)}
           </div>
         )}
+
+        {!isCollapsed && overviewEntry(false)}
 
         {/* Group list */}
         {!isCollapsed && (
