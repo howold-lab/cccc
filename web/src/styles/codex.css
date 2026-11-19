@@ -170,6 +170,18 @@
   border-radius: var(--radius-md);
 }
 
+/* Fields take borderFocus, the accent, while focused; checkboxes and radios tick in it. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-field]:focus,
+:root[data-ui-style="lcd"] [data-lcd-scope] .glass-input:focus {
+  border-color: var(--lcd-focus);
+}
+
+:root[data-ui-style="lcd"]
+  :is([role="dialog"][data-lcd-scope], [data-lcd-scope] [role="dialog"])
+  :is(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--lcd-accent);
+}
+
 :root[data-ui-style="lcd"] [data-lcd-scope] :is(input, select, textarea):focus-visible {
   outline: none;
 }
@@ -355,12 +367,12 @@
 :root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-surface] {
   border: 1px solid var(--lcd-rule);
   border-radius: 24px;
-  background: var(--lcd-raised);
+  background: var(--lcd-composer);
   box-shadow: var(--lcd-shadow);
 }
 
 :root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-surface]:focus-within {
-  border-color: color-mix(in srgb, var(--lcd-rule-strong) 60%, var(--lcd-rule));
+  border-color: var(--lcd-rule-strong);
 }
 
 /* Composer tools are borderless icon keys. */
@@ -526,7 +538,7 @@
 
 /* A soft accent ring instead of the dashed outline. */
 :root[data-ui-style="lcd"] [data-lcd-scope] :focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--lcd-accent) 55%, transparent);
+  outline: 2px solid var(--lcd-focus);
   outline-offset: 2px;
 }
 
@@ -534,7 +546,7 @@
   [data-lcd-scope]
   input[role="switch"]:focus-visible
   + [data-switch-track] {
-  outline: 2px solid color-mix(in srgb, var(--lcd-accent) 55%, transparent);
+  outline: 2px solid var(--lcd-focus);
   outline-offset: 2px;
 }
 

@@ -88,37 +88,45 @@
    >= 15. The darkest ground text sits on, panel-2, costs text about 9 Lc: body and
    secondary keep Lc 81 and 71 there, and placeholder tones stay above 4.5:1. */
 :root[data-ui-style="lcd"] {
-  /* Codex-style neutral palette: a white reading surface, a pale grey sidebar and
-     panels, soft grey selection and a blue accent. */
+  /* Codex light preset (contrast 45), from the Codex app's theme: surface #fff, ink
+     #1a1c1f with translucent secondary/tertiary tones, borders and hover/selection as
+     ink at low opacity, accent #339cff and the blue user bubble. Keep the alpha values:
+     they are what makes hover, selection and borders read the same on any ground.
+     The sidebar colour is the measured pixel; the theme does not bind it directly. */
   --lcd-bg: #ffffff;
-  --lcd-sidebar: #f9f9f9;
-  --lcd-panel: #f7f7f8;
-  --lcd-panel-2: #f0f0f1;
+  --lcd-sidebar: #f8f8f7;
+  --lcd-panel: #f6f6f6;
+  --lcd-panel-2: #efefef;
   --lcd-raised: #ffffff;
   --lcd-plate: #ffffff;
   /* Text on the plate, which stays light in both themes. */
-  --lcd-plate-ink: #3c3c43;
-  --lcd-ink: #0d0d0d;
-  --lcd-ink-strong: #000000;
-  --lcd-dim: #4b4b52;
-  --lcd-muted: #6e6e76;
-  --lcd-rule: #e8e8ea;
-  --lcd-rule-strong: #d4d4d8;
-  /* The line between messages. */
-  --lcd-sep: #ededef;
+  --lcd-plate-ink: #1a1c1f;
+  --lcd-ink: #1a1c1f;
+  --lcd-ink-strong: #0d0d0d;
+  --lcd-dim: rgba(26, 28, 31, 0.695);
+  --lcd-muted: rgba(26, 28, 31, 0.495);
+  /* border and borderHeavy; borderLight is the line between messages. */
+  --lcd-rule: rgba(26, 28, 31, 0.078);
+  --lcd-rule-strong: rgba(26, 28, 31, 0.117);
+  --lcd-sep: rgba(26, 28, 31, 0.049);
   --lcd-wait: #c2410c;
   --lcd-on-wait: #ffffff;
   --lcd-danger: #c0362c;
-  --lcd-link: #1f6feb;
-  --lcd-accent: #2f7cf6;
-  --lcd-accent-strong: #1f6feb;
+  /* Links stay a deeper blue than the accent so body text links remain legible. */
+  --lcd-link: #0b72d9;
+  --lcd-accent: #339cff;
+  --lcd-accent-strong: #1f8bf5;
   --lcd-on-accent: #ffffff;
-  --lcd-accent-soft: #e8f1fe;
-  --lcd-bubble: #e9f1fd;
-  --lcd-bubble-ink: #0d0d0d;
-  --lcd-sel-bg: #ececee;
-  --lcd-sel-fg: #0d0d0d;
-  --lcd-sel-soft: #f2f2f3;
+  --lcd-accent-soft: rgba(51, 156, 255, 0.12);
+  --lcd-focus: #339cff;
+  /* The blue conversation style: blue[50] ground, blue[900] text. */
+  --lcd-bubble: #e8f3fe;
+  --lcd-bubble-ink: #0c274a;
+  --lcd-composer: rgba(255, 255, 255, 0.96);
+  /* primary-ghost-hover: one tone for hover and the selected row. */
+  --lcd-sel-bg: rgba(26, 28, 31, 0.054);
+  --lcd-sel-fg: #1a1c1f;
+  --lcd-sel-soft: rgba(26, 28, 31, 0.054);
   --lcd-code-bg: #f3f3f4;
   --lcd-overlay: rgba(0, 0, 0, 0.28);
   --lcd-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
@@ -177,6 +185,8 @@
   --lcd-accent-strong: #5a9cff;
   --lcd-on-accent: #ffffff;
   --lcd-accent-soft: #1f2f47;
+  --lcd-focus: #3d8bff;
+  --lcd-composer: #2a2a2a;
   --lcd-bubble: #2f3b4d;
   --lcd-bubble-ink: #f2f2f2;
   --lcd-sel-bg: #343434;
@@ -246,7 +256,7 @@
 
   --color-border-primary: var(--lcd-rule-strong);
   --color-border-secondary: var(--lcd-rule);
-  --color-border-focus: var(--lcd-accent);
+  --color-border-focus: var(--lcd-focus);
 
   --color-text-primary: var(--lcd-ink);
   --color-text-secondary: var(--lcd-dim);
@@ -277,7 +287,7 @@
   --destructive-foreground: #ffffff;
   --border: var(--lcd-rule);
   --input: var(--lcd-rule);
-  --ring: var(--lcd-accent);
+  --ring: var(--lcd-focus);
   --focus-ring:
     0 0 0 1px var(--lcd-bg), 0 0 0 3px color-mix(in srgb, var(--lcd-accent) 45%, transparent);
 
