@@ -2,14 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AuthenticatedDownloadLink } from "../AuthenticatedDownloadLink";
 import { DownloadIcon, FileIcon, PlayIcon } from "../Icons";
-import {
-  openAttachmentResource,
-  type MessageAttachmentSource,
-} from "../resourcePanel/openAttachmentResource";
+import type { MessageAttachmentSource } from "../resourcePanel/openAttachmentResource";
+import { useMediaViewerStore } from "../../stores/useMediaViewerStore";
 
 /**
  * A video attachment shown as its first frame. The frame loads only once the
- * message is on screen; playback happens in the resource panel when clicked, where
+ * message is on screen; playback happens in a centered viewer when clicked, where
  * the player fetches in byte ranges. Starting one pauses other message media, and
  * a format the browser cannot decode falls back to the download chip.
  */
@@ -79,7 +77,16 @@ export function VideoPreview({
       <button
         ref={frame}
         type="button"
-        onClick={() => openAttachmentResource(resource, "video", label)}
+        onClick={() =>
+          useMediaViewerStore.getState().open({
+            media: "video",
+            src: href,
+            title: label,
+            downloadHref,
+            downloadName,
+            resource,
+          })
+        }
         aria-label={t("playVideo", { name: label })}
         className="group relative block w-full bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
       >

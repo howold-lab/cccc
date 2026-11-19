@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { useChatOutboxStore } from "../../stores/chatOutboxStore";
 import { useResourcePanelStore } from "../../stores/useResourcePanelStore";
+import { useMediaViewerStore } from "../../stores/useMediaViewerStore";
 import type { LedgerEvent, MessageAttachment } from "../../types";
 import { buildMessageAttachmentLinks } from "../../utils/messageAttachmentLinks";
 import {
@@ -99,6 +100,7 @@ it("plays and downloads a sent video from the stored blob after its local previe
   act(() => {
     host.querySelector<HTMLButtonElement>('button[aria-label="playVideo"]')!.click();
   });
+  act(() => useMediaViewerStore.getState().openInPanel());
 
   const tab = useResourcePanelStore.getState().groups.g1.tabs[0];
   expect(tab.kind).toBe("attachment");

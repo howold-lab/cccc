@@ -3,10 +3,8 @@ import { useTranslation } from "react-i18next";
 import { classNames } from "../../utils/classNames";
 import { MESSAGE_IMAGE_PREVIEW_HEIGHT_PX } from "./imageLayout";
 import { ImagePreviewFailure } from "./ImagePreviewFailure";
-import {
-  openAttachmentResource,
-  type MessageAttachmentSource,
-} from "../resourcePanel/openAttachmentResource";
+import type { MessageAttachmentSource } from "../resourcePanel/openAttachmentResource";
+import { useMediaViewerStore } from "../../stores/useMediaViewerStore";
 
 const IMAGE_LOAD_ERROR_CACHE = new Set<string>();
 // The transparency grid is drawn in the panel tones, and the picture shows as it is:
@@ -165,7 +163,17 @@ export function ImagePreview({
             ? "border-white/10 bg-slate-900/45 hover:bg-slate-900/55"
             : "border-[rgba(15,23,42,0.12)] bg-[rgb(238,241,245)] hover:bg-[rgb(232,236,241)]",
       )}
-      onClick={() => openAttachmentResource(resource, "image", alt, isSvg)}
+      onClick={() =>
+        useMediaViewerStore.getState().open({
+          media: "image",
+          src: displaySrc || resolvedHref || href,
+          title: alt,
+          downloadHref,
+          downloadName,
+          isSvg,
+          resource,
+        })
+      }
       data-image-frame
       aria-label={t("openImagePreview", { name: alt })}
       title={t("openImagePreview", { name: alt })}

@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { ImagePreview } from "./ImagePreview";
 import { useResourcePanelStore } from "../../stores/useResourcePanelStore";
+import { useMediaViewerStore } from "../../stores/useMediaViewerStore";
 
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 let host: HTMLDivElement, root: ReturnType<typeof createRoot>;
@@ -60,6 +61,8 @@ it("keeps an opened resource independent of the message thumbnail's failure", as
   await render("/slow-lifecycle.png");
   const thumbnail = host.querySelector("img")!;
   await act(async () => host.querySelector("button")!.click());
+  expect(useMediaViewerStore.getState().item).toMatchObject({ media: "image", title: "Image" });
+  await act(async () => useMediaViewerStore.getState().openInPanel());
   expect(useResourcePanelStore.getState().groups.g.tabs).toHaveLength(1);
   expect(document.querySelector('[role="dialog"]')).toBeNull();
   await act(async () => thumbnail.dispatchEvent(new Event("error")));
@@ -75,6 +78,7 @@ it("keeps an opened resource independent of the message thumbnail's failure", as
   expect(host.textContent).not.toContain("imagePreviewUnavailable");
   const opener = host.querySelector<HTMLButtonElement>("button")!;
   await act(async () => opener.click());
+  await act(async () => useMediaViewerStore.getState().openInPanel());
   expect(document.querySelector('[role="dialog"]')).toBeNull();
   expect(useResourcePanelStore.getState().groups.g.tabs).toHaveLength(1);
   expect(document.body.style.position).toBe(original.position);

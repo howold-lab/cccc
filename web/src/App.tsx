@@ -51,6 +51,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useConnectWorkbench } from "./features/connect/useConnectWorkbench";
 import { ConnectRemotePanel } from "./features/connect/ConnectRemotePanel";
 import { PendingReplyProvider } from "./features/pendingReplies/PendingReplyProvider";
+import { CenteredMediaViewer } from "./components/messageBubble/CenteredMediaViewer";
 
 // Body already reserves the top safe area. Keep this flow box inside the
 // visual viewport; fixed overlays still use the complete VISUAL_VIEWPORT_BOX.
@@ -602,6 +603,8 @@ export default function App({
           </Suspense>
         </ErrorBoundary>
       ) : null}
+
+      <CenteredMediaViewer />
 
       <DropOverlay isOpen={dropOverlayOpen} isDark={isDark} maxFileMb={WEB_MAX_FILE_MB} />
     </div>

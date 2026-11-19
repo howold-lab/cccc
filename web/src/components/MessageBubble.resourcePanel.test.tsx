@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { useChatOutboxStore } from "../stores/chatOutboxStore";
 import { useResourcePanelStore } from "../stores/useResourcePanelStore";
+import { useMediaViewerStore } from "../stores/useMediaViewerStore";
 import type { LedgerEvent } from "../types";
 import {
   completeCanonicalOutboxReconciliation,
@@ -98,6 +99,8 @@ it("keeps original attachment identity through filtering, reordering and send co
     const button = host.querySelector<HTMLButtonElement>(selector);
     expect(button).not.toBeNull();
     act(() => button!.click());
+    // Images and videos open the centered viewer first; documents open the panel directly.
+    act(() => useMediaViewerStore.getState().openInPanel());
   };
   click("[data-image-frame]");
   click('button[aria-label="playVideo"]');
@@ -157,8 +160,10 @@ it("keeps attachments from different authors with the same client id in separate
   });
   await renderMessage(message("event-a", "agent-a"));
   act(() => host.querySelector<HTMLButtonElement>("[data-image-frame]")!.click());
+  act(() => useMediaViewerStore.getState().openInPanel());
   await renderMessage(message("event-b", "agent-b"));
   act(() => host.querySelector<HTMLButtonElement>("[data-image-frame]")!.click());
+  act(() => useMediaViewerStore.getState().openInPanel());
   const tabs = useResourcePanelStore.getState().groups["displayed-group"].tabs;
   expect(tabs).toHaveLength(2);
   expect(tabs.map((tab) => (tab.kind === "attachment" ? tab.eventId : ""))).toEqual([

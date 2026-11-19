@@ -207,7 +207,9 @@
     "renderFailed": "Could not render this diagram. Showing its source instead.",
     "tooLarge": "This diagram is too large to render safely. Showing its source instead."
   },
-  "table": { "scrollRegion": "Scrollable table" },
+  "table": {
+    "scrollRegion": "Scrollable table"
+  },
   "webModelDelivery": {
     "submitting": "Delivering to Web Model",
     "submitted": "Delivered to Web Model",
@@ -1127,5 +1129,9 @@
   "slashDescriptions": {
     "install": "Install or enable a skill, MCP toolpack, capability, URL, repo, or local path.",
     "selfEvolution": "Review how the team works and propose up to three changes for you to choose."
+  },
+  "mediaViewer": {
+    "openInPanel": "Open in side panel",
+    "close": "Close preview"
   }
 }

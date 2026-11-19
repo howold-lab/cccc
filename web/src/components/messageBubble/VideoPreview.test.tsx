@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { VideoPreview } from "./VideoPreview";
 import { AttachmentResourceView } from "../resourcePanel/views/AttachmentResourceView";
 import { useResourcePanelStore } from "../../stores/useResourcePanelStore";
+import { useMediaViewerStore } from "../../stores/useMediaViewerStore";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -95,12 +96,22 @@ it("shows the first frame only once on screen and never plays it inline", () => 
   expect(player()).toBeNull();
 });
 
-it("opens a resource tab from the thumbnail", () => {
+it("opens the centered viewer from the thumbnail, and the side panel from there", () => {
   act(() => root.render(preview("/preview/clip.mp4")));
 
   open();
 
-  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(useMediaViewerStore.getState().item).toMatchObject({
+    media: "video",
+    src: "/preview/clip.mp4",
+    title: "clip.mp4",
+    downloadHref: "/preview/clip.mp4?download=true",
+  });
+  expect(useResourcePanelStore.getState().groups.g).toBeUndefined();
+
+  act(() => useMediaViewerStore.getState().openInPanel());
+
+  expect(useMediaViewerStore.getState().item).toBeNull();
   expect(useResourcePanelStore.getState().groups.g.tabs[0]).toMatchObject({
     kind: "attachment",
     media: "video",
