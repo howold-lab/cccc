@@ -193,6 +193,21 @@
   font-weight: 500;
 }
 
+/* Group rows show only the name, as Codex lists do: the run-state shape (▶ ■ —) is
+   hidden from view but keeps its label for screen readers. The header still shows
+   the open Group's state, and a broken connection (× or dots, no shape) stays visible. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(.glass-group-item, .glass-group-item-active)
+  .lcd-group-symbol[data-lcd-shape] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* Waiting-on-you counts are small pills. */
 :root[data-ui-style="lcd"] [data-lcd-scope] [data-pending-state] {
   border-radius: 999px;
