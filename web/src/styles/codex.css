@@ -534,6 +534,78 @@
   background: var(--lcd-panel);
 }
 
+/* Hover: a soft round halo around the tile instead of a square shade, and the tile's
+   edge stays light rather than turning ink. */
+:root[data-ui-style="lcd"] .lcd-member:not([data-listed]):hover {
+  background: none;
+}
+
+:root[data-ui-style="lcd"] .lcd-member:not([data-listed]):hover .lcd-tile {
+  box-shadow: 0 0 0 3px var(--lcd-sel-bg);
+}
+
+:root[data-ui-style="lcd"]
+  .lcd-member:not([data-listed]):is([data-tone="idle"], [data-tone="stopped"]):hover
+  .lcd-tile {
+  border-color: var(--lcd-rule-strong);
+}
+
+:root[data-ui-style="lcd"] .lcd-member-more:hover,
+:root[data-ui-style="lcd"] .lcd-member-add:hover {
+  background: none;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-more:hover::before,
+:root[data-ui-style="lcd"] .lcd-member-add:hover::before {
+  background: var(--lcd-sel-bg);
+}
+
+/* The open member: a short accent bar under the tile. */
+:root[data-ui-style="lcd"] .lcd-member[data-active]:not([data-listed])::after {
+  right: 0.75rem;
+  left: 0.75rem;
+  border-radius: 999px;
+  background: var(--lcd-accent);
+}
+
+/* Busy: a thin round spinner around the tile instead of the square ring of dots.
+   Still form (motion off): the full ring in the accent. */
+:root[data-ui-style="lcd"] .lcd-member-ring {
+  inset: -0.25rem;
+  border: 2px solid var(--lcd-accent);
+  border-radius: 999px;
+  background: none;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-ring[data-ring="moving"] {
+  border-color: color-mix(in srgb, var(--lcd-accent) 20%, transparent);
+  border-top-color: var(--lcd-accent);
+  animation: codex-ring-spin 1s linear infinite;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-ring i,
+:root[data-ui-style="lcd"] .lcd-member-ring[data-ring="moving"] i {
+  display: none;
+}
+
+:root[data-ui-style="lcd"][data-lcd-motion="off"] .lcd-member-ring[data-ring] {
+  border-color: var(--lcd-accent);
+  animation: none;
+}
+
+@keyframes codex-ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Needs attention: one ring in the waiting colour, round like the tile. */
+:root[data-ui-style="lcd"]
+  :is(.lcd-member, [data-lcd-dock-button])[data-tone="attention"]
+  .lcd-tile {
+  outline-offset: 2px;
+}
+
 /* ---- Focus ---- */
 
 /* A soft accent ring instead of the dashed outline. */
