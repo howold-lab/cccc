@@ -15,6 +15,7 @@
 @import "./styles/lcdVoiceSecretary.css";
 @import "./styles/lcdVoiceDocuments.css";
 @import "./styles/lcdPresentation.css";
+@import "./styles/codex.css";
 @import "tailwindcss";
 
 @config "../tailwind.config.ts";

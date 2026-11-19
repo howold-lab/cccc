@@ -88,42 +88,62 @@
    >= 15. The darkest ground text sits on, panel-2, costs text about 9 Lc: body and
    secondary keep Lc 81 and 71 there, and placeholder tones stay above 4.5:1. */
 :root[data-ui-style="lcd"] {
-  --lcd-bg: #ebe9e5;
-  --lcd-panel: #e2e1dc;
-  --lcd-panel-2: #dad9d5;
-  --lcd-raised: #f1f0ec;
-  --lcd-plate: #faf8f4;
+  /* Codex-style neutral palette: a white reading surface, a pale grey sidebar and
+     panels, soft grey selection and a blue accent. */
+  --lcd-bg: #ffffff;
+  --lcd-sidebar: #f9f9f9;
+  --lcd-panel: #f7f7f8;
+  --lcd-panel-2: #f0f0f1;
+  --lcd-raised: #ffffff;
+  --lcd-plate: #ffffff;
   /* Text on the plate, which stays light in both themes. */
-  --lcd-plate-ink: #454440;
-  --lcd-ink: #1f1e1b;
-  --lcd-ink-strong: #131310;
-  --lcd-dim: #43423f;
-  --lcd-muted: #5d5c58;
-  --lcd-rule: #cccac6;
-  --lcd-rule-strong: #7a7975;
+  --lcd-plate-ink: #3c3c43;
+  --lcd-ink: #0d0d0d;
+  --lcd-ink-strong: #000000;
+  --lcd-dim: #4b4b52;
+  --lcd-muted: #6e6e76;
+  --lcd-rule: #e8e8ea;
+  --lcd-rule-strong: #d4d4d8;
   /* The line between messages. */
-  --lcd-sep: #cccac6;
-  --lcd-wait: #832c0d;
-  --lcd-on-wait: #f1f0ec;
-  --lcd-danger: #7e2f18;
-  --lcd-link: #164a63;
-  --lcd-sel-bg: #1f1e1b;
-  --lcd-sel-fg: #ebe9e5;
-  --lcd-sel-soft: #dad9d5;
-  --lcd-code-bg: #dddcd8;
-  --lcd-overlay: rgba(19, 19, 16, 0.35);
+  --lcd-sep: #ededef;
+  --lcd-wait: #c2410c;
+  --lcd-on-wait: #ffffff;
+  --lcd-danger: #c0362c;
+  --lcd-link: #1f6feb;
+  --lcd-accent: #2f7cf6;
+  --lcd-accent-strong: #1f6feb;
+  --lcd-on-accent: #ffffff;
+  --lcd-accent-soft: #e8f1fe;
+  --lcd-bubble: #e9f1fd;
+  --lcd-bubble-ink: #0d0d0d;
+  --lcd-sel-bg: #ececee;
+  --lcd-sel-fg: #0d0d0d;
+  --lcd-sel-soft: #f2f2f3;
+  --lcd-code-bg: #f3f3f4;
+  --lcd-overlay: rgba(0, 0, 0, 0.28);
+  --lcd-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --lcd-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 16px rgba(0, 0, 0, 0.05);
+  --lcd-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
   --lcd-font-cjk:
     "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "PingFang SC", "Hiragino Sans", "Microsoft YaHei",
     "Yu Gothic", "Meiryo", monospace;
-  --lcd-font-body: "IBM Plex Mono", var(--lcd-font-cjk);
+  --lcd-font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Helvetica Neue", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --lcd-font-code:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Noto Sans Mono CJK SC", monospace;
+  --lcd-font-body: var(--lcd-font-sans);
   --lcd-font-pixel: "Fusion Pixel 12 SC", var(--lcd-font-body);
-  --lcd-font-brand: "Departure Mono", var(--lcd-font-body);
+  --lcd-font-brand: var(--lcd-font-sans);
 }
 
 :root[data-ui-style="lcd"]:lang(ja) {
   --lcd-font-cjk:
     "Noto Sans Mono CJK JP", "Noto Sans CJK JP", "Hiragino Sans", "Yu Gothic", "Meiryo",
     "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", monospace;
+  --lcd-font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Helvetica Neue", "Hiragino Sans",
+    "Yu Gothic", "Meiryo", "Noto Sans CJK JP", "PingFang SC", "Microsoft YaHei", sans-serif;
   --lcd-font-pixel: "Fusion Pixel 12 JA", var(--lcd-font-body);
 }
 
@@ -136,31 +156,37 @@
 }
 
 :root[data-ui-style="lcd"].dark {
-  --lcd-bg: #21201e;
-  --lcd-panel: #2b2a27;
-  --lcd-panel-2: #2e2e2b;
-  --lcd-raised: #282724;
-  --lcd-plate: #d2d1cd;
-  --lcd-ink: #dad9d5;
-  --lcd-ink-strong: #ecebe7;
-  /* The same paper and ink, inverted: body Lc 81, secondary 65 and faint text 55, each
-     about 2.5 lower on panel-2. */
-  --lcd-dim: #bfbeba;
-  --lcd-muted: #adaca9;
-  --lcd-rule: #343330;
-  --lcd-rule-strong: #7d7c78;
-  /* The dark rule all but vanishes on the screen; between messages the line takes
-     the strong rule mixed 45% into the screen. */
-  --lcd-sep: #464543;
+  --lcd-bg: #212121;
+  --lcd-sidebar: #181818;
+  --lcd-panel: #262626;
+  --lcd-panel-2: #2d2d2d;
+  --lcd-raised: #2a2a2a;
+  --lcd-plate: #e6e6e6;
+  --lcd-ink: #ececec;
+  --lcd-ink-strong: #ffffff;
+  --lcd-dim: #c2c2c2;
+  --lcd-muted: #9b9b9b;
+  --lcd-rule: #333333;
+  --lcd-rule-strong: #4a4a4a;
+  --lcd-sep: #2f2f2f;
   --lcd-wait: #f2ae4c;
-  --lcd-on-wait: #21201e;
-  --lcd-danger: #ee9c80;
-  --lcd-link: #86c4e2;
-  --lcd-sel-bg: #dad9d5;
-  --lcd-sel-fg: #21201e;
-  --lcd-sel-soft: #2e2e2b;
-  --lcd-code-bg: #2b2a27;
-  --lcd-overlay: rgba(0, 0, 0, 0.5);
+  --lcd-on-wait: #212121;
+  --lcd-danger: #ff8f84;
+  --lcd-link: #7cb4ff;
+  --lcd-accent: #3d8bff;
+  --lcd-accent-strong: #5a9cff;
+  --lcd-on-accent: #ffffff;
+  --lcd-accent-soft: #1f2f47;
+  --lcd-bubble: #2f3b4d;
+  --lcd-bubble-ink: #f2f2f2;
+  --lcd-sel-bg: #343434;
+  --lcd-sel-fg: #ececec;
+  --lcd-sel-soft: #2c2c2c;
+  --lcd-code-bg: #2a2a2a;
+  --lcd-overlay: rgba(0, 0, 0, 0.55);
+  --lcd-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --lcd-shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.25);
+  --lcd-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 
 /* The page ground. */
@@ -172,7 +198,7 @@
 /* Product tokens, type and corners. */
 :root[data-ui-style="lcd"] [data-lcd-scope] {
   --color-body-bg: var(--lcd-bg);
-  --color-sidebar-bg: var(--lcd-bg);
+  --color-sidebar-bg: var(--lcd-sidebar);
   --color-sidebar-border: var(--lcd-rule);
   --color-sidebar-item-hover: var(--lcd-sel-soft);
   --color-sidebar-item-active: var(--lcd-sel-soft);
@@ -190,16 +216,16 @@
   --glass-border: var(--lcd-rule);
   --glass-border-subtle: var(--lcd-rule);
   --glass-border-gradient: none;
-  --glass-shadow: none;
-  --glass-shadow-lg: none;
+  --glass-shadow: var(--lcd-shadow-sm);
+  --glass-shadow-lg: var(--lcd-shadow-lg);
   --glass-inner-glow: none;
   --glass-glow: none;
   --glass-blur: 0px;
   --glass-blur-lg: 0px;
   --glass-tab-bg: transparent;
   --glass-tab-bg-hover: var(--lcd-sel-soft);
-  --glass-tab-bg-active: var(--lcd-raised);
-  --glass-tab-border-active: var(--lcd-rule-strong);
+  --glass-tab-bg-active: var(--lcd-sel-bg);
+  --glass-tab-border-active: transparent;
   --glass-tab-shadow-active: none;
   --glass-bubble-bg: transparent;
   --glass-bubble-border: var(--lcd-rule);
@@ -220,15 +246,15 @@
 
   --color-border-primary: var(--lcd-rule-strong);
   --color-border-secondary: var(--lcd-rule);
-  --color-border-focus: var(--lcd-ink);
+  --color-border-focus: var(--lcd-accent);
 
   --color-text-primary: var(--lcd-ink);
   --color-text-secondary: var(--lcd-dim);
   --color-text-tertiary: var(--lcd-muted);
   --color-text-muted: var(--lcd-muted);
-  --color-text-inverse: var(--lcd-sel-fg);
+  --color-text-inverse: var(--lcd-bg);
 
-  --color-accent-primary: var(--lcd-ink);
+  --color-accent-primary: var(--lcd-accent);
   --color-accent-secondary: var(--lcd-link);
   --color-accent-warning: var(--lcd-wait);
   --color-accent-danger: var(--lcd-danger);
@@ -240,7 +266,7 @@
   --popover: var(--lcd-raised);
   --popover-foreground: var(--lcd-ink);
   --primary: var(--lcd-ink);
-  --primary-foreground: var(--lcd-sel-fg);
+  --primary-foreground: var(--lcd-bg);
   --secondary: var(--lcd-panel-2);
   --secondary-foreground: var(--lcd-ink);
   --muted: var(--lcd-panel-2);
@@ -248,23 +274,24 @@
   --accent: var(--lcd-sel-soft);
   --accent-foreground: var(--lcd-ink);
   --destructive: var(--lcd-danger);
-  --destructive-foreground: var(--lcd-sel-fg);
+  --destructive-foreground: #ffffff;
   --border: var(--lcd-rule);
-  --input: var(--lcd-rule-strong);
-  --ring: var(--lcd-ink);
-  --focus-ring: 0 0 0 1px var(--lcd-bg), 0 0 0 2px var(--lcd-ink);
+  --input: var(--lcd-rule);
+  --ring: var(--lcd-accent);
+  --focus-ring:
+    0 0 0 1px var(--lcd-bg), 0 0 0 3px color-mix(in srgb, var(--lcd-accent) 45%, transparent);
 
-  --radius-xs: 0px;
-  --radius-sm: 0px;
-  --radius-md: 0px;
-  --radius-lg: 0px;
-  --radius-xl: 0px;
-  --radius-2xl: 0px;
-  --radius-3xl: 0px;
-  --radius-4xl: 0px;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 18px;
+  --radius-3xl: 22px;
+  --radius-4xl: 26px;
 
   --font-sans: var(--lcd-font-body);
-  --font-mono: var(--lcd-font-body);
+  --font-mono: var(--lcd-font-code);
   font-family: var(--lcd-font-body);
   font-synthesis: none;
   color: var(--lcd-ink);
@@ -935,22 +962,18 @@
   overflow-wrap: anywhere;
 }
 
-/* The proportional choice changes message text, while the surrounding controls,
-   attachments and code keep the screen's monospace font. */
+/* Message text follows the body-font choice: proportional (the default) sets it in the
+   interface's sans, mono in the code font. Controls, attachments and code are unchanged. */
 :root[data-ui-style="lcd"][data-lcd-body="proportional"]
   [data-chat-work-surface]
   :is([data-message-content], [data-message-quote-text], [data-message-insight-text]) {
-  font-family:
-    "IBM Plex Sans", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", "Hiragino Sans",
-    "Yu Gothic", "Meiryo", sans-serif;
+  font-family: var(--lcd-font-sans);
 }
 
-:root[data-ui-style="lcd"][data-lcd-body="proportional"]:lang(ja)
+:root[data-ui-style="lcd"][data-lcd-body="mono"]
   [data-chat-work-surface]
   :is([data-message-content], [data-message-quote-text], [data-message-insight-text]) {
-  font-family:
-    "IBM Plex Sans", "Noto Sans CJK JP", "Hiragino Sans", "Yu Gothic", "Meiryo", "Noto Sans CJK SC",
-    "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--lcd-font-code);
 }
 
 /* Code and quotes already have their own styling; do not add punctuation absent from the text. */
@@ -972,7 +995,7 @@
 
 :root[data-ui-style="lcd"] [data-lcd-scope] .markdown-body :is(pre, code),
 :root[data-ui-style="lcd"] [data-lcd-scope] .code-block-lang {
-  font-family: "IBM Plex Mono", var(--lcd-font-body);
+  font-family: var(--lcd-font-code);
 }
 
 :root[data-ui-style="lcd"] [data-lcd-scope] .markdown-body :is(pre, pre code) {
@@ -1692,20 +1715,6 @@
   border-radius: 0;
   background: var(--lcd-wait);
   color: var(--lcd-on-wait);
-}
-
-/* No round corners in the LCD grid. The radius tokens are zero; this also reaches
-   literal radii (`rounded`, `rounded-full`) and product classes that hard-code theirs.
-   A busy spinner keeps its ring: it is still while animations are off, and a square
-   with one open side would read as a glyph. A record mark keeps its dot as well
-   (lcdVoiceSecretary.css): a square reads as stop. */
-:root[data-ui-style="lcd"] :is([data-lcd-scope], [data-lcd-scope] *):not(.animate-spin) {
-  border-radius: 0;
-}
-
-/* Kept apart: a browser without this pseudo-element would drop the whole rule above. */
-:root[data-ui-style="lcd"] [data-lcd-scope] ::-webkit-scrollbar-thumb {
-  border-radius: 0;
 }
 
 /* The recipient card hard-codes palette colours for both themes; restate them here. */

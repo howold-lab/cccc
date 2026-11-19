@@ -1,0 +1,662 @@
+/* Codex look.
+
+   The LCD rules (lcd*.css) still provide the structure and data-* hooks; this layer,
+   imported after them, replaces the LCD treatment where it differs from the Codex
+   desktop look: soft grey selection instead of reverse video, borderless icon keys,
+   rounded corners and cards, a quiet chat ledger with your messages in a bubble, and
+   a floating composer with a round send key in the accent colour.
+
+   Colours still come from the --lcd-* tokens in lcd.css; selectors repeat the LCD
+   prefix so their specificity matches the rules they override. */
+
+/* ---- Type ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-brand-name] {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.5rem;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-title] {
+  font-family: var(--lcd-font-sans);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.5rem;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] :is(code, kbd, samp, pre) {
+  font-family: var(--lcd-font-code);
+}
+
+/* ---- Scrollbars ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] ::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+}
+
+/* ---- Header ---- */
+
+/* Header tools are plain icon keys: no frame at rest, a soft tone under the pointer. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-group-view-switch],
+    [data-group-work-shortcuts],
+    [data-group-side-panel-controls-host]
+  ) {
+  gap: 2px;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-group-view-switch], [data-group-work-shortcuts], [data-group-side-panel-controls-host])
+  > button
+  + button {
+  margin-left: 0;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-group-work-shortcuts], [data-group-side-panel-controls-host])
+  > button,
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-app-settings-trigger], [data-group-view-toggle]) {
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--lcd-dim);
+}
+
+/* The view switch is a segmented control: a grey track, the current view a white pill. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-view-switch] {
+  padding: 2px;
+  border-radius: var(--radius-lg);
+  background: var(--lcd-panel-2);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-view-switch] > button {
+  height: calc(2rem - 4px);
+  padding: 0 1.5ch;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--lcd-dim);
+  font-weight: 500;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-view-switch] > button[aria-pressed="true"] {
+  background: var(--lcd-raised);
+  color: var(--lcd-ink);
+  box-shadow:
+    var(--lcd-shadow-sm),
+    0 0 0 1px var(--lcd-rule);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-group-view-switch]
+  > button[aria-pressed="false"]:hover {
+  background: transparent;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls] > span {
+  border-color: var(--lcd-rule);
+  border-radius: var(--radius-md);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls][aria-expanded="true"] > span {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls][aria-expanded="true"] > svg {
+  color: var(--lcd-ink);
+}
+
+@media (hover: hover) {
+  :root[data-ui-style="lcd"]
+    [data-lcd-scope]
+    :is([data-group-work-shortcuts], [data-group-side-panel-controls-host])
+    > button:hover:not(:disabled),
+  :root[data-ui-style="lcd"]
+    [data-lcd-scope]
+    :is([data-app-settings-trigger], [data-group-view-toggle]):hover,
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls]:hover > span {
+    background: var(--lcd-sel-soft);
+    color: var(--lcd-ink);
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls]:hover > svg {
+    color: var(--lcd-ink);
+  }
+}
+
+/* ---- Keys and fields ---- */
+
+/* Secondary keys: a light outline at rest, a soft tone under the pointer. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-key] {
+  border: 1px solid var(--lcd-rule);
+  border-radius: var(--radius-md);
+  background: var(--lcd-raised);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-key]:hover:not(:disabled) {
+  border-color: var(--lcd-rule-strong);
+  background: var(--lcd-sel-soft);
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-resource-bar]
+  [data-lcd-key][aria-pressed="true"] {
+  border-color: var(--lcd-rule);
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-ink);
+}
+
+/* Primary keys stay filled in ink, as Codex's own primary buttons are, with round
+   corners. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-primary] {
+  border-radius: var(--radius-md);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-field] {
+  border-radius: var(--radius-md);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] :is(input, select, textarea):focus-visible {
+  outline: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] ::selection {
+  background: color-mix(in srgb, var(--lcd-accent) 24%, transparent);
+  color: inherit;
+}
+
+/* ---- Sidebar ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] :is(.glass-group-item, .glass-group-item-active) {
+  border-color: transparent;
+  border-radius: var(--radius-md);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .glass-group-item-active {
+  border-color: transparent;
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-ink);
+  font-weight: 500;
+}
+
+/* Waiting-on-you counts are small pills. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-pending-state] {
+  border-radius: 999px;
+}
+
+/* ---- Menus and popovers ---- */
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-group-menu], [data-lcd-menu], [role="menu"], [role="listbox"]) {
+  border-radius: var(--radius-xl);
+  box-shadow: var(--lcd-shadow-lg);
+}
+
+:root[data-ui-style="lcd"] .lcd-members-popover {
+  border-radius: var(--radius-xl);
+  box-shadow: var(--lcd-shadow-lg);
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  :is([role^="menuitem"], [role="option"], button) {
+  border-radius: var(--radius-sm);
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  [data-lcd-tag] {
+  border-radius: var(--radius-xs);
+}
+
+/* ---- Dialogs ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [role="dialog"] {
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--lcd-shadow-lg);
+}
+
+/* ---- Avatars ---- */
+
+:root[data-ui-style="lcd"] .lcd-tile {
+  border-color: var(--lcd-rule);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] :is([data-lcd-dock-button], [data-lcd-dock-add]) {
+  border-radius: 999px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-dock-add] > span {
+  border-radius: 999px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-dock-badge] {
+  border-color: var(--lcd-rule-strong);
+  border-radius: 999px;
+}
+
+/* ---- Messages ---- */
+
+/* No ledger line between speakers; space alone separates messages, as in Codex. */
+:root[data-ui-style="lcd"] .lcd-row:not([data-lcd-same-sender])::after {
+  content: none;
+}
+
+:root[data-ui-style="lcd"] .lcd-row {
+  line-height: 1.65;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-name {
+  font-weight: 600;
+}
+
+/* Your own messages: a tinted bubble on the right. The head (recipient and time) stays
+   small above it; your name is implied by the side. */
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .lcd-row-name {
+  padding: 0;
+  background: transparent;
+  color: var(--lcd-muted);
+  font-weight: 500;
+}
+
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .lcd-row-body {
+  padding: 0.5rem 0.875rem;
+  border-radius: 18px;
+  background: var(--lcd-bubble);
+  color: var(--lcd-bubble-ink);
+}
+
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .lcd-row-head {
+  margin-bottom: 0.25rem;
+}
+
+/* Message actions: quiet text keys without dividers. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] > button {
+  border-radius: var(--radius-sm);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] > button + button {
+  border-left: 0;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] > button:hover {
+  background: var(--lcd-sel-soft);
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] .lcd-row [data-message-actions-inline] > [data-show-in-chat] + button {
+  border-left: 0;
+}
+
+/* A question waiting on you: a rounded card in the waiting colour instead of the
+   double frame. */
+:root[data-ui-style="lcd"] [data-lcd-scope] form[data-pending-reply] {
+  padding: 1rem 1.25rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--lcd-wait) 45%, var(--lcd-rule));
+  border-radius: var(--radius-xl);
+  background: var(--lcd-raised);
+  box-shadow: var(--lcd-shadow);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] form[data-pending-reply][data-pending-reply-quiet] {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+:root[data-ui-style="lcd"] .lcd-ask-title {
+  font-family: var(--lcd-font-sans);
+  font-weight: 600;
+}
+
+/* Code blocks: rounded panels. */
+:root[data-ui-style="lcd"] [data-lcd-scope] .markdown-body pre {
+  border-radius: var(--radius-lg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .markdown-body :not(pre) > code {
+  border-radius: var(--radius-xs);
+}
+
+/* ---- Composer ---- */
+
+/* A floating card: rounded, lightly outlined, with a soft shadow. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-surface] {
+  border: 1px solid var(--lcd-rule);
+  border-radius: 24px;
+  background: var(--lcd-raised);
+  box-shadow: var(--lcd-shadow);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-surface]:focus-within {
+  border-color: color-mix(in srgb, var(--lcd-rule-strong) 60%, var(--lcd-rule));
+}
+
+/* Composer tools are borderless icon keys. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-attach] {
+  border: 1px solid transparent;
+  border-radius: 999px;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-composer-action-bar]
+  button:not([data-composer-send-primary]) {
+  border-radius: var(--radius-md);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-composer-recipient-row], [data-relay-recipient-row])
+  button {
+  border-radius: 999px;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-composer-recipient-row], [data-relay-recipient-row])
+  button[aria-pressed="true"] {
+  background: var(--lcd-accent-soft);
+  color: var(--lcd-accent-strong);
+}
+
+/* Send: the accent colour, rounded. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-send-control] {
+  border-radius: 999px;
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-send-primary] {
+  border-color: var(--lcd-accent);
+  border-radius: 999px;
+  background: var(--lcd-accent);
+  color: var(--lcd-on-accent);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-send-primary]:hover:not(:disabled) {
+  border-color: var(--lcd-accent-strong);
+  background: var(--lcd-accent-strong);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-send-primary]:disabled {
+  border-color: var(--lcd-panel-2);
+  background: var(--lcd-panel-2);
+  color: var(--lcd-muted);
+  opacity: 1;
+}
+
+/* The hint's caret is a thin line, not a block. */
+:root[data-ui-style="lcd"] [data-composer-caret] {
+  width: 1px;
+  margin-left: 1px;
+}
+
+/* ---- Pills and small marks ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-badge] {
+  border-radius: 999px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] :is([data-scroll-latest], [data-scroll-latest-count]) {
+  border-radius: 999px;
+  box-shadow: var(--lcd-shadow);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-terminal-unread], [data-terminal-unread-count]) {
+  border-radius: 999px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-switch-track]::after {
+  border-radius: 999px;
+}
+
+/* The voice and prompt tools sit in the composer as plain keys, without a frame or
+   dividers between them. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-voice-assistant-row-control] {
+  border-color: transparent;
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-voice-assistant-row-control]
+  :is(button, span, div) {
+  border-color: transparent;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-voice-assistant-row-control]
+  button:hover:not(:disabled) {
+  background: var(--lcd-sel-soft);
+}
+
+/* Send options: a quiet chevron beside the send key. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-send-options] {
+  margin-left: 2px;
+  border-color: transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--lcd-dim);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-composer-send-options]:hover:not(:disabled) {
+  background: var(--lcd-sel-soft);
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-composer-action-bar]
+  [data-voice-assistant-row-control] {
+  gap: 2px;
+  border-color: transparent;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-voice-assistant-row-control]
+  :is(.voice-desktop-controls > button, .voice-mobile-only > button) {
+  border-left-color: transparent;
+  border-radius: var(--radius-md);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-voice-assistant-row-control]
+  > button[aria-pressed="true"] {
+  border-radius: 999px;
+  background: var(--lcd-accent);
+  color: var(--lcd-on-accent);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-voice-assistant-row-control][data-recording] {
+  border-color: transparent;
+  border-radius: 999px;
+  background: var(--lcd-accent-soft);
+}
+
+/* ---- Member strip ---- */
+
+:root[data-ui-style="lcd"] .lcd-member-more::before,
+:root[data-ui-style="lcd"] .lcd-member-add::before {
+  border-color: var(--lcd-rule);
+  border-radius: 999px;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-add::before {
+  border-style: solid;
+  background: var(--lcd-panel);
+}
+
+/* ---- Focus ---- */
+
+/* A soft accent ring instead of the dashed outline. */
+:root[data-ui-style="lcd"] [data-lcd-scope] :focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--lcd-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  input[role="switch"]:focus-visible
+  + [data-switch-track] {
+  outline: 2px solid color-mix(in srgb, var(--lcd-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+:root[data-ui-style="lcd"] .lcd-row.lcd-row-highlighted::before {
+  outline: 2px solid color-mix(in srgb, var(--lcd-accent) 45%, transparent);
+  outline-offset: 4px;
+  border-radius: var(--radius-lg);
+}
+
+/* ---- Segmented switches ---- */
+
+/* Every switch is a grey track whose current key is a raised white pill. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch],
+    [data-segmented-choice],
+    [data-search-kind],
+    [data-voice-pane-switch],
+    [data-workspace-mode-switch],
+    [data-connect-mode-switch],
+    [data-browser-view-switch],
+    [data-voice-panel-views],
+    [data-voice-document-views],
+    [data-presentation-snapshot-tabs],
+    [data-presentation-preview-mode],
+    [data-presentation-slot-switch],
+    [data-web-model-delivery]
+  ) {
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-lg);
+  background: var(--lcd-panel-2);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch] > button,
+    [data-segmented-choice] > [role="radio"],
+    [data-search-kind] > button,
+    [data-voice-pane-switch] > button,
+    [data-workspace-mode-switch] > button,
+    [data-connect-mode-switch] > button,
+    [data-browser-view-switch] > button,
+    [data-voice-panel-views] > button,
+    [data-voice-document-views] > button,
+    [data-presentation-snapshot-tabs] > button,
+    [data-presentation-preview-mode] > button,
+    [data-presentation-slot-switch] > button,
+    [data-web-model-delivery] > label > input + span
+  ) {
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--lcd-dim);
+  font-weight: 500;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch] > button + button,
+    [data-segmented-choice] > [role="radio"] + [role="radio"],
+    [data-search-kind] > button + button,
+    [data-voice-pane-switch] > button + button,
+    [data-workspace-mode-switch] > button + button,
+    [data-connect-mode-switch] > button + button,
+    [data-browser-view-switch] > button + button,
+    [data-voice-panel-views] > button + button,
+    [data-voice-document-views] > button + button,
+    [data-presentation-snapshot-tabs] > button + button,
+    [data-presentation-preview-mode] > button + button,
+    [data-presentation-slot-switch] > button + button,
+    [data-web-model-delivery] > label + label
+  ) {
+  margin-left: 0;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-segmented-choice="wrap"] {
+  padding: 2px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-segmented-choice="wrap"] > [role="radio"] {
+  margin: 0;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch] > button[aria-pressed="true"],
+    [data-segmented-choice] > [role="radio"][aria-checked="true"],
+    [data-search-kind] > button[aria-pressed="true"],
+    [data-voice-pane-switch] > button[aria-pressed="true"],
+    [data-workspace-mode-switch] > button[aria-pressed="true"],
+    [data-connect-mode-switch] > button[aria-pressed="true"],
+    [data-browser-view-switch] > button[aria-pressed="true"],
+    [data-voice-panel-views] > button[aria-pressed="true"],
+    [data-voice-document-views] > button[aria-pressed="true"],
+    [data-presentation-snapshot-tabs] > button[aria-pressed="true"],
+    [data-presentation-preview-mode] > button[aria-pressed="true"],
+    [data-presentation-slot-switch] > button[aria-pressed="true"],
+    [data-web-model-delivery] > label > input:checked + span
+  ) {
+  background: var(--lcd-raised);
+  color: var(--lcd-ink);
+  box-shadow:
+    var(--lcd-shadow-sm),
+    0 0 0 1px var(--lcd-rule);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-connect-mode-switch]
+  > button[aria-pressed="true"]
+  * {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-connect-mode-switch] {
+  padding: 2px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-connect-mode-switch] > button {
+  margin: 0;
+}
+
+/* Phone header keys (sidebar and Group menu) are borderless icon keys too. */
+:root[data-ui-style="lcd"] [data-lcd-scope] :is([data-sidebar-toggle], [data-group-header-menu]) {
+  border-color: transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+}
+
+@media (hover: hover) {
+  :root[data-ui-style="lcd"]
+    [data-lcd-scope]
+    :is([data-sidebar-toggle], [data-group-header-menu]):hover:not(:disabled) {
+    background: var(--lcd-sel-soft);
+  }
+}

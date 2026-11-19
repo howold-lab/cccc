@@ -1,5 +1,12 @@
 # LCD style hooks
 
+> **Codex look.** The palette, type and corner tokens in `lcd.css` now give a Codex-style
+> look (white surface, grey sidebar, system sans, blue accent, rounded corners), and
+> `codex.css`, imported after the LCD files, replaces the LCD treatments that differ:
+> soft grey selection instead of reverse video, borderless icon keys, segmented switches,
+> a bubble for your messages and a floating composer. The hooks below still apply; where
+> a rule in `codex.css` restyles one, edit it there.
+
 LCD is the Web UI's only look. Components still carry the classes of the former classic
 look (comments in this folder call them "classic") and gain `data-*` hooks; the LCD rules
 in this folder read the hooks. When you edit a component, you may drop classic palette

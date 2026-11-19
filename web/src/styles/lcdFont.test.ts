@@ -35,7 +35,7 @@ it("prefers Japanese glyphs for Japanese LCD body text in both font modes", () =
   }
 });
 
-it("changes only message text for proportional while keeping saved mono and pixel choices", () => {
+it("sets message text by the body-font choice and keeps code in the code font", () => {
   const root = document.documentElement;
   const previousStyle = root.getAttribute("data-ui-style");
   const previousBody = root.getAttribute("data-lcd-body");
@@ -58,19 +58,25 @@ it("changes only message text for proportional while keeping saved mono and pixe
   document.body.append(host);
   try {
     const font = (selector: string) => getComputedStyle(host.querySelector(selector)!).fontFamily;
-    for (const selector of ["p", "[data-message-quote-text]", "[data-message-insight-text]"]) {
-      expect(font(selector)).toContain("IBM Plex Sans");
+    for (const selector of [
+      "p",
+      "[data-message-quote-text]",
+      "[data-message-insight-text]",
+      "button",
+    ]) {
+      expect(font(selector)).toContain("-apple-system");
     }
-    for (const selector of ["code", "pre", "button"]) {
-      expect(font(selector)).toContain("IBM Plex Mono");
+    for (const selector of ["code", "pre"]) {
+      expect(font(selector)).toContain("ui-monospace");
     }
     root.setAttribute("data-lcd-body", "mono");
     host.innerHTML = markup;
-    expect(font("p")).toContain("IBM Plex Mono");
+    expect(font("p")).toContain("ui-monospace");
+    expect(font("button")).toContain("-apple-system");
     root.setAttribute("data-lcd-body", "pixel");
     host.innerHTML = markup;
     expect(font("p")).toContain("RoundPix 16");
-    expect(font("code")).toContain("IBM Plex Mono");
+    expect(font("code")).toContain("ui-monospace");
   } finally {
     style.remove();
     host.remove();
