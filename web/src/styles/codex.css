@@ -922,6 +922,58 @@
   opacity: 0.55;
 }
 
+/* ---- Ask a Group's agent from the overview ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] :is([data-overview-ask], [data-overview-answer]) {
+  border: 1px solid var(--lcd-rule);
+  border-radius: 18px;
+  background: var(--lcd-raised);
+  box-shadow: var(--lcd-shadow);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask]:focus-within {
+  border-color: var(--lcd-rule-strong);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-mark] {
+  background: var(--lcd-accent-soft);
+  color: var(--lcd-link);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-input] {
+  border: 0;
+  box-shadow: none;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-input]::placeholder {
+  color: var(--lcd-muted);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-group] {
+  border-color: var(--lcd-rule-strong);
+  background: var(--lcd-raised);
+  color: var(--lcd-dim);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-send]:not(:disabled) {
+  border-color: var(--lcd-accent);
+  background: var(--lcd-accent);
+  color: var(--lcd-on-accent);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-chip] {
+  border-color: var(--lcd-rule-strong);
+  color: var(--lcd-dim);
+}
+
+@media (hover: hover) {
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-chip]:hover:not(:disabled) {
+    background: var(--lcd-sel-soft);
+    color: var(--lcd-ink);
+  }
+}
+
 /* ---- Task board ---- */
 
 /* Filter chips: outlined; the current one filled in ink. */

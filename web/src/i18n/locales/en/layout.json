@@ -432,6 +432,19 @@
       "pages": "Pages",
       "empty": "No matching Group",
       "hint": "⌘K to jump"
+    },
+    "ask": {
+      "placeholder": "Ask {{group}}: anything I need to confirm?",
+      "groupLabel": "Group to ask",
+      "quickConfirm": "Anything I need to confirm?",
+      "quickProgress": "How far is each Group?",
+      "quickStuck": "Which tasks are stuck?",
+      "quickDone": "What got done today?",
+      "youAsked": "You asked:",
+      "openGroup": "View in {{group}}",
+      "waiting": "{{group}} is working on it…",
+      "followUp": "Follow up",
+      "openTasks": "Open All tasks"
     }
   }
 }

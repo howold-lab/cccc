@@ -360,6 +360,7 @@ export function AppShell({
                     onOpenGroup={openGroupFromOverview}
                     onOpenPending={openPendingReplies}
                     onOpenSidebar={onOpenSidebar}
+                    onOpenTasks={() => useOverviewStore.getState().show("tasks")}
                   />
                 )}
               </ErrorBoundary>

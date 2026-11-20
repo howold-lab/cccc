@@ -432,6 +432,19 @@
       "pages": "ページ",
       "empty": "一致するグループはありません",
       "hint": "⌘K でジャンプ"
+    },
+    "ask": {
+      "placeholder": "{{group}}に質問：確認が必要なことはありますか？",
+      "groupLabel": "質問するグループ",
+      "quickConfirm": "確認が必要なことは？",
+      "quickProgress": "各グループの進み具合は？",
+      "quickStuck": "停滞しているタスクは？",
+      "quickDone": "今日終わったことは？",
+      "youAsked": "質問：",
+      "openGroup": "{{group}}で見る",
+      "waiting": "{{group}}が対応中…",
+      "followUp": "追加で質問",
+      "openTasks": "すべてのタスクへ"
     }
   }
 }

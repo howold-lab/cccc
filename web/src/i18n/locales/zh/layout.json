@@ -427,6 +427,19 @@
       "pages": "页面",
       "empty": "没有匹配的工作组",
       "hint": "⌘K 快速跳转"
+    },
+    "ask": {
+      "placeholder": "问{{group}}：最近有什么要我确认的？",
+      "groupLabel": "问哪个工作组",
+      "quickConfirm": "有什么要我确认的",
+      "quickProgress": "各组做到哪了",
+      "quickStuck": "哪些任务卡住了",
+      "quickDone": "今天完成了什么",
+      "youAsked": "你问：",
+      "openGroup": "在{{group}}查看",
+      "waiting": "{{group}} 正在处理…",
+      "followUp": "追问",
+      "openTasks": "去「所有任务」"
     }
   }
 }

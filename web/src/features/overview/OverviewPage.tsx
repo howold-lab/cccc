@@ -10,6 +10,7 @@ import { answerPendingReply } from "../../services/api/pendingReplies";
 import type { GroupMeta } from "../../types";
 import { newClientId } from "../../utils/clientId";
 import { PendingSummaryContext } from "../pendingReplies/context";
+import { OverviewAsk } from "./OverviewAsk";
 import { oneLine } from "./plainText";
 import {
   useOverviewData,
@@ -412,6 +413,7 @@ export function OverviewPage({
   onOpenGroup,
   onOpenPending,
   onOpenSidebar,
+  onOpenTasks,
 }: {
   groups: GroupMeta[];
   readOnly: boolean;
@@ -419,6 +421,8 @@ export function OverviewPage({
   onOpenPending: (groupId: string) => void;
   /** Opens the Group list on a phone, where the overview covers the page header. */
   onOpenSidebar?: () => void;
+  /** Opens the cross-Group task board. */
+  onOpenTasks?: () => void;
 }) {
   const { t, i18n } = useTranslation("layout");
   const age = useAge();
@@ -510,11 +514,13 @@ export function OverviewPage({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8">
         <div className="mx-auto grid w-full max-w-[1800px] gap-5">
-          <p className="text-sm text-[var(--color-text-secondary)]" data-overview-summary>
-            {needsTotal > 0
-              ? t("overview.summary", { running: runningGroups, needs: needsTotal })
-              : t("overview.summaryNone", { running: runningGroups })}
-          </p>
+          <OverviewAsk
+            groups={groups}
+            readOnly={readOnly}
+            isDark={isDark}
+            onOpenGroup={onOpenGroup}
+            onOpenTasks={() => onOpenTasks?.()}
+          />
 
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <Stat
