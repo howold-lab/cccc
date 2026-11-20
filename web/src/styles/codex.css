@@ -759,3 +759,104 @@
     background: var(--lcd-sel-soft);
   }
 }
+
+/* ---- Overview ---- */
+
+/* Cards and stats: white panels with a light edge and a soft shadow. */
+:root[data-ui-style="lcd"] [data-lcd-scope] :is([data-overview-card], [data-overview-stat]) {
+  border: 1px solid var(--lcd-rule);
+  border-radius: var(--radius-xl);
+  background: var(--lcd-raised);
+  box-shadow: var(--lcd-shadow);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-card-head] {
+  border-bottom: 1px solid var(--lcd-sep);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-list] > li + li {
+  border-top: 1px solid var(--lcd-sep);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-stat-value] {
+  color: var(--lcd-ink);
+  letter-spacing: -0.02em;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-overview-stat][data-alert]
+  [data-overview-stat-value] {
+  color: var(--lcd-wait);
+}
+
+/* "Needs you" counts and tags take the waiting colour, softly. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-count],
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-tag] {
+  background: color-mix(in srgb, var(--lcd-wait) 10%, transparent);
+  color: var(--lcd-wait);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-tag] {
+  padding: 0 0.375rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+/* Answer keys: outlined; the recommended one in the accent. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-option] {
+  border-color: var(--lcd-rule-strong);
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-option][data-recommended] {
+  border-color: var(--lcd-accent);
+  background: var(--lcd-accent-soft);
+  color: var(--lcd-link);
+}
+
+@media (hover: hover) {
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-option]:hover:not(:disabled),
+  :root[data-ui-style="lcd"]
+    [data-lcd-scope]
+    :is([data-overview-project], [data-overview-agent]):hover {
+    background: var(--lcd-sel-soft);
+  }
+}
+
+/* Project state: a blue dot with a halo while working, red when stuck, grey when idle,
+   hollow when stopped. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-dot] {
+  background: var(--lcd-muted);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-dot="working"] {
+  background: var(--lcd-accent);
+  box-shadow: 0 0 0 3px var(--lcd-accent-soft);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-dot="stuck"] {
+  background: var(--lcd-danger);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-dot="stopped"] {
+  border: 1.5px solid var(--lcd-rule-strong);
+  background: transparent;
+}
+
+/* Agent avatars sit in a ring: the accent while working, light otherwise. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ring] {
+  border: 2px solid var(--lcd-rule);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ring="working"] {
+  border-color: var(--lcd-accent);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ring="stuck"] {
+  border-color: var(--lcd-danger);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ring="stopped"] {
+  opacity: 0.55;
+}

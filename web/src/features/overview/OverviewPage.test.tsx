@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   answer: vi.fn(),
   actors: vi.fn(),
   context: vi.fn(),
+  tail: vi.fn(),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -26,6 +27,7 @@ vi.mock("../../services/api/pendingReplies", () => ({
 }));
 vi.mock("../../services/api/actors", () => ({ fetchActors: api.actors }));
 vi.mock("../../services/api/context", () => ({ fetchContext: api.context }));
+vi.mock("../../services/api/messaging", () => ({ fetchLedgerTail: api.tail }));
 
 import { OverviewPage } from "./OverviewPage";
 
@@ -59,7 +61,19 @@ const question: LedgerEvent = {
   },
 } as unknown as LedgerEvent;
 
+const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+const chat = (id: string, by: string, ts: string, text: string, to: string[]): LedgerEvent =>
+  ({ id, kind: "chat.message", by, ts, data: { text, to } }) as unknown as LedgerEvent;
+let ledgers: Record<string, LedgerEvent[]> = {};
+
 beforeEach(() => {
+  ledgers = {
+    kb: [
+      chat("u1", "user", hoursAgo(5), "Please update the price page", ["maintainer"]),
+      chat("r1", "maintainer", hoursAgo(4), "The price page is live", ["user"]),
+    ],
+    ops: [chat("u2", "user", hoursAgo(6), "Is the stream still recording?", ["watcher"])],
+  };
   api.summary.mockResolvedValue({
     ok: true,
     result: { groups: [{ group_id: "kb", state: "fresh", pending: 1 }] },
@@ -84,7 +98,14 @@ beforeEach(() => {
     result: {
       actors:
         groupId === "kb"
-          ? [{ id: "maintainer", title: "Maintainer", running: true, effective_working_state: "working" }]
+          ? [
+              {
+                id: "maintainer",
+                title: "Maintainer",
+                running: true,
+                effective_working_state: "working",
+              },
+            ]
           : [{ id: "watcher", running: false }],
     },
   }));
@@ -92,8 +113,14 @@ beforeEach(() => {
     ok: true,
     result: {
       agent_states:
-        groupId === "kb" ? [{ id: "maintainer", hot: { focus: "Sorting 51 missed questions" } }] : [],
+        groupId === "kb"
+          ? [{ id: "maintainer", hot: { focus: "Sorting 51 missed questions" } }]
+          : [],
     },
+  }));
+  api.tail.mockImplementation(async (groupId: string) => ({
+    ok: true,
+    result: { events: ledgers[groupId] ?? [], has_more: false, count: 0 },
   }));
   host = document.createElement("div");
   document.body.append(host);
@@ -105,9 +132,10 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-const flush = () => act(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 0));
-});
+const flush = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
 
 async function render(props: Partial<Parameters<typeof OverviewPage>[0]> = {}) {
   const onOpenGroup = vi.fn();
@@ -131,7 +159,7 @@ async function render(props: Partial<Parameters<typeof OverviewPage>[0]> = {}) {
 it("lists questions waiting on the user across Groups with their choices", async () => {
   await render();
 
-  const row = host.querySelector("[data-overview-pending]")!;
+  const row = host.querySelector('[data-overview-need="question"]')!;
   expect(row.textContent).toContain("Where should the price go?");
   expect(row.textContent).toContain("Knowledge base");
   expect(row.querySelectorAll("[data-overview-option]")).toHaveLength(2);
@@ -165,12 +193,12 @@ it("does not offer answers to a read-only viewer", async () => {
 it("shows what each agent is doing and opens its Group", async () => {
   const { onOpenGroup, onOpenPending } = await render();
 
-  const working = host.querySelector('[data-overview-agent="working"]')!;
+  const working = host.querySelector<HTMLButtonElement>('[data-overview-agent="working"]')!;
   expect(working.textContent).toContain("Maintainer");
   expect(working.textContent).toContain("Sorting 51 missed questions");
   expect(host.querySelector('[data-overview-agent="stopped"]')!.textContent).toContain("watcher");
 
-  act(() => host.querySelector<HTMLButtonElement>('[data-overview-group="kb"] button')!.click());
+  act(() => working.click());
   expect(onOpenGroup).toHaveBeenCalledWith("kb");
 
   const open = [...host.querySelectorAll("button")].find(
@@ -178,4 +206,31 @@ it("shows what each agent is doing and opens its Group", async () => {
   )!;
   act(() => open.click());
   expect(onOpenPending).toHaveBeenCalledWith("kb");
+});
+
+it("lists each project with its latest reply to the user, those needing the user first", async () => {
+  await render();
+
+  const projects = [...host.querySelectorAll("[data-overview-project]")];
+  expect(projects.map((row) => row.textContent?.includes("Knowledge base"))).toEqual([true, false]);
+  expect(projects[0].textContent).toContain("The price page is live");
+  expect(projects[0].getAttribute("data-overview-project")).toBe("working");
+  expect(projects[1].getAttribute("data-overview-project")).toBe("stopped");
+  expect(projects[1].textContent).toContain("overview.noReply");
+});
+
+it("flags a user message no agent has answered for two hours", async () => {
+  await render();
+
+  const rows = host.querySelectorAll('[data-overview-need="unanswered"]');
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain("Operations");
+  expect(rows[0].textContent).toContain("Is the stream still recording?");
+});
+
+it("does not flag a user message that is still recent", async () => {
+  ledgers.ops = [chat("u2", "user", hoursAgo(0.5), "Is the stream still recording?", ["watcher"])];
+  await render();
+
+  expect(host.querySelector('[data-overview-need="unanswered"]')).toBeNull();
 });

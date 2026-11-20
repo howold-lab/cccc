@@ -223,7 +223,8 @@ export function AppShell({
   const [mobileReadingHidden, setMobileReadingHidden] = useState(false);
   const [mobileReadingOverlay, setMobileReadingOverlay] = useState(false);
   const messagesVisible = useUIStore((state) => groupMessagesVisible(selectedGroupId, state));
-  const overviewOpen = useOverviewStore((state) => state.open) && !remoteWorkspace && !connectEmbedded;
+  const overviewOpen =
+    useOverviewStore((state) => state.open) && !remoteWorkspace && !connectEmbedded;
   const archivedSet = new Set(archivedGroupIds);
   const workingGroups = orderedGroups.filter((group) => !archivedSet.has(group.group_id));
   const openPendingReplies = useCallback(
@@ -328,6 +329,7 @@ export function AppShell({
                     else requestWorkspaceNavigation(() => onSelectGroup(groupId));
                   }}
                   onOpenPending={openPendingReplies}
+                  onOpenSidebar={onOpenSidebar}
                 />
               </ErrorBoundary>
             </div>

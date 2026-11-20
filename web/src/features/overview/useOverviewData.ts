@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchActors } from "../../services/api/actors";
 import { fetchContext } from "../../services/api/context";
-import {
-  fetchPendingReplies,
-  fetchPendingReplySummary,
-} from "../../services/api/pendingReplies";
+import { fetchLedgerTail } from "../../services/api/messaging";
+import { fetchPendingReplies, fetchPendingReplySummary } from "../../services/api/pendingReplies";
 import type { Actor, AgentState, ChatMessageData, GroupMeta, LedgerEvent } from "../../types";
 import { pendingReplyView } from "../pendingReplies/model";
 import type { StructuredQuestion } from "../pendingReplies/types";
@@ -24,6 +22,8 @@ export type OverviewAgent = {
   actorId: string;
   title: string;
   role: string;
+  runtime: string;
+  avatarUrl: string;
   running: boolean;
   workingState: string;
   focus: string;
@@ -31,10 +31,22 @@ export type OverviewAgent = {
   updatedAt: string;
 };
 
+/** A Group's latest chat facts, read from its ledger rather than from tasks. */
+export type OverviewActivity = {
+  groupId: string;
+  /** The newest chat message in the Group, from anyone. */
+  lastTs: string;
+  /** The newest message an agent addressed to the user. */
+  lastReply: { by: string; ts: string; text: string } | null;
+  /** The user's newest message when no agent has written to the user since. */
+  unanswered: { ts: string; text: string; eventId: string } | null;
+};
+
 export type OverviewData = {
   pending: OverviewPendingItem[];
   pendingByGroup: Record<string, number>;
   agents: OverviewAgent[];
+  activity: Record<string, OverviewActivity>;
   loading: boolean;
   /** The time of the last complete read, for the page's "updated" line. */
   asOf: string | null;
@@ -43,6 +55,8 @@ export type OverviewData = {
 
 const PENDING_INTERVAL_MS = 10_000;
 const AGENT_INTERVAL_MS = 30_000;
+/** Chat messages read from the end of each Group's ledger to find its latest facts. */
+const ACTIVITY_TAIL = 40;
 
 async function readPending(groupIds: string[], signal: AbortSignal) {
   const summary = await fetchPendingReplySummary({ signal });
@@ -101,8 +115,12 @@ async function readAgents(groups: GroupMeta[], signal: AbortSignal) {
             actorId: actor.id,
             title: actor.title || actor.id,
             role: actor.role || "",
+            runtime: String(actor.runtime || ""),
+            avatarUrl: String(actor.avatar_url || ""),
             running: Boolean(actor.running),
-            workingState: String(actor.effective_working_state || (actor.running ? "idle" : "stopped")),
+            workingState: String(
+              actor.effective_working_state || (actor.running ? "idle" : "stopped"),
+            ),
             focus: String(state?.hot?.focus || ""),
             blockers: (state?.hot?.blockers ?? []).filter(Boolean),
             updatedAt: String(state?.updated_at || ""),
@@ -113,6 +131,59 @@ async function readAgents(groups: GroupMeta[], signal: AbortSignal) {
   return lists.flat();
 }
 
+function messageText(event: LedgerEvent): string {
+  const data = (event.data ?? {}) as ChatMessageData;
+  return typeof data.text === "string" ? data.text : "";
+}
+
+function addressedToUser(event: LedgerEvent): boolean {
+  const to = ((event.data ?? {}) as ChatMessageData).to;
+  return Array.isArray(to) && to.includes("user");
+}
+
+async function readActivity(groups: GroupMeta[], signal: AbortSignal) {
+  const entries = await Promise.all(
+    groups.map(async (group): Promise<OverviewActivity | null> => {
+      const tail = await fetchLedgerTail(group.group_id, ACTIVITY_TAIL, {
+        includeStatuses: false,
+        signal,
+      });
+      if (!tail.ok) return null;
+      const events = tail.result.events.filter(
+        (event) => event.kind === "chat.message" && typeof event.ts === "string",
+      );
+      let lastReply: OverviewActivity["lastReply"] = null;
+      let lastUser: LedgerEvent | null = null;
+      for (const event of events) {
+        const ts = String(event.ts);
+        if (event.by === "user") {
+          if (!lastUser || ts > String(lastUser.ts)) lastUser = event;
+        } else if (addressedToUser(event) && (!lastReply || ts > lastReply.ts)) {
+          lastReply = { by: String(event.by ?? ""), ts, text: messageText(event) };
+        }
+      }
+      const lastTs = events.reduce((latest, event) => {
+        const ts = String(event.ts);
+        return ts > latest ? ts : latest;
+      }, "");
+      const unanswered =
+        lastUser && (!lastReply || lastReply.ts < String(lastUser.ts))
+          ? {
+              ts: String(lastUser.ts),
+              text: messageText(lastUser),
+              eventId: String(lastUser.id ?? ""),
+            }
+          : null;
+      return { groupId: group.group_id, lastTs, lastReply, unanswered };
+    }),
+  );
+  return Object.fromEntries(
+    entries
+      .filter((entry): entry is OverviewActivity => !!entry)
+      .map((entry) => [entry.groupId, entry]),
+  );
+}
+
 /** Reads what the overview shows across Groups: open questions to the user and each agent's state. */
 export function useOverviewData(groups: GroupMeta[], enabled: boolean): OverviewData {
   const key = groups.map((group) => group.group_id).join("\n");
@@ -121,6 +192,7 @@ export function useOverviewData(groups: GroupMeta[], enabled: boolean): Overview
   const [pending, setPending] = useState<OverviewPendingItem[]>([]);
   const [pendingByGroup, setPendingByGroup] = useState<Record<string, number>>({});
   const [agents, setAgents] = useState<OverviewAgent[]>([]);
+  const [activity, setActivity] = useState<Record<string, OverviewActivity>>({});
   const [loading, setLoading] = useState(true);
   const [asOf, setAsOf] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -159,8 +231,13 @@ export function useOverviewData(groups: GroupMeta[], enabled: boolean): Overview
     let stopped = false;
     const pull = async () => {
       try {
-        const result = await readAgents(groupsRef.current, controller.signal);
-        if (!stopped) setAgents(result);
+        const [result, latest] = await Promise.all([
+          readAgents(groupsRef.current, controller.signal),
+          readActivity(groupsRef.current, controller.signal),
+        ]);
+        if (stopped) return;
+        setAgents(result);
+        setActivity(latest);
       } catch {
         // Keep what was shown; the next read tries again.
       }
@@ -174,5 +251,5 @@ export function useOverviewData(groups: GroupMeta[], enabled: boolean): Overview
     };
   }, [enabled, key, tick]);
 
-  return { pending, pendingByGroup, agents, loading, asOf, refresh };
+  return { pending, pendingByGroup, agents, activity, loading, asOf, refresh };
 }
