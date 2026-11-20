@@ -9,6 +9,7 @@ import type {
 } from "../../types";
 import type { WebModelDeliveryStatus } from "../../utils/webModelDeliveryStatus";
 import { MessageBubble } from "../MessageBubble";
+import { DayDivider } from "./DayDivider";
 
 type VirtualMessageRowProps = {
   virtualRow: { key: React.Key; index: number; start: number };
@@ -17,6 +18,8 @@ type VirtualMessageRowProps = {
   collapseHeader?: boolean;
   compactSpacing?: boolean;
   sameSender?: boolean;
+  /** The day this message starts, when a date divider goes above it. */
+  dayDivider?: number | null;
   actorById: Map<string, Actor>;
   actors: Actor[];
   displayNameMap: Map<string, string>;
@@ -51,6 +54,7 @@ export const VirtualMessageRow = memo(function VirtualMessageRow({
   collapseHeader,
   compactSpacing,
   sameSender,
+  dayDivider,
   measureElement,
   highlightEventId,
   onReply,
@@ -84,6 +88,7 @@ export const VirtualMessageRow = memo(function VirtualMessageRow({
       }}
       className={compactSpacing ? "pb-2" : "pb-4"}
     >
+      {dayDivider ? <DayDivider day={new Date(dayDivider)} /> : null}
       <MessageBubble
         {...messageBubbleProps}
         event={message}

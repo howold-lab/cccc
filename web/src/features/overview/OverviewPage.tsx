@@ -8,6 +8,7 @@ import { answerPendingReply } from "../../services/api/pendingReplies";
 import type { GroupMeta } from "../../types";
 import { newClientId } from "../../utils/clientId";
 import { PendingSummaryContext } from "../pendingReplies/context";
+import { oneLine } from "./plainText";
 import {
   useOverviewData,
   type OverviewActivity,
@@ -51,10 +52,6 @@ function useAge() {
     if (hours < 24) return t("overview.age.hours", { count: hours });
     return t("overview.age.days", { count: Math.floor(hours / 24) });
   };
-}
-
-function oneLine(text: string) {
-  return text.replace(/\s+/g, " ").trim();
 }
 
 function Card({

@@ -203,9 +203,7 @@
     "renderFailed": "この図をレンダリングできませんでした。代わりにソースを表示します。",
     "tooLarge": "この図は安全にレンダリングするには大きすぎます。代わりにソースを表示します。"
   },
-  "table": {
-    "scrollRegion": "横方向にスクロールできる表"
-  },
+  "table": { "scrollRegion": "横方向にスクロールできる表" },
   "webModelDelivery": {
     "submitting": "Web モデル に配信中",
     "submitted": "Web モデル に配信済み",
@@ -1130,8 +1128,7 @@
     "install": "Skill、MCP ツールパック、能力、URL、リポジトリ、ローカルパスをインストールまたは有効化します。",
     "selfEvolution": "チームの協働を振り返り、改善案を最大 3 件提案します。採否はあなたが決めます。"
   },
-  "mediaViewer": {
-    "openInPanel": "サイドパネルで開く",
-    "close": "プレビューを閉じる"
-  }
+  "mediaViewer": { "openInPanel": "サイドパネルで開く", "close": "プレビューを閉じる" },
+  "dayToday": "今日",
+  "dayYesterday": "昨日"
 }

@@ -207,9 +207,7 @@
     "renderFailed": "无法渲染此图表，已改为显示源码。",
     "tooLarge": "此图表过大，无法安全渲染，已改为显示源码。"
   },
-  "table": {
-    "scrollRegion": "可横向滚动的表格"
-  },
+  "table": { "scrollRegion": "可横向滚动的表格" },
   "webModelDelivery": {
     "submitting": "正在投递到 Web 模型",
     "submitted": "已投递到 Web 模型",
@@ -1130,8 +1128,7 @@
     "install": "安装或启用 Skill、MCP 工具包、能力、URL、仓库或本地路径。",
     "selfEvolution": "回顾团队的协作情况，提出最多三条改进建议，由你决定。"
   },
-  "mediaViewer": {
-    "openInPanel": "在侧栏打开",
-    "close": "关闭预览"
-  }
+  "mediaViewer": { "openInPanel": "在侧栏打开", "close": "关闭预览" },
+  "dayToday": "今天",
+  "dayYesterday": "昨天"
 }

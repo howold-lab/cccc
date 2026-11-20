@@ -4,6 +4,8 @@ import { MessageBubble } from "../MessageBubble";
 import { getReplyQuoteText, getStableMessageKey } from "../virtualMessageListHelpers";
 import { VirtualMessageRow } from "./VirtualMessageRow";
 import { getMessageRowGrouping } from "./grouping";
+import { DayDivider } from "./DayDivider";
+import { dayStartingAt } from "./days";
 import type { VirtualMessageListProps } from "./types";
 
 type MessageRowsProps = Pick<
@@ -108,7 +110,10 @@ export function MessageRows({
         {virtualItems.map((virtualRow) => {
           const message = messages[virtualRow.index];
           const previous = virtualRow.index > 0 ? messages[virtualRow.index - 1] : undefined;
-          const grouping = getMessageRowGrouping(previous, message);
+          const day = dayStartingAt(previous, message);
+          const grouping = day
+            ? { collapseHeader: false, compactSpacing: false, sameSender: false }
+            : getMessageRowGrouping(previous, message);
           return (
             <VirtualMessageRow
               {...common}
@@ -119,6 +124,7 @@ export function MessageRows({
               collapseHeader={grouping.collapseHeader}
               compactSpacing={grouping.compactSpacing}
               sameSender={grouping.sameSender}
+              dayDivider={day ? day.getTime() : null}
               agentState={agentStateById.get(String(message.by || "")) || null}
               webModelDeliveryStatus={deliveryStatus(message)}
               highlightEventId={effectiveHighlightEventId}
@@ -140,10 +146,11 @@ export function MessageRows({
       style={{ marginTop: nonVirtualTopMargin }}
     >
       {messages.map((message, index) => {
-        const grouping = getMessageRowGrouping(
-          index > 0 ? messages[index - 1] : undefined,
-          message,
-        );
+        const previous = index > 0 ? messages[index - 1] : undefined;
+        const day = dayStartingAt(previous, message);
+        const grouping = day
+          ? { collapseHeader: false, compactSpacing: false, sameSender: false }
+          : getMessageRowGrouping(previous, message);
         return (
           <div
             key={String(getStableMessageKey(message, index))}
@@ -160,6 +167,7 @@ export function MessageRows({
             }
             className={grouping.compactSpacing ? "pb-2" : "pb-4"}
           >
+            {day ? <DayDivider day={day} /> : null}
             <MessageBubble
               {...common}
               event={message}

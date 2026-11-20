@@ -220,6 +220,39 @@
   white-space: nowrap;
 }
 
+/* A running Group gets a small blue dot after its name instead; other states stay quiet. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(.glass-group-item, .glass-group-item-active)
+  .lcd-group-symbol[data-lcd-shape="run"] {
+  position: static;
+  order: 1;
+  width: 7px;
+  height: 7px;
+  overflow: visible;
+  clip-path: none;
+  border-radius: 999px;
+  background: var(--lcd-accent);
+  box-shadow: 0 0 0 3px var(--lcd-accent-soft);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(.glass-group-item, .glass-group-item-active)
+  .lcd-group-symbol[data-lcd-shape="run"]::before {
+  content: none;
+}
+
+/* ---- Date dividers between days in a conversation ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-day-divider] {
+  color: var(--lcd-muted);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-day-divider] > span[aria-hidden] {
+  background: var(--lcd-sep);
+}
+
 /* Waiting-on-you counts are small pills. */
 :root[data-ui-style="lcd"] [data-lcd-scope] [data-pending-state] {
   border-radius: 999px;
