@@ -141,7 +141,7 @@ function addressedToUser(event: LedgerEvent): boolean {
   return Array.isArray(to) && to.includes("user");
 }
 
-async function readActivity(groups: GroupMeta[], signal: AbortSignal) {
+export async function readActivity(groups: GroupMeta[], signal: AbortSignal) {
   const entries = await Promise.all(
     groups.map(async (group): Promise<OverviewActivity | null> => {
       const tail = await fetchLedgerTail(group.group_id, ACTIVITY_TAIL, {

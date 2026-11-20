@@ -352,6 +352,7 @@
   },
   "overview": {
     "nav": "总览",
+    "tasksNav": "所有任务",
     "title": "总览",
     "loading": "正在读取…",
     "refresh": "刷新",
@@ -394,6 +395,23 @@
       "minutes": "{{count}} 分钟前",
       "hours": "{{count}} 小时前",
       "days": "{{count}} 天前"
+    },
+    "tasks": {
+      "title": "所有任务",
+      "summary": "{{groups}} 个工作组 · {{open}} 个未完成任务",
+      "all": "全部",
+      "onlyStuck": "只看卡住的",
+      "columns": { "planned": "待办", "active": "进行中", "stuck": "卡住", "done": "近 7 天完成" },
+      "columnEmpty": "没有任务",
+      "stale": "可能过时",
+      "staleTitle": "进行中，但已经超过一天没有更新",
+      "waitingUser": "等你",
+      "waitingActor": "等其他 agent",
+      "waitingExternal": "等外部",
+      "blockedBy": "被 {{ids}} 挡住",
+      "since": "{{age}}更新",
+      "unassigned": "未分配",
+      "quietGroups": "这些组最近一天有活动，但没有未完成的任务，进度可能没记下来：{{names}}"
     }
   }
 }

@@ -1,5 +1,6 @@
 import { useOverviewStore } from "../../stores/useOverviewStore";
 import { OverviewPage } from "../../features/overview/OverviewPage";
+import { TaskOverviewPage } from "../../features/overview/TaskOverviewPage";
 import { requestWorkspaceNavigation } from "../../stores/workspaceNavigation";
 import { WorkspaceNavigationDialog } from "../workspace/WorkspaceNavigationDialog";
 import { useCallback, useState, type CSSProperties } from "react";
@@ -225,6 +226,12 @@ export function AppShell({
   const messagesVisible = useUIStore((state) => groupMessagesVisible(selectedGroupId, state));
   const overviewOpen =
     useOverviewStore((state) => state.open) && !remoteWorkspace && !connectEmbedded;
+  const overviewView = useOverviewStore((state) => state.view);
+  const openGroupFromOverview = (groupId: string) => {
+    useOverviewStore.getState().hide();
+    if (groupId === selectedGroupId) onSelectGroup(groupId);
+    else requestWorkspaceNavigation(() => onSelectGroup(groupId));
+  };
   const archivedSet = new Set(archivedGroupIds);
   const workingGroups = orderedGroups.filter((group) => !archivedSet.has(group.group_id));
   const openPendingReplies = useCallback(
@@ -278,11 +285,11 @@ export function AppShell({
             orderedGroups={orderedGroups}
             archivedGroupIds={archivedGroupIds}
             selectedGroupId={remoteWorkspace || overviewOpen ? "" : selectedGroupId}
-            overviewActive={overviewOpen}
+            overviewView={overviewOpen ? overviewView : null}
             onOpenOverview={
               remoteWorkspace || connectEmbedded
                 ? undefined
-                : () => useOverviewStore.getState().show()
+                : (view) => useOverviewStore.getState().show(view)
             }
             isOpen={sidebarOpen}
             isCollapsed={sidebarCollapsed}
@@ -320,17 +327,21 @@ export function AppShell({
           {overviewOpen ? (
             <div className="absolute inset-0 z-30 flex min-h-0 flex-col" data-overview-layer>
               <ErrorBoundary>
-                <OverviewPage
-                  groups={workingGroups}
-                  readOnly={webReadOnly}
-                  onOpenGroup={(groupId) => {
-                    useOverviewStore.getState().hide();
-                    if (groupId === selectedGroupId) onSelectGroup(groupId);
-                    else requestWorkspaceNavigation(() => onSelectGroup(groupId));
-                  }}
-                  onOpenPending={openPendingReplies}
-                  onOpenSidebar={onOpenSidebar}
-                />
+                {overviewView === "tasks" ? (
+                  <TaskOverviewPage
+                    groups={workingGroups}
+                    onOpenGroup={openGroupFromOverview}
+                    onOpenSidebar={onOpenSidebar}
+                  />
+                ) : (
+                  <OverviewPage
+                    groups={workingGroups}
+                    readOnly={webReadOnly}
+                    onOpenGroup={openGroupFromOverview}
+                    onOpenPending={openPendingReplies}
+                    onOpenSidebar={onOpenSidebar}
+                  />
+                )}
               </ErrorBoundary>
             </div>
           ) : null}

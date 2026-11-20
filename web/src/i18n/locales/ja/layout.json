@@ -352,6 +352,7 @@
   },
   "overview": {
     "nav": "概要",
+    "tasksNav": "すべてのタスク",
     "title": "概要",
     "loading": "読み込み中…",
     "refresh": "更新",
@@ -394,6 +395,28 @@
       "minutes": "{{count}} 分前",
       "hours": "{{count}} 時間前",
       "days": "{{count}} 日前"
+    },
+    "tasks": {
+      "title": "すべてのタスク",
+      "summary": "{{groups}} グループ · 未完了 {{open}} 件",
+      "all": "すべて",
+      "onlyStuck": "停滞のみ",
+      "columns": {
+        "planned": "未着手",
+        "active": "進行中",
+        "stuck": "停滞",
+        "done": "7 日以内に完了"
+      },
+      "columnEmpty": "タスクなし",
+      "stale": "古い可能性",
+      "staleTitle": "進行中ですが 1 日以上更新がありません",
+      "waitingUser": "あなた待ち",
+      "waitingActor": "他の agent 待ち",
+      "waitingExternal": "外部待ち",
+      "blockedBy": "{{ids}} がブロック",
+      "since": "{{age}}に更新",
+      "unassigned": "未割り当て",
+      "quietGroups": "直近 1 日に動きがあるのに未完了タスクがなく、進捗が記録されていない可能性があります: {{names}}"
     }
   }
 }

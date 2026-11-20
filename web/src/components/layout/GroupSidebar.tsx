@@ -18,7 +18,9 @@ import {
   GroupDeleteIcon,
   PlusIcon,
   HomeIcon,
+  ClipboardIcon,
 } from "../Icons";
+import type { OverviewView } from "../../stores/useOverviewStore";
 import { GroupSidebarSectionHeader } from "./GroupSidebarSectionHeader";
 import { GroupSidebarItem } from "./GroupSidebarItem";
 import { GroupSidebarSortableList } from "./GroupSidebarSortableList";
@@ -68,10 +70,10 @@ export interface GroupSidebarProps {
   onControlGroup?: (groupId: string, control: GroupControl) => void;
   /** Delete a group from its menu; the handler owns the confirmation. */
   onDeleteGroup?: (groupId: string) => void;
-  /** Whether the cross-Group overview is the page on show. */
-  overviewActive?: boolean;
-  /** Opens the cross-Group overview; omitted where it is unavailable. */
-  onOpenOverview?: () => void;
+  /** Which cross-Group page (overview or task board) is on show, if any. */
+  overviewView?: OverviewView | null;
+  /** Opens a cross-Group page; omitted where they are unavailable. */
+  onOpenOverview?: (view: OverviewView) => void;
 }
 
 export function GroupSidebar({
@@ -99,7 +101,7 @@ export function GroupSidebar({
   onOpenGroupAutomation,
   onControlGroup,
   onDeleteGroup,
-  overviewActive = false,
+  overviewView = null,
   onOpenOverview,
 }: GroupSidebarProps) {
   const { t } = useTranslation("layout");
@@ -246,41 +248,52 @@ export function GroupSidebar({
     [onDeleteGroup, readOnly, t, controlsBusy],
   );
 
-  const overviewEntry = (collapsed: boolean) =>
-    onOpenOverview ? (
-      collapsed ? (
+  const overviewEntry = (collapsed: boolean, view: OverviewView) => {
+    if (!onOpenOverview) return null;
+    const active = overviewView === view;
+    const label = view === "tasks" ? t("overview.tasksNav") : t("overview.nav");
+    const icon =
+      view === "tasks" ? (
+        <ClipboardIcon size={collapsed ? 18 : 16} />
+      ) : (
+        <HomeIcon size={collapsed ? 18 : 16} />
+      );
+    if (collapsed)
+      return (
         <IconButton
           type="button"
           size="touch"
-          variant={overviewActive ? "secondary" : undefined}
-          onClick={onOpenOverview}
-          label={t("overview.nav")}
-          aria-current={overviewActive ? "page" : undefined}
+          variant={active ? "secondary" : undefined}
+          onClick={() => onOpenOverview(view)}
+          label={label}
+          aria-current={active ? "page" : undefined}
         >
-          <HomeIcon size={18} />
+          {icon}
         </IconButton>
-      ) : (
-        <button
-          type="button"
-          onClick={() => {
-            onOpenOverview();
-            if (window.matchMedia("(max-width: 767px)").matches) onClose();
-          }}
-          aria-current={overviewActive ? "page" : undefined}
-          className={classNames(
-            "mx-2 mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
-            overviewActive
-              ? "bg-[var(--color-sidebar-item-active)] font-semibold text-[var(--color-text-primary)]"
-              : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]",
-          )}
-          data-overview-entry
-        >
-          <HomeIcon size={16} />
-          <span className="min-w-0 flex-1 truncate">{t("overview.nav")}</span>
-          {totalPending && <PendingIndicatorText indicator={totalPending} />}
-        </button>
-      )
-    ) : null;
+      );
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          onOpenOverview(view);
+          if (window.matchMedia("(max-width: 767px)").matches) onClose();
+        }}
+        aria-current={active ? "page" : undefined}
+        className={classNames(
+          "mx-2 flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+          view === "overview" ? "mt-2" : "mt-0.5",
+          active
+            ? "bg-[var(--color-sidebar-item-active)] font-semibold text-[var(--color-text-primary)]"
+            : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]",
+        )}
+        data-overview-entry={view}
+      >
+        {icon}
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {view === "overview" && totalPending && <PendingIndicatorText indicator={totalPending} />}
+      </button>
+    );
+  };
 
   const localSessionsEntry = (collapsed: boolean) =>
     !readOnly && canAccessLocalSessions ? (
@@ -509,12 +522,14 @@ export function GroupSidebar({
                 <PlusIcon size={18} />
               </IconButton>
             )}
-            {overviewEntry(true)}
+            {overviewEntry(true, "overview")}
+            {overviewEntry(true, "tasks")}
             {localSessionsEntry(true)}
           </div>
         )}
 
-        {!isCollapsed && overviewEntry(false)}
+        {!isCollapsed && overviewEntry(false, "overview")}
+        {!isCollapsed && overviewEntry(false, "tasks")}
 
         {/* Group list */}
         {!isCollapsed && (

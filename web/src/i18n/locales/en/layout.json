@@ -352,6 +352,7 @@
   },
   "overview": {
     "nav": "Overview",
+    "tasksNav": "All tasks",
     "title": "Overview",
     "loading": "Loading…",
     "refresh": "Refresh",
@@ -394,6 +395,28 @@
       "minutes": "{{count}} min ago",
       "hours": "{{count}} h ago",
       "days": "{{count}} d ago"
+    },
+    "tasks": {
+      "title": "All tasks",
+      "summary": "{{groups}} Groups · {{open}} open tasks",
+      "all": "All",
+      "onlyStuck": "Stuck only",
+      "columns": {
+        "planned": "To do",
+        "active": "In progress",
+        "stuck": "Stuck",
+        "done": "Done in 7 days"
+      },
+      "columnEmpty": "No tasks",
+      "stale": "May be stale",
+      "staleTitle": "In progress but not updated for over a day",
+      "waitingUser": "Waiting on you",
+      "waitingActor": "Waiting on an agent",
+      "waitingExternal": "Waiting externally",
+      "blockedBy": "Blocked by {{ids}}",
+      "since": "updated {{age}}",
+      "unassigned": "Unassigned",
+      "quietGroups": "Active in the last day but with no open task, so progress may be unrecorded: {{names}}"
     }
   }
 }
