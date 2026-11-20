@@ -220,6 +220,18 @@
   background: transparent;
 }
 
+/* The dot (or a broken connection's mark) lines up with the name, not the two-line row. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-row-main] > .lcd-group-symbol {
+  margin-top: calc(0.125rem + 0.625rem - 3.5px);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-group-row-main]
+  > .lcd-group-symbol:not([data-lcd-shape]) {
+  margin-top: 0.25rem;
+}
+
 :root[data-ui-style="lcd"]
   [data-lcd-scope]
   :is(.glass-group-item, .glass-group-item-active)
@@ -233,6 +245,30 @@
   .lcd-group-symbol[data-lcd-shape="run"] {
   background: var(--lcd-accent);
   box-shadow: 0 0 0 3px var(--lcd-accent-soft);
+}
+
+/* ---- Quick jump (⌘K) ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quick-jump-entry] {
+  border-color: var(--lcd-rule);
+  background: var(--lcd-raised);
+}
+
+@media (hover: hover) {
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-quick-jump-entry]:hover {
+    border-color: var(--lcd-rule-strong);
+    color: var(--lcd-dim);
+  }
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quick-jump-entry] kbd {
+  border: 1px solid var(--lcd-rule-strong);
+  font-family: var(--lcd-font-sans);
+}
+
+/* The sidebar's latest line sits close under the Group name. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-latest] {
+  margin-top: 1px;
 }
 
 /* ---- Date dividers between days in a conversation ---- */

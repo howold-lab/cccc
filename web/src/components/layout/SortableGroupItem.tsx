@@ -10,6 +10,7 @@ import { classNames } from "../../utils/classNames";
 import { getGroupStatusFromSource } from "../../utils/groupStatus";
 import { useGroupMenu, type GroupMenuActionItem } from "./useGroupMenu";
 import { GroupStatusIndicator } from "./GroupStatusIndicator";
+import { GroupLatestAge, GroupLatestLine } from "./GroupLatestLine";
 import { GroupItemMenuTrigger } from "./GroupItemMenuTrigger";
 import { GroupPendingIndicator } from "../../features/pendingReplies/PendingIndicator";
 import { usePendingGroupLabel } from "../../features/pendingReplies/usePendingGroupLabel";
@@ -211,18 +212,24 @@ export function SortableGroupItem({
           onMouseEnter={onWarm}
           onFocus={onWarm}
         >
-          <div className="flex items-center gap-2 min-w-0">
+          <div className="flex min-w-0 flex-1 items-start gap-2" data-group-row-main>
             <GroupStatusIndicator status={status} />
-            <span
-              className={classNames(
-                "text-sm truncate",
-                isActive
-                  ? "font-semibold text-[rgb(35,36,37)] dark:text-white"
-                  : "font-normal text-[var(--color-text-primary)] group-hover/item:text-[var(--color-text-primary)]",
-              )}
-              title={group.title || gid}
-            >
-              {group.title || gid}
+            <span className="flex min-w-0 flex-1 flex-col py-0.5">
+              <span className="flex min-w-0 items-baseline gap-2">
+                <span
+                  className={classNames(
+                    "min-w-0 flex-1 text-sm truncate",
+                    isActive
+                      ? "font-semibold text-[rgb(35,36,37)] dark:text-white"
+                      : "font-normal text-[var(--color-text-primary)] group-hover/item:text-[var(--color-text-primary)]",
+                  )}
+                  title={group.title || gid}
+                >
+                  {group.title || gid}
+                </span>
+                {isArchived ? null : <GroupLatestAge groupId={gid} />}
+              </span>
+              {isArchived ? null : <GroupLatestLine groupId={gid} />}
             </span>
           </div>
         </button>

@@ -176,3 +176,17 @@ it("filters to stuck tasks only", async () => {
   expect(host.querySelectorAll("[data-board-column]")).toHaveLength(1);
   expect(host.querySelector('[data-board-column="stuck"]')).not.toBeNull();
 });
+
+it("opens a task's own detail when the page can", async () => {
+  const onOpenTask = vi.fn();
+  act(() =>
+    root.render(<TaskOverviewPage groups={groups} onOpenGroup={vi.fn()} onOpenTask={onOpenTask} />),
+  );
+  await flush();
+  await flush();
+
+  act(() =>
+    host.querySelector<HTMLButtonElement>('[data-board-column="stuck"] [data-board-task]')!.click(),
+  );
+  expect(onOpenTask).toHaveBeenCalledWith("kb", "T1");
+});

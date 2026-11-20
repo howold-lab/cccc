@@ -19,8 +19,10 @@ import {
   PlusIcon,
   HomeIcon,
   ClipboardIcon,
+  SearchIcon,
 } from "../Icons";
 import type { OverviewView } from "../../stores/useOverviewStore";
+import { useQuickJumpStore } from "../../stores/useQuickJumpStore";
 import { GroupSidebarSectionHeader } from "./GroupSidebarSectionHeader";
 import { GroupSidebarItem } from "./GroupSidebarItem";
 import { GroupSidebarSortableList } from "./GroupSidebarSortableList";
@@ -528,6 +530,18 @@ export function GroupSidebar({
           </div>
         )}
 
+        {!isCollapsed && onOpenOverview ? (
+          <button
+            type="button"
+            onClick={() => useQuickJumpStore.getState().setOpen(true)}
+            className="mx-2 mt-2 flex items-center gap-2 rounded-lg border px-3 py-1.5 text-left text-[13px] text-[var(--color-text-tertiary)]"
+            data-quick-jump-entry
+          >
+            <SearchIcon size={14} />
+            <span className="min-w-0 flex-1 truncate">{t("overview.palette.placeholder")}</span>
+            <kbd className="shrink-0 rounded px-1 text-[11px]">⌘K</kbd>
+          </button>
+        ) : null}
         {!isCollapsed && overviewEntry(false, "overview")}
         {!isCollapsed && overviewEntry(false, "tasks")}
 

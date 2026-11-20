@@ -417,6 +417,21 @@
       "since": "{{age}}に更新",
       "unassigned": "未割り当て",
       "quietGroups": "直近 1 日に動きがあるのに未完了タスクがなく、進捗が記録されていない可能性があります: {{names}}"
+    },
+    "reply": "返信",
+    "replyPlaceholder": "「{{group}}」にメッセージ…",
+    "replyHint": "Enter で送信、Shift+Enter で改行。グループの既定の宛先に送ります",
+    "send": "送信",
+    "sent": "送信済み",
+    "sendFailed": "送信できませんでした。グループで再度お試しください",
+    "cancel": "キャンセル",
+    "palette": {
+      "title": "ジャンプ",
+      "placeholder": "グループ名を入力…",
+      "groups": "グループ",
+      "pages": "ページ",
+      "empty": "一致するグループはありません",
+      "hint": "⌘K でジャンプ"
     }
   }
 }

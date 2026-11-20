@@ -412,6 +412,21 @@
       "since": "{{age}}更新",
       "unassigned": "未分配",
       "quietGroups": "这些组最近一天有活动，但没有未完成的任务，进度可能没记下来：{{names}}"
+    },
+    "reply": "回复",
+    "replyPlaceholder": "给「{{group}}」说点什么…",
+    "replyHint": "Enter 发送，Shift+Enter 换行；发给这个组的默认收件人",
+    "send": "发送",
+    "sent": "已发送",
+    "sendFailed": "没发出去，请到组里再试",
+    "cancel": "取消",
+    "palette": {
+      "title": "快速跳转",
+      "placeholder": "输入工作组名称…",
+      "groups": "工作组",
+      "pages": "页面",
+      "empty": "没有匹配的工作组",
+      "hint": "⌘K 快速跳转"
     }
   }
 }

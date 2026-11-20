@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useAge } from "./useAge";
 import { MenuIcon } from "../../components/Icons";
 import { Button } from "../../components/ui/button";
 import { IconButton } from "../../components/ui/icon-button";
@@ -12,20 +13,6 @@ import {
 } from "./useTaskOverviewData";
 
 const COLUMNS: BoardColumn[] = ["planned", "active", "stuck", "done"];
-
-function useAge() {
-  const { t } = useTranslation("layout");
-  return (ts: string | null | undefined) => {
-    const time = new Date(String(ts || "")).getTime();
-    if (!ts || Number.isNaN(time)) return "";
-    const minutes = Math.floor((Date.now() - time) / 60_000);
-    if (minutes < 1) return t("overview.age.justNow");
-    if (minutes < 60) return t("overview.age.minutes", { count: minutes });
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return t("overview.age.hours", { count: hours });
-    return t("overview.age.days", { count: Math.floor(hours / 24) });
-  };
-}
 
 function TaskCard({
   entry,
@@ -111,10 +98,13 @@ function TaskCard({
 export function TaskOverviewPage({
   groups,
   onOpenGroup,
+  onOpenTask,
   onOpenSidebar,
 }: {
   groups: GroupMeta[];
   onOpenGroup: (groupId: string) => void;
+  /** Opens one task's detail in its Group; without it a card opens the Group. */
+  onOpenTask?: (groupId: string, taskId: string) => void;
   onOpenSidebar?: () => void;
 }) {
   const { t } = useTranslation("layout");
@@ -249,7 +239,11 @@ export function TaskOverviewPage({
                         key={`${entry.groupId}:${entry.task.id}`}
                         entry={entry}
                         groupTitle={titles[entry.groupId] ?? entry.groupId}
-                        onOpen={() => onOpenGroup(entry.groupId)}
+                        onOpen={() =>
+                          onOpenTask
+                            ? onOpenTask(entry.groupId, entry.task.id)
+                            : onOpenGroup(entry.groupId)
+                        }
                       />
                     ))}
                   </ul>

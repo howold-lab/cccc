@@ -417,6 +417,21 @@
       "since": "updated {{age}}",
       "unassigned": "Unassigned",
       "quietGroups": "Active in the last day but with no open task, so progress may be unrecorded: {{names}}"
+    },
+    "reply": "Reply",
+    "replyPlaceholder": "Say something to “{{group}}”…",
+    "replyHint": "Enter sends, Shift+Enter adds a line; goes to the Group's default recipients",
+    "send": "Send",
+    "sent": "Sent",
+    "sendFailed": "Not sent. Try again in the Group.",
+    "cancel": "Cancel",
+    "palette": {
+      "title": "Jump to",
+      "placeholder": "Type a Group name…",
+      "groups": "Groups",
+      "pages": "Pages",
+      "empty": "No matching Group",
+      "hint": "⌘K to jump"
     }
   }
 }

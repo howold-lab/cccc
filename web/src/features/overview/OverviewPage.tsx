@@ -1,9 +1,11 @@
 import { useContext, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { useAge } from "./useAge";
 import { ActorAvatar } from "../../components/ActorAvatar";
 import { MenuIcon } from "../../components/Icons";
 import { Button } from "../../components/ui/button";
 import { IconButton } from "../../components/ui/icon-button";
+import { sendMessage } from "../../services/api/context";
 import { answerPendingReply } from "../../services/api/pendingReplies";
 import type { GroupMeta } from "../../types";
 import { newClientId } from "../../utils/clientId";
@@ -38,20 +40,6 @@ function formatTime(ts: string, locale: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function useAge() {
-  const { t } = useTranslation("layout");
-  return (ts: string) => {
-    const time = new Date(ts).getTime();
-    if (!ts || Number.isNaN(time)) return "";
-    const minutes = Math.floor((Date.now() - time) / 60_000);
-    if (minutes < 1) return t("overview.age.justNow");
-    if (minutes < 60) return t("overview.age.minutes", { count: minutes });
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return t("overview.age.hours", { count: hours });
-    return t("overview.age.days", { count: Math.floor(hours / 24) });
-  };
 }
 
 function Card({
@@ -248,52 +236,171 @@ function groupTone(group: GroupMeta, agents: OverviewAgent[]): Tone {
   return "stopped";
 }
 
-function ProjectItem({ row, onOpen }: { row: ProjectRow; onOpen: () => void }) {
+function QuickReply({
+  groupId,
+  groupTitle,
+  onSent,
+  onClose,
+}: {
+  groupId: string;
+  groupTitle: string;
+  onSent: () => void;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation("layout");
+  const [text, setText] = useState("");
+  const [state, setState] = useState<"idle" | "sending" | "failed">("idle");
+  const send = async () => {
+    const body = text.trim();
+    if (!body || state === "sending") return;
+    setState("sending");
+    // No recipients: the Group's default recipient policy applies, as in the composer.
+    const response = await sendMessage(groupId, body, [], undefined, "send", newClientId()).catch(
+      () => null,
+    );
+    if (response?.ok) {
+      setText("");
+      setState("idle");
+      onSent();
+    } else {
+      setState("failed");
+    }
+  };
+  return (
+    <div className="px-4 pb-3 pl-9" data-overview-reply>
+      <textarea
+        autoFocus
+        rows={2}
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            void send();
+          }
+          if (event.key === "Escape") onClose();
+        }}
+        placeholder={t("overview.replyPlaceholder", { group: groupTitle })}
+        className="block w-full resize-none rounded-xl border px-3 py-2 text-sm"
+        data-lcd-field
+      />
+      <div className="mt-2 flex items-center gap-2">
+        {state === "failed" ? (
+          <span className="text-xs text-[var(--color-accent-danger)]">
+            {t("overview.sendFailed")}
+          </span>
+        ) : (
+          <span className="text-xs text-[var(--color-text-tertiary)]">
+            {t("overview.replyHint")}
+          </span>
+        )}
+        <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={onClose}>
+          {t("overview.cancel")}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={!text.trim() || state === "sending"}
+          onClick={() => void send()}
+          data-overview-send
+        >
+          {state === "sending" ? t("overview.sending") : t("overview.send")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ProjectItem({
+  row,
+  readOnly,
+  onOpen,
+  onSent,
+}: {
+  row: ProjectRow;
+  readOnly: boolean;
+  onOpen: () => void;
+  onSent: () => void;
+}) {
   const { t } = useTranslation("layout");
   const age = useAge();
+  const [replying, setReplying] = useState(false);
+  const [sent, setSent] = useState(false);
   const reply = row.activity?.lastReply;
   const lastTs = row.activity?.lastTs || "";
+  const title = row.group.title || row.group.group_id;
   return (
-    <li>
-      <button
-        type="button"
-        onClick={onOpen}
-        className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left transition-colors"
-        data-overview-project={row.tone}
-      >
-        <span className="mt-[7px] h-2 w-2 shrink-0 rounded-full" data-overview-dot={row.tone} />
-        <span className="min-w-0 flex-1">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-medium text-[var(--color-text-primary)]">
-              {row.group.title || row.group.group_id}
-            </span>
-            <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">
-              {t(`overview.state.${row.tone}`)}
-            </span>
-            {row.pending > 0 ? (
-              <span
-                className="shrink-0 rounded-full px-1.5 text-[11px] font-semibold"
-                data-pending-state
-              >
-                {row.pending}
+    <li data-overview-project-row>
+      <div className="flex min-w-0 items-stretch">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex min-w-0 flex-1 items-start gap-3 py-3 pl-4 pr-2 text-left transition-colors"
+          data-overview-project={row.tone}
+        >
+          <span className="mt-[7px] h-2 w-2 shrink-0 rounded-full" data-overview-dot={row.tone} />
+          <span className="min-w-0 flex-1">
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-sm font-medium text-[var(--color-text-primary)]">
+                {title}
               </span>
-            ) : null}
-            <span className="ml-auto shrink-0 text-xs text-[var(--color-text-tertiary)]">
-              {lastTs ? age(lastTs) : t("overview.quiet")}
+              <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">
+                {t(`overview.state.${row.tone}`)}
+              </span>
+              {row.pending > 0 ? (
+                <span
+                  className="shrink-0 rounded-full px-1.5 text-[11px] font-semibold"
+                  data-pending-state
+                >
+                  {row.pending}
+                </span>
+              ) : null}
+              <span className="ml-auto shrink-0 text-xs text-[var(--color-text-tertiary)]">
+                {lastTs ? age(lastTs) : t("overview.quiet")}
+              </span>
+            </span>
+            <span className="mt-0.5 line-clamp-2 break-words text-[13px] leading-5 text-[var(--color-text-secondary)]">
+              {reply ? (
+                <>
+                  <span className="text-[var(--color-text-tertiary)]">{reply.by}：</span>
+                  {oneLine(reply.text)}
+                </>
+              ) : (
+                <span className="text-[var(--color-text-tertiary)]">{t("overview.noReply")}</span>
+              )}
             </span>
           </span>
-          <span className="mt-0.5 line-clamp-2 break-words text-[13px] leading-5 text-[var(--color-text-secondary)]">
-            {reply ? (
-              <>
-                <span className="text-[var(--color-text-tertiary)]">{reply.by}：</span>
-                {oneLine(reply.text)}
-              </>
-            ) : (
-              <span className="text-[var(--color-text-tertiary)]">{t("overview.noReply")}</span>
-            )}
+        </button>
+        {readOnly ? null : (
+          <span className="flex shrink-0 items-start py-2.5 pr-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-expanded={replying}
+              onClick={() => {
+                setSent(false);
+                setReplying((value) => !value);
+              }}
+              data-overview-reply-toggle
+            >
+              {sent ? t("overview.sent") : t("overview.reply")}
+            </Button>
           </span>
-        </span>
-      </button>
+        )}
+      </div>
+      {replying ? (
+        <QuickReply
+          groupId={row.group.group_id}
+          groupTitle={title}
+          onClose={() => setReplying(false)}
+          onSent={() => {
+            setReplying(false);
+            setSent(true);
+            onSent();
+          }}
+        />
+      ) : null}
     </li>
   );
 }
@@ -477,7 +584,9 @@ export function OverviewPage({
                     <ProjectItem
                       key={row.group.group_id}
                       row={row}
+                      readOnly={readOnly}
                       onOpen={() => onOpenGroup(row.group.group_id)}
+                      onSent={data.refresh}
                     />
                   ))}
                 </ul>

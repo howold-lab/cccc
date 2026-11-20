@@ -1,6 +1,8 @@
 import { useOverviewStore } from "../../stores/useOverviewStore";
 import { OverviewPage } from "../../features/overview/OverviewPage";
 import { TaskOverviewPage } from "../../features/overview/TaskOverviewPage";
+import { useGroupActivityFeed } from "../../stores/useGroupActivityStore";
+import { QuickJump } from "../../features/overview/QuickJump";
 import { requestWorkspaceNavigation } from "../../stores/workspaceNavigation";
 import { WorkspaceNavigationDialog } from "../workspace/WorkspaceNavigationDialog";
 import { useCallback, useState, type CSSProperties } from "react";
@@ -232,8 +234,19 @@ export function AppShell({
     if (groupId === selectedGroupId) onSelectGroup(groupId);
     else requestWorkspaceNavigation(() => onSelectGroup(groupId));
   };
+  const openTaskFromOverview = (groupId: string, taskId: string) => {
+    useOverviewStore.getState().hide();
+    const open = () => useModalStore.getState().openContextTask(taskId);
+    if (groupId === selectedGroupId) open();
+    else
+      requestWorkspaceNavigation(() => {
+        onSelectGroup(groupId);
+        open();
+      });
+  };
   const archivedSet = new Set(archivedGroupIds);
   const workingGroups = orderedGroups.filter((group) => !archivedSet.has(group.group_id));
+  useGroupActivityFeed(workingGroups, !remoteWorkspace && !connectEmbedded);
   const openPendingReplies = useCallback(
     (groupId: string) => {
       requestWorkspaceNavigation(() => {
@@ -275,6 +288,12 @@ export function AppShell({
 
   return (
     <PendingReplyNavigationContext.Provider value={openPendingReplies}>
+      <QuickJump
+        groups={orderedGroups}
+        enabled={!remoteWorkspace && !connectEmbedded}
+        onOpenGroup={openGroupFromOverview}
+        onOpenOverview={(view) => useOverviewStore.getState().show(view)}
+      />
       <div
         className={`relative h-full min-h-0 transition-[grid-template-columns] duration-300 ease-out ${connectEmbedded ? "" : "md:grid md:[grid-template-columns:var(--sidebar-width)_minmax(0,1fr)]"}`}
         style={shellStyle}
@@ -331,6 +350,7 @@ export function AppShell({
                   <TaskOverviewPage
                     groups={workingGroups}
                     onOpenGroup={openGroupFromOverview}
+                    onOpenTask={openTaskFromOverview}
                     onOpenSidebar={onOpenSidebar}
                   />
                 ) : (

@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   actors: vi.fn(),
   context: vi.fn(),
   tail: vi.fn(),
+  send: vi.fn(),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -26,7 +27,7 @@ vi.mock("../../services/api/pendingReplies", () => ({
   answerPendingReply: api.answer,
 }));
 vi.mock("../../services/api/actors", () => ({ fetchActors: api.actors }));
-vi.mock("../../services/api/context", () => ({ fetchContext: api.context }));
+vi.mock("../../services/api/context", () => ({ fetchContext: api.context, sendMessage: api.send }));
 vi.mock("../../services/api/messaging", () => ({ fetchLedgerTail: api.tail }));
 
 import { OverviewPage } from "./OverviewPage";
@@ -233,4 +234,41 @@ it("does not flag a user message that is still recent", async () => {
   await render();
 
   expect(host.querySelector('[data-overview-need="unanswered"]')).toBeNull();
+});
+
+it("sends a quick reply to a project without leaving the overview", async () => {
+  api.send.mockResolvedValue({ ok: true, result: {} });
+  await render();
+
+  const row = [...host.querySelectorAll("[data-overview-project-row]")].find((item) =>
+    item.textContent?.includes("Knowledge base"),
+  )!;
+  act(() => row.querySelector<HTMLButtonElement>("[data-overview-reply-toggle]")!.click());
+  const box = row.querySelector<HTMLTextAreaElement>("textarea")!;
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+    setter.call(box, "Ship the price image today");
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    row.querySelector<HTMLButtonElement>("[data-overview-send]")!.click();
+  });
+  await flush();
+
+  expect(api.send).toHaveBeenCalledWith(
+    "kb",
+    "Ship the price image today",
+    [],
+    undefined,
+    "send",
+    expect.any(String),
+  );
+  expect(row.querySelector("textarea")).toBeNull();
+  expect(row.textContent).toContain("overview.sent");
+});
+
+it("offers no quick reply to a read-only viewer", async () => {
+  await render({ readOnly: true });
+
+  expect(host.querySelector("[data-overview-reply-toggle]")).toBeNull();
 });
