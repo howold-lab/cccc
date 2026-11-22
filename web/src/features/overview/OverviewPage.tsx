@@ -11,6 +11,7 @@ import type { GroupMeta } from "../../types";
 import { newClientId } from "../../utils/clientId";
 import { PendingSummaryContext } from "../pendingReplies/context";
 import { OverviewAsk } from "./OverviewAsk";
+import { readLastAsked } from "./askModel";
 import { oneLine } from "./plainText";
 import {
   useOverviewData,
@@ -71,32 +72,6 @@ function Card({
       </header>
       {children}
     </section>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  note,
-  alert,
-}: {
-  label: string;
-  value: string;
-  note?: string;
-  alert?: boolean;
-}) {
-  return (
-    <div className="min-w-0 px-4 py-3" data-overview-stat data-alert={alert ? "" : undefined}>
-      <div className="text-xs text-[var(--color-text-tertiary)]">{label}</div>
-      <div className="mt-1 flex items-baseline gap-1.5">
-        <span className="text-2xl font-semibold tabular-nums" data-overview-stat-value>
-          {value}
-        </span>
-        {note ? (
-          <span className="truncate text-xs text-[var(--color-text-tertiary)]">{note}</span>
-        ) : null}
-      </div>
-    </div>
   );
 }
 
@@ -314,11 +289,14 @@ function QuickReply({
 
 function ProjectItem({
   row,
+  answerAbove,
   readOnly,
   onOpen,
   onSent,
 }: {
   row: ProjectRow;
+  /** Its latest reply is the answer shown in the ask card, so it is not repeated. */
+  answerAbove: boolean;
   readOnly: boolean;
   onOpen: () => void;
   onSent: () => void;
@@ -361,7 +339,11 @@ function ProjectItem({
               </span>
             </span>
             <span className="mt-0.5 line-clamp-2 break-words text-[13px] leading-5 text-[var(--color-text-secondary)]">
-              {reply ? (
+              {reply && answerAbove ? (
+                <span className="text-[var(--color-text-tertiary)]">
+                  {t("overview.answerAbove")}
+                </span>
+              ) : reply ? (
                 <>
                   <span className="text-[var(--color-text-tertiary)]">{reply.by}：</span>
                   {oneLine(reply.text)}
@@ -479,6 +461,11 @@ export function OverviewPage({
     data.refresh();
     summary?.refresh();
   };
+  const busyAgents = agents.filter((agent) =>
+    ["working", "stuck", "waiting"].includes(agentTone(agent)),
+  );
+  const quietAgents = agents.filter((agent) => !busyAgents.includes(agent));
+  const lastAsked = readLastAsked();
   const isDark =
     typeof document !== "undefined" && document.documentElement.classList.contains("dark");
 
@@ -522,67 +509,64 @@ export function OverviewPage({
             onOpenTasks={() => onOpenTasks?.()}
           />
 
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <Stat
-              label={t("overview.statNeeds")}
-              value={String(needsTotal)}
-              alert={needsTotal > 0}
-            />
-            <Stat
-              label={t("overview.statGroups")}
-              value={String(runningGroups)}
-              note={`/ ${groups.length}`}
-            />
-            <Stat
-              label={t("overview.statWorking")}
-              value={String(workingAgents)}
-              note={t("overview.statWorkingNote", { count: onlineAgents })}
-            />
-            <Stat
-              label={t("overview.statActive")}
-              value={String(activeToday)}
-              note={t("overview.statActiveNote")}
-            />
-          </div>
+          <p
+            className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-[13px] text-[var(--color-text-tertiary)]"
+            data-overview-strip
+          >
+            <span data-overview-strip-needs={needsTotal > 0 ? "alert" : "none"}>
+              {needsTotal > 0
+                ? t("overview.stripNeeds", { count: needsTotal })
+                : t("overview.stripNoNeeds")}
+            </span>
+            <span>
+              {t("overview.stripRunning", { running: runningGroups, total: groups.length })}
+            </span>
+            <span>
+              {t("overview.stripWorking", { count: workingAgents, online: onlineAgents })}
+            </span>
+            <span>{t("overview.stripActive", { count: activeToday })}</span>
+          </p>
 
-          <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
             <div className="grid min-w-0 content-start gap-5">
-              <Card
-                title={t("overview.needsTitle")}
-                count={needsTotal}
-                aside={t("overview.needsAside")}
-              >
-                {data.loading ? (
-                  <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
-                    {t("overview.loading")}
-                  </p>
-                ) : needsTotal === 0 ? (
-                  <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
-                    {t("overview.needsEmpty")}
-                  </p>
-                ) : (
-                  <ul data-overview-list>
-                    {data.pending.map((item) => (
-                      <PendingRow
-                        key={`${item.groupId}:${item.event.id}`}
-                        item={item}
-                        groupTitle={titles[item.groupId] ?? item.groupId}
-                        readOnly={readOnly}
-                        onOpen={() => onOpenPending(item.groupId)}
-                        onAnswered={answered}
-                      />
-                    ))}
-                    {unanswered.map((activity) => (
-                      <UnansweredRow
-                        key={`unanswered:${activity.groupId}`}
-                        groupTitle={titles[activity.groupId] ?? activity.groupId}
-                        activity={activity}
-                        onOpen={() => onOpenGroup(activity.groupId)}
-                      />
-                    ))}
-                  </ul>
-                )}
-              </Card>
+              {data.loading || needsTotal > 0 ? (
+                <Card
+                  title={t("overview.needsTitleFact")}
+                  count={needsTotal}
+                  aside={t("overview.needsAside")}
+                >
+                  {data.loading ? (
+                    <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
+                      {t("overview.loading")}
+                    </p>
+                  ) : needsTotal === 0 ? (
+                    <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
+                      {t("overview.needsEmpty")}
+                    </p>
+                  ) : (
+                    <ul data-overview-list>
+                      {data.pending.map((item) => (
+                        <PendingRow
+                          key={`${item.groupId}:${item.event.id}`}
+                          item={item}
+                          groupTitle={titles[item.groupId] ?? item.groupId}
+                          readOnly={readOnly}
+                          onOpen={() => onOpenPending(item.groupId)}
+                          onAnswered={answered}
+                        />
+                      ))}
+                      {unanswered.map((activity) => (
+                        <UnansweredRow
+                          key={`unanswered:${activity.groupId}`}
+                          groupTitle={titles[activity.groupId] ?? activity.groupId}
+                          activity={activity}
+                          onOpen={() => onOpenGroup(activity.groupId)}
+                        />
+                      ))}
+                    </ul>
+                  )}
+                </Card>
+              ) : null}
 
               <Card title={t("overview.projectsTitle")} aside={t("overview.projectsAside")}>
                 <ul data-overview-list>
@@ -590,6 +574,12 @@ export function OverviewPage({
                     <ProjectItem
                       key={row.group.group_id}
                       row={row}
+                      answerAbove={
+                        !!lastAsked &&
+                        lastAsked.groupId === row.group.group_id &&
+                        !!row.activity?.lastReply &&
+                        row.activity.lastReply.ts >= lastAsked.ts
+                      }
                       readOnly={readOnly}
                       onOpen={() => onOpenGroup(row.group.group_id)}
                       onSent={data.refresh}
@@ -601,7 +591,10 @@ export function OverviewPage({
 
             <Card
               title={t("overview.agentsTitle")}
-              aside={t("overview.agentsAside", { agents: agents.length })}
+              aside={t("overview.agentsBusyAside", {
+                busy: busyAgents.length,
+                agents: agents.length,
+              })}
             >
               {agents.length === 0 ? (
                 <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
@@ -609,7 +602,7 @@ export function OverviewPage({
                 </p>
               ) : (
                 <ul data-overview-list>
-                  {agents.map((agent) => {
+                  {busyAgents.map((agent) => {
                     const tone = agentTone(agent);
                     const detail = agent.blockers[0] || agent.focus;
                     return (
@@ -658,6 +651,22 @@ export function OverviewPage({
                       </li>
                     );
                   })}
+                  {busyAgents.length === 0 ? (
+                    <li className="px-4 py-3 text-[13px] text-[var(--color-text-tertiary)]">
+                      {t("overview.noBusyAgents")}
+                    </li>
+                  ) : null}
+                  {quietAgents.length > 0 ? (
+                    <li
+                      className="px-4 py-3 text-[13px] leading-5 text-[var(--color-text-tertiary)]"
+                      data-overview-quiet-agents
+                    >
+                      {t("overview.quietAgents", {
+                        count: quietAgents.length,
+                        names: quietAgents.map((agent) => agent.title).join("、"),
+                      })}
+                    </li>
+                  ) : null}
                 </ul>
               )}
             </Card>

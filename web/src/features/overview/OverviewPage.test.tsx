@@ -197,7 +197,8 @@ it("shows what each agent is doing and opens its Group", async () => {
   const working = host.querySelector<HTMLButtonElement>('[data-overview-agent="working"]')!;
   expect(working.textContent).toContain("Maintainer");
   expect(working.textContent).toContain("Sorting 51 missed questions");
-  expect(host.querySelector('[data-overview-agent="stopped"]')!.textContent).toContain("watcher");
+  expect(host.querySelector('[data-overview-agent="stopped"]')).toBeNull();
+  expect(host.querySelector("[data-overview-quiet-agents]")!.textContent).toContain("watcher");
 
   act(() => working.click());
   expect(onOpenGroup).toHaveBeenCalledWith("kb");

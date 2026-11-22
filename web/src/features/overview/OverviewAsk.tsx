@@ -6,11 +6,11 @@ import { sendMessage } from "../../services/api/context";
 import { fetchLedgerTail } from "../../services/api/messaging";
 import type { ChatMessageData, GroupMeta, LedgerEvent } from "../../types";
 import { newClientId } from "../../utils/clientId";
-import { answersTo, type Asked } from "./askModel";
+import { answersTo, LAST_ASKED_KEY, NO_REPLY_AFTER_MS, type Asked } from "./askModel";
 import { useAge } from "./useAge";
 
 const GROUP_KEY = "cccc-overview-ask-group";
-const LAST_KEY = "cccc-overview-ask-last";
+const LAST_KEY = LAST_ASKED_KEY;
 /** A Group with this title is asked by default. */
 const DEFAULT_TITLE = "调度层";
 /** Reads while waiting for the answer, then slower so a follow-up message still shows. */
@@ -70,12 +70,20 @@ export function OverviewAsk({
   const [failed, setFailed] = useState(false);
   const [asked, setAsked] = useState<Asked | null>(() => read<Asked>(LAST_KEY));
   const [answers, setAnswers] = useState<LedgerEvent[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     if (!groupId && groups.length) setGroupId(defaultGroup(groups));
   }, [groupId, groups]);
 
   const answered = answers.length > 0;
+  useEffect(() => {
+    if (!asked || answered) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 10_000);
+    return () => window.clearInterval(timer);
+  }, [asked, answered]);
+  const noReply = !!asked && !answered && now - new Date(asked.ts).getTime() > NO_REPLY_AFTER_MS;
   useEffect(() => {
     if (!asked) return undefined;
     const controller = new AbortController();
@@ -97,14 +105,14 @@ export function OverviewAsk({
     };
   }, [asked, answered]);
 
-  const ask = async (question: string) => {
+  const ask = async (question: string, target = groupId) => {
     const body = question.trim();
-    if (!body || !groupId || sending || readOnly) return;
+    if (!body || !target || sending || readOnly) return;
     setSending(true);
     setFailed(false);
     const sentAt = new Date().toISOString();
     // No recipients: the Group's default recipient policy applies, as in its own composer.
-    const response = await sendMessage(groupId, body, [], undefined, "send", newClientId()).catch(
+    const response = await sendMessage(target, body, [], undefined, "send", newClientId()).catch(
       () => null,
     );
     setSending(false);
@@ -114,13 +122,15 @@ export function OverviewAsk({
     }
     const event = ((response.result ?? {}) as { event?: LedgerEvent }).event;
     const next: Asked = {
-      groupId,
+      groupId: target,
       question: body,
       ts: String(event?.ts || sentAt),
       eventId: String(event?.id || ""),
     };
     setText("");
     setAnswers([]);
+    setExpanded(false);
+    setNow(Date.now());
     setAsked(next);
     write(LAST_KEY, next);
   };
@@ -234,21 +244,79 @@ export function OverviewAsk({
             >
               {t("overview.ask.openGroup", { group: groupTitle(asked.groupId) })} ›
             </button>
+            <button
+              type="button"
+              className="shrink-0 px-1 text-[var(--color-text-tertiary)]"
+              aria-label={t("overview.ask.close")}
+              title={t("overview.ask.close")}
+              onClick={() => {
+                setAsked(null);
+                setAnswers([]);
+                try {
+                  window.localStorage.removeItem(LAST_KEY);
+                } catch {
+                  // Nothing remembered to forget.
+                }
+              }}
+              data-overview-answer-close
+            >
+              ✕
+            </button>
           </header>
           {answered ? (
-            <div className="grid gap-3 px-5 py-3">
-              {answers.map((event) => (
-                <div key={String(event.id)} data-overview-answer-message>
-                  <p className="mb-1 text-xs text-[var(--color-text-tertiary)]">
-                    {String(event.by || "")} · {age(String(event.ts))}
-                  </p>
-                  <LazyMarkdownRenderer
-                    content={String(((event.data ?? {}) as ChatMessageData).text || "")}
-                    isDark={isDark}
-                    className="text-sm"
-                  />
-                </div>
-              ))}
+            <div
+              className="relative overflow-hidden px-5 py-3"
+              style={expanded ? undefined : { maxHeight: "16rem" }}
+              data-overview-answer-body={expanded ? "expanded" : "folded"}
+            >
+              <div className="grid max-w-[46rem] gap-3">
+                {answers.map((event) => (
+                  <div key={String(event.id)} data-overview-answer-message>
+                    <p className="mb-1 text-xs text-[var(--color-text-tertiary)]">
+                      {String(event.by || "")} · {age(String(event.ts))}
+                    </p>
+                    <LazyMarkdownRenderer
+                      content={String(((event.data ?? {}) as ChatMessageData).text || "")}
+                      isDark={isDark}
+                      className="text-sm"
+                    />
+                  </div>
+                ))}
+              </div>
+              {expanded ? null : (
+                <span
+                  className="pointer-events-none absolute inset-x-0 bottom-0 h-12"
+                  data-overview-answer-fade
+                  aria-hidden="true"
+                />
+              )}
+            </div>
+          ) : noReply ? (
+            <div className="px-5 py-4 text-[13px]" data-overview-answer-noreply>
+              <p className="text-[var(--color-text-secondary)]">
+                {t("overview.ask.noReply", { group: groupTitle(asked.groupId) })}
+              </p>
+              <div className="mt-2 flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={readOnly || sending}
+                  onClick={() => {
+                    chooseGroup(asked.groupId);
+                    void ask(asked.question, asked.groupId);
+                  }}
+                >
+                  {t("overview.ask.resend")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onOpenGroup(asked.groupId)}
+                >
+                  {t("overview.ask.check", { group: groupTitle(asked.groupId) })}
+                </Button>
+              </div>
             </div>
           ) : (
             <p
@@ -264,6 +332,17 @@ export function OverviewAsk({
             </p>
           )}
           <div className="flex gap-2 px-5 pb-3.5">
+            {answered ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => setExpanded((value) => !value)}
+                data-overview-answer-toggle
+              >
+                {expanded ? t("overview.ask.collapse") : t("overview.ask.expand")}
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="secondary"

@@ -974,6 +974,23 @@
   }
 }
 
+/* A folded answer fades out at the bottom. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-answer-fade] {
+  background: linear-gradient(to bottom, transparent, var(--lcd-raised));
+}
+
+/* The one-line status strip: open questions take the waiting colour. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-strip] > span + span::before {
+  content: "·";
+  margin-right: 1rem;
+  color: var(--lcd-rule-strong);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-strip-needs="alert"] {
+  color: var(--lcd-wait);
+  font-weight: 600;
+}
+
 /* ---- Task board ---- */
 
 /* Filter chips: outlined; the current one filled in ink. */

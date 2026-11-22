@@ -444,7 +444,23 @@
       "openGroup": "View in {{group}}",
       "waiting": "{{group}} is working on it…",
       "followUp": "Follow up",
-      "openTasks": "Open All tasks"
-    }
+      "openTasks": "Open All tasks",
+      "expand": "Show all",
+      "collapse": "Collapse",
+      "close": "Dismiss this answer",
+      "noReply": "No reply from {{group}} in two minutes; the message may not have arrived (for example right after a restart).",
+      "resend": "Send again",
+      "check": "Check {{group}}"
+    },
+    "stripNeeds": "{{count}} open questions",
+    "stripNoNeeds": "No open questions",
+    "stripRunning": "Running {{running}}/{{total}}",
+    "stripWorking": "Working {{count}} · {{online}} agents online",
+    "stripActive": "{{count}} Groups active today",
+    "needsTitleFact": "Needs you (confirmed by the system)",
+    "agentsBusyAside": "{{busy}} busy / {{agents}} in all",
+    "noBusyAgents": "No agent is working right now",
+    "quietAgents": "{{count}} idle or stopped: {{names}}",
+    "answerAbove": "Latest reply is the answer above"
   }
 }

@@ -127,3 +127,32 @@ it("cannot ask from a read-only view", () => {
 
   expect(host.querySelector<HTMLButtonElement>("[data-overview-ask-chip]")!.disabled).toBe(true);
 });
+
+it("says the question may not have arrived when no reply comes in two minutes", async () => {
+  window.localStorage.setItem(
+    "cccc-overview-ask-last",
+    JSON.stringify({
+      groupId: "ops",
+      question: "Anything for me?",
+      ts: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
+      eventId: "q9",
+    }),
+  );
+  api.tail.mockResolvedValue({ ok: true, result: { events: [], has_more: false, count: 0 } });
+  render();
+  await flush();
+
+  expect(host.querySelector("[data-overview-answer-noreply]")).not.toBeNull();
+});
+
+it("forgets the answer when it is closed", async () => {
+  render();
+  await act(async () => {
+    host.querySelector<HTMLButtonElement>("[data-overview-ask-chip]")!.click();
+  });
+  await flush();
+
+  act(() => host.querySelector<HTMLButtonElement>("[data-overview-answer-close]")!.click());
+  expect(host.querySelector("[data-overview-answer]")).toBeNull();
+  expect(window.localStorage.getItem("cccc-overview-ask-last")).toBeNull();
+});

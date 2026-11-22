@@ -439,7 +439,23 @@
       "openGroup": "在{{group}}查看",
       "waiting": "{{group}} 正在处理…",
       "followUp": "追问",
-      "openTasks": "去「所有任务」"
-    }
+      "openTasks": "去「所有任务」",
+      "expand": "展开全部",
+      "collapse": "收起",
+      "close": "关闭这条问答",
+      "noReply": "{{group}} 两分钟内没有回复，消息可能没送到（比如它刚重启）。",
+      "resend": "重新发送",
+      "check": "去{{group}}看看"
+    },
+    "stripNeeds": "{{count}} 件正式待答复",
+    "stripNoNeeds": "没有正式待答复",
+    "stripRunning": "运行中 {{running}}/{{total}}",
+    "stripWorking": "工作中 {{count}} · {{online}} 个 agent 在线",
+    "stripActive": "今天有动静 {{count}} 组",
+    "needsTitleFact": "需要你（系统确认）",
+    "agentsBusyAside": "{{busy}} 个在干活 / 共 {{agents}} 个",
+    "noBusyAgents": "现在没有 agent 在干活",
+    "quietAgents": "{{count}} 个空闲或停止：{{names}}",
+    "answerAbove": "最新回复见上方的回答"
   }
 }

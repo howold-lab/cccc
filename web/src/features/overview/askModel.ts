@@ -3,6 +3,22 @@ import type { ChatMessageData, LedgerEvent } from "../../types";
 /** A question sent from the overview to a Group's agent. */
 export type Asked = { groupId: string; question: string; ts: string; eventId: string };
 
+/** Where the overview remembers the last question across reloads. */
+export const LAST_ASKED_KEY = "cccc-overview-ask-last";
+
+/** The last question asked from the overview, if any. */
+export function readLastAsked(): Asked | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_ASKED_KEY);
+    return raw ? (JSON.parse(raw) as Asked) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** With no reply after this long, the card says the question may not have arrived. */
+export const NO_REPLY_AFTER_MS = 2 * 60 * 1000;
+
 /** The send time is the browser's; allow for its clock running ahead of the daemon's. */
 const CLOCK_SLACK_MS = 30_000;
 

@@ -444,7 +444,23 @@
       "openGroup": "{{group}}で見る",
       "waiting": "{{group}}が対応中…",
       "followUp": "追加で質問",
-      "openTasks": "すべてのタスクへ"
-    }
+      "openTasks": "すべてのタスクへ",
+      "expand": "すべて表示",
+      "collapse": "折りたたむ",
+      "close": "この回答を閉じる",
+      "noReply": "{{group}} から 2 分間返信がありません。メッセージが届いていない可能性があります（再起動直後など）。",
+      "resend": "再送信",
+      "check": "{{group}}を見る"
+    },
+    "stripNeeds": "正式な回答待ち {{count}} 件",
+    "stripNoNeeds": "正式な回答待ちなし",
+    "stripRunning": "稼働中 {{running}}/{{total}}",
+    "stripWorking": "作業中 {{count}} · オンライン {{online}}",
+    "stripActive": "今日動きあり {{count}} グループ",
+    "needsTitleFact": "要対応（システム確認）",
+    "agentsBusyAside": "作業中 {{busy}} / 全 {{agents}}",
+    "noBusyAgents": "いま作業中の agent はいません",
+    "quietAgents": "アイドルまたは停止 {{count}}：{{names}}",
+    "answerAbove": "最新の返信は上の回答です"
   }
 }
