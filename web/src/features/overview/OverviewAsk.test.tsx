@@ -38,15 +38,26 @@ const chat = (
     data: { text, to: ["user"], ...data },
   }) as unknown as LedgerEvent;
 
-it("takes the agent's replies to the question, or its messages to the user after it", () => {
+it("prefers the agent's replies that quote the question", () => {
+  const asked = { groupId: "g", question: "q", ts: "2026-11-20T10:00:00Z", eventId: "q1" };
+  const events = [
+    chat("q1", "user", "2026-11-20T10:00:00Z", "q"),
+    chat("a1", "claude-1", "2026-11-20T10:01:00Z", "answer"),
+    chat("r", "claude-1", "2026-11-20T10:02:00Z", "linked", { reply_to: "q1", to: ["user"] }),
+  ];
+  expect(answersTo(asked, events).map((event) => event.id)).toEqual(["r"]);
+});
+
+it("otherwise takes messages to the user after the question, until the user speaks again", () => {
   const asked = { groupId: "g", question: "q", ts: "2026-11-20T10:00:00Z", eventId: "q1" };
   const events = [
     chat("old", "claude-1", "2026-11-20T09:00:00Z", "earlier"),
-    chat("u", "user", "2026-11-20T10:00:00Z", "q"),
+    chat("q1", "user", "2026-11-20T10:00:00Z", "q"),
     chat("a1", "claude-1", "2026-11-20T10:01:00Z", "answer"),
-    chat("r", "claude-1", "2026-11-20T09:59:59Z", "linked", { reply_to: "q1", to: ["user"] }),
+    chat("u2", "user", "2026-11-20T10:05:00Z", "something else"),
+    chat("a2", "claude-1", "2026-11-20T10:06:00Z", "about something else"),
   ];
-  expect(answersTo(asked, events).map((event) => event.id)).toEqual(["r", "a1"]);
+  expect(answersTo(asked, events).map((event) => event.id)).toEqual(["a1"]);
 });
 
 let root: Root;

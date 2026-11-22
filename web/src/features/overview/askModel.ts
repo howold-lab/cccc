@@ -22,17 +22,35 @@ export const NO_REPLY_AFTER_MS = 2 * 60 * 1000;
 /** The send time is the browser's; allow for its clock running ahead of the daemon's. */
 const CLOCK_SLACK_MS = 30_000;
 
-/** The agent's messages to the user that answer this question: replies to it, or anything after it. */
+/**
+ * The agent's messages that answer this question. Replies quoting it win. Otherwise its
+ * messages to the user after the question count, but only until the user's next message in
+ * the Group: anything later answers something else.
+ */
 export function answersTo(asked: Asked, events: LedgerEvent[]): LedgerEvent[] {
+  const chats = events
+    .filter((event) => event.kind === "chat.message")
+    .sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  const quoted = chats.filter(
+    (event) =>
+      event.by !== "user" &&
+      !!asked.eventId &&
+      ((event.data ?? {}) as ChatMessageData).reply_to === asked.eventId,
+  );
+  if (quoted.length) return quoted.slice(0, 3);
+
   const after = new Date(asked.ts).getTime() - CLOCK_SLACK_MS;
-  return events
-    .filter((event) => {
-      if (event.kind !== "chat.message" || event.by === "user") return false;
-      const data = (event.data ?? {}) as ChatMessageData;
-      if (asked.eventId && data.reply_to === asked.eventId) return true;
-      const to = Array.isArray(data.to) ? data.to : [];
-      return to.includes("user") && new Date(String(event.ts)).getTime() > after;
-    })
-    .sort((a, b) => String(a.ts).localeCompare(String(b.ts)))
-    .slice(-3);
+  const asking = new Date(asked.ts).getTime();
+  const found: LedgerEvent[] = [];
+  for (const event of chats) {
+    const ts = new Date(String(event.ts)).getTime();
+    if (event.by === "user") {
+      const isQuestion = !!asked.eventId && event.id === asked.eventId;
+      if (!isQuestion && ts > asking) break;
+      continue;
+    }
+    const to = ((event.data ?? {}) as ChatMessageData).to;
+    if (ts > after && Array.isArray(to) && to.includes("user")) found.push(event);
+  }
+  return found.slice(0, 3);
 }
