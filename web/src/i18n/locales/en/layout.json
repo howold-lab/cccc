@@ -461,6 +461,25 @@
     "agentsBusyAside": "{{busy}} busy / {{agents}} in all",
     "noBusyAgents": "No agent is working right now",
     "quietAgents": "{{count}} idle or stopped: {{names}}",
-    "answerAbove": "Latest reply is the answer above"
+    "answerAbove": "Latest reply is the answer above",
+    "quota": {
+      "title": "Quota",
+      "source": "Claude subscription · from the status line",
+      "used": "used",
+      "fiveHour": "5-hour window",
+      "sevenDay": "7-day window",
+      "reset": "reset",
+      "resetsIn": "resets in about {{time}}",
+      "minutes": "{{count}} min",
+      "hoursMinutes": "{{hours}} h {{minutes}} min",
+      "daysHours": "{{days}} d {{hours}} h",
+      "updated": "updated {{age}}",
+      "stale": "stale ({{age}})",
+      "waiting": "No quota data yet. Restart Claude Code or open a new session; it records after the first model call.",
+      "notInstalled": "claude-statusline is not installed; once it is, 5-hour and 7-day quota shows here.",
+      "note": "Reset times are inferred from usage, hence “about”. Red at 85% used or more, amber from 60%.",
+      "chip": "Claude quota",
+      "left": "{{pct}}% left"
+    }
   }
 }

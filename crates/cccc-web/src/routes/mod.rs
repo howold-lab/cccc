@@ -46,6 +46,7 @@ mod remote_access_projection;
 mod settings;
 mod streams;
 mod system;
+mod claude_usage;
 mod system_branding;
 mod system_branding_assets;
 mod system_branding_manifest;
@@ -88,6 +89,7 @@ fn first_non_blank<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
 pub fn router() -> Router<AppState> {
     Router::new()
         .merge(system::routes())
+        .merge(claude_usage::routes())
         .merge(system_branding::routes())
         .merge(system_branding_assets::routes())
         .merge(system_branding_manifest::routes())

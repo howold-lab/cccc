@@ -11,6 +11,8 @@ import type { GroupMeta } from "../../types";
 import { newClientId } from "../../utils/clientId";
 import { PendingSummaryContext } from "../pendingReplies/context";
 import { OverviewAsk } from "./OverviewAsk";
+import { QuotaCard, QuotaChip } from "./QuotaCard";
+import { useClaudeLimits } from "./useClaudeLimits";
 import { readLastAsked } from "./askModel";
 import { oneLine } from "./plainText";
 import {
@@ -466,6 +468,7 @@ export function OverviewPage({
   );
   const quietAgents = agents.filter((agent) => !busyAgents.includes(agent));
   const lastAsked = readLastAsked();
+  const limits = useClaudeLimits();
   const isDark =
     typeof document !== "undefined" && document.documentElement.classList.contains("dark");
 
@@ -525,6 +528,7 @@ export function OverviewPage({
               {t("overview.stripWorking", { count: workingAgents, online: onlineAgents })}
             </span>
             <span>{t("overview.stripActive", { count: activeToday })}</span>
+            <QuotaChip limits={limits} />
           </p>
 
           <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -589,87 +593,90 @@ export function OverviewPage({
               </Card>
             </div>
 
-            <Card
-              title={t("overview.agentsTitle")}
-              aside={t("overview.agentsBusyAside", {
-                busy: busyAgents.length,
-                agents: agents.length,
-              })}
-            >
-              {agents.length === 0 ? (
-                <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
-                  {t("overview.loading")}
-                </p>
-              ) : (
-                <ul data-overview-list>
-                  {busyAgents.map((agent) => {
-                    const tone = agentTone(agent);
-                    const detail = agent.blockers[0] || agent.focus;
-                    return (
-                      <li key={`${agent.groupId}:${agent.actorId}`}>
-                        <button
-                          type="button"
-                          onClick={() => onOpenGroup(agent.groupId)}
-                          className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left transition-colors"
-                          data-overview-agent={tone}
-                        >
-                          <span
-                            className="relative mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
-                            data-overview-ring={tone}
-                            aria-hidden="true"
+            <div className="grid min-w-0 content-start gap-5">
+              <QuotaCard limits={limits} />
+              <Card
+                title={t("overview.agentsTitle")}
+                aside={t("overview.agentsBusyAside", {
+                  busy: busyAgents.length,
+                  agents: agents.length,
+                })}
+              >
+                {agents.length === 0 ? (
+                  <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
+                    {t("overview.loading")}
+                  </p>
+                ) : (
+                  <ul data-overview-list>
+                    {busyAgents.map((agent) => {
+                      const tone = agentTone(agent);
+                      const detail = agent.blockers[0] || agent.focus;
+                      return (
+                        <li key={`${agent.groupId}:${agent.actorId}`}>
+                          <button
+                            type="button"
+                            onClick={() => onOpenGroup(agent.groupId)}
+                            className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left transition-colors"
+                            data-overview-agent={tone}
                           >
-                            <ActorAvatar
-                              avatarUrl={agent.avatarUrl || undefined}
-                              runtime={agent.runtime}
-                              title={agent.title}
-                              isDark={isDark}
-                              sizeClassName="h-7 w-7"
-                              textClassName="text-[0.625rem]"
-                              className="lcd-tile"
-                            />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="flex min-w-0 items-baseline gap-2">
-                              <span className="truncate text-sm font-medium text-[var(--color-text-primary)]">
-                                {agent.title}
-                              </span>
-                              <span className="truncate text-xs text-[var(--color-text-tertiary)]">
-                                {titles[agent.groupId]}
-                              </span>
-                              {agent.updatedAt ? (
-                                <span className="ml-auto shrink-0 text-xs text-[var(--color-text-tertiary)]">
-                                  {age(agent.updatedAt)}
+                            <span
+                              className="relative mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+                              data-overview-ring={tone}
+                              aria-hidden="true"
+                            >
+                              <ActorAvatar
+                                avatarUrl={agent.avatarUrl || undefined}
+                                runtime={agent.runtime}
+                                title={agent.title}
+                                isDark={isDark}
+                                sizeClassName="h-7 w-7"
+                                textClassName="text-[0.625rem]"
+                                className="lcd-tile"
+                              />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="flex min-w-0 items-baseline gap-2">
+                                <span className="truncate text-sm font-medium text-[var(--color-text-primary)]">
+                                  {agent.title}
                                 </span>
-                              ) : null}
+                                <span className="truncate text-xs text-[var(--color-text-tertiary)]">
+                                  {titles[agent.groupId]}
+                                </span>
+                                {agent.updatedAt ? (
+                                  <span className="ml-auto shrink-0 text-xs text-[var(--color-text-tertiary)]">
+                                    {age(agent.updatedAt)}
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="mt-0.5 line-clamp-2 break-words text-[13px] leading-5 text-[var(--color-text-secondary)]">
+                                {t(`overview.state.${tone}`)}
+                                {detail ? ` · ${oneLine(detail)}` : ""}
+                              </span>
                             </span>
-                            <span className="mt-0.5 line-clamp-2 break-words text-[13px] leading-5 text-[var(--color-text-secondary)]">
-                              {t(`overview.state.${tone}`)}
-                              {detail ? ` · ${oneLine(detail)}` : ""}
-                            </span>
-                          </span>
-                        </button>
+                          </button>
+                        </li>
+                      );
+                    })}
+                    {busyAgents.length === 0 ? (
+                      <li className="px-4 py-3 text-[13px] text-[var(--color-text-tertiary)]">
+                        {t("overview.noBusyAgents")}
                       </li>
-                    );
-                  })}
-                  {busyAgents.length === 0 ? (
-                    <li className="px-4 py-3 text-[13px] text-[var(--color-text-tertiary)]">
-                      {t("overview.noBusyAgents")}
-                    </li>
-                  ) : null}
-                  {quietAgents.length > 0 ? (
-                    <li
-                      className="px-4 py-3 text-[13px] leading-5 text-[var(--color-text-tertiary)]"
-                      data-overview-quiet-agents
-                    >
-                      {t("overview.quietAgents", {
-                        count: quietAgents.length,
-                        names: quietAgents.map((agent) => agent.title).join("、"),
-                      })}
-                    </li>
-                  ) : null}
-                </ul>
-              )}
-            </Card>
+                    ) : null}
+                    {quietAgents.length > 0 ? (
+                      <li
+                        className="px-4 py-3 text-[13px] leading-5 text-[var(--color-text-tertiary)]"
+                        data-overview-quiet-agents
+                      >
+                        {t("overview.quietAgents", {
+                          count: quietAgents.length,
+                          names: quietAgents.map((agent) => agent.title).join("、"),
+                        })}
+                      </li>
+                    ) : null}
+                  </ul>
+                )}
+              </Card>
+            </div>
           </div>
         </div>
       </div>

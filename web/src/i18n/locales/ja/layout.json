@@ -461,6 +461,25 @@
     "agentsBusyAside": "作業中 {{busy}} / 全 {{agents}}",
     "noBusyAgents": "いま作業中の agent はいません",
     "quietAgents": "アイドルまたは停止 {{count}}：{{names}}",
-    "answerAbove": "最新の返信は上の回答です"
+    "answerAbove": "最新の返信は上の回答です",
+    "quota": {
+      "title": "利用枠",
+      "source": "Claude サブスクリプション · ステータスラインの記録",
+      "used": "使用",
+      "fiveHour": "5 時間枠",
+      "sevenDay": "7 日枠",
+      "reset": "リセット済み",
+      "resetsIn": "約 {{time}}後にリセット",
+      "minutes": "{{count}} 分",
+      "hoursMinutes": "{{hours}} 時間 {{minutes}} 分",
+      "daysHours": "{{days}} 日 {{hours}} 時間",
+      "updated": "{{age}}に更新",
+      "stale": "データが古い（{{age}}）",
+      "waiting": "まだデータがありません。Claude Code を再起動するか新しいセッションで、最初のモデル呼び出し後に記録が始まります。",
+      "notInstalled": "claude-statusline が未インストールです。導入すると 5 時間と 7 日の利用枠が表示されます。",
+      "note": "リセット時刻は使用量の変化から推定しているため「約」と表示します。85% 以上は赤、60–85% は黄。",
+      "chip": "Claude 利用枠",
+      "left": "残り {{pct}}%"
+    }
   }
 }

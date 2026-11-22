@@ -456,6 +456,25 @@
     "agentsBusyAside": "{{busy}} 个在干活 / 共 {{agents}} 个",
     "noBusyAgents": "现在没有 agent 在干活",
     "quietAgents": "{{count}} 个空闲或停止：{{names}}",
-    "answerAbove": "最新回复见上方的回答"
+    "answerAbove": "最新回复见上方的回答",
+    "quota": {
+      "title": "可用额度",
+      "source": "Claude 订阅 · 来自状态栏记账",
+      "used": "已用",
+      "fiveHour": "5 小时窗口",
+      "sevenDay": "7 天窗口",
+      "reset": "已重置",
+      "resetsIn": "约 {{time}}后重置",
+      "minutes": "{{count}} 分钟",
+      "hoursMinutes": "{{hours}} 小时 {{minutes}} 分",
+      "daysHours": "{{days}} 天 {{hours}} 小时",
+      "updated": "{{age}}更新",
+      "stale": "数据已过期（{{age}}）",
+      "waiting": "还没有额度数据。重启 Claude Code 或开新会话，第一次调用模型后就会开始记录。",
+      "notInstalled": "还没有安装 claude-statusline，装好后这里会显示 5 小时和 7 天的额度。",
+      "note": "重置时间是根据用量变化推算的，所以标「约」。已用 ≥85% 标红，60–85% 标黄。",
+      "chip": "Claude 额度",
+      "left": "剩 {{pct}}%"
+    }
   }
 }

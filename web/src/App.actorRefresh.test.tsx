@@ -173,6 +173,9 @@ async function serveRequest(input: string | URL | Request, init?: RequestInit): 
     unexpectedRequests.push(`${method} ${url.pathname}`);
     throw new Error(`Unexpected mutation: ${method} ${url.pathname}`);
   }
+  if (url.pathname === "/api/v1/usage/claude-limits") {
+    return jsonResponse({ installed: false, accounts: [] });
+  }
   if (url.pathname === "/api/v1/reply-requests/summary") {
     return jsonResponse({
       groups: Object.keys(actorsByGroup).map((group_id) => ({

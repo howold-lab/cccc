@@ -991,6 +991,60 @@
   font-weight: 600;
 }
 
+/* ---- Claude quota ---- */
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quota-track] {
+  background: var(--lcd-panel-2);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quota-window] [data-quota-track] > span {
+  background: var(--lcd-accent);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-quota-window][data-tone="mid"]
+  [data-quota-track]
+  > span {
+  background: #e8a33a;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-quota-window][data-tone="hot"]
+  [data-quota-track]
+  > span {
+  background: var(--lcd-danger);
+}
+
+/* Stale data is greyed so an old number is not read as current. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quota-account][data-stale] [data-quota-window] {
+  opacity: 0.5;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quota-chip] {
+  border-color: var(--lcd-rule);
+  color: var(--lcd-dim);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quota-chip] b {
+  color: var(--lcd-ink);
+  font-weight: 600;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quota-chip] b[data-tone="mid"] {
+  color: #b7791f;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-quota-chip] b[data-tone="hot"] {
+  color: var(--lcd-danger);
+}
+
+/* The chip is not a separate strip item: no leading dot. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-strip] > [data-quota-chip]::before {
+  content: none;
+}
+
 /* ---- Task board ---- */
 
 /* Filter chips: outlined; the current one filled in ink. */
