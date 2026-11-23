@@ -654,6 +654,33 @@
       "takeAllConfirm": "按推荐回答这 {{count}} 件？「要你本人」的不会动。",
       "more": "还有 {{count}} 件",
       "fold": "收起"
+    },
+    "unattended": {
+      "label": "代我决定",
+      "hint": "开着时，成员发给你的新消息也会交给 Chet，由它替你回复、答选择卡。登录、付款、合并代码、删除、对外发布、花钱这类留给你。对所有组生效。",
+      "since": "· {{time}} 起",
+      "failed": "切换失败",
+      "decidedTitle": "你不在时替你定的",
+      "decidedAside": "Chet · {{count}} 件 · 不对就改判",
+      "answered": "已代定",
+      "replied": "已回复",
+      "chose": "选了「{{choice}}」",
+      "change": "改判",
+      "changePlaceholder": "写你的决定，会发给提问的 agent",
+      "send": "发送",
+      "changed": "已改判",
+      "shouldBeYou": "本该你定",
+      "rulesTitle": "代我决定的规则",
+      "rules": {
+        "mayLabel": "可以代定：",
+        "may": "有明确答案的普通选择；回复进度询问；指出风险和更好的做法",
+        "leavesLabel": "留给我：",
+        "leaves": "登录扫码、付款花钱、合并或推送代码、删除、对外发布",
+        "scopeLabel": "只管：",
+        "scope": "打开之后成员发给你的新消息；旧的不碰",
+        "whoLabel": "谁来定：",
+        "who": "Chet，用它自己的额度；规则是给模型的指令，可能判断错，所以每条都能改判"
+      }
     }
   },
   "sections": {

@@ -17,6 +17,7 @@ import { useSidebarSectionsStore } from "../../stores/useSidebarSectionsStore";
 import { segmentBySection } from "../../components/layout/sidebarSectionsModel";
 import { oneLine } from "./plainText";
 import { NeedRow } from "./NeedRow";
+import { DecidedForYou, UnattendedRules, UnattendedSwitch } from "./Unattended";
 import {
   answerNeed,
   NEEDS_VISIBLE,
@@ -358,6 +359,7 @@ export function OverviewPage({
     );
   const needsTotal = data.pending.length + unanswered.length;
   const sortedNeeds = sortNeeds(data.pending);
+  const chetActs = Object.values(data.activity).flatMap((activity) => activity.chetActs ?? []);
   const quickNeeds = sortedNeeds.filter(canTakeRecommendation);
   const [needsExpanded, setNeedsExpanded] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -516,6 +518,7 @@ export function OverviewPage({
             </span>
             <span>{t("overview.stripActive", { count: activeToday })}</span>
             <QuotaChip limits={limits} />
+            <UnattendedSwitch readOnly={readOnly} />
           </p>
 
           <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -590,6 +593,13 @@ export function OverviewPage({
                 </Card>
               ) : null}
 
+              <DecidedForYou
+                acts={chetActs}
+                titles={titles}
+                readOnly={readOnly}
+                onOpenGroup={onOpenGroup}
+              />
+
               <Card title={t("overview.projectsTitle")} aside={t("overview.projectsAside")}>
                 {hasSections ? (
                   <>
@@ -632,6 +642,7 @@ export function OverviewPage({
             </div>
 
             <div className="grid min-w-0 content-start gap-5">
+              <UnattendedRules />
               <QuotaCard limits={limits} />
               <Card
                 title={t("overview.agentsTitle")}

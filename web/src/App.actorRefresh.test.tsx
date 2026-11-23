@@ -176,6 +176,9 @@ async function serveRequest(input: string | URL | Request, init?: RequestInit): 
   if (url.pathname === "/api/v1/usage/claude-limits") {
     return jsonResponse({ installed: false, accounts: [] });
   }
+  if (url.pathname === "/api/v1/chet/unattended") {
+    return jsonResponse({ unattended: { enabled: false, since: null } });
+  }
   if (url.pathname === "/api/v1/sidebar/sections") {
     return jsonResponse({ saved: false, sections: { v: 1, pinned: [], sections: [] } });
   }

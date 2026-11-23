@@ -654,6 +654,33 @@
       "takeAllConfirm": "Answer these {{count}} with their recommendations? Ones that need you personally are left alone.",
       "more": "{{count}} more",
       "fold": "Show less"
+    },
+    "unattended": {
+      "label": "Decide for me",
+      "hint": "While on, members' new messages to you also go to Chet, which replies and answers question cards for you. Signing in, paying, merging code, deleting, publishing and spending stay with you. Applies to every Group.",
+      "since": "· since {{time}}",
+      "failed": "Could not switch",
+      "decidedTitle": "Decided while you were away",
+      "decidedAside": "Chet · {{count}} · change any that are wrong",
+      "answered": "Decided",
+      "replied": "Replied",
+      "chose": "Chose “{{choice}}”",
+      "change": "Change",
+      "changePlaceholder": "Your decision, sent to the agent who asked",
+      "send": "Send",
+      "changed": "Changed",
+      "shouldBeYou": "Should be yours",
+      "rulesTitle": "What Chet may decide",
+      "rules": {
+        "mayLabel": "May decide:",
+        "may": "ordinary choices with a clear answer; progress questions; pointing out risks and better ways",
+        "leavesLabel": "Leaves to me:",
+        "leaves": "signing in, paying, merging or pushing code, deleting, publishing",
+        "scopeLabel": "Only:",
+        "scope": "new messages members send you after it is turned on",
+        "whoLabel": "Who:",
+        "who": "Chet, on its own quota; the rules are instructions to a model and it can misjudge, so every line can be changed"
+      }
     }
   },
   "sections": {

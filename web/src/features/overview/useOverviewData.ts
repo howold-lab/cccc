@@ -6,6 +6,7 @@ import { fetchPendingReplies, fetchPendingReplySummary } from "../../services/ap
 import type { Actor, AgentState, ChatMessageData, GroupMeta, LedgerEvent } from "../../types";
 import { pendingReplyView } from "../pendingReplies/model";
 import type { StructuredQuestion } from "../pendingReplies/types";
+import { chetActsFrom, type ChetAct } from "./chetActs";
 
 export type OverviewPendingItem = {
   groupId: string;
@@ -40,6 +41,8 @@ export type OverviewActivity = {
   lastReply: { by: string; ts: string; text: string } | null;
   /** The user's newest message when no agent has written to the user since. */
   unanswered: { ts: string; text: string; eventId: string } | null;
+  /** What Chet did for the user in this Group, as far back as the tail reaches. */
+  chetActs?: ChetAct[];
 };
 
 export type OverviewData = {
@@ -174,7 +177,13 @@ export async function readActivity(groups: GroupMeta[], signal: AbortSignal) {
               eventId: String(lastUser.id ?? ""),
             }
           : null;
-      return { groupId: group.group_id, lastTs, lastReply, unanswered };
+      return {
+        groupId: group.group_id,
+        lastTs,
+        lastReply,
+        unanswered,
+        chetActs: chetActsFrom(group.group_id, events),
+      };
     }),
   );
   return Object.fromEntries(

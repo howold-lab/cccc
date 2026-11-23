@@ -7,7 +7,7 @@ export const NEEDS_VISIBLE = 3;
 
 // Decisions that stay with the user however clear the recommendation is: code going
 // out, deleting, publishing, money, and signing in.
-const PERSONAL =
+export const PERSONAL =
   /合并|合到|合进|快进|推送|push|merge|删除|删掉|清空|delete|remove|发布|上线|对外|publish|release|付款|支付|花钱|购买|充值|pay|purchase|登录|扫码|login|sign[\s-]?in|密钥|token|password|密码/i;
 
 function questionText(item: OverviewPendingItem) {

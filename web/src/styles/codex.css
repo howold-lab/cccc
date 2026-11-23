@@ -1201,3 +1201,45 @@
   color: var(--lcd-accent);
   font-weight: 600;
 }
+
+/* Unattended mode on the overview: a small switch in the status line, and Chet's
+   decisions tagged in the accent colour. */
+:root[data-ui-style="lcd"] [data-unattended-track] {
+  position: relative;
+  display: inline-block;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--lcd-rule-strong);
+  transition: background 0.15s;
+}
+:root[data-ui-style="lcd"] [data-unattended-knob] {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+:root[data-ui-style="lcd"] [data-unattended="on"] [data-unattended-track] {
+  background: var(--lcd-accent);
+}
+:root[data-ui-style="lcd"] [data-unattended="on"] [data-unattended-knob] {
+  transform: translateX(12px);
+}
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-strip] > [data-unattended]::before,
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-strip] [data-unattended] *::before {
+  content: none;
+}
+:root[data-ui-style="lcd"] [data-chet-act-tag] {
+  border: 1px solid color-mix(in srgb, var(--lcd-accent) 40%, transparent);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
+  color: var(--lcd-accent);
+}
+:root[data-ui-style="lcd"] [data-chet-act-change] {
+  color: var(--lcd-accent);
+}
