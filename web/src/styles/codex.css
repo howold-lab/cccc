@@ -1115,3 +1115,34 @@
 :root[data-ui-style="lcd"] [data-lcd-scope] [data-board-bar] > span {
   background: var(--lcd-accent);
 }
+
+/* Sidebar sections on the overview: a filter row and a heading per section. */
+[data-overview-section-chip] {
+  border: 1px solid var(--lcd-rule);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: transparent;
+}
+[data-overview-section-chip]:hover {
+  color: var(--color-text-primary);
+}
+[data-overview-section-chip][aria-pressed="true"] {
+  border-color: var(--color-text-primary);
+  background: var(--color-text-primary);
+  color: var(--color-bg-primary, #fff);
+}
+[data-overview-segment] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  border-top: 1px solid var(--lcd-rule);
+}
+[data-overview-segment] span {
+  font-weight: 400;
+}

@@ -1,4 +1,4 @@
-import { useContext, useMemo, useState, type ReactNode } from "react";
+import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useAge } from "./useAge";
 import { ActorAvatar } from "../../components/ActorAvatar";
@@ -14,6 +14,8 @@ import { OverviewAsk } from "./OverviewAsk";
 import { QuotaCard, QuotaChip } from "./QuotaCard";
 import { useClaudeLimits } from "./useClaudeLimits";
 import { readLastAsked } from "./askModel";
+import { useSidebarSectionsStore } from "../../stores/useSidebarSectionsStore";
+import { segmentBySection } from "../../components/layout/sidebarSectionsModel";
 import { oneLine } from "./plainText";
 import {
   useOverviewData,
@@ -197,6 +199,16 @@ function UnansweredRow({
       </div>
     </li>
   );
+}
+
+const SECTION_FILTER_KEY = "cccc-overview-section";
+
+function readSectionFilter() {
+  try {
+    return window.localStorage.getItem(SECTION_FILTER_KEY) || "all";
+  } catch {
+    return "all";
+  }
 }
 
 type ProjectRow = {
@@ -468,6 +480,42 @@ export function OverviewPage({
   );
   const quietAgents = agents.filter((agent) => !busyAgents.includes(agent));
   const lastAsked = readLastAsked();
+  const sectionLayout = useSidebarSectionsStore((state) => state.layout);
+  const sectionsLoaded = useSidebarSectionsStore((state) => state.loaded);
+  useEffect(() => {
+    if (!sectionsLoaded) void useSidebarSectionsStore.getState().load();
+  }, [sectionsLoaded]);
+  const [sectionFilter, setSectionFilterState] = useState(readSectionFilter);
+  const setSectionFilter = (key: string) => {
+    setSectionFilterState(key);
+    try {
+      window.localStorage.setItem(SECTION_FILTER_KEY, key);
+    } catch {
+      // The filter still applies for this visit.
+    }
+  };
+  const hasSections = sectionLayout.sections.length > 0;
+  const segments = segmentBySection(rows, sectionLayout, t("sections.unsectioned"));
+  const filterKnown = segments.some((segment) => segment.key === sectionFilter);
+  const shownSegments =
+    sectionFilter === "all" || !filterKnown
+      ? segments
+      : segments.filter((segment) => segment.key === sectionFilter);
+  const projectItem = (row: ProjectRow) => (
+    <ProjectItem
+      key={row.group.group_id}
+      row={row}
+      answerAbove={
+        !!lastAsked &&
+        lastAsked.groupId === row.group.group_id &&
+        !!row.activity?.lastReply &&
+        row.activity.lastReply.ts >= lastAsked.ts
+      }
+      readOnly={readOnly}
+      onOpen={() => onOpenGroup(row.group.group_id)}
+      onSent={data.refresh}
+    />
+  );
   const limits = useClaudeLimits();
   const isDark =
     typeof document !== "undefined" && document.documentElement.classList.contains("dark");
@@ -573,23 +621,43 @@ export function OverviewPage({
               ) : null}
 
               <Card title={t("overview.projectsTitle")} aside={t("overview.projectsAside")}>
-                <ul data-overview-list>
-                  {rows.map((row) => (
-                    <ProjectItem
-                      key={row.group.group_id}
-                      row={row}
-                      answerAbove={
-                        !!lastAsked &&
-                        lastAsked.groupId === row.group.group_id &&
-                        !!row.activity?.lastReply &&
-                        row.activity.lastReply.ts >= lastAsked.ts
-                      }
-                      readOnly={readOnly}
-                      onOpen={() => onOpenGroup(row.group.group_id)}
-                      onSent={data.refresh}
-                    />
-                  ))}
-                </ul>
+                {hasSections ? (
+                  <>
+                    <div className="flex flex-wrap gap-1.5 px-4 pt-3 pb-2" data-overview-sections>
+                      {[
+                        { key: "all", name: t("sections.filterAll") },
+                        ...segments
+                          .filter((segment) => segment.name)
+                          .map((segment) => ({ key: segment.key, name: segment.name ?? "" })),
+                      ].map((chip) => (
+                        <button
+                          key={chip.key}
+                          type="button"
+                          onClick={() => setSectionFilter(chip.key)}
+                          aria-pressed={
+                            chip.key === sectionFilter || (chip.key === "all" && !filterKnown)
+                          }
+                          data-overview-section-chip
+                        >
+                          {chip.name}
+                        </button>
+                      ))}
+                    </div>
+                    <ul data-overview-list>
+                      {shownSegments.map((segment) => [
+                        segment.name ? (
+                          <li key={`h:${segment.key}`} data-overview-segment>
+                            {segment.name}
+                            <span>{segment.items.length}</span>
+                          </li>
+                        ) : null,
+                        ...segment.items.map(projectItem),
+                      ])}
+                    </ul>
+                  </>
+                ) : (
+                  <ul data-overview-list>{rows.map(projectItem)}</ul>
+                )}
               </Card>
             </div>
 

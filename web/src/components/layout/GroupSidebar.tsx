@@ -20,7 +20,12 @@ import {
   HomeIcon,
   ClipboardIcon,
   SearchIcon,
+  PinIcon,
 } from "../Icons";
+import { useSidebarSectionsStore, sectionOf } from "../../stores/useSidebarSectionsStore";
+import { splitIntoSections, subsetMoveToFull } from "./sidebarSectionsModel";
+import { SidebarSectionFolder } from "./SidebarSectionFolder";
+import type { GroupMenuActionItem } from "./useGroupMenu";
 import type { OverviewView } from "../../stores/useOverviewStore";
 import { useQuickJumpStore } from "../../stores/useQuickJumpStore";
 import { GroupSidebarSectionHeader } from "./GroupSidebarSectionHeader";
@@ -122,6 +127,25 @@ export function GroupSidebar({
   const archivedGroups = useMemo(
     () => orderedGroups.filter((g) => archivedSet.has(String(g.group_id || "").trim())),
     [archivedSet, orderedGroups],
+  );
+  const sectionLayout = useSidebarSectionsStore((state) => state.layout);
+  const sectionsLoaded = useSidebarSectionsStore((state) => state.loaded);
+  const foldedSections = useSidebarSectionsStore((state) => state.collapsed);
+  useEffect(() => {
+    if (!sectionsLoaded) void useSidebarSectionsStore.getState().load();
+  }, [sectionsLoaded]);
+  const split = useMemo(
+    () => splitIntoSections(workingGroups, sectionLayout),
+    [sectionLayout, workingGroups],
+  );
+  const showError = useUIStore((state) => state.showError);
+  const saveOrWarn = useCallback(
+    (result: Promise<boolean>) => {
+      void result.then((ok) => {
+        if (!ok) showError(t("sections.saveFailed"));
+      });
+    },
+    [showError, t],
   );
   const archivedPending = pending
     ? aggregatePendingIndicator(
@@ -232,11 +256,55 @@ export function GroupSidebar({
     [onControlGroup, onOpenGroupAutomation, readOnly, t, controlsBusy],
   );
 
+  const sectionActionsFor = useCallback(
+    (gid: string): GroupMenuActionItem[] => {
+      const store = useSidebarSectionsStore.getState();
+      const current = sectionOf(sectionLayout, gid);
+      const pinned = sectionLayout.pinned.includes(gid);
+      const moves = sectionLayout.sections
+        .filter((section) => section.id !== current?.id)
+        .map((section) => ({
+          label: t("sections.moveTo", { name: section.name }),
+          icon: <FolderIcon size={15} />,
+          section: "sections",
+          onClick: () => saveOrWarn(store.moveGroup(gid, section.id)),
+        }));
+      const out: GroupMenuActionItem[] = [...moves];
+      if (current) {
+        out.push({
+          label: t("sections.removeFrom"),
+          section: "sections",
+          onClick: () => saveOrWarn(store.moveGroup(gid, null)),
+        });
+      }
+      out.push({
+        label: t("sections.newSection"),
+        icon: <PlusIcon size={15} />,
+        section: "sections",
+        onClick: () => {
+          const name = window.prompt(t("sections.newSectionPrompt"));
+          if (name?.trim()) saveOrWarn(store.createSection(name, gid));
+        },
+      });
+      out.push({
+        label: pinned ? t("sections.unpin") : t("sections.pin"),
+        icon: <PinIcon size={15} />,
+        section: "sections",
+        onClick: () => saveOrWarn(store.setPinned(gid, !pinned)),
+      });
+      return out;
+    },
+    [saveOrWarn, sectionLayout, t],
+  );
+
   const trailingActionsFor = useCallback(
     (group: GroupMeta) => {
-      if (!onDeleteGroup || readOnly) return [];
+      if (readOnly) return [];
       const gid = String(group.group_id || "");
+      const sectionItems = archivedSet.has(gid.trim()) ? [] : sectionActionsFor(gid);
+      if (!onDeleteGroup) return sectionItems;
       return [
+        ...sectionItems,
         {
           label: t("deleteGroup"),
           disabled: controlsBusy,
@@ -247,7 +315,7 @@ export function GroupSidebar({
         },
       ];
     },
-    [onDeleteGroup, readOnly, t, controlsBusy],
+    [archivedSet, onDeleteGroup, readOnly, sectionActionsFor, t, controlsBusy],
   );
 
   const overviewEntry = (collapsed: boolean, view: OverviewView) => {
@@ -321,6 +389,14 @@ export function GroupSidebar({
         setArchivedOpen(true);
         onArchiveGroup(gid);
       };
+      // A section shows part of the working list; map its moves back onto the whole list.
+      const reorder =
+        section === "working" && groups !== workingGroups
+          ? (_: "working" | "archived", fromIndex: number, toIndex: number) => {
+              const mapped = subsetMoveToFull(groups, workingGroups, fromIndex, toIndex);
+              if (mapped) onReorderSection("working", mapped[0], mapped[1]);
+            }
+          : onReorderSection;
       if (getSidebarReorderActivation({ isCollapsed, readOnly }) !== "disabled") {
         return (
           <GroupSidebarSortableList
@@ -339,7 +415,7 @@ export function GroupSidebar({
             onMenuAction={handleMenuAction}
             runActionsFor={runActionsFor}
             trailingActionsFor={trailingActionsFor}
-            onReorderSection={onReorderSection}
+            onReorderSection={reorder}
             onSelectGroup={onSelectGroup}
             onWarmGroup={onWarmGroup}
             onClose={onClose}
@@ -394,7 +470,87 @@ export function GroupSidebar({
       selectedGroupId,
       t,
       trailingActionsFor,
+      workingGroups,
     ],
+  );
+
+  const pinnedEntry = (group: GroupMeta) => {
+    const gid = String(group.group_id || "");
+    const active = !overviewView && gid === selectedGroupId;
+    const waiting = pending ? aggregatePendingIndicator(pending.summaries, [group.group_id]) : null;
+    return (
+      <button
+        key={gid}
+        type="button"
+        onClick={() => {
+          onSelectGroup(gid);
+          if (window.matchMedia("(max-width: 767px)").matches) onClose();
+        }}
+        onMouseEnter={active ? undefined : () => onWarmGroup?.(gid)}
+        aria-current={active ? "page" : undefined}
+        className={classNames(
+          "mx-2 mt-0.5 flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+          active
+            ? "bg-[var(--color-sidebar-item-active)] font-semibold text-[var(--color-text-primary)]"
+            : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]",
+        )}
+        data-sidebar-pinned={gid}
+      >
+        <PinIcon size={16} />
+        <span className="min-w-0 flex-1 truncate">{group.title || gid}</span>
+        {waiting && <PendingIndicatorText indicator={waiting} />}
+      </button>
+    );
+  };
+
+  const sectionFolder = (
+    key: string,
+    name: string,
+    groups: GroupMeta[],
+    actions?: { onRename: () => void; onDelete: () => void },
+  ) => {
+    const open = !foldedSections.includes(key);
+    const waiting = pending
+      ? aggregatePendingIndicator(
+          pending.summaries,
+          groups.map((group) => group.group_id),
+        ) !== null
+      : false;
+    return (
+      <SidebarSectionFolder
+        key={key}
+        name={name}
+        count={groups.length}
+        open={open}
+        waiting={waiting}
+        readOnly={readOnly}
+        onToggle={() => useSidebarSectionsStore.getState().toggleCollapsed(key)}
+        onRename={actions?.onRename}
+        onDelete={actions?.onDelete}
+      >
+        {groups.length > 0 ? renderGroupList(groups, "working") : null}
+      </SidebarSectionFolder>
+    );
+  };
+
+  const sectionedList = () => (
+    <div className="space-y-1" data-sidebar-sections>
+      {split.sections.map(({ section, groups }) =>
+        sectionFolder(section.id, section.name, groups, {
+          onRename: () => {
+            const name = window.prompt(t("sections.renamePrompt"), section.name);
+            if (name?.trim() && name.trim() !== section.name)
+              saveOrWarn(useSidebarSectionsStore.getState().renameSection(section.id, name));
+          },
+          onDelete: () => {
+            if (window.confirm(t("sections.deleteConfirm", { name: section.name })))
+              saveOrWarn(useSidebarSectionsStore.getState().deleteSection(section.id));
+          },
+        }),
+      )}
+      {split.unsectioned.length > 0 &&
+        sectionFolder("__unsectioned", t("sections.unsectioned"), split.unsectioned)}
+    </div>
   );
 
   return (
@@ -544,6 +700,7 @@ export function GroupSidebar({
         ) : null}
         {!isCollapsed && overviewEntry(false, "overview")}
         {!isCollapsed && overviewEntry(false, "tasks")}
+        {!isCollapsed && split.pinned.map(pinnedEntry)}
 
         {/* Group list */}
         {!isCollapsed && (
@@ -558,7 +715,11 @@ export function GroupSidebar({
           />
         )}
         <div className={groupSidebarScrollClass(isCollapsed)}>
-          {renderGroupList(isCollapsed ? collapsedGroups : workingGroups, "working")}
+          {isCollapsed
+            ? renderGroupList(collapsedGroups, "working")
+            : split.hasSections
+              ? sectionedList()
+              : renderGroupList(split.pinned.length ? split.unsectioned : workingGroups, "working")}
 
           {!isCollapsed && archivedGroups.length > 0 && (
             <div className="mt-2">

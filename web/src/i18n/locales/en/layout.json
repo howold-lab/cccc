@@ -481,5 +481,22 @@
       "chip": "Claude quota",
       "left": "{{pct}}% left"
     }
+  },
+  "sections": {
+    "title": "Sections",
+    "unsectioned": "No section",
+    "moveTo": "Move to “{{name}}”",
+    "removeFrom": "Remove from section",
+    "newSection": "New section…",
+    "newSectionPrompt": "Name of the new section",
+    "rename": "Rename",
+    "renamePrompt": "New name for the section",
+    "delete": "Delete section",
+    "deleteConfirm": "Delete section “{{name}}”? Its Groups stay and move to “No section”.",
+    "pin": "Pin to top",
+    "unpin": "Unpin",
+    "saveFailed": "The sections were not saved. Try again shortly.",
+    "waitingInside": "Something inside is waiting on you",
+    "filterAll": "All"
   }
 }

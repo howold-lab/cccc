@@ -481,5 +481,22 @@
       "chip": "Claude 利用枠",
       "left": "残り {{pct}}%"
     }
+  },
+  "sections": {
+    "title": "セクション",
+    "unsectioned": "未分類",
+    "moveTo": "「{{name}}」へ移動",
+    "removeFrom": "セクションから外す",
+    "newSection": "新しいセクション…",
+    "newSectionPrompt": "新しいセクションの名前",
+    "rename": "名前を変更",
+    "renamePrompt": "セクションの新しい名前",
+    "delete": "セクションを削除",
+    "deleteConfirm": "セクション「{{name}}」を削除しますか？中のグループは削除されず「未分類」に戻ります。",
+    "pin": "上に固定",
+    "unpin": "固定を解除",
+    "saveFailed": "セクションを保存できませんでした。しばらくしてからもう一度お試しください。",
+    "waitingInside": "中にあなたの対応待ちがあります",
+    "filterAll": "すべて"
   }
 }

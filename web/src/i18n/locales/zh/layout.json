@@ -401,7 +401,12 @@
       "summary": "{{groups}} 个工作组 · {{open}} 个未完成任务",
       "all": "全部",
       "onlyStuck": "只看卡住的",
-      "columns": { "planned": "待办", "active": "进行中", "stuck": "卡住", "done": "近 7 天完成" },
+      "columns": {
+        "planned": "待办",
+        "active": "进行中",
+        "stuck": "卡住",
+        "done": "近 7 天完成"
+      },
       "columnEmpty": "没有任务",
       "stale": "可能过时",
       "staleTitle": "进行中，但已经超过一天没有更新",
@@ -476,5 +481,22 @@
       "chip": "Claude 额度",
       "left": "剩 {{pct}}%"
     }
+  },
+  "sections": {
+    "title": "分区",
+    "unsectioned": "未分区",
+    "moveTo": "移到「{{name}}」",
+    "removeFrom": "移出分区",
+    "newSection": "新建分区…",
+    "newSectionPrompt": "新分区的名称",
+    "rename": "改名",
+    "renamePrompt": "分区的新名称",
+    "delete": "删除分区",
+    "deleteConfirm": "删除分区「{{name}}」？里面的组不会被删除，会回到「未分区」。",
+    "pin": "固定到上面",
+    "unpin": "取消固定",
+    "saveFailed": "分区没保存成功，请稍后再试。",
+    "waitingInside": "里面有事等你",
+    "filterAll": "全部"
   }
 }

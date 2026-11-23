@@ -47,6 +47,7 @@ mod settings;
 mod streams;
 mod system;
 mod claude_usage;
+mod sidebar_sections;
 mod system_branding;
 mod system_branding_assets;
 mod system_branding_manifest;
@@ -90,6 +91,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .merge(system::routes())
         .merge(claude_usage::routes())
+        .merge(sidebar_sections::routes())
         .merge(system_branding::routes())
         .merge(system_branding_assets::routes())
         .merge(system_branding_manifest::routes())
