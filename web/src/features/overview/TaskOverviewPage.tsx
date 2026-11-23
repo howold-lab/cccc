@@ -5,12 +5,9 @@ import { MenuIcon } from "../../components/Icons";
 import { Button } from "../../components/ui/button";
 import { IconButton } from "../../components/ui/icon-button";
 import type { GroupMeta } from "../../types";
-import {
-  STALE_AFTER_MS,
-  useTaskOverviewData,
-  type BoardColumn,
-  type BoardTask,
-} from "./useTaskOverviewData";
+import { findTaskGaps } from "./taskGapModel";
+import { TaskGapList } from "./TaskGapList";
+import { useTaskOverviewData, type BoardColumn, type BoardTask } from "./useTaskOverviewData";
 
 const COLUMNS: BoardColumn[] = ["planned", "active", "stuck", "done"];
 
@@ -100,8 +97,10 @@ export function TaskOverviewPage({
   onOpenGroup,
   onOpenTask,
   onOpenSidebar,
+  readOnly = false,
 }: {
   groups: GroupMeta[];
+  readOnly?: boolean;
   onOpenGroup: (groupId: string) => void;
   /** Opens one task's detail in its Group; without it a card opens the Group. */
   onOpenTask?: (groupId: string, taskId: string) => void;
@@ -125,17 +124,7 @@ export function TaskOverviewPage({
       (!groupFilter || entry.groupId === groupFilter) && (!onlyStuck || entry.column === "stuck"),
   );
   const openCount = data.tasks.filter((entry) => entry.column !== "done").length;
-  const recentlyActive = (groupId: string) => {
-    const ts = data.activity[groupId]?.lastTs;
-    return !!ts && Date.now() - new Date(ts).getTime() < STALE_AFTER_MS;
-  };
-  const quietGroups = data.loading
-    ? []
-    : groups.filter(
-        (group) =>
-          recentlyActive(group.group_id) &&
-          !data.tasks.some((entry) => entry.groupId === group.group_id && entry.column !== "done"),
-      );
+  const gaps = data.loading ? [] : findTaskGaps(groups, data.tasks, data.activity);
   const columns = COLUMNS.filter((column) => !onlyStuck || column === "stuck");
   const sortTasks = (a: BoardTask, b: BoardTask) =>
     String(b.task.updated_at || "").localeCompare(String(a.task.updated_at || ""));
@@ -198,13 +187,7 @@ export function TaskOverviewPage({
           </button>
         </div>
 
-        {quietGroups.length > 0 ? (
-          <p className="rounded-xl px-4 py-2.5 text-[13px]" data-board-notice>
-            {t("overview.tasks.quietGroups", {
-              names: quietGroups.map((group) => titles[group.group_id]).join("、"),
-            })}
-          </p>
-        ) : null}
+        <TaskGapList gaps={gaps} titles={titles} readOnly={readOnly} />
 
         <div
           className="grid min-h-[24rem] flex-1 gap-3 overflow-x-auto pb-1"

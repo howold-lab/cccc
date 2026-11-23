@@ -349,6 +349,7 @@ export function AppShell({
                 {overviewView === "tasks" ? (
                   <TaskOverviewPage
                     groups={workingGroups}
+                    readOnly={webReadOnly}
                     onOpenGroup={openGroupFromOverview}
                     onOpenTask={openTaskFromOverview}
                     onOpenSidebar={onOpenSidebar}

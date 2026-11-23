@@ -416,7 +416,17 @@
       "blockedBy": "Blocked by {{ids}}",
       "since": "updated {{age}}",
       "unassigned": "Unassigned",
-      "quietGroups": "Active in the last day but with no open task, so progress may be unrecorded: {{names}}"
+      "quietGroups": "Active in the last day but with no open task, so progress may be unrecorded: {{names}}",
+      "gapsTitle": "These Groups' tasks may trail their chat",
+      "gapNoTasks": "talking {{chat}}, but no open task",
+      "gapBehind": "tasks updated {{task}}, chat {{chat}}",
+      "nudgeText": "Please check this Group's tasks against the recent chat: add what is missing, close what is done, and update stale ones with their next step. A one-line reply when done is enough.",
+      "nudge": {
+        "idle": "Ask it to update tasks",
+        "sending": "Sending…",
+        "sent": "Sent",
+        "failed": "Not sent, retry"
+      }
     },
     "reply": "Reply",
     "replyPlaceholder": "Say something to “{{group}}”…",

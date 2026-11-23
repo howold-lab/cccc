@@ -416,7 +416,17 @@
       "blockedBy": "被 {{ids}} 挡住",
       "since": "{{age}}更新",
       "unassigned": "未分配",
-      "quietGroups": "这些组最近一天有活动，但没有未完成的任务，进度可能没记下来：{{names}}"
+      "quietGroups": "这些组最近一天有活动，但没有未完成的任务，进度可能没记下来：{{names}}",
+      "gapsTitle": "这些组的任务可能没跟上聊天",
+      "gapNoTasks": "{{chat}}还在聊，但没有未完成的任务",
+      "gapBehind": "任务 {{task}}更新，聊天 {{chat}}",
+      "nudgeText": "请按这个组最近的聊天检查一下任务：漏记的补上，做完的关掉，过时的更新状态和下一步。改完回一句就行。",
+      "nudge": {
+        "idle": "让它更新任务",
+        "sending": "发送中…",
+        "sent": "已发送",
+        "failed": "没发出去，重试"
+      }
     },
     "reply": "回复",
     "replyPlaceholder": "给「{{group}}」说点什么…",
