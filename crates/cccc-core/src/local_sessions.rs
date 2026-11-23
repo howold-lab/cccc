@@ -6,16 +6,23 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
 
+pub mod source_control;
+
+/// Claude plugin installed by `cccc sessions setup enable claude`. Managed
+/// Claude sessions share the user's Claude configuration and disable it for
+/// themselves, since it does nothing in a CCCC-owned environment.
+pub const CLAUDE_PLUGIN_ID: &str = "cccc-local-sessions@cccc-local";
+
 /// Global native configuration can also be loaded by CCCC-owned Actors and
 /// assistants. It must not replace their existing identity or receive path.
 pub fn cccc_owned_environment() -> bool {
-    [
-        "CCCC_ACTOR_ID",
-        "CCCC_SECRETARY_TASK_TOKEN",
-        "CCCC_SECRETARY_TASK_TOKEN_FILE",
-    ]
-    .iter()
-    .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+    crate::home::context_var_os("CCCC_ACTOR_ID").is_some_and(|value| !value.is_empty())
+        || [
+            "CCCC_SECRETARY_TASK_TOKEN",
+            "CCCC_SECRETARY_TASK_TOKEN_FILE",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
         || std::env::var("CCCC_MCP_TOOL_PROFILE").is_ok_and(|value| value == "secretary-task")
 }
 
@@ -78,8 +85,8 @@ impl NativeHost {
         let info = macos_process(pid)?;
         Ok(Self {
             pid,
-            started: (u128::from(info.pbi_start_tvsec) * 1_000_000
-                + u128::from(info.pbi_start_tvusec))
+            started: (u128::from(info.started_seconds) * 1_000_000
+                + u128::from(info.started_microseconds))
             .to_string(),
             boot: "macos-bsd-start".into(),
         })
@@ -160,26 +167,13 @@ fn native_parent_pid(pid: u32) -> io::Result<u32> {
 
 #[cfg(target_os = "macos")]
 fn native_parent_pid(pid: u32) -> io::Result<u32> {
-    Ok(macos_process(pid)?.pbi_ppid)
+    Ok(macos_process(pid)?.parent_pid)
 }
 
 #[cfg(target_os = "macos")]
-fn macos_process(pid: u32) -> io::Result<libproc::bsd_info::BSDInfo> {
-    use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
-    let pid = i32::try_from(pid).map_err(io::Error::other)?;
-    let info = libproc::proc_pid::pidinfo::<libproc::bsd_info::BSDInfo>(pid, 0).map_err(|_| {
-        // libproc returns a formatted string, not an errno. Never infer exit
-        // from English text; use the native existence check for that case.
-        match kill(Pid::from_raw(pid), None) {
-            Err(Errno::ESRCH) => io::Error::new(io::ErrorKind::NotFound, "Native host has exited"),
-            Err(Errno::EPERM) => io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Native host is inaccessible",
-            ),
-            _ => io::Error::other("Native host identity is unavailable"),
-        }
-    })?;
-    if info.pbi_status == nix::libc::SZOMB {
+fn macos_process(pid: u32) -> io::Result<cccc_runtime::darwin_process::ProcessInfo> {
+    let info = cccc_runtime::darwin_process::ProcessInfo::read(pid)?;
+    if info.zombie {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "Native host has exited",
@@ -381,6 +375,12 @@ pub fn set_integration_disabled(
 
 pub fn read(home: &HomeLayout, source_id: &str) -> io::Result<NativeSession> {
     let session = read_record(home, source_id)?;
+    if source_control::blocked(home, source_id)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "CCCC access for this source was explicitly removed; restore it before reconnecting",
+        ));
+    }
     if session.retired.is_some() || integration_disabled(home, session.runtime)? {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -409,6 +409,9 @@ pub fn validate_binding(
     home: &HomeLayout,
     binding: &cccc_contracts::local_session::LocalSessionBinding,
 ) -> io::Result<()> {
+    if crate::session_nodes::is_remote_source(&binding.source_id) {
+        return crate::session_nodes::binding_valid(home, binding);
+    }
     let group = crate::GroupStore::new(home.clone())?.load(&binding.group_id)?;
     let actor = crate::actors::find(&group, &binding.actor_id)
         .ok_or_else(|| io::Error::other("Native membership is unavailable"))?;
@@ -471,6 +474,12 @@ fn write_lifecycle(
 ) -> io::Result<NativeSession> {
     home.initialize().map_err(io::Error::other)?;
     fs::with_exclusive_lock(&home.root().join("state/local_sessions.lock"), || {
+        if source_control::blocked(home, &session.source_id)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "CCCC source access was explicitly removed",
+            ));
+        }
         if integration_disabled(home, session.runtime)? {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -641,7 +650,13 @@ pub fn scan(home: &HomeLayout) -> io::Result<(Vec<NativeSession>, Vec<String>)> 
                 LocalSessionRuntime::Opencode => opencode_disabled,
             }
     });
-    Ok((sessions, errors))
+    let mut available = Vec::new();
+    for session in sessions {
+        if !source_control::blocked(home, &session.source_id)? {
+            available.push(session);
+        }
+    }
+    Ok((available, errors))
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]

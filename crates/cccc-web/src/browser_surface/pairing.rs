@@ -262,7 +262,9 @@ mod tests {
         if crate::system_browser_path().is_none() {
             return;
         }
-        let _chrome_guard = super::super::chrome_test_guard().await;
+        let Some(_chrome_guard) = super::super::chrome_test_guard().await else {
+            return;
+        };
         let temp = tempfile::tempdir().expect("fixture");
         let (url, server) = super::super::browser_surface_tests::local_page("<main></main>").await;
         let surfaces = BrowserSurfaces::default();
@@ -384,6 +386,9 @@ mod tests {
             "https://chatgpt.com/?model=fixture",
             "https://chatgpt.com/c/WEB:00000000-0000-4000-8000-000000000001",
             "https://chatgpt.com/c/WEB%3A00000000-0000-4000-8000-000000000001",
+            "https://chatgpt.com/c/local-chatgpt:00000000-0000-4000-8000-000000000001",
+            "https://chatgpt.com/c/local-chatgpt%3A00000000-0000-4000-8000-000000000001",
+            "https://chatgpt.com/c/local-chatgpt%3a00000000-0000-4000-8000-000000000001",
             "https://chat.openai.com/c/WEB:pending",
         ] {
             assert!(pending_new_chat_url(url), "{url}");
@@ -395,6 +400,7 @@ mod tests {
         for url in [
             "https://chatgpt.com/c/stable-id",
             "https://chatgpt.com/c/WEB:pending/other",
+            "https://chatgpt.com/c/local-chatgpt%3Apending/other",
             "https://chatgpt.com/auth/login",
             "http://chatgpt.com/c/WEB:pending",
             "https://chatgpt.com.example/c/WEB:pending",

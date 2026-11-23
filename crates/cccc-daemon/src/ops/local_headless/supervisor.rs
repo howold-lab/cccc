@@ -1,12 +1,15 @@
-use super::super::codex_voice_analyst::{AnalystSession, lifecycle_timing};
+use super::super::codex_voice_analyst::{
+    AnalystSession, lifecycle_timing, sanitize_multiline_diagnostic,
+};
 use super::{
     BatchSubmission, HeadlessStatus, Session, managed_reader, poisoned, provider_cli,
     run_managed_launch,
 };
+use cccc_contracts::event::DeliveryEvidence;
 use cccc_contracts::{Actor, ActorRuntime, Event, RunnerKind, utc_now};
 use cccc_core::{GroupDoc, HomeLayout};
 use serde_json::{Map, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
@@ -70,6 +73,13 @@ pub fn supports(actor: &Actor) -> bool {
     uses_managed_session(actor)
 }
 
+/// Runtimes whose start can wait on the user in the member's terminal: a
+/// Claude confirmation, or Hermes's first setup. When that ends before the
+/// member connects, automatic starts pause until the user starts it again.
+pub(crate) fn pauses_after_confirmation(runtime: ActorRuntime) -> bool {
+    matches!(runtime, ActorRuntime::Claude | ActorRuntime::Hermes)
+}
+
 pub(super) fn uses_managed_session(actor: &Actor) -> bool {
     actor.external_session_id.is_empty()
         && (matches!(
@@ -80,6 +90,7 @@ pub(super) fn uses_managed_session(actor: &Actor) -> bool {
                 | ActorRuntime::Opencode
                 | ActorRuntime::Kilo
                 | ActorRuntime::Pi
+                | ActorRuntime::Hermes
         ) || actor.runtime.is_headless_acp(actor.runtime_mode))
 }
 
@@ -95,6 +106,9 @@ fn start_managed_agent(
         Err(refusal) if super::workspace_trust::refused(actor, &refusal) => {
             super::workspace_trust::prompt(home, group, actor, key, cwd, refusal)
         }
+        Err(refusal) if super::hermes_setup::needed(actor, &refusal) => {
+            super::hermes_setup::open(home, group, actor, key, cwd, refusal)
+        }
         Err(error) => Err(error),
     }
 }
@@ -107,6 +121,13 @@ pub(super) fn launch_managed(
 ) -> io::Result<AnalystSession> {
     let instruction_snapshot = super::super::instruction_files::Snapshot::read(cwd);
     let mut env = actor.env.clone();
+    if actor.runtime != ActorRuntime::Claude
+        && let Some(mut inherited) =
+            crate::session_owner::launch_environment(&group.group_id, &actor.id)
+    {
+        inherited.extend(env);
+        env = inherited;
+    }
     env.insert(
         "CCCC_HOME".into(),
         home.root().to_string_lossy().into_owned(),
@@ -114,6 +135,7 @@ pub(super) fn launch_managed(
     env.insert("CCCC_GROUP_ID".into(), group.group_id.clone());
     env.insert("CCCC_ACTOR_ID".into(), actor.id.clone());
     super::super::codex_mcp::configure_actor_cli(&mut env);
+    let private_values = managed_private_values(actor, &env);
     let config = super::super::codex_voice_analyst::ActorLaunchConfig {
         workdir: cwd.to_path_buf(),
         group_id: group.group_id.clone(),
@@ -125,11 +147,13 @@ pub(super) fn launch_managed(
     };
     let launch_home = home.clone();
     let app = run_managed_launch(
-        async move { AnalystSession::launch_actor(&launch_home, config).await }.instrument(
-            tracing::info_span!(
-                "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
-            ),
-        ),
+        async move {
+            AnalystSession::launch_actor_with_diagnostics(&launch_home, config, &private_values)
+                .await
+        }
+        .instrument(tracing::info_span!(
+            "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
+        )),
     )?;
     if let Some(snapshot) = instruction_snapshot {
         super::super::instruction_files::record(
@@ -141,6 +165,15 @@ pub(super) fn launch_managed(
         );
     }
     Ok(app)
+}
+
+fn managed_private_values(actor: &Actor, environment: &BTreeMap<String, String>) -> Vec<String> {
+    // The provider inherits this process's environment besides the one it was given.
+    super::output::journal_private_values(
+        &actor.env,
+        environment,
+        cccc_runtime::unicode_environment(),
+    )
 }
 
 pub(super) fn attach_managed(
@@ -156,6 +189,7 @@ pub(super) fn attach_managed(
     let scope = workspace.clone().for_actor(actor);
     let prompt =
         cccc_core::system_prompt::render_session_with_scope(home, group, actor, scope.as_ref());
+    let journal_private = managed_private_values(actor, &app.tui_environment());
     let item = Arc::new(Session {
         home: home.clone(),
         group_id: group.group_id.clone(),
@@ -168,6 +202,7 @@ pub(super) fn attach_managed(
             env: app.tui_environment(),
             cwd: cwd.clone(),
             submit: actor.submit,
+            confirmed_input: None,
         })),
         status: Mutex::new(HeadlessStatus {
             status: "idle".into(),
@@ -180,6 +215,7 @@ pub(super) fn attach_managed(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
+        journal_private,
     });
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
@@ -253,10 +289,10 @@ fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Resu
     if lookup(&key).is_some_and(|item| item.running()) {
         return Ok(());
     }
-    if actor.runtime == ActorRuntime::Claude {
+    if pauses_after_confirmation(actor.runtime) {
         super::confirmation_pause::ensure_allowed(&key)?;
     } else {
-        // A prior Claude confirmation does not govern another provider's next launch.
+        // A prior confirmation does not govern another provider's next launch.
         super::confirmation_pause::retry(&key)?;
     }
     stop_locked(&key)?;
@@ -278,6 +314,17 @@ pub fn stop(group_id: &str, actor_id: &str) -> io::Result<()> {
 /// through the managed-session reader. Returns `false` when the actor has no
 /// tracked managed session — the exit then follows the normal record path.
 pub fn detach_after_viewer_exit(group_id: &str, actor_id: &str) -> io::Result<bool> {
+    #[cfg(unix)]
+    if let Some(result) = crate::session_owner::control(
+        group_id,
+        actor_id,
+        None,
+        crate::session_owner::Control::DetachViewer,
+    )? {
+        return result
+            .as_bool()
+            .ok_or_else(|| io::Error::other("invalid viewer detach result"));
+    }
     let key = (group_id.to_owned(), actor_id.to_owned());
     let _start = StartGuard::acquire(&key)?;
     let Some(item) = lookup(&key) else {
@@ -292,6 +339,17 @@ pub fn detach_after_viewer_exit(group_id: &str, actor_id: &str) -> io::Result<bo
 /// Reopen only the native attachment to a registered, healthy provider.
 /// Called by write/control paths; status reads must never launch a viewer.
 pub fn ensure_viewer(group_id: &str, actor_id: &str) -> io::Result<()> {
+    #[cfg(unix)]
+    if crate::session_owner::control(
+        group_id,
+        actor_id,
+        None,
+        crate::session_owner::Control::EnsureViewer,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
     let key = (group_id.to_owned(), actor_id.to_owned());
     let _start = StartGuard::acquire(&key)?;
     if let Some(item) = lookup(&key)
@@ -418,11 +476,41 @@ pub fn running(group_id: &str, actor_id: &str) -> bool {
 /// A failed managed session still owns its attached terminal until cleanup
 /// succeeds. Preserve that distinction from an independent PTY session.
 pub(crate) fn registered_running(group_id: &str, actor_id: &str) -> Option<bool> {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => {
+            return snapshot.owner.as_ref().and_then(|owner| {
+                matches!(
+                    owner.identity,
+                    super::super::actor_runtime::OwnerIdentity::Managed { .. }
+                )
+                .then_some(owner.state == super::super::actor_runtime::OwnerState::Running)
+            });
+        }
+        Err(_) => return Some(false),
+        Ok(None) => {}
+    }
     lookup(&(group_id.to_owned(), actor_id.to_owned())).map(|item| item.running())
 }
 
 /// The registered session's generation, and whether it is running.
 pub(crate) fn registered_generation(group_id: &str, actor_id: &str) -> Option<(String, bool)> {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => {
+            return snapshot.owner.and_then(|owner| match owner.identity {
+                super::super::actor_runtime::OwnerIdentity::Managed {
+                    generation: Some(generation),
+                } => Some((
+                    generation,
+                    owner.state == super::super::actor_runtime::OwnerState::Running,
+                )),
+                _ => None,
+            });
+        }
+        Err(_) => return None,
+        Ok(None) => {}
+    }
     let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
     Some((item.managed.generation().to_owned(), item.running()))
 }
@@ -431,12 +519,40 @@ pub(crate) fn registered_workspace(
     group_id: &str,
     actor_id: &str,
 ) -> Option<(bool, super::super::actor_runtime::LaunchWorkspace)> {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => {
+            return snapshot.owner.and_then(|owner| {
+                if matches!(
+                    owner.identity,
+                    super::super::actor_runtime::OwnerIdentity::Managed { .. }
+                ) {
+                    snapshot.workspace.map(|workspace| {
+                        (
+                            owner.state == super::super::actor_runtime::OwnerState::Running,
+                            workspace,
+                        )
+                    })
+                } else {
+                    None
+                }
+            });
+        }
+        Err(_) => return None,
+        Ok(None) => {}
+    }
     let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
     Some((item.running(), item.workspace.clone()))
 }
 
 #[must_use]
 pub fn status(group_id: &str, actor_id: &str) -> Option<HeadlessStatus> {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => return snapshot.managed_status,
+        Err(_) => return None,
+        Ok(None) => {}
+    }
     let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
     let running = item.running();
     let state = item.status.lock().ok()?;
@@ -463,20 +579,63 @@ pub fn submit_batch(
         source_events,
         cancelled,
         &AtomicBool::new(false),
+        None,
     )
 }
 
 /// As [`submit_batch`], setting `started` right before input is handed to the
 /// managed session or written to its terminal. Input may have arrived even
 /// when the submission then reports `Deferred`.
-pub fn submit_batch_marked(
+pub(crate) fn submit_batch_marked(
     home: &HomeLayout,
     group: &GroupDoc,
     actor: &Actor,
     source_events: &[Event],
     cancelled: &AtomicBool,
     started: &AtomicBool,
+    target: Option<&crate::session_owner::OwnedTarget>,
 ) -> BatchSubmission {
+    #[cfg(not(unix))]
+    let _ = target;
+    #[cfg(unix)]
+    if crate::session_owner::enabled(home) {
+        let Some(text) = super::super::actor_delivery_render::render_batch_with_mail_context(
+            home,
+            group,
+            &actor.id,
+            source_events,
+        ) else {
+            return BatchSubmission::Deferred;
+        };
+        return match crate::session_owner::submit(
+            home,
+            group,
+            actor,
+            source_events,
+            &text,
+            cancelled,
+            started,
+            target,
+        ) {
+            Ok(result) => {
+                let reached_input = result
+                    .get("started")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                started.store(reached_input, Ordering::Release);
+                let outcome = BatchSubmission::from_owner_result(&result);
+                reconcile_owner_submission(outcome, reached_input)
+            }
+            Err(error)
+                if !started.load(Ordering::Acquire)
+                    || (error.kind() == io::ErrorKind::Interrupted
+                        && crate::session_owner::maintenance_selected(home)) =>
+            {
+                BatchSubmission::Deferred
+            }
+            Err(_) => BatchSubmission::Unconfirmed,
+        };
+    }
     let Some(item) = lookup(&(group.group_id.clone(), actor.id.clone())) else {
         return BatchSubmission::Deferred;
     };
@@ -495,6 +654,12 @@ pub fn submit_batch_marked(
 /// notice is admitted. Actors without a managed session report no state and
 /// are never idle.
 pub fn ready_for_mail_notice(group_id: &str, actor_id: &str) -> bool {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => return snapshot.ready_for_mail_notice,
+        Err(_) => return false,
+        Ok(None) => {}
+    }
     lookup(&(group_id.to_owned(), actor_id.to_owned()))
         .is_some_and(|item| item.running() && item.ready_for_mail_notice())
 }
@@ -508,7 +673,7 @@ fn submit_admitted(
     started: &AtomicBool,
     item: &Session,
 ) -> BatchSubmission {
-    let Some(mut delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
+    let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
         &actor.id,
@@ -516,6 +681,66 @@ fn submit_admitted(
     ) else {
         return BatchSubmission::Deferred;
     };
+    submit_prepared_admitted(
+        home,
+        group,
+        actor,
+        source_events,
+        &delivery,
+        cancelled,
+        started,
+        item,
+    )
+}
+
+/// The controller renders authorized input. The existing session alone admits
+/// it, consumes its startup prompt and owns the actual provider operation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_prepared(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    generation: &str,
+    source_events: &[Event],
+    delivery: &str,
+    cancelled: &AtomicBool,
+    started: &AtomicBool,
+) -> BatchSubmission {
+    let Some(item) = lookup(&(group.group_id.clone(), actor.id.clone())) else {
+        return BatchSubmission::Deferred;
+    };
+    if item.managed.generation() != generation
+        || !item.running()
+        || cancelled.load(Ordering::Acquire)
+    {
+        return BatchSubmission::Deferred;
+    }
+    item.admit_batch(source_events, || {
+        submit_prepared_admitted(
+            home,
+            group,
+            actor,
+            source_events,
+            delivery,
+            cancelled,
+            started,
+            &item,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_prepared_admitted(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    source_events: &[Event],
+    delivery: &str,
+    cancelled: &AtomicBool,
+    started: &AtomicBool,
+    item: &Session,
+) -> BatchSubmission {
+    let mut delivery = delivery.to_owned();
     let mut instruction_notice = item.workspace.clone().for_actor(actor).and_then(|scope| {
         super::super::instruction_files::check(
             home,
@@ -529,8 +754,8 @@ fn submit_admitted(
         delivery.push_str("\n\n");
         delivery.push_str(&notice.delivery_line());
     }
-    // OpenCode V2's terminal is a view of the owned HTTP session. Admit CCCC
-    // input through that session's durable queue, including during TUI startup.
+    // OpenCode V2's terminal is a view of the owned HTTP session. Submit plain
+    // input to that session and let OpenCode choose its delivery mode.
     // Writing the terminal can be acknowledged before its composer is ready.
     if item.managed.structured_only()
         || item.managed.runtime() == cccc_contracts::ActorRuntime::Opencode
@@ -552,7 +777,13 @@ fn submit_admitted(
             match super::block_on_managed(async {
                 tokio::select! {
                     biased;
-                    result = item.managed.start_turn(item.managed.generation(), &id, prepared) => result,
+                    result = async {
+                        if item.managed.runtime() == cccc_contracts::ActorRuntime::Opencode {
+                            item.managed.submit_bound_opencode(item.managed.generation(), &id, prepared).await
+                        } else {
+                            item.managed.start_turn(item.managed.generation(), &id, prepared).await.map(drop)
+                        }
+                    } => result,
                     _ = async {
                         while !cancelled.load(Ordering::Acquire) {
                             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -564,12 +795,18 @@ fn submit_admitted(
                 }
             }) {
                 Ok(_) => {
-                    outcome = BatchSubmission::Accepted;
+                    outcome = BatchSubmission::Accepted(Some(DeliveryEvidence::ChannelAccepted));
                     true
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    // The existing delegation protocol leaves no unresolved
+                    // entry for this terminal busy rejection.
+                    started.store(false, Ordering::Release);
+                    false
+                }
                 Err(error) => {
-                    let diagnostic = item.managed.safe_diagnostic(&error);
+                    let diagnostic =
+                        sanitize_multiline_diagnostic(&error.to_string(), &item.journal_private);
                     tracing::warn!(
                         message = %diagnostic,
                         group_id = %group.group_id,
@@ -605,41 +842,36 @@ fn submit_admitted(
                 }
             }
         });
-        if outcome == BatchSubmission::Accepted
+        if outcome.is_accepted()
             && let Some(notice) = instruction_notice.take()
         {
             notice.delivered();
         }
         return outcome;
     }
-    if let Err(error) = item.reattach_viewer() {
-        tracing::warn!(
-            %error,
-            group_id = %group.group_id,
-            actor_id = %actor.id,
-            "failed to re-attach managed Actor viewer for delivery"
-        );
-        return BatchSubmission::Deferred;
-    }
-    if item.has_terminal() {
+    let viewer = match item.delivery_viewer() {
+        Ok(viewer) => viewer,
+        Err(error) => {
+            tracing::warn!(%error, group_id = %group.group_id, actor_id = %actor.id,
+                "failed to re-attach managed Actor viewer for delivery");
+            return BatchSubmission::Deferred;
+        }
+    };
+    if let Some(viewer) = viewer {
         let launched = item.launched(actor);
+        let mut outcome = BatchSubmission::Deferred;
         let accepted = submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
-            started.store(true, Ordering::Release);
-            super::super::actor_delivery::submit_terminal_text(
-                &group.group_id,
-                &launched,
-                prepared,
-                cancelled,
-            )
+            if launched.runtime == ActorRuntime::Kilo {
+                outcome = submit_kilo_input(item, &viewer, &launched, prepared, cancelled, started);
+            } else {
+                outcome = submit_managed_viewer(&viewer, &launched, prepared, cancelled, started);
+            }
+            outcome.is_accepted()
         });
         if accepted && let Some(notice) = instruction_notice.take() {
             notice.delivered();
         }
-        return if accepted {
-            BatchSubmission::Accepted
-        } else {
-            BatchSubmission::Deferred
-        };
+        return outcome;
     }
     BatchSubmission::Deferred
 }
@@ -656,11 +888,147 @@ fn submit_with_startup_prompt(
         || delivery.to_owned(),
         |prompt| format!("{prompt}\n\n{delivery}"),
     );
+    // With no receipt the startup instructions accompany the next attempt.
     let accepted = submit(&prepared);
     if accepted {
         *startup_prompt = None;
     }
     accepted
+}
+
+/// Reconcile a managed terminal write using exact byte evidence:
+/// - `Accepted`: full payload and submit keys written.
+/// - `NotWritten`: proven 0 bytes written; resets `started` so neither non-owner
+///   nor Unix session-owner treats a pre-write deferral as unconfirmed.
+/// - `Uncertain`: at least 1 byte written before failure/cancellation; keeps
+///   `started = true` and settles `Unconfirmed` so it is never auto-retried.
+pub(super) fn classify_terminal_handoff(
+    started: &AtomicBool,
+    submit: impl FnOnce() -> cccc_runtime::PtyHandoff,
+) -> BatchSubmission {
+    started.store(true, Ordering::Release);
+    match submit() {
+        cccc_runtime::PtyHandoff::Accepted => {
+            BatchSubmission::Accepted(Some(DeliveryEvidence::TerminalWritten))
+        }
+        cccc_runtime::PtyHandoff::NotWritten(_) => {
+            started.store(false, Ordering::Release);
+            BatchSubmission::Deferred
+        }
+        cccc_runtime::PtyHandoff::Uncertain(_) => BatchSubmission::Unconfirmed,
+    }
+}
+
+#[cfg(any(unix, test))]
+pub(super) fn reconcile_owner_submission(
+    outcome: Option<BatchSubmission>,
+    reached_input: bool,
+) -> BatchSubmission {
+    match outcome {
+        Some(BatchSubmission::Deferred) if reached_input => BatchSubmission::Unconfirmed,
+        Some(outcome) => outcome,
+        None => BatchSubmission::Unconfirmed,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn submit_managed_terminal_input(
+    group_id: &str,
+    actor: &Actor,
+    text: &str,
+    cancelled: &AtomicBool,
+    started: &AtomicBool,
+) -> BatchSubmission {
+    let Ok(viewer) = crate::session_owner::runtime::status(group_id, &actor.id) else {
+        return BatchSubmission::Deferred;
+    };
+    submit_managed_viewer(&viewer, actor, text, cancelled, started)
+}
+
+fn submit_managed_viewer(
+    viewer: &cccc_runtime::SessionStatus,
+    actor: &Actor,
+    text: &str,
+    cancelled: &AtomicBool,
+    started: &AtomicBool,
+) -> BatchSubmission {
+    if !viewer.running {
+        return BatchSubmission::Deferred;
+    }
+    classify_terminal_handoff(started, || {
+        super::super::actor_delivery::submit_terminal_text_for_session(
+            viewer, actor, text, cancelled,
+        )
+    })
+}
+
+/// Kilo enables terminal paste before its composer can receive a message.
+/// The bound session's user-message event can confirm a write independently
+/// of when the provider starts work.
+fn submit_kilo_input(
+    item: &Session,
+    viewer: &cccc_runtime::SessionStatus,
+    actor: &Actor,
+    text: &str,
+    cancelled: &AtomicBool,
+    started: &AtomicBool,
+) -> BatchSubmission {
+    let Some(pid) = viewer.pid.filter(|_| viewer.running) else {
+        return BatchSubmission::Deferred;
+    };
+    let generation = (pid, viewer.started_at.clone());
+    let confirmed = item.viewer.lock().is_ok_and(|launch| {
+        launch.as_ref().and_then(|v| v.confirmed_input.as_ref()) == Some(&generation)
+    });
+    let receipt = if confirmed {
+        None
+    } else {
+        if !cccc_runtime::wait_for_new_kilo_composer(
+            viewer,
+            std::time::Duration::from_secs(15),
+            cancelled,
+        )
+        .unwrap_or(false)
+        {
+            return BatchSubmission::Deferred;
+        }
+        let Ok(receipt) = item.managed.expect_kilo_user_message(text) else {
+            return BatchSubmission::Deferred;
+        };
+        Some(receipt)
+    };
+    started.store(true, Ordering::Release);
+    let write = super::super::actor_delivery::submit_viewer_text(
+        viewer,
+        receipt.is_some(),
+        actor,
+        text,
+        cancelled,
+    );
+    if matches!(write, cccc_runtime::PtyHandoff::NotWritten(_)) {
+        started.store(false, Ordering::Release);
+        return BatchSubmission::Deferred;
+    }
+    let Some(receipt) = receipt else {
+        return match write {
+            cccc_runtime::PtyHandoff::Accepted => {
+                BatchSubmission::Accepted(Some(DeliveryEvidence::TerminalWritten))
+            }
+            _ => BatchSubmission::Unconfirmed,
+        };
+    };
+    let received = super::block_on_managed(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), receipt).await
+    });
+    if !matches!(received, Ok(Ok(()))) {
+        return BatchSubmission::Unconfirmed;
+    }
+    if let Ok(mut launch) = item.viewer.lock()
+        && let Some(viewer) = launch.as_mut()
+    {
+        viewer.confirmed_input = Some(generation);
+    }
+    BatchSubmission::Accepted(Some(DeliveryEvidence::ChannelAccepted))
 }
 
 #[cfg(test)]
@@ -685,9 +1053,19 @@ fn lookup(key: &Key) -> Option<Arc<Session>> {
 }
 
 pub(crate) fn structured_state(group: &str, actor: &str) -> Option<serde_json::Value> {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group, actor) {
+        Ok(Some(snapshot)) => return snapshot.structured,
+        Err(_) => return None,
+        Ok(None) => {}
+    }
     let item = lookup(&(group.to_owned(), actor.to_owned()))?;
+    // Working says whether the cancel control had a target when read: a started
+    // turn, or an ACP prompt CCCC wrote that the provider has not reported started.
+    let working = item.active_turn.lock().is_ok_and(|turn| turn.is_some())
+        || item.managed.has_cancellable_prompt();
     Some(
-        serde_json::json!({"generation":item.managed.generation(),"runtime":item.managed.runtime(),"runtime_mode":item.managed.runtime_mode(),"runner":if item.managed.structured_only(){"headless"}else{"pty"},"permissions":item.managed.permissions(),"running":item.running(),"working":item.active_turn.lock().is_ok_and(|turn|turn.is_some())}),
+        serde_json::json!({"generation":item.managed.generation(),"runtime":item.managed.runtime(),"runtime_mode":item.managed.runtime_mode(),"runner":if item.managed.tui_ready(){"pty"}else{"headless"},"permissions":item.managed.permissions(),"running":item.running(),"working":working}),
     )
 }
 
@@ -698,6 +1076,20 @@ pub(crate) fn respond_interaction(
     request: &str,
     reply: serde_json::Value,
 ) -> io::Result<()> {
+    #[cfg(unix)]
+    if crate::session_owner::control(
+        group,
+        actor,
+        Some(generation),
+        crate::session_owner::Control::Interaction {
+            request_id: request.into(),
+            reply: reply.clone(),
+        },
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
     let item = lookup(&(group.to_owned(), actor.to_owned()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Actor is not running"))?;
     super::block_on_managed(item.managed.respond_interaction(generation, request, reply))
@@ -710,12 +1102,37 @@ pub(crate) fn respond_permission(
     request: &str,
     allow: bool,
 ) -> io::Result<()> {
+    #[cfg(unix)]
+    if crate::session_owner::control(
+        group,
+        actor,
+        Some(generation),
+        crate::session_owner::Control::Permission {
+            request_id: request.into(),
+            allow,
+        },
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
     let item = lookup(&(group.to_owned(), actor.to_owned()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Actor is not running"))?;
     super::block_on_managed(item.managed.respond_permission(generation, request, allow))
 }
 
 pub(crate) fn cancel_turn(group: &str, actor: &str, generation: &str) -> io::Result<bool> {
+    #[cfg(unix)]
+    if let Some(result) = crate::session_owner::control(
+        group,
+        actor,
+        Some(generation),
+        crate::session_owner::Control::CancelTurn,
+    )? {
+        return result
+            .as_bool()
+            .ok_or_else(|| io::Error::other("invalid cancellation result"));
+    }
     let item = lookup(&(group.to_owned(), actor.to_owned()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Actor is not running"))?;
     item.managed.require_generation(generation)?;
@@ -725,7 +1142,11 @@ pub(crate) fn cancel_turn(group: &str, actor: &str, generation: &str) -> io::Res
         .map_err(|_| poisoned())?
         .as_ref()
         .map(|turn| turn.turn_id.clone());
-    let Some(turn) = turn else { return Ok(false) };
+    let Some(turn) = turn else {
+        // An ACP prompt can be cancelled from the moment it is written,
+        // before the provider reports the turn started.
+        return super::block_on_managed(item.managed.cancel_written_prompt(generation));
+    };
     super::block_on_managed(item.managed.interrupt(generation, &turn))?;
     Ok(true)
 }

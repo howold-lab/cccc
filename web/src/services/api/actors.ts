@@ -14,7 +14,12 @@ import {
 export type ProfileView = "global" | "my" | "all" | "accessible";
 export type ProfileScope = "global" | "user";
 
-export type ActorRuntimeActionResult = { actor?: Actor; runtime_confirmation_required?: boolean };
+export type ActorRuntimeActionResult = {
+  actor?: Actor;
+  runtime_confirmation_required?: boolean;
+  /** Present when this start began a new conversation instead of the saved one. */
+  runtime_session_replaced?: { at: string; reasons: string[]; message?: string };
+};
 
 export type ActorRuntimeSwitchTarget =
   | { kind: "native"; source_id: string; expected_native_session_id: string }
@@ -307,6 +312,24 @@ export async function startActor(groupId: string, actorId: string) {
     return await apiJson<ActorRuntimeActionResult>(
       `/api/v1/groups/${encodeURIComponent(groupId)}/actors/${encodeURIComponent(actorId)}/start`,
       { method: "POST" },
+    );
+  } finally {
+    invalidateGroupActorsReads(groupId);
+  }
+}
+
+/** Lets CCCC send its waiting input into the terminal process named by `generation`. It answers
+ *  no prompt in that terminal; a replaced terminal fails with runtime_session_changed. */
+export async function releaseActorStartupInput(
+  groupId: string,
+  actorId: string,
+  generation: string,
+) {
+  invalidateGroupActorsReads(groupId);
+  try {
+    return await apiJson<{ released: boolean }>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/actors/${encodeURIComponent(actorId)}/terminal_ready`,
+      { method: "POST", body: JSON.stringify({ generation }) },
     );
   } finally {
     invalidateGroupActorsReads(groupId);

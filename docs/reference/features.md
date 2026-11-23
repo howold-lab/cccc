@@ -152,6 +152,11 @@ the page reloads.
 - What is announced follows the Inbox rules: a `chat.message` that names
   `user` (or `@user`) explicitly, from someone other than the user, and not
   the source copy of a send to another Group. `@all` does not count.
+- Each subscribed browser can receive all messages addressed to the user
+  (the default) or only requests that need a reply, including question cards.
+  Changing the level leaves the subscription in place and does not revisit
+  messages the notifier already processed. A new subscription starts at the
+  default level.
 - Only what is written after a browser subscribed is announced to it, in the
   best-effort way described here. Subscribing records the newest event of each
   Group the signed-in token can see, and only later events are announced;
@@ -210,8 +215,8 @@ the page reloads.
   app, an unsent draft there is lost.
 - Other browsers hand the same message to CCCC's service worker. Opening the
   notification then brings an open CCCC page forward and shows the message
-  there, or opens a page at it when none is open; other CCCC pages, such as
-  the Capability Center, are passed over. A page the browser reports as open
+  there, or opens a page at it when none is open; other CCCC pages that
+  cannot show it are passed over. A page the browser reports as open
   is not reloaded, so a draft there is kept. A page that wakes from the
   background still goes to the message if it hears of the click within about
   ten seconds; an older click arriving after a newer one is ignored. When the
@@ -246,18 +251,26 @@ the page reloads.
   followed. A subscription whose stored page origin is invalid or not in
   canonical form is neither sent to nor shown as enabled, and the log says
   so; enabling notifications again in that browser repairs it.
-- Web API: `GET /api/v1/push/config` (the public key, or `null` before one is
-  made; the hashes of the caller's subscriptions; and `sender`: `here`,
-  `elsewhere` for another Web process, `starting`, or `unavailable` when
-  nothing can send from this process), `POST /api/v1/push/key` (makes the key
-  once), `PUT /api/v1/push/subscription` (the browser's `PushSubscription`
-  JSON plus `application_server_key`; refused with `push_sender_unavailable`
-  when nothing can send) and `DELETE /api/v1/push/subscription`
-  (`{"endpoint": …}`, removes only the caller's own subscription). `PUT` needs
-  an `Origin` or `Referer` that matches the request's `Host` (or trusted
-  proxy headers) or an origin in `CCCC_WEB_CORS_ORIGINS`; notification links
-  lead back to it. A client that sets these headers itself chooses the
-  origin its own notifications link to.
+- Web Push API
+  - `GET /api/v1/push/config` returns the public key (`null` before one is
+    made), `subscriptions` (the caller's endpoint hashes), and
+    `subscription_levels` keyed by those hashes. Its `sender` field is
+    `here`, `elsewhere` for another Web process, `starting`, or `unavailable`
+    when nothing can send from this process.
+  - `POST /api/v1/push/key` makes the public key on first use.
+  - `PUT /api/v1/push/subscription` binds the browser's `PushSubscription`
+    JSON plus `application_server_key` and an optional `level`. Repeating
+    the same binding with no level keeps its saved level. A request when
+    nothing can send returns `push_sender_unavailable`. `PUT` needs an
+    `Origin` or `Referer` that matches the request's `Host` (or trusted proxy
+    headers) or an origin in `CCCC_WEB_CORS_ORIGINS`. Notification links lead
+    back to that origin.
+  - `PATCH /api/v1/push/subscription` takes `{"endpoint": …, "level": …}` and
+    returns `{"updated": true, "level": …}`. Levels are `all` and
+    `requests_only`. A request without a matching active subscription for
+    the caller returns 404 `push_subscription_not_found`.
+  - `DELETE /api/v1/push/subscription` takes `{"endpoint": …}` and removes
+    the caller's subscription.
 
 ## IM Bridge
 
@@ -589,12 +602,12 @@ cccc setup --runtime droid
 cccc setup --runtime amp
 cccc setup --runtime auggie
 cccc setup --runtime grok
-cccc setup --runtime hermes
+cccc setup --runtime hermes       # Report session-owned MCP
 cccc setup --runtime kimi
 cccc setup --runtime opencode
-cccc setup --runtime cursor       # Prompt-assisted setup inside Cursor CLI
-cccc setup --runtime kilo         # Prompt-assisted setup inside Kilo Code CLI
-cccc setup --runtime antigravity  # Prompt-assisted setup inside Antigravity
+cccc setup --runtime cursor
+cccc setup --runtime kilo         # Report CCCC-owned per-session MCP
+cccc setup --runtime antigravity
 cccc setup --runtime custom
 ```
 

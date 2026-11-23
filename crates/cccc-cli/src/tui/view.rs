@@ -6,7 +6,9 @@
 use super::app::{App, COMMANDS, Notice, Screen};
 use super::groups::{GroupStatus, GroupSummary};
 use super::text;
-use crate::host_state::{DaemonState, HostPhase, ShutdownReport, StopResult, WebState};
+use crate::host_state::{
+    AgentsResult, DaemonState, HostPhase, ShutdownReport, StopResult, WebState,
+};
 use cccc_contracts::local_session::{LocalSessionRuntime, LocalSessionSource};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -96,6 +98,7 @@ pub(super) fn render(frame: &mut Frame, app: &App, now: Instant) {
         Screen::Sessions => super::sessions_view::render(frame, app, theme, now),
         Screen::Tasks => super::tasks_view::render(frame, app, theme, now),
         Screen::Pending => super::pending_view::render(frame, app, theme),
+        Screen::Update => super::update_view::render(frame, app, theme),
     }
 }
 
@@ -391,6 +394,7 @@ fn group_row_with_pending(
     let status_style = match group.status {
         _ if selected => Style::new(),
         GroupStatus::Running => theme.ok(),
+        GroupStatus::Unknown => theme.error(),
         GroupStatus::Stopped | GroupStatus::Offline => theme.dim(),
         GroupStatus::Idle | GroupStatus::Paused => Style::new(),
     };
@@ -401,7 +405,9 @@ fn group_row_with_pending(
     spans.extend(status_block(
         group.status.label(),
         status_style,
-        &group.running_actors.to_string(),
+        &group
+            .running_actors
+            .map_or_else(|| "?".to_owned(), |n| n.to_string()),
         Style::new(),
     ));
     Line::from(spans).style(if selected {
@@ -629,6 +635,9 @@ fn bottom(frame: &mut Frame, app: &App, theme: Theme) {
 
 pub(super) fn notice_line(app: &App, theme: Theme, width: usize) -> Option<Line<'static>> {
     let room = width.saturating_sub(2);
+    if let HostPhase::Updating { notice } = &app.host.phase {
+        return Some(Line::raw(format!(" {}", text::fit(notice, room))));
+    }
     if app.stopping() {
         let force = if app.interrupts > 0 { "again" } else { "twice" };
         return Some(Line::raw(format!(
@@ -705,6 +714,9 @@ fn help_screen(frame: &mut Frame, app: &App, theme: Theme) {
     let room = width.saturating_sub(2);
     let mut lines = vec![Line::default(), Line::styled("Commands", theme.bold())];
     for (name, meaning) in COMMANDS {
+        if !app.command_available(name) {
+            continue;
+        }
         let column = 14;
         for (index, part) in text::wrap(meaning, room.saturating_sub(column))
             .into_iter()
@@ -761,6 +773,13 @@ fn help_screen(frame: &mut Frame, app: &App, theme: Theme) {
             lines.push(Line::raw(format!("  {command}")));
         }
     }
+    if cccc_daemon::session_owner::platform_supported() {
+        lines.extend([
+            Line::default(),
+            Line::raw("To stop CCCC and keep agents, run in another terminal"),
+            Line::raw("  cccc daemon stop --keep-agents"),
+        ]);
+    }
     let body = Rect {
         x: area.x + 1,
         width: area.width.saturating_sub(2),
@@ -806,8 +825,14 @@ fn too_small(frame: &mut Frame, theme: Theme) {
 /// What the terminal shows after the interface closes, from the host's
 /// account of what actually stopped.
 pub(super) fn receipt(report: &ShutdownReport) -> String {
+    let agents_uncertain = match report.agents {
+        AgentsResult::Unconfirmed => true,
+        AgentsResult::Confirmed { uncertain, .. } => uncertain > 0,
+        AgentsResult::NotOwned => false,
+    };
     let failed = matches!(report.web, StopResult::Failed { .. })
-        || matches!(report.daemon, StopResult::Failed { .. });
+        || matches!(report.daemon, StopResult::Failed { .. })
+        || agents_uncertain;
     let mut lines = vec![
         if failed {
             "CCCC stopped with problems.".to_owned()
@@ -817,10 +842,66 @@ pub(super) fn receipt(report: &ShutdownReport) -> String {
         format!("  Web     {}", outcome(&report.web)),
         format!("  Daemon  {}", outcome(&report.daemon)),
     ];
+    if let Some(agents) = agents_outcome(&report.agents) {
+        lines.push(format!("  Agents  {agents}"));
+    }
     if failed {
         lines.push(format!("  Log     {}", report.log_path.display()));
     }
     lines.join("\n")
+}
+
+/// Only counts the receipt confirmed; anything else is named as possibly still running.
+fn agents_outcome(result: &AgentsResult) -> Option<String> {
+    const STOP_THEM: &str = "run `cccc daemon stop` to stop them";
+    match result {
+        AgentsResult::NotOwned => None,
+        // Without a receipt the stop's mode is unknown: kept agents come first, since a
+        // plain stop would also end work that was meant to stay.
+        AgentsResult::Unconfirmed => Some(
+            "not confirmed; some may still be running; start CCCC again to reattach any that are, \
+             or stop them with `cccc daemon stop`"
+                .to_owned(),
+        ),
+        &AgentsResult::Confirmed {
+            plain,
+            stopped,
+            kept,
+            uncertain,
+            ref review_owners,
+        } => {
+            let mut parts = Vec::new();
+            if stopped > 0 {
+                parts.push(format!("stopped {stopped}"));
+            }
+            if kept > 0 {
+                parts.push(format!(
+                    "kept {kept} running; start CCCC again to reattach them"
+                ));
+            }
+            // After a plain stop, another one reaches a live session owner directly; the
+            // owner's review command lists only records it gave up on, so it comes second.
+            // After a kept stop, another plain stop would also stop the agents just kept.
+            if uncertain > 0 {
+                let next = match (plain, review_owners.is_empty()) {
+                    (true, true) => format!("; {STOP_THEM}"),
+                    (true, false) => format!(
+                        "; {STOP_THEM}; if it cannot confirm them, run {}",
+                        crate::daemon_lifecycle::review_commands(review_owners)
+                    ),
+                    (false, false) => format!(
+                        "; to review, run {}",
+                        crate::daemon_lifecycle::review_commands(review_owners)
+                    ),
+                    (false, true) => String::new(),
+                };
+                parts.push(format!("{uncertain} may still be running{next}"));
+            }
+            // Nothing confirmed is not "none were running": a daemon without session owners
+            // stops agents it does not list, so an empty receipt adds no line.
+            (!parts.is_empty()).then(|| parts.join("; "))
+        }
+    }
 }
 
 fn outcome(result: &StopResult) -> String {
@@ -853,7 +934,7 @@ pub(super) fn shows_age(app: &App) -> bool {
             Screen::Tasks => tasks,
             Screen::Pending => false,
             Screen::Sessions => sessions,
-            Screen::Help | Screen::Setup => false,
+            Screen::Help | Screen::Setup | Screen::Update => false,
         }
 }
 

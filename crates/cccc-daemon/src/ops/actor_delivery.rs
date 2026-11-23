@@ -1,3 +1,4 @@
+use cccc_contracts::event::DeliveryEvidence;
 use cccc_contracts::{Actor, ActorRuntime, ActorSubmit, Event, GroupState};
 use cccc_core::{GroupDoc, HomeLayout, inbox};
 use serde::Serialize;
@@ -9,13 +10,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::ops::actor_delivery_worker;
 
 mod drain;
+mod gaps;
 mod lifecycle;
 mod terminal;
-pub(crate) use drain::{drain_group, pending_group_ids};
-pub use lifecycle::{
-    ShutdownReason, shutdown_actor, shutdown_actor_for, shutdown_all, shutdown_group,
+#[cfg(test)]
+pub(crate) use drain::drain_group;
+pub(crate) use drain::{
+    PreparedDrain, apply_drain, drain_local_completions, pending_group_ids, prepare_drain,
 };
-pub(super) use terminal::{submit_terminal_text, submit_terminal_text_for_session};
+pub use lifecycle::{
+    ShutdownReason, pause_group, shutdown_actor, shutdown_actor_for, shutdown_all, shutdown_group,
+};
+pub(crate) use terminal::{submit_terminal_text_for_session, submit_viewer_text};
 
 const QUEUE_CAPACITY: usize = 256;
 const COMPLETION_CAPACITY: usize = 4096;
@@ -28,6 +34,7 @@ const TERMINAL_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_mil
 const TERMINAL_REPEAT_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
 type Key = (String, String);
+type DeliveryKey = (String, String, String);
 
 pub(super) fn terminal_submit_sequence(actor: &Actor) -> &'static [&'static [u8]] {
     match actor.submit {
@@ -75,8 +82,25 @@ pub(super) struct DeliveryCompletion {
     pub outcome: CompletedDelivery,
 }
 
+impl DeliveryCompletion {
+    fn persist(&self, home: &HomeLayout) -> Result<Event, crate::dispatch::OpError> {
+        crate::ops::runtime_delivery::append_state_with_owner(
+            home,
+            &self.group_id,
+            &self.actor_id,
+            &self.actor_created_at,
+            &self.event_id,
+            &self.transport,
+            self.outcome.ledger_outcome(),
+            crate::ops::runtime_delivery::OwnerAcknowledgement::AfterWritePermit {
+                known_only: true,
+            },
+        )
+    }
+}
+
 pub(super) enum CompletedDelivery {
-    Accepted,
+    Accepted(Option<DeliveryEvidence>),
     Withdrawn(String),
     Failed(String),
     Unsubmitted(String),
@@ -87,7 +111,7 @@ impl CompletedDelivery {
     fn ledger_outcome(&self) -> crate::ops::runtime_delivery::DeliveryOutcome<'_> {
         use crate::ops::runtime_delivery::DeliveryOutcome;
         match self {
-            Self::Accepted => DeliveryOutcome::Accepted,
+            Self::Accepted(evidence) => DeliveryOutcome::Accepted(*evidence),
             Self::Withdrawn(reason) => DeliveryOutcome::Withdrawn(reason),
             Self::Failed(reason) => DeliveryOutcome::Failed(reason),
             Self::Unsubmitted(reason) => DeliveryOutcome::Unsubmitted(reason),
@@ -102,8 +126,6 @@ struct DeliveryWorker {
     /// Set before cancellation when the Actor's runtime owner is replaced.
     replaced: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
-    /// Native pending work exceeded this worker's memory queue or query page.
-    needs_refill: bool,
 }
 
 impl DeliveryWorker {
@@ -160,14 +182,177 @@ fn sender_notices() -> &'static Mutex<VecDeque<SenderNotice>> {
     NOTICES.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-fn in_flight() -> &'static Mutex<HashSet<(String, String, String)>> {
-    static IN_FLIGHT: OnceLock<Mutex<HashSet<(String, String, String)>>> = OnceLock::new();
+fn in_flight() -> &'static Mutex<HashSet<DeliveryKey>> {
+    static IN_FLIGHT: OnceLock<Mutex<HashSet<DeliveryKey>>> = OnceLock::new();
     IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// A queue slot owned by the caller until it reaches a worker.
+struct DeliverySlot(Option<DeliveryKey>);
+
+impl DeliverySlot {
+    fn reserve(group_id: &str, actor_id: &str, event_id: &str) -> Result<Self, Offer> {
+        let key = (
+            group_id.to_owned(),
+            actor_id.to_owned(),
+            event_id.to_owned(),
+        );
+        let mut pending = in_flight().lock().map_err(|_| Offer::Refused)?;
+        if pending.insert(key.clone()) {
+            Ok(Self(Some(key)))
+        } else {
+            Err(Offer::AlreadyInFlight)
+        }
+    }
+
+    fn transfer(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DeliverySlot {
+    fn drop(&mut self) {
+        if let Some(key) = &self.0
+            && let Ok(mut pending) = in_flight().lock()
+        {
+            pending.remove(key);
+        }
+    }
 }
 
 fn fenced() -> &'static Mutex<HashSet<Key>> {
     static FENCED: OnceLock<Mutex<HashSet<Key>>> = OnceLock::new();
     FENCED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// External-session members needing a later unread refill, kept independently of
+/// live workers so pre-enqueue read failures survive even before a worker spawns.
+/// Value is `paused`.
+fn refills() -> &'static Mutex<HashMap<Key, bool>> {
+    static REFILLS: OnceLock<Mutex<HashMap<Key, bool>>> = OnceLock::new();
+    REFILLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Groups whose `GroupDoc` reload failed after committing a notification, awaiting
+/// maintenance catch-up. Value is `(paused, revision)`.
+fn group_catchups() -> &'static Mutex<HashMap<String, (bool, u64)>> {
+    static GROUP_CATCHUPS: OnceLock<Mutex<HashMap<String, (bool, u64)>>> = OnceLock::new();
+    GROUP_CATCHUPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(in crate::ops) fn set_group_paused(group_id: &str, paused: bool) {
+    gaps::set_group_paused(group_id, paused);
+    if let Ok(mut pending) = refills().lock() {
+        for ((group, _), flag) in pending.iter_mut() {
+            if group == group_id {
+                *flag = paused;
+            }
+        }
+    }
+    if let Ok(mut pending) = group_catchups().lock()
+        && let Some((flag, _)) = pending.get_mut(group_id)
+    {
+        *flag = paused;
+    }
+}
+
+/// Schedule a whole-history catch-up for one member after a pre-enqueue failure
+/// (e.g. pending read error, restore failure, or >queue-capacity backlog).
+pub(in crate::ops) fn record_member_catchup(group: &GroupDoc, actor: &Actor) {
+    if matches!(group.state, GroupState::Paused | GroupState::Stopped)
+        || !actor.enabled
+        || held_for_switch(group, actor)
+    {
+        return;
+    }
+    if actor.external_session_id.is_empty() {
+        gaps::record(group, actor, None);
+    } else {
+        set_refill(&group.group_id, &actor.id, true);
+    }
+}
+
+/// Schedule a group-level catch-up when a notification was appended to the ledger
+/// but the group document could not be reloaded to dispatch it immediately.
+pub(in crate::ops) fn record_group_catchup(group_id: &str) {
+    if let Ok(mut pending) = group_catchups().lock() {
+        let revision = pending
+            .get(group_id)
+            .map_or(0, |(_, rev)| rev.wrapping_add(1));
+        pending.insert(group_id.to_owned(), (false, revision));
+    }
+}
+
+fn active_group_catchup_revision(group_id: &str) -> Option<u64> {
+    group_catchups()
+        .lock()
+        .ok()
+        .and_then(|pending| pending.get(group_id).copied())
+        .filter(|(paused, _)| !paused)
+        .map(|(_, revision)| revision)
+}
+
+fn complete_group_catchup(group_id: &str, revision: u64) {
+    if let Ok(mut pending) = group_catchups().lock()
+        && pending
+            .get(group_id)
+            .is_some_and(|(_, current)| *current == revision)
+    {
+        pending.remove(group_id);
+    }
+}
+
+fn clear_group_catchup(group_id: &str) {
+    if let Ok(mut pending) = group_catchups().lock() {
+        pending.remove(group_id);
+    }
+}
+
+fn clear_all_group_catchups() {
+    if let Ok(mut pending) = group_catchups().lock() {
+        pending.clear();
+    }
+}
+
+fn collect_group_catchup_groups(groups: &mut HashSet<String>) {
+    if let Ok(pending) = group_catchups().lock() {
+        groups.extend(
+            pending
+                .iter()
+                .filter(|(_, (paused, _))| !paused)
+                .map(|(group_id, _)| group_id.clone()),
+        );
+    }
+}
+
+fn clear_refills(remove: impl Fn(&Key) -> bool) {
+    if let Ok(mut pending) = refills().lock() {
+        pending.retain(|key, _| !remove(key));
+    }
+}
+
+fn collect_refill_groups(groups: &mut HashSet<String>) {
+    if let Ok(pending) = refills().lock() {
+        groups.extend(
+            pending
+                .iter()
+                .filter(|(_, paused)| !**paused)
+                .map(|((group_id, _), _)| group_id.clone()),
+        );
+    }
+}
+
+fn pending_refill_actors(group_id: &str) -> Vec<String> {
+    refills()
+        .lock()
+        .map(|pending| {
+            pending
+                .iter()
+                .filter(|((id, _), paused)| id == group_id && !**paused)
+                .map(|((_, actor_id), _)| actor_id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Keeps new delivery work away from one Actor while its runtime owner is
@@ -225,20 +410,24 @@ pub(super) fn record_completion(completion: DeliveryCompletion) {
     }
 }
 
-pub(super) fn complete_job(job: &DeliveryJob) {
-    finish_job(job, CompletedDelivery::Accepted);
+pub(super) fn complete_job(job: &DeliveryJob, evidence: Option<DeliveryEvidence>) {
+    finish_job(job, CompletedDelivery::Accepted(evidence));
 }
 
 pub(super) fn finish_job(job: &DeliveryJob, outcome: CompletedDelivery) {
-    match crate::ops::runtime_delivery::append_state(
-        &job.home,
-        &job.group.group_id,
-        &job.actor.id,
-        &job.actor.created_at,
-        &job.event.id,
-        job.transport,
-        outcome.ledger_outcome(),
-    ) {
+    finish_job_with_owner(
+        job,
+        outcome,
+        crate::ops::runtime_delivery::OwnerAcknowledgement::KnownAttempt,
+    );
+}
+
+fn finish_job_with_owner(
+    job: &DeliveryJob,
+    outcome: CompletedDelivery,
+    owner: crate::ops::runtime_delivery::OwnerAcknowledgement,
+) {
+    match write_job_state(job, outcome.ledger_outcome(), owner) {
         Ok(_) => release_in_flight(job),
         Err(error) => {
             tracing::warn!(
@@ -258,7 +447,35 @@ pub(super) fn finish_job(job: &DeliveryJob, outcome: CompletedDelivery) {
     }
 }
 
-fn clear_in_flight(mut remove: impl FnMut(&(String, String, String)) -> bool) {
+pub(super) fn append_job_state(
+    job: &DeliveryJob,
+    outcome: crate::ops::runtime_delivery::DeliveryOutcome<'_>,
+) -> Result<Event, crate::dispatch::OpError> {
+    write_job_state(
+        job,
+        outcome,
+        crate::ops::runtime_delivery::OwnerAcknowledgement::KnownAttempt,
+    )
+}
+
+fn write_job_state(
+    job: &DeliveryJob,
+    outcome: crate::ops::runtime_delivery::DeliveryOutcome<'_>,
+    owner: crate::ops::runtime_delivery::OwnerAcknowledgement,
+) -> Result<Event, crate::dispatch::OpError> {
+    crate::ops::runtime_delivery::append_state_with_owner(
+        &job.home,
+        &job.group.group_id,
+        &job.actor.id,
+        &job.actor.created_at,
+        &job.event.id,
+        job.transport,
+        outcome,
+        owner,
+    )
+}
+
+fn clear_in_flight(mut remove: impl FnMut(&DeliveryKey) -> bool) {
     if let Ok(mut pending) = in_flight().lock() {
         pending.retain(|item| !remove(item));
     }
@@ -291,15 +508,7 @@ fn exhaust_job(job: &DeliveryJob, reason: &str) {
 }
 
 fn settle_failure(job: &DeliveryJob, outcome: crate::ops::runtime_delivery::DeliveryOutcome<'_>) {
-    if let Err(error) = crate::ops::runtime_delivery::append_state(
-        &job.home,
-        &job.group.group_id,
-        &job.actor.id,
-        &job.actor.created_at,
-        &job.event.id,
-        job.transport,
-        outcome,
-    ) {
+    if let Err(error) = append_job_state(job, outcome) {
         tracing::warn!(
             message = %error.message,
             event_id = %job.event.id,
@@ -314,13 +523,8 @@ fn settle_failure(job: &DeliveryJob, outcome: crate::ops::runtime_delivery::Deli
 /// the submission, and the event keeps its in-flight slot meanwhile.
 pub(super) fn withdraw_jobs(jobs: &[DeliveryJob], reason: &str) {
     for job in jobs {
-        match crate::ops::runtime_delivery::append_state(
-            &job.home,
-            &job.group.group_id,
-            &job.actor.id,
-            &job.actor.created_at,
-            &job.event.id,
-            job.transport,
+        match append_job_state(
+            job,
             crate::ops::runtime_delivery::DeliveryOutcome::Withdrawn(reason),
         ) {
             Ok(_) => release_in_flight(job),
@@ -401,7 +605,47 @@ pub(super) fn tell_sender(job: &DeliveryJob, uncertain: bool) {
     }
 }
 
+/// Tells the member who asked Chet in a Group, once, that the host never sent
+/// the request. The caller holds the Group's write permit, so the notice is
+/// written before it reports success and a retry cannot repeat it.
+pub(super) fn tell_sender_not_sent_to_chet(
+    home: &HomeLayout,
+    group_id: &str,
+    event_id: &str,
+    delivery_id: &str,
+) -> Result<(), crate::dispatch::OpError> {
+    drain::notify_sender(
+        home,
+        &SenderNotice {
+            group_id: group_id.to_owned(),
+            event_id: event_id.to_owned(),
+            recipient: cccc_core::actors::CHET_SERVICE_PRINCIPAL.to_owned(),
+            delivery_id: delivery_id.to_owned(),
+            uncertain: false,
+        },
+    )
+}
+
+/// The caller just appended this source. No retained execution has seen it.
 pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchReport {
+    dispatch_with_origin(home, group, event, DispatchSource::New(None))
+}
+
+pub(super) fn dispatch_observed_notice(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    event: &Event,
+    observed: &crate::session_owner::OwnerObservations,
+) {
+    dispatch_with_origin(home, group, event, DispatchSource::New(Some(observed)));
+}
+
+fn dispatch_with_origin(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    event: &Event,
+    source: DispatchSource<'_>,
+) -> DispatchReport {
     if !matches!(event.kind.as_str(), "chat.message" | "system.notify")
         || matches!(group.state, GroupState::Paused | GroupState::Stopped)
     {
@@ -418,29 +662,59 @@ pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchR
         return mail_report();
     }
 
-    let targets: Vec<_> = group
+    let targets = group
         .actors
         .iter()
-        .filter(|actor| event_targets_actor(group, event, &actor.id) && receives_push(group, actor))
+        .filter(|actor| event_targets_actor(group, event, &actor.id))
+        .filter(|actor| {
+            if configured_for_push(actor) {
+                return true;
+            }
+            let observed = if source.uses_live_target() {
+                crate::session_owner::running_target(home, &group.group_id, actor).and_then(
+                    |target| {
+                        if target.is_some() {
+                            Ok(true)
+                        } else {
+                            running_push_owner(group, actor)
+                        }
+                    },
+                )
+            } else {
+                source.observe(|| running_push_owner(group, actor))
+            };
+            match observed {
+                Ok(running) => running,
+                Err(_) => {
+                    if actor.enabled && !held_for_switch(group, actor) {
+                        gaps::record(group, actor, Some(event));
+                    }
+                    false
+                }
+            }
+        })
         .cloned()
-        .collect();
-    dispatch_to(home, group, event, &targets, false)
+        .collect::<Vec<_>>();
+    dispatch_to_inner(home, group, event, &targets, false, None, source)
 }
 
 /// Whether work reaches this Actor by push rather than by its own pull. What
 /// runs now decides; saved settings apply when nothing does.
 pub(super) fn receives_push(group: &GroupDoc, actor: &Actor) -> bool {
+    configured_for_push(actor) || running_push_owner(group, actor).unwrap_or(false)
+}
+
+fn configured_for_push(actor: &Actor) -> bool {
     !actor.external_session_id.is_empty()
         || !crate::ops::actor_runtime::is_structured(actor)
         || crate::ops::local_headless::supports(actor)
         || actor.runtime == ActorRuntime::Deepseek
-        || owner_running(group, actor)
 }
 
-fn owner_running(group: &GroupDoc, actor: &Actor) -> bool {
+fn running_push_owner(group: &GroupDoc, actor: &Actor) -> std::io::Result<bool> {
     use crate::ops::actor_runtime::{OwnerState, delivery_owner};
-    delivery_owner(&group.group_id, &actor.id)
-        .is_ok_and(|owner| owner.is_some_and(|owner| owner.state == OwnerState::Running))
+    Ok(delivery_owner(&group.group_id, &actor.id)?
+        .is_some_and(|owner| owner.state == OwnerState::Running))
 }
 
 pub(super) fn event_targets_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
@@ -466,21 +740,130 @@ pub fn dispatch_to(
     targets: &[Actor],
     force_ambiguous: bool,
 ) -> DispatchReport {
-    dispatch_to_inner(home, group, event, targets, force_ambiguous, None)
+    dispatch_to_inner(
+        home,
+        group,
+        event,
+        targets,
+        force_ambiguous,
+        None,
+        DispatchSource::Directed,
+    )
+}
+
+pub(super) struct ExplicitDeliveryTargets<'a> {
+    routes: &'a [(&'a Actor, &'static str)],
+    slots: HashMap<String, DeliverySlot>,
+}
+
+/// Reserve all worker slots before writing an explicit claim. A worker that
+/// already holds a slot may still be waiting to take its own claim.
+pub(super) fn reserve_explicit_deliveries<'a>(
+    group: &GroupDoc,
+    event: &Event,
+    routes: &'a [(&'a Actor, &'static str)],
+) -> Result<ExplicitDeliveryTargets<'a>, crate::dispatch::OpError> {
+    use crate::dispatch::OpError;
+    use serde_json::json;
+
+    let mut slots = HashMap::new();
+    for (actor, transport) in routes {
+        if held_for_switch(group, actor) || is_fenced(&group.group_id, &actor.id) {
+            let mut error = OpError::new(
+                "delivery_blocked",
+                format!("actor is switching runtime: {}", actor.id),
+            );
+            error.details.insert("actor_id".into(), json!(actor.id));
+            error
+                .details
+                .insert("reason".into(), json!("runtime_switch"));
+            return Err(error);
+        }
+        // The Web Model runtime consumes this claim through wait_next_turn.
+        if transport.starts_with("web_model") {
+            continue;
+        }
+        let slot = match DeliverySlot::reserve(&group.group_id, &actor.id, &event.id) {
+            Ok(slot) => slot,
+            Err(Offer::AlreadyInFlight) => {
+                let mut error = OpError::new(
+                    "delivery_in_progress",
+                    format!("message is already queued for actor: {}", actor.id),
+                );
+                error.details.insert("actor_id".into(), json!(actor.id));
+                return Err(error);
+            }
+            Err(_) => {
+                return Err(OpError::io(std::io::Error::other(
+                    "delivery queue unavailable",
+                )));
+            }
+        };
+        slots.insert(actor.id.clone(), slot);
+    }
+    Ok(ExplicitDeliveryTargets { routes, slots })
 }
 
 /// Offer work its caller already claimed, each on the channel that claimed it.
-pub fn dispatch_preclaimed(
+pub(super) fn dispatch_preclaimed(
     home: &HomeLayout,
     group: &GroupDoc,
     event: &Event,
-    claims: &[(&Actor, &'static str)],
+    claims: ExplicitDeliveryTargets<'_>,
 ) -> DispatchReport {
     let targets = claims
+        .routes
         .iter()
         .map(|(actor, _)| (*actor).clone())
         .collect::<Vec<_>>();
-    dispatch_to_inner(home, group, event, &targets, false, Some(claims))
+    dispatch_to_inner(
+        home,
+        group,
+        event,
+        &targets,
+        false,
+        Some(claims),
+        DispatchSource::Directed,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum DispatchSource<'a> {
+    New(Option<&'a crate::session_owner::OwnerObservations>),
+    Unread(&'static str),
+    Directed,
+}
+impl DispatchSource<'_> {
+    fn uses_live_target(self) -> bool {
+        matches!(self, Self::New(None))
+    }
+
+    fn observe<T>(self, read: impl FnOnce() -> T) -> T {
+        match self {
+            Self::New(Some(observed)) => observed.with_scope(read),
+            _ => read(),
+        }
+    }
+
+    fn missed(self, group: &GroupDoc, actor: &Actor, event: &Event) {
+        match self {
+            Self::New(_) => {
+                if actor.external_session_id.is_empty() {
+                    gaps::record(group, actor, Some(event));
+                } else {
+                    set_refill(&group.group_id, &actor.id, true);
+                }
+            }
+            Self::Unread(_) => record_member_catchup(group, actor),
+            Self::Directed => {}
+        }
+    }
+}
+
+struct DispatchOutcome {
+    report: DispatchReport,
+    interrupted: bool,
+    held: bool,
 }
 
 fn dispatch_to_inner(
@@ -489,44 +872,104 @@ fn dispatch_to_inner(
     event: &Event,
     targets: &[Actor],
     force_ambiguous: bool,
-    claims: Option<&[(&Actor, &'static str)]>,
+    claims: Option<ExplicitDeliveryTargets<'_>>,
+    source: DispatchSource<'_>,
 ) -> DispatchReport {
+    dispatch_to_inner_outcome(home, group, event, targets, force_ambiguous, claims, source).report
+}
+
+fn dispatch_to_inner_outcome(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    event: &Event,
+    targets: &[Actor],
+    force_ambiguous: bool,
+    mut claims: Option<ExplicitDeliveryTargets<'_>>,
+    source: DispatchSource<'_>,
+) -> DispatchOutcome {
     if matches!(group.state, GroupState::Paused | GroupState::Stopped) {
-        return report(targets.len(), 0, 0);
+        return DispatchOutcome {
+            report: report(targets.len(), 0, 0),
+            interrupted: false,
+            held: false,
+        };
     }
     let mut queued = 0;
     let mut online = 0;
+    let mut interrupted = false;
+    let mut held = false;
     let preclaimed = claims.is_some();
     for actor in targets {
         if !actor.enabled || held_for_switch(group, actor) {
             continue;
         }
+        let target = if source.uses_live_target() && actor.external_session_id.is_empty() {
+            match crate::session_owner::running_target(home, &group.group_id, actor) {
+                Ok(target) => target,
+                Err(error) => {
+                    tracing::debug!(%error, actor_id = %actor.id, "delivery target is not observable");
+                    source.missed(group, actor, event);
+                    interrupted = true;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let observe_pause = || {
+            source.observe(|| {
+                crate::ops::actor_runtime::confirmation_pause_applies(home, &group.group_id, actor)
+            })
+        };
         // Leave new events pending while this managed Claude awaits an explicit
         // retry. Already claimed work must reach the worker to be settled safely.
         if !preclaimed
-            && crate::ops::actor_runtime::confirmation_pause_applies(home, &group.group_id, actor)
+            && actor.external_session_id.is_empty()
+            && target
+                .as_ref()
+                .map_or_else(observe_pause, |target| target.observe(observe_pause))
                 .is_ok_and(|paused| paused)
         {
             continue;
         }
-        let actor_online = if !actor.external_session_id.is_empty() {
+        if matches!(source, DispatchSource::New(_)) && gaps::extend(group, actor, event) {
+            continue;
+        }
+        let actor_online = if matches!(source, DispatchSource::Unread(_)) {
+            // The catch-up caller uses only the queued count.
+            false
+        } else if !actor.external_session_id.is_empty() {
             super::local_sessions::connected(home, &actor.external_session_id)
         } else {
-            owner_running(group, actor)
+            target.is_some()
+                || source
+                    .observe(|| running_push_owner(group, actor))
+                    .unwrap_or(false)
         };
         if actor_online {
             online += 1;
         }
-        let claimed_on = claims.and_then(|claims| {
+        let claimed_on = claims.as_ref().and_then(|claims| {
             claims
+                .routes
                 .iter()
                 .find(|(claimed, _)| claimed.id == actor.id)
                 .map(|(_, transport)| *transport)
         });
-        let transport = match claimed_on.map_or_else(|| delivery_transport(home, group, actor), Ok)
-        {
+        let known_transport = match source {
+            DispatchSource::Unread(transport) => Some(transport),
+            _ => claimed_on,
+        };
+        let observe_transport = || source.observe(|| delivery_transport(home, group, actor));
+        let transport = match known_transport.map_or_else(
+            || {
+                target.as_ref().map_or_else(observe_transport, |target| {
+                    target.observe(observe_transport)
+                })
+            },
+            Ok,
+        ) {
             Ok(transport) => transport,
-            // The message stays pending for the next dispatch.
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -534,6 +977,8 @@ fn dispatch_to_inner(
                     actor_id = %actor.id,
                     "failed to read the Actor's runtime owner"
                 );
+                source.missed(group, actor, event);
+                interrupted = true;
                 continue;
             }
         };
@@ -544,17 +989,33 @@ fn dispatch_to_inner(
             continue;
         }
         let claimed = preclaimed || actor.external_session_id.is_empty() || force_ambiguous;
+        let slot = if let Some(claims) = &mut claims {
+            claims.slots.remove(&actor.id)
+        } else if claimed && matches!(source, DispatchSource::Unread(_)) {
+            // A live managed worker may be about to reclaim a failed attempt.
+            // The unread scan cannot take that claim away from its consumer.
+            match DeliverySlot::reserve(&group.group_id, &actor.id, &event.id) {
+                Ok(slot) => Some(slot),
+                Err(Offer::AlreadyInFlight) => continue,
+                Err(_) => {
+                    source.missed(group, actor, event);
+                    interrupted = true;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         if claimed && !preclaimed {
-            match crate::ops::runtime_delivery::claim(
-                home,
-                group,
-                actor,
-                &event.id,
-                transport,
-                force_ambiguous,
-            ) {
-                Ok(crate::ops::runtime_delivery::ClaimResult::Claimed) => {}
-                Ok(crate::ops::runtime_delivery::ClaimResult::Terminal(_)) => continue,
+            use crate::ops::runtime_delivery::{ClaimResult, claim, claim_new_source};
+            let result = if matches!(source, DispatchSource::New(_)) {
+                claim_new_source(home, group, actor, &event.id, transport)
+            } else {
+                claim(home, group, actor, &event.id, transport, force_ambiguous)
+            };
+            match result {
+                Ok(ClaimResult::Claimed) => {}
+                Ok(ClaimResult::Terminal(_)) => continue,
                 Err(error) => {
                     tracing::warn!(
                         group_id = %group.group_id,
@@ -563,55 +1024,150 @@ fn dispatch_to_inner(
                         message = %error.message,
                         "failed to claim runtime delivery"
                     );
+                    source.missed(group, actor, event);
+                    interrupted = true;
                     continue;
                 }
             }
         }
-        let offered = enqueue(DeliveryJob {
+        match offer_delivery(home, group, actor, event, transport, claimed, slot) {
+            Offer::Queued => queued += 1,
+            Offer::AlreadyInFlight => {}
+            Offer::Held => {
+                held = true;
+                interrupted = true;
+            }
+            Offer::Refused => {
+                interrupted = true;
+                if actor.external_session_id.is_empty() {
+                    match source {
+                        DispatchSource::New(_) => gaps::record(group, actor, Some(event)),
+                        DispatchSource::Unread(_) | DispatchSource::Directed => {
+                            gaps::record(group, actor, None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    DispatchOutcome {
+        report: report(targets.len(), online, queued),
+        interrupted,
+        held,
+    }
+}
+
+/// Process-owned jobs have passed the durable claim check for this attempt.
+/// The previous daemon's live claims are reconciled by recovery outside this queue.
+fn offer_delivery(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    event: &Event,
+    transport: &'static str,
+    claimed: bool,
+    slot: Option<DeliverySlot>,
+) -> Offer {
+    let slot = match slot {
+        Some(slot) => Ok(slot),
+        None => DeliverySlot::reserve(&group.group_id, &actor.id, &event.id),
+    };
+    let offered = match &slot {
+        Ok(_) => enqueue(DeliveryJob {
             home: home.clone(),
             group: group.clone(),
             actor: actor.clone(),
             event: event.clone(),
             claimed,
             transport,
-        });
-        if offered == Offer::Queued {
-            queued += 1;
-        } else if offered == Offer::Refused
-            && claimed
-            && let Err(error) = crate::ops::runtime_delivery::append_state(
+        }),
+        Err(offer) => *offer,
+    };
+    if offered == Offer::Queued
+        && let Ok(slot) = slot
+    {
+        slot.transfer();
+        return offered;
+    }
+    if offered == Offer::Refused {
+        if claimed
+            && let Err(error) = crate::ops::runtime_delivery::append_state_with_owner(
                 home,
                 &group.group_id,
                 &actor.id,
                 &actor.created_at,
                 &event.id,
                 transport,
-                if actor.external_session_id.is_empty() {
-                    crate::ops::runtime_delivery::DeliveryOutcome::Failed(
-                        "daemon delivery queue did not accept the event",
-                    )
-                } else {
-                    crate::ops::runtime_delivery::DeliveryOutcome::Unsubmitted(
-                        "daemon delivery queue did not accept the event",
-                    )
-                },
+                crate::ops::runtime_delivery::DeliveryOutcome::Unsubmitted(
+                    "daemon delivery queue did not accept the event",
+                ),
+                crate::ops::runtime_delivery::OwnerAcknowledgement::NotOffered,
             )
         {
             tracing::warn!(message = %error.message, "failed to record rejected runtime delivery");
         }
+        if !actor.external_session_id.is_empty() {
+            set_refill(&group.group_id, &actor.id, true);
+        }
     }
-    report(targets.len(), online, queued)
+    offered
 }
 
 pub fn dispatch_unread(home: &HomeLayout, group: &GroupDoc, actor_id: &str) -> usize {
     if matches!(group.state, GroupState::Paused | GroupState::Stopped) {
+        set_refill(&group.group_id, actor_id, false);
         return 0;
     }
     let Some(actor) = group.actors.iter().find(|actor| actor.id == actor_id) else {
+        set_refill(&group.group_id, actor_id, false);
         return 0;
     };
-    if !actor.enabled || held_for_switch(group, actor) || !receives_push(group, actor) {
+    if !actor.enabled || held_for_switch(group, actor) {
+        set_refill(&group.group_id, actor_id, false);
         return 0;
+    }
+    let gap = gaps::resume_member(&group.group_id, actor_id);
+    // Pull members need no pending-page read unless a running push owner takes their work.
+    let saved_push = configured_for_push(actor);
+    let observed =
+        (!saved_push).then(|| crate::ops::actor_runtime::delivery_owner(&group.group_id, actor_id));
+    if let Some(Ok(owner)) = &observed
+        && !owner
+            .as_ref()
+            .is_some_and(|o| o.state == crate::ops::actor_runtime::OwnerState::Running)
+    {
+        set_refill(&group.group_id, actor_id, false);
+        gaps::complete(&group.group_id, actor_id, gap.as_ref());
+        return 0;
+    }
+    if let Some(Err(error)) = &observed {
+        tracing::warn!(%error, group_id = %group.group_id, %actor_id,
+            "failed to read the runtime owner for pending deliveries");
+        record_member_catchup(group, actor);
+        return 0;
+    }
+    let pause = if actor.external_session_id.is_empty() {
+        crate::ops::actor_runtime::confirmation_pause_applies(home, &group.group_id, actor)
+    } else {
+        Ok(false)
+    };
+    match pause {
+        Ok(false) => {}
+        Ok(true) => {
+            set_refill(&group.group_id, actor_id, false);
+            gaps::complete(&group.group_id, actor_id, gap.as_ref());
+            return 0;
+        }
+        Err(error) => {
+            tracing::warn!(
+                message = %error.message,
+                group_id = %group.group_id,
+                %actor_id,
+                "failed to check confirmation pause for pending deliveries"
+            );
+            record_member_catchup(group, actor);
+            return 0;
+        }
     }
     let events = match crate::ops::runtime_delivery::pending_sources(
         home,
@@ -622,6 +1178,7 @@ pub fn dispatch_unread(home: &HomeLayout, group: &GroupDoc, actor_id: &str) -> u
         Ok(events) => events,
         Err(error) => {
             tracing::warn!(message = %error.message, %actor_id, "failed to load pending runtime deliveries");
+            record_member_catchup(group, actor);
             return 0;
         }
     };
@@ -637,20 +1194,67 @@ pub fn dispatch_unread(home: &HomeLayout, group: &GroupDoc, actor_id: &str) -> u
         ));
     }
     let native = !actor.external_session_id.is_empty();
+
     let full_page = events.len() == QUEUE_CAPACITY;
     if native {
         // Only a successful read consumes the previous refill request. A full
         // enqueue below can request another pass even for a partial page.
         set_refill(&group.group_id, actor_id, false);
     }
-    let queued = events
-        .into_iter()
-        .map(|event| dispatch_to(home, group, &event, std::slice::from_ref(actor), false).queued)
-        .sum();
-    if native && full_page {
-        // The whole page may already be in flight. Its tail still needs a
-        // later ledger read after those deliveries settle.
-        set_refill(&group.group_id, actor_id, true);
+    if events.is_empty() {
+        gaps::complete(&group.group_id, actor_id, gap.as_ref());
+        return 0;
+    }
+    let transport = if native {
+        "local_session"
+    } else {
+        let owner = observed.unwrap_or_else(|| {
+            crate::ops::actor_runtime::delivery_owner(&group.group_id, actor_id)
+        });
+        let owner = match owner {
+            Ok(owner) => owner,
+            Err(error) => {
+                tracing::warn!(%error, group_id = %group.group_id, %actor_id,
+                    "failed to read the runtime owner for pending deliveries");
+                gaps::record(group, actor, None);
+                return 0;
+            }
+        };
+        owner_transport(home, group, actor, owner.as_ref())
+    };
+    let mut queued = 0;
+    let mut interrupted = false;
+    let mut held = false;
+    for event in events {
+        let outcome = dispatch_to_inner_outcome(
+            home,
+            group,
+            &event,
+            std::slice::from_ref(actor),
+            false,
+            None,
+            DispatchSource::Unread(transport),
+        );
+        queued += outcome.report.queued;
+        if outcome.held {
+            held = true;
+            break;
+        }
+        if outcome.interrupted {
+            interrupted = true;
+            break;
+        }
+    }
+    if held {
+        return queued;
+    }
+    if !full_page && !interrupted {
+        gaps::complete(&group.group_id, actor_id, gap.as_ref());
+    }
+    if full_page {
+        // The whole page may already be in flight (or filled the queue). Its
+        // tail still needs a later ledger read after those deliveries settle.
+        record_member_catchup(group, actor);
     }
     queued
 }
@@ -796,43 +1400,36 @@ fn report(targeted: usize, online: usize, queued: usize) -> DispatchReport {
 }
 
 fn set_refill(group_id: &str, actor_id: &str, needed: bool) {
-    if let Ok(mut workers) = workers().lock()
-        && let Some(worker) = workers.get_mut(&(group_id.into(), actor_id.into()))
-    {
-        worker.needs_refill = needed;
+    if let Ok(mut pending) = refills().lock() {
+        let key = (group_id.to_owned(), actor_id.to_owned());
+        if needed {
+            pending.insert(key, false);
+        } else {
+            pending.remove(&key);
+        }
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Offer {
     Queued,
     /// The member's runtime is being switched. A claimed job was already
     /// given back as unsubmitted, so the switch's own dispatch offers it again.
     Held,
+    /// The event already holds an in-flight slot in the worker or completion queue.
+    AlreadyInFlight,
     Refused,
 }
 
 fn enqueue(job: DeliveryJob) -> Offer {
     let key = (job.group.group_id.clone(), job.actor.id.clone());
-    let delivery_key = (key.0.clone(), key.1.clone(), job.event.id.clone());
-    let reserved = in_flight()
-        .lock()
-        .map(|mut pending| pending.insert(delivery_key.clone()))
-        .unwrap_or(false);
-    if !reserved {
+    let Ok(mut map) = workers().lock() else {
         return Offer::Refused;
-    }
-    let mut map = match workers().lock() {
-        Ok(map) => map,
-        Err(_) => {
-            clear_in_flight(|item| item == &delivery_key);
-            return Offer::Refused;
-        }
     };
     if is_fenced(&key.0, &key.1) {
         // Settled under the worker map: the fence is lifted only afterwards.
         if job.claimed
-            && let Err(error) = crate::ops::runtime_delivery::append_state(
+            && let Err(error) = crate::ops::runtime_delivery::append_state_with_owner(
                 &job.home,
                 &key.0,
                 &key.1,
@@ -842,31 +1439,25 @@ fn enqueue(job: DeliveryJob) -> Offer {
                 crate::ops::runtime_delivery::DeliveryOutcome::Unsubmitted(
                     "held while the member's runtime was switched",
                 ),
+                crate::ops::runtime_delivery::OwnerAcknowledgement::NotOffered,
             )
         {
             tracing::warn!(message = %error.message, "failed to give back held runtime delivery");
         }
-        clear_in_flight(|item| item == &delivery_key);
         return Offer::Held;
     }
     let worker = map.entry(key.clone()).or_insert_with(|| spawn_worker(&key));
     let Some(sender) = worker.sender.as_ref() else {
-        clear_in_flight(|item| item == &delivery_key);
         return Offer::Refused;
     };
     match sender.try_send(job) {
         Ok(()) => Offer::Queued,
-        Err(TrySendError::Full(job)) => {
-            if !job.actor.external_session_id.is_empty() {
-                worker.needs_refill = true;
-            }
-            clear_in_flight(|item| item == &delivery_key);
+        Err(TrySendError::Full(_)) => {
             tracing::warn!(group_id = %key.0, actor_id = %key.1, "PTY delivery queue is full");
             Offer::Refused
         }
         Err(TrySendError::Disconnected(job)) => {
-            let mut replacement = spawn_worker(&key);
-            replacement.needs_refill = worker.needs_refill;
+            let replacement = spawn_worker(&key);
             let result = replacement
                 .sender
                 .as_ref()
@@ -876,11 +1467,11 @@ fn enqueue(job: DeliveryJob) -> Offer {
             if let Some(stale) = stale {
                 stale.shutdown();
             }
-            if !result {
-                clear_in_flight(|item| item == &delivery_key);
-                return Offer::Refused;
+            if result {
+                Offer::Queued
+            } else {
+                Offer::Refused
             }
-            Offer::Queued
         }
     }
 }
@@ -908,9 +1499,10 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                     break;
                 };
                 vec![job]
-            } else if deferred.len() >= BATCH_CAPACITY {
+            } else if !attempted.is_empty() || deferred.len() >= BATCH_CAPACITY {
                 // Failed startup or paused delivery must not grow this batch
                 // beyond its limit by draining the bounded channel on retries.
+                // An admitted batch keeps its original event set until settled.
                 if !actor_delivery_worker::interruptible_sleep(
                     deferred_retry_delay(deferred_failures),
                     &thread_cancelled,
@@ -929,7 +1521,7 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
             };
-            if actor_delivery_worker::merges_batches(&batch[0]) {
+            if attempted.is_empty() && actor_delivery_worker::merges_batches(&batch[0]) {
                 while batch.len() < BATCH_CAPACITY {
                     match receiver.try_recv() {
                         Ok(job) => batch.push(job),
@@ -995,6 +1587,20 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                     exhaust_job(&job, &reason);
                     tell_sender(&job, false);
                     failed_turns = (String::new(), 0);
+                } else if let Some(job) = batch.first_mut() {
+                    // A definitive native failure settles this attempt before
+                    // another claim can authorize the existing bounded retry.
+                    // Keep the in-flight worker slot throughout the backoff.
+                    match append_job_state(
+                        job,
+                        crate::ops::runtime_delivery::DeliveryOutcome::Failed(&reason),
+                    ) {
+                        Ok(_) => {
+                            job.claimed = false;
+                            attempted.remove(&job.event.id);
+                        }
+                        Err(error) => tracing::warn!(message = %error.message, "failed native outcome still awaits settlement"),
+                    }
                 }
                 deferred = batch;
                 deferred_failures = deferred_failures.saturating_add(1);
@@ -1009,30 +1615,47 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
         }
         let replacing = thread_replaced.load(Ordering::Acquire);
         for job in deferred.into_iter().chain(receiver.try_iter()) {
+            use crate::ops::runtime_delivery::OwnerAcknowledgement;
             let reason = "delivery worker stopped before runtime acceptance".to_owned();
-            // Only managed submission marks a job attempted; it decides, not
-            // the snapshot the job was queued with.
-            if replacing && attempted.contains(&job.event.id) {
-                // The old runtime may already hold this input. Keep it for the
-                // replacement to review instead of submitting it twice.
-                finish_job(
-                    &job,
-                    CompletedDelivery::Ambiguous(
-                        "runtime replaced while this delivery was being submitted".into(),
-                    ),
-                );
-            } else if replacing && job.actor.external_session_id.is_empty() {
-                // Never submitted to the old runtime: the replacement receives it.
-                finish_job(&job, CompletedDelivery::Unsubmitted(reason));
-            } else if job.actor.external_session_id.is_empty() {
-                fail_job(&job, &reason);
-            } else if !job.claimed {
+            if !job.claimed {
                 release_in_flight(&job);
-            } else {
-                // Native processing removes every offered terminal outcome
-                // from the batch. Remaining work is known not to be submitted.
-                finish_job(&job, CompletedDelivery::Unsubmitted(reason));
+                continue;
             }
+            if crate::session_owner::enabled(&job.home)
+                && crate::session_owner::maintenance_selected(&job.home)
+                && job.actor.external_session_id.is_empty()
+            {
+                if !attempted.contains(&job.event.id) {
+                    finish_job_with_owner(
+                        &job,
+                        CompletedDelivery::Unsubmitted(reason),
+                        OwnerAcknowledgement::NotOffered,
+                    );
+                } else {
+                    // The execution task belongs to its owner. The next
+                    // controller queries it before settling this durable claim.
+                    release_in_flight(&job);
+                }
+                continue;
+            }
+            // Each native handoff marks its own attempted input. A stopped
+            // whole-turn transport may have received it before any acceptance
+            // result; calling it failed would authorize an automatic replay.
+            let native = !job.actor.external_session_id.is_empty();
+            let (outcome, acknowledgement) = if attempted.contains(&job.event.id) {
+                (
+                    CompletedDelivery::Ambiguous(
+                        if replacing { "runtime replaced while this delivery was being submitted" }
+                        else { "runtime stopped after submission before its outcome was confirmed" }.into(),
+                    ),
+                    OwnerAcknowledgement::AfterWritePermit { known_only: true },
+                )
+            } else if replacing || native {
+                (CompletedDelivery::Unsubmitted(reason), OwnerAcknowledgement::NotOffered)
+            } else {
+                (CompletedDelivery::Failed(reason), OwnerAcknowledgement::NotOffered)
+            };
+            finish_job_with_owner(&job, outcome, acknowledgement);
         }
     });
     let thread = match thread {
@@ -1047,7 +1670,6 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
         cancelled,
         replaced,
         thread,
-        needs_refill: false,
     }
 }
 
@@ -1261,6 +1883,102 @@ mod tests {
         assert_eq!(states, ["claimed", "failed"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_worker_stop_after_deepseek_input_is_ambiguous_without_automatic_replay() {
+        let temp = tempfile::tempdir().expect("isolated test directory");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("resolve isolated home");
+        let store = GroupStore::new(home.clone()).expect("open isolated group store");
+        let mut group = store
+            .create("interrupted turn", "")
+            .expect("create fixture group");
+        let prompt_log = temp.path().join("prompts");
+        let script = r#"while IFS= read -r line; do
+if printf '%s' "$line" | grep -q '"method":"initialize"'; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"fake"}}}'
+elif printf '%s' "$line" | grep -q '"method":"session/new"'; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"fake-session"}}'
+else
+  printf '%s\n' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p' >> "$PROMPT_LOG"
+fi
+done"#;
+        let mut actor = Actor::new("interrupted");
+        actor.runtime = ActorRuntime::Deepseek;
+        actor.command = vec!["sh".into(), "-c".into(), script.into()];
+        actor.env.insert(
+            "PROMPT_LOG".into(),
+            prompt_log.to_string_lossy().into_owned(),
+        );
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save fixture group");
+        crate::ops::deepseek_runtime::start(&home, &group, &actor, temp.path())
+            .expect("start fake DeepSeek runtime");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = json!({"to":[actor.id],"text":"interrupted work","message_mode":"send"})
+            .as_object()
+            .expect("object result")
+            .clone();
+        let ledger_path = store
+            .ledger_path(&group.group_id)
+            .expect("resolve group ledger");
+        ledger::append(&ledger_path, &event).expect("append delivery event");
+        let worker = spawn_worker(&(group.group_id.clone(), actor.id.clone()));
+        worker
+            .sender
+            .as_ref()
+            .expect("present fixture value")
+            .send(DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event: event.clone(),
+                claimed: false,
+                transport: "deepseek",
+            })
+            .expect("submit fixture delivery");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::fs::read_to_string(&prompt_log)
+            .is_ok_and(|methods| methods.lines().any(|method| method == "session/prompt"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "provider did not receive input"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        worker.shutdown();
+        drain_group(&home, &group.group_id);
+        crate::ops::deepseek_runtime::stop(&group.group_id, &actor.id);
+        let recorded = std::fs::read_to_string(prompt_log).expect("read provider method log");
+        let methods = recorded.lines().collect::<Vec<_>>();
+        eprintln!("fake provider methods: {methods:?}");
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| **method == "session/prompt")
+                .count(),
+            1
+        );
+        let events = ledger::read_all(&ledger_path).expect("read delivery ledger");
+        let states = events
+            .iter()
+            .filter(|record| {
+                record.kind == "runtime.delivery"
+                    && record.data.get("source_event_id") == Some(&json!(event.id))
+            })
+            .filter_map(|record| record.data.get("state").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(states, ["claimed", "ambiguous"]);
+        assert_eq!(
+            crate::ops::runtime_delivery::claim(
+                &home, &group, &actor, &event.id, "deepseek", false
+            )
+            .expect("claim fixture delivery"),
+            crate::ops::runtime_delivery::ClaimResult::Terminal("ambiguous".into())
+        );
+    }
+
     /// A non-credential provider failure is retried, then the next delivery
     /// gets its turn instead of waiting behind the failed one forever.
     #[cfg(unix)]
@@ -1395,8 +2113,26 @@ done"#;
             })
             .filter_map(|event| event.data.get("reason").and_then(serde_json::Value::as_str))
             .collect();
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("upstream stream ended (HTTP 503)"));
+        assert_eq!(failures.len(), 4);
+        assert!(
+            failures
+                .iter()
+                .all(|reason| reason.contains("upstream stream ended (HTTP 503)"))
+        );
+        let attempts = events
+            .iter()
+            .filter(|record| {
+                record.kind == "runtime.delivery"
+                    && record.data.get("source_event_id") == Some(&json!(event.id))
+            })
+            .filter_map(|record| record.data.get("state").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts,
+            [
+                "claimed", "failed", "claimed", "failed", "claimed", "failed", "claimed", "failed"
+            ]
+        );
         // Its retries are used up, so starting the Actor, resuming the Group or
         // restarting the daemon must not run it again; an explicit retry may.
         let still_pending =
@@ -1546,10 +2282,15 @@ done"#;
         }
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel = Arc::clone(&cancelled);
-        let group = group_id.clone();
         let (result_tx, result_rx) = mpsc::channel();
+        let expected = cccc_runtime::status(&group_id, &actor.id).expect("terminal status");
         let thread = std::thread::spawn(move || {
-            let result = submit_terminal_text(&group, &actor, &"x".repeat(1024 * 1024), &cancel);
+            let result = submit_terminal_text_for_session(
+                &expected,
+                &actor,
+                &"x".repeat(1024 * 1024),
+                &cancel,
+            );
             result_tx.send(result).expect("result receiver");
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1559,7 +2300,6 @@ done"#;
             cancelled,
             replaced: Arc::new(AtomicBool::new(false)),
             thread: Some(thread),
-            needs_refill: false,
         };
         let (done_tx, done_rx) = mpsc::channel();
         let shutdown = std::thread::spawn(move || {
@@ -1571,7 +2311,11 @@ done"#;
         shutdown.join().expect("shutdown thread");
         assert!(blocked, "fixture must block input before shutdown");
         stopped.expect("delivery shutdown must finish before stopping the runtime");
-        assert!(!result_rx.recv().expect("cancelled submission"));
+        assert!(matches!(
+            result_rx.recv().expect("cancelled submission"),
+            cccc_runtime::PtyHandoff::Uncertain(cccc_runtime::PtyHandoffReason::Cancelled)
+                | cccc_runtime::PtyHandoff::NotWritten(cccc_runtime::PtyHandoffReason::Cancelled)
+        ));
     }
 
     #[test]
@@ -1608,14 +2352,7 @@ done"#;
         .expect("claim");
 
         assert_eq!(
-            enqueue(DeliveryJob {
-                home: home.clone(),
-                group: group.clone(),
-                actor: actor.clone(),
-                event: event.clone(),
-                claimed: true,
-                transport: "pty",
-            }),
+            offer_delivery(&home, &group, &actor, &event, "pty", true, None),
             Offer::Queued
         );
         shutdown_actor(&group.group_id, &actor.id);
@@ -1673,14 +2410,7 @@ done"#;
         .expect("claim");
         let fence = fence_actor(&group.group_id, &actor.id);
 
-        let offered = enqueue(DeliveryJob {
-            home: home.clone(),
-            group: group.clone(),
-            actor: actor.clone(),
-            event: event.clone(),
-            claimed: true,
-            transport: "pty",
-        });
+        let offered = offer_delivery(&home, &group, &actor, &event, "pty", true, None);
         drop(fence);
 
         assert_eq!(offered, Offer::Held);
@@ -1717,6 +2447,377 @@ done"#;
             pending.iter().map(|event| &event.id).collect::<Vec<_>>(),
             [&event.id],
             "the switch's own dispatch offers it again"
+        );
+    }
+
+    struct GroupGuard(String);
+    impl Drop for GroupGuard {
+        fn drop(&mut self) {
+            shutdown_group(&self.0);
+        }
+    }
+
+    fn install_stub_worker(group_id: &str, actor_id: &str) -> mpsc::Receiver<DeliveryJob> {
+        let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
+        workers().lock().expect("workers").insert(
+            (group_id.to_owned(), actor_id.to_owned()),
+            DeliveryWorker {
+                sender: Some(tx),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                replaced: Arc::new(AtomicBool::new(false)),
+                thread: None,
+            },
+        );
+        rx
+    }
+
+    fn append_send(ledger_path: &std::path::Path, group_id: &str, to: &str, text: &str) -> Event {
+        let mut event = Event::new("chat.message", group_id);
+        event.by = "user".into();
+        event.data = json!({"to":[to],"text":text,"message_mode":"send"})
+            .as_object()
+            .cloned()
+            .expect("event data");
+        ledger::append(ledger_path, &event).expect("append send");
+        event
+    }
+
+    #[test]
+    fn non_external_queue_full_records_unsubmitted_and_recovers_in_order() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("queue full", "").expect("group");
+        let _guard = GroupGuard(group.group_id.clone());
+        let actor = Actor::new("peer1");
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        let rx = install_stub_worker(&group.group_id, &actor.id);
+
+        for index in 0..QUEUE_CAPACITY {
+            let filler = append_send(&path, &group.group_id, &actor.id, &format!("fill-{index}"));
+            let report = dispatch(&home, &group, &filler);
+            assert_eq!(report.queued, 1);
+        }
+
+        let first_overflow = append_send(&path, &group.group_id, &actor.id, "overflow-1");
+        let second_overflow = append_send(&path, &group.group_id, &actor.id, "overflow-2");
+        assert_eq!(dispatch(&home, &group, &first_overflow).queued, 0);
+        // Subsequent send joins the open gap and cannot overtake the rejected one.
+        assert_eq!(dispatch(&home, &group, &second_overflow).queued, 0);
+
+        let records = ledger::read_all(&path).expect("ledger");
+        let rejected = records
+            .iter()
+            .rfind(|record| {
+                record.kind == "runtime.delivery"
+                    && record.data["source_event_id"] == first_overflow.id
+            })
+            .expect("rejected delivery record");
+        assert_eq!(rejected.data["state"], "failed");
+        assert_eq!(rejected.data["retryable"], true);
+        assert!(
+            !records.iter().any(|record| {
+                record.kind == "runtime.delivery"
+                    && record.data["source_event_id"] == second_overflow.id
+            }),
+            "second overflow stays behind the open gap without overtaking"
+        );
+        assert!(pending_group_ids().contains(&group.group_id));
+
+        // Free two slots in the worker queue and drain the group.
+        for _ in 0..2 {
+            let job = rx.try_recv().expect("queued filler");
+            complete_job(&job, None);
+        }
+        drain_group(&home, &group.group_id);
+
+        let mut remaining: Vec<String> = rx.try_iter().map(|job| job.event.id).collect();
+        let tail = remaining.split_off(remaining.len() - 2);
+        assert_eq!(tail, vec![first_overflow.id, second_overflow.id]);
+        // One more drain with capacity clears the completed gap.
+        clear_in_flight(|item| item.0 == group.group_id);
+        drain_group(&home, &group.group_id);
+        assert!(!pending_group_ids().contains(&group.group_id));
+    }
+
+    #[test]
+    fn non_external_dispatch_unread_pages_beyond_queue_capacity_in_order() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("backlog paging", "").expect("group");
+        let _guard = GroupGuard(group.group_id.clone());
+        let actor = Actor::new("peer1");
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        let rx = install_stub_worker(&group.group_id, &actor.id);
+
+        let total = QUEUE_CAPACITY + 4;
+        let ids: Vec<String> = (0..total)
+            .map(|index| append_send(&path, &group.group_id, &actor.id, &format!("msg-{index}")).id)
+            .collect();
+
+        assert_eq!(
+            dispatch_unread(&home, &group, &actor.id),
+            QUEUE_CAPACITY,
+            "first page fills the bounded queue"
+        );
+        assert!(
+            pending_group_ids().contains(&group.group_id),
+            "full page schedules catch-up for the tail"
+        );
+
+        // Draining while all slots are occupied does not duplicate or drop the tail.
+        drain_group(&home, &group.group_id);
+        let first_page: Vec<String> = rx
+            .try_iter()
+            .map(|job| {
+                complete_job(&job, None);
+                job.event.id
+            })
+            .collect();
+        assert_eq!(first_page, ids[..QUEUE_CAPACITY]);
+
+        // Once slots free up, maintenance delivers the tail in exact ledger order.
+        drain_group(&home, &group.group_id);
+        let second_page: Vec<String> = rx
+            .try_iter()
+            .map(|job| {
+                complete_job(&job, None);
+                job.event.id
+            })
+            .collect();
+        assert_eq!(second_page, ids[QUEUE_CAPACITY..]);
+        assert!(!pending_group_ids().contains(&group.group_id));
+    }
+
+    #[test]
+    fn dispatch_unread_pending_sources_error_records_catchup_and_recovers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("pending read error", "").expect("group");
+        let _guard = GroupGuard(group.group_id.clone());
+        let pty_actor = Actor::new("pty_peer");
+        let mut native_actor = Actor::new("native_peer");
+        native_actor.external_session_id = "ext_session_1".into();
+        group
+            .actors
+            .extend([pty_actor.clone(), native_actor.clone()]);
+        store.save(&group).expect("save group");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+
+        let pty_msg = append_send(&path, &group.group_id, &pty_actor.id, "for pty");
+        let native_msg = append_send(&path, &group.group_id, &native_actor.id, "for native");
+
+        // Corrupt read_cursors.json so pending_sources fails before any worker exists.
+        let cursor_path = store
+            .state_dir(&group.group_id)
+            .expect("state dir")
+            .join("read_cursors.json");
+        std::fs::write(&cursor_path, b"{not valid json").expect("corrupt cursors");
+
+        assert_eq!(dispatch_unread(&home, &group, &pty_actor.id), 0);
+        assert_eq!(dispatch_unread(&home, &group, &native_actor.id), 0);
+        assert!(pending_group_ids().contains(&group.group_id));
+
+        // Install stub workers and restore the cursor file, then drain.
+        let pty_rx = install_stub_worker(&group.group_id, &pty_actor.id);
+        let native_rx = install_stub_worker(&group.group_id, &native_actor.id);
+        std::fs::remove_file(&cursor_path).expect("restore cursors");
+
+        drain_group(&home, &group.group_id);
+        assert_eq!(
+            pty_rx
+                .try_iter()
+                .map(|job| job.event.id)
+                .collect::<Vec<_>>(),
+            vec![pty_msg.id]
+        );
+        assert_eq!(
+            native_rx
+                .try_iter()
+                .map(|job| job.event.id)
+                .collect::<Vec<_>>(),
+            vec![native_msg.id]
+        );
+        assert!(!pending_group_ids().contains(&group.group_id));
+    }
+
+    #[test]
+    fn already_in_flight_offer_does_not_overwrite_claimed_receipt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("already in flight", "").expect("group");
+        let _guard = GroupGuard(group.group_id.clone());
+        let actor = Actor::new("peer1");
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        let event = append_send(&path, &group.group_id, &actor.id, "in flight");
+
+        crate::ops::runtime_delivery::append_state(
+            &home,
+            &group.group_id,
+            &actor.id,
+            &actor.created_at,
+            &event.id,
+            "pty",
+            crate::ops::runtime_delivery::DeliveryOutcome::Claimed,
+        )
+        .expect("claim");
+        in_flight().lock().expect("in flight").insert((
+            group.group_id.clone(),
+            actor.id.clone(),
+            event.id.clone(),
+        ));
+
+        assert_eq!(
+            offer_delivery(&home, &group, &actor, &event, "pty", true, None),
+            Offer::AlreadyInFlight
+        );
+        let other = Actor::new("other");
+        let targets = [(&other, "pty"), (&actor, "pty")];
+        let Err(error) = reserve_explicit_deliveries(&group, &event, &targets) else {
+            panic!("the existing worker owns the second slot");
+        };
+        assert_eq!(error.code, "delivery_in_progress");
+        assert!(
+            !in_flight().lock().expect("in flight").contains(&(
+                group.group_id.clone(),
+                other.id,
+                event.id.clone()
+            )),
+            "rejecting the whole request releases earlier reservations"
+        );
+        let state = crate::ops::runtime_delivery::latest_state(
+            &home,
+            &group.group_id,
+            &actor.id,
+            &event.id,
+        )
+        .expect("state");
+        assert_eq!(state.map(|(s, _)| s).as_deref(), Some("claimed"));
+        assert!(!pending_group_ids().contains(&group.group_id));
+    }
+
+    #[test]
+    fn queued_managed_retry_keeps_its_claim_when_recovery_or_send_now_runs() {
+        use crate::ops::runtime_delivery::{self, ClaimResult, DeliveryOutcome};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("queued retry", "").expect("group");
+        let _guard = GroupGuard(group.group_id.clone());
+        let mut actor = Actor::new("peer1");
+        actor.runtime = ActorRuntime::Deepseek;
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+
+        for (outcome, gap_eligible) in [
+            (DeliveryOutcome::Failed("turn failed"), false),
+            (DeliveryOutcome::Unsubmitted("no input was sent"), true),
+        ] {
+            let event = append_send(&path, &group.group_id, &actor.id, "queued work");
+            let _worker_slot = DeliverySlot::reserve(&group.group_id, &actor.id, &event.id)
+                .expect("reserve the live worker's slot");
+            let receipt = runtime_delivery::append_state(
+                &home,
+                &group.group_id,
+                &actor.id,
+                &actor.created_at,
+                &event.id,
+                "deepseek",
+                outcome,
+            )
+            .expect("settle the preceding attempt");
+            let latest = || {
+                inbox::latest_delivery_receipt(&home, &group, &actor.id, &event.id)
+                    .expect("load latest receipt")
+                    .expect("delivery receipt")
+                    .id
+            };
+            let args = json!({
+                "group_id": group.group_id,
+                "actor_ids": [actor.id],
+                "source_event_id": event.id,
+            });
+            let response = crate::dispatch::dispatch(
+                &home,
+                &cccc_contracts::DaemonRequest {
+                    v: 1,
+                    op: "message_deliver".into(),
+                    args: args.as_object().expect("delivery args").clone(),
+                },
+            );
+            assert_eq!(
+                response.error.expect("already in the worker").code,
+                "delivery_in_progress"
+            );
+            assert_eq!(latest(), receipt.id, "Send now cannot take the live slot");
+            assert_eq!(dispatch_unread(&home, &group, &actor.id), 0);
+            assert_eq!(
+                latest(),
+                receipt.id,
+                "unread recovery cannot claim it either"
+            );
+
+            if gap_eligible {
+                gaps::record(&group, &actor, Some(&event));
+                let prepared = gaps::prepare_group(
+                    &home,
+                    &group,
+                    &crate::session_owner::OwnerObservations::default(),
+                );
+                assert!(!prepared.is_empty(), "include the known no-handoff receipt");
+                gaps::apply_group(&home, &group, prepared);
+                assert_eq!(latest(), receipt.id, "gap recovery cannot claim it either");
+            }
+            assert_eq!(
+                runtime_delivery::claim_current_attempt(
+                    &home, &group, &actor, &event.id, "deepseek"
+                )
+                .expect("the live worker can reclaim its own work"),
+                ClaimResult::Claimed
+            );
+        }
+    }
+
+    #[test]
+    fn confirmation_paused_backlog_does_not_schedule_refill_spin() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("paused confirmation", "").expect("group");
+        let _guard = GroupGuard(group.group_id.clone());
+        let mut actor = Actor::new("claude");
+        actor.runtime = ActorRuntime::Claude;
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        for index in 0..QUEUE_CAPACITY {
+            append_send(&path, &group.group_id, &actor.id, &format!("wait-{index}"));
+        }
+        crate::ops::local_headless::pause_confirmation(&group.group_id, &actor.id)
+            .expect("pause confirmation");
+        struct PauseGuard(String, String);
+        impl Drop for PauseGuard {
+            fn drop(&mut self) {
+                let _ = crate::ops::local_headless::retry_confirmation(&self.0, &self.1);
+            }
+        }
+        let _pause_guard = PauseGuard(group.group_id.clone(), actor.id.clone());
+
+        assert_eq!(dispatch_unread(&home, &group, &actor.id), 0);
+        assert!(
+            !pending_group_ids().contains(&group.group_id),
+            "paused confirmation backlog must not keep a maintenance refill spinning"
         );
     }
 }

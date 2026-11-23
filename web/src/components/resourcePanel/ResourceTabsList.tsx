@@ -1,8 +1,9 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { FileText, Image as ImageGlyph, Presentation, RotateCcw } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import type { ClosedEntry, ResourceTab } from "../../stores/useResourcePanelStore";
 import { resourceSource } from "./resourceSource";
+import { resourceTabIcon } from "./resourceTabIcon";
 import { classNames } from "../../utils/classNames";
 import { CloseIcon, LcdIcon } from "../Icons";
 import { buttonVariants } from "../ui/button-variants";
@@ -10,6 +11,37 @@ import { buttonVariants } from "../ui/button-variants";
 function matches(tab: ResourceTab, needle: string, source: string) {
   if (!needle) return true;
   return `${tab.title}\n${source}`.toLocaleLowerCase().includes(needle);
+}
+
+/** One recently closed entry; a close-all is one entry and comes back as a whole. */
+export function ClosedEntryRow({
+  entry,
+  onRestore,
+}: {
+  entry: ClosedEntry;
+  onRestore: (entry: ClosedEntry) => void;
+}) {
+  const { t } = useTranslation("chat");
+  return (
+    <button
+      type="button"
+      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--color-text-secondary)] outline-none hover:bg-[var(--glass-tab-bg)] focus:bg-[var(--glass-tab-bg)]"
+      onClick={() => onRestore(entry)}
+      title={t("resourcePanel.reopen")}
+      data-resource-row
+      data-resource-closed-entry
+    >
+      <LcdIcon icon={RotateCcw} glyph="undo" className="h-4 w-4 shrink-0" aria-hidden="true" />
+      <span className="truncate">
+        {entry.tabs.length > 1
+          ? t("resourcePanel.closedGroup", {
+              title: entry.tabs[0].title,
+              rest: entry.tabs.length - 1,
+            })
+          : entry.tabs[0]?.title}
+      </span>
+    </button>
+  );
 }
 
 /**
@@ -122,20 +154,7 @@ export function ResourceTabsList({
                 data-resource-row
               >
                 <LcdIcon
-                  icon={
-                    tab.kind === "workspace"
-                      ? FileText
-                      : tab.kind === "presentation"
-                        ? Presentation
-                        : ImageGlyph
-                  }
-                  glyph={
-                    tab.kind === "workspace"
-                      ? "file-text"
-                      : tab.kind === "presentation"
-                        ? "monitor"
-                        : "image"
-                  }
+                  {...resourceTabIcon(tab)}
                   className="h-4 w-4 shrink-0"
                   aria-hidden="true"
                 />
@@ -171,33 +190,14 @@ export function ResourceTabsList({
               {t("resourcePanel.recentlyClosed")}
             </p>
             {shownClosed.map((entry) => (
-              <button
+              <ClosedEntryRow
                 key={entry.id}
-                type="button"
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--color-text-secondary)] outline-none hover:bg-[var(--glass-tab-bg)] focus:bg-[var(--glass-tab-bg)]"
-                onClick={() => {
-                  onRestore(entry);
+                entry={entry}
+                onRestore={(choice) => {
+                  onRestore(choice);
                   onDone();
                 }}
-                title={t("resourcePanel.reopen")}
-                data-resource-row
-                data-resource-closed-entry
-              >
-                <LcdIcon
-                  icon={RotateCcw}
-                  glyph="undo"
-                  className="h-4 w-4 shrink-0"
-                  aria-hidden="true"
-                />
-                <span className="truncate">
-                  {entry.tabs.length > 1
-                    ? t("resourcePanel.closedGroup", {
-                        title: entry.tabs[0].title,
-                        rest: entry.tabs.length - 1,
-                      })
-                    : entry.tabs[0]?.title}
-                </span>
-              </button>
+              />
             ))}
           </>
         ) : null}

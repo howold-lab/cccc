@@ -34,6 +34,7 @@ fn session(temp: &std::path::Path) -> (Session, super::control_fixture::ControlD
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
+        journal_private: Vec::new(),
     };
     (session, directory)
 }
@@ -69,7 +70,7 @@ fn turn(session: &Session, method: &str, id: &str) {
 }
 
 fn accept(session: &Session, events: &[Event]) -> BatchSubmission {
-    session.admit_batch(events, || BatchSubmission::Accepted)
+    session.admit_batch(events, || BatchSubmission::Accepted(None))
 }
 
 #[tokio::test]
@@ -84,7 +85,10 @@ async fn early_notices_wait_for_the_running_turn_and_land_once_it_completes() {
     assert!(!session.ready_for_mail_notice());
     assert_eq!(accept(&session, &[notice()]), BatchSubmission::Withheld);
     turn(&session, "turn/completed", "turn-1");
-    assert_eq!(accept(&session, &[notice()]), BatchSubmission::Accepted);
+    assert_eq!(
+        accept(&session, &[notice()]),
+        BatchSubmission::Accepted(None)
+    );
 }
 
 #[tokio::test]
@@ -95,15 +99,18 @@ async fn only_early_notices_are_held_and_never_with_real_messages() {
     assert_eq!(accept(&session, &[notice()]), BatchSubmission::Withheld);
     // A notice sent at the busy delay carries no hold window.
     let busy_notice = event("system.notify", json!({"kind":"mail_notice","context":{}}));
-    assert_eq!(accept(&session, &[busy_notice]), BatchSubmission::Accepted);
+    assert_eq!(
+        accept(&session, &[busy_notice]),
+        BatchSubmission::Accepted(None)
+    );
     // A mixed batch carries real messages the sender wants delivered now.
     assert_eq!(
         accept(&session, &[send(), notice()]),
-        BatchSubmission::Accepted
+        BatchSubmission::Accepted(None)
     );
     // Once the busy delay has passed a notice goes out as it always did.
     assert_eq!(
         accept(&session, &[notice_due_in(-1)]),
-        BatchSubmission::Accepted
+        BatchSubmission::Accepted(None)
     );
 }
