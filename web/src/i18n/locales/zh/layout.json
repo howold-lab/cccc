@@ -480,6 +480,17 @@
       "note": "重置时间是根据用量变化推算的，所以标「约」。已用 ≥85% 标红，60–85% 标黄。",
       "chip": "Claude 额度",
       "left": "剩 {{pct}}%"
+    },
+    "needs": {
+      "personal": "要你本人",
+      "recommend": "推荐",
+      "take": "按推荐",
+      "other": "其他",
+      "choose": "选择",
+      "takeAll": "全部按推荐（{{count}}）",
+      "takeAllConfirm": "按推荐回答这 {{count}} 件？「要你本人」的不会动。",
+      "more": "还有 {{count}} 件",
+      "fold": "收起"
     }
   },
   "sections": {

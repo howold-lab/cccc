@@ -6,7 +6,6 @@ import { MenuIcon } from "../../components/Icons";
 import { Button } from "../../components/ui/button";
 import { IconButton } from "../../components/ui/icon-button";
 import { sendMessage } from "../../services/api/context";
-import { answerPendingReply } from "../../services/api/pendingReplies";
 import type { GroupMeta } from "../../types";
 import { newClientId } from "../../utils/clientId";
 import { PendingSummaryContext } from "../pendingReplies/context";
@@ -17,12 +16,15 @@ import { readLastAsked } from "./askModel";
 import { useSidebarSectionsStore } from "../../stores/useSidebarSectionsStore";
 import { segmentBySection } from "../../components/layout/sidebarSectionsModel";
 import { oneLine } from "./plainText";
+import { NeedRow } from "./NeedRow";
 import {
-  useOverviewData,
-  type OverviewActivity,
-  type OverviewAgent,
-  type OverviewPendingItem,
-} from "./useOverviewData";
+  answerNeed,
+  NEEDS_VISIBLE,
+  canTakeRecommendation,
+  recommendedOption,
+  sortNeeds,
+} from "./needsModel";
+import { useOverviewData, type OverviewActivity, type OverviewAgent } from "./useOverviewData";
 
 type Tone = "working" | "waiting" | "stuck" | "idle" | "stopped";
 
@@ -52,11 +54,13 @@ function Card({
   title,
   count,
   aside,
+  action,
   children,
 }: {
   title: string;
   count?: number;
   aside?: string;
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -73,95 +77,10 @@ function Card({
             {aside}
           </span>
         ) : null}
+        {action ? <span className={aside ? "shrink-0" : "ml-auto shrink-0"}>{action}</span> : null}
       </header>
       {children}
     </section>
-  );
-}
-
-function PendingRow({
-  item,
-  groupTitle,
-  readOnly,
-  onOpen,
-  onAnswered,
-}: {
-  item: OverviewPendingItem;
-  groupTitle: string;
-  readOnly: boolean;
-  onOpen: () => void;
-  onAnswered: () => void;
-}) {
-  const { t, i18n } = useTranslation("layout");
-  const [busy, setBusy] = useState("");
-  const [failed, setFailed] = useState(false);
-  const question = item.question;
-  const options = question?.options ?? [];
-  const prompt = question?.prompt || item.text;
-
-  const answer = async (optionId: string) => {
-    setBusy(optionId);
-    setFailed(false);
-    const response = await answerPendingReply(item.groupId, item.event.id ?? "", newClientId(), {
-      v: 1,
-      option_id: optionId,
-    }).catch(() => null);
-    setBusy("");
-    if (response?.ok) onAnswered();
-    else setFailed(true);
-  };
-
-  return (
-    <li className="px-4 py-3" data-overview-need="question">
-      <div className="flex min-w-0 items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="text-xs text-[var(--color-text-tertiary)]">
-            <span className="font-medium text-[var(--color-text-primary)]">{groupTitle}</span> ·{" "}
-            {item.sender} · {formatTime(item.ts, i18n.language)}
-          </p>
-          <p className="mt-0.5 whitespace-pre-wrap break-words text-sm font-medium leading-6 text-[var(--color-text-primary)]">
-            {prompt}
-          </p>
-          {options.length > 0 ? (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {options.map((option) => {
-                const recommended = question?.recommended?.option_id === option.id;
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    disabled={readOnly || !!busy}
-                    onClick={() => void answer(option.id)}
-                    title={option.consequence || undefined}
-                    className="max-w-full rounded-lg border px-3 py-1.5 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-60"
-                    data-overview-option={option.id}
-                    data-recommended={recommended ? "" : undefined}
-                  >
-                    {option.id}. {option.label}
-                    {recommended ? (
-                      <span className="ml-1 text-[11px]"> · {t("overview.recommended")}</span>
-                    ) : null}
-                    {busy === option.id ? (
-                      <span className="ml-2 text-xs text-[var(--color-text-tertiary)]">
-                        {t("overview.sending")}
-                      </span>
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
-          {failed ? (
-            <p className="mt-1 text-xs text-[var(--color-accent-danger)]">
-              {t("overview.answerFailed")}
-            </p>
-          ) : null}
-        </div>
-        <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={onOpen}>
-          {t("overview.openInGroup")}
-        </Button>
-      </div>
-    </li>
   );
 }
 
@@ -438,6 +357,26 @@ export function OverviewPage({
         Date.now() - new Date(activity.unanswered.ts).getTime() >= UNANSWERED_AFTER_MS,
     );
   const needsTotal = data.pending.length + unanswered.length;
+  const sortedNeeds = sortNeeds(data.pending);
+  const quickNeeds = sortedNeeds.filter(canTakeRecommendation);
+  const [needsExpanded, setNeedsExpanded] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const takeAllRecommended = async () => {
+    if (!quickNeeds.length) return;
+    if (!window.confirm(t("overview.needs.takeAllConfirm", { count: quickNeeds.length }))) return;
+    setBulkBusy(true);
+    for (const item of quickNeeds) {
+      const option = recommendedOption(item);
+      if (option) await answerNeed(item, option.option.id);
+    }
+    setBulkBusy(false);
+    answered();
+  };
+  const needRows = [
+    ...sortedNeeds.map((item) => ({ kind: "question" as const, item })),
+    ...unanswered.map((activity) => ({ kind: "unanswered" as const, activity })),
+  ];
+  const shownNeeds = needsExpanded ? needRows : needRows.slice(0, NEEDS_VISIBLE);
   const unansweredGroups = new Set(unanswered.map((activity) => activity.groupId));
 
   const rows: ProjectRow[] = groups
@@ -585,7 +524,20 @@ export function OverviewPage({
                 <Card
                   title={t("overview.needsTitleFact")}
                   count={needsTotal}
-                  aside={t("overview.needsAside")}
+                  action={
+                    !readOnly && quickNeeds.length > 1 ? (
+                      <button
+                        type="button"
+                        disabled={bulkBusy}
+                        onClick={() => void takeAllRecommended()}
+                        data-need-action="take-all"
+                      >
+                        {bulkBusy
+                          ? t("overview.sending")
+                          : t("overview.needs.takeAll", { count: quickNeeds.length })}
+                      </button>
+                    ) : undefined
+                  }
                 >
                   {data.loading ? (
                     <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
@@ -597,24 +549,42 @@ export function OverviewPage({
                     </p>
                   ) : (
                     <ul data-overview-list>
-                      {data.pending.map((item) => (
-                        <PendingRow
-                          key={`${item.groupId}:${item.event.id}`}
-                          item={item}
-                          groupTitle={titles[item.groupId] ?? item.groupId}
-                          readOnly={readOnly}
-                          onOpen={() => onOpenPending(item.groupId)}
-                          onAnswered={answered}
-                        />
-                      ))}
-                      {unanswered.map((activity) => (
-                        <UnansweredRow
-                          key={`unanswered:${activity.groupId}`}
-                          groupTitle={titles[activity.groupId] ?? activity.groupId}
-                          activity={activity}
-                          onOpen={() => onOpenGroup(activity.groupId)}
-                        />
-                      ))}
+                      {shownNeeds.map((row) =>
+                        row.kind === "question" ? (
+                          <NeedRow
+                            key={`${row.item.groupId}:${row.item.event.id}`}
+                            item={row.item}
+                            groupTitle={titles[row.item.groupId] ?? row.item.groupId}
+                            when={age(row.item.ts)}
+                            readOnly={readOnly}
+                            onOpen={() => onOpenPending(row.item.groupId)}
+                            onAnswered={answered}
+                          />
+                        ) : (
+                          <UnansweredRow
+                            key={`unanswered:${row.activity.groupId}`}
+                            groupTitle={titles[row.activity.groupId] ?? row.activity.groupId}
+                            activity={row.activity}
+                            onOpen={() => onOpenGroup(row.activity.groupId)}
+                          />
+                        ),
+                      )}
+                      {needRows.length > NEEDS_VISIBLE ? (
+                        <li>
+                          <button
+                            type="button"
+                            onClick={() => setNeedsExpanded((value) => !value)}
+                            className="w-full px-4 py-2 text-left text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+                            data-needs-more
+                          >
+                            {needsExpanded
+                              ? t("overview.needs.fold")
+                              : t("overview.needs.more", {
+                                  count: needRows.length - NEEDS_VISIBLE,
+                                })}
+                          </button>
+                        </li>
+                      ) : null}
                     </ul>
                   )}
                 </Card>

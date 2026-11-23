@@ -480,6 +480,17 @@
       "note": "リセット時刻は使用量の変化から推定しているため「約」と表示します。85% 以上は赤、60–85% は黄。",
       "chip": "Claude 利用枠",
       "left": "残り {{pct}}%"
+    },
+    "needs": {
+      "personal": "本人の判断",
+      "recommend": "推奨",
+      "take": "推奨で回答",
+      "other": "その他",
+      "choose": "選ぶ",
+      "takeAll": "すべて推奨で回答（{{count}}）",
+      "takeAllConfirm": "この {{count}} 件を推奨どおりに回答しますか？本人の判断が必要なものは対象外です。",
+      "more": "ほか {{count}} 件",
+      "fold": "閉じる"
     }
   },
   "sections": {

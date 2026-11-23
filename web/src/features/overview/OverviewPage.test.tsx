@@ -157,23 +157,25 @@ async function render(props: Partial<Parameters<typeof OverviewPage>[0]> = {}) {
   return { onOpenGroup, onOpenPending };
 }
 
-it("lists questions waiting on the user across Groups with their choices", async () => {
+it("lists questions waiting on the user in two lines, with every choice on demand", async () => {
   await render();
 
   const row = host.querySelector('[data-overview-need="question"]')!;
   expect(row.textContent).toContain("Where should the price go?");
   expect(row.textContent).toContain("Knowledge base");
+  expect(row.querySelector("[data-need-rec]")!.textContent).toContain("Clearest");
+  expect(row.querySelectorAll("[data-overview-option]")).toHaveLength(0);
+  act(() => row.querySelector<HTMLButtonElement>("[data-need-toggle]")!.click());
   expect(row.querySelectorAll("[data-overview-option]")).toHaveLength(2);
-  expect(row.textContent).toContain("overview.recommended");
   expect(api.pending).toHaveBeenCalledWith("kb", undefined, expect.anything());
   expect(api.pending).not.toHaveBeenCalledWith("ops", undefined, expect.anything());
 });
 
-it("answers a choice in place and reads again", async () => {
+it("takes the recommendation in one click and reads again", async () => {
   await render();
 
   await act(async () => {
-    host.querySelector<HTMLButtonElement>('[data-overview-option="A"]')!.click();
+    host.querySelector<HTMLButtonElement>('[data-need-action="take"]')!.click();
   });
   await flush();
 
@@ -184,9 +186,26 @@ it("answers a choice in place and reads again", async () => {
   expect(api.summary.mock.calls.length).toBeGreaterThan(1);
 });
 
+it("answers another choice from the opened question", async () => {
+  await render();
+
+  act(() => host.querySelector<HTMLButtonElement>('[data-need-action="more"]')!.click());
+  await act(async () => {
+    host.querySelector<HTMLButtonElement>('[data-overview-option="B"]')!.click();
+  });
+  await flush();
+
+  expect(api.answer).toHaveBeenCalledWith("kb", "event-1", expect.any(String), {
+    v: 1,
+    option_id: "B",
+  });
+});
+
 it("does not offer answers to a read-only viewer", async () => {
   await render({ readOnly: true });
 
+  expect(host.querySelector("[data-need-action]")).toBeNull();
+  act(() => host.querySelector<HTMLButtonElement>("[data-need-toggle]")!.click());
   const option = host.querySelector<HTMLButtonElement>('[data-overview-option="A"]')!;
   expect(option.disabled).toBe(true);
 });
@@ -203,8 +222,9 @@ it("shows what each agent is doing and opens its Group", async () => {
   act(() => working.click());
   expect(onOpenGroup).toHaveBeenCalledWith("kb");
 
-  const open = [...host.querySelectorAll("button")].find(
-    (button) => button.textContent === "overview.openInGroup",
+  act(() => host.querySelector<HTMLButtonElement>("[data-need-toggle]")!.click());
+  const open = [...host.querySelectorAll("button")].find((button) =>
+    button.textContent?.startsWith("overview.openInGroup"),
   )!;
   act(() => open.click());
   expect(onOpenPending).toHaveBeenCalledWith("kb");

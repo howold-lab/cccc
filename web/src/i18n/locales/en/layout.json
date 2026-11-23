@@ -480,6 +480,17 @@
       "note": "Reset times are inferred from usage, hence “about”. Red at 85% used or more, amber from 60%.",
       "chip": "Claude quota",
       "left": "{{pct}}% left"
+    },
+    "needs": {
+      "personal": "Needs you",
+      "recommend": "Recommended",
+      "take": "Take it",
+      "other": "Other",
+      "choose": "Choose",
+      "takeAll": "Take all recommended ({{count}})",
+      "takeAllConfirm": "Answer these {{count}} with their recommendations? Ones that need you personally are left alone.",
+      "more": "{{count}} more",
+      "fold": "Show less"
     }
   },
   "sections": {
