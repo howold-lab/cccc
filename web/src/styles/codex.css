@@ -375,14 +375,16 @@
   margin-bottom: 0.25rem;
 }
 
-/* Agents' messages: a light framed card under the author, so long replies read as one
-   block instead of loose text on the page. */
+/* Agents' messages: a framed card under the author, so long replies read as one block
+   instead of loose text on the page. The page is white, so the card takes a soft grey
+   fill and a clearly visible edge rather than relying on a hairline alone. */
 :root[data-ui-style="lcd"] .lcd-row:not([data-lcd-user]) .lcd-row-body {
   margin: 0.25rem 0 0.5rem calc(1.25rem + 0.75ch);
-  padding: 0.625rem 0.875rem;
-  border: 1px solid var(--lcd-rule-strong);
+  padding: 0.75rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--lcd-ink) 16%, transparent);
   border-radius: 14px;
-  background: var(--lcd-raised);
+  background: color-mix(in srgb, var(--lcd-ink) 3.5%, var(--lcd-bg));
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--lcd-ink) 6%, transparent);
 }
 
 @media (max-width: 767px) and (pointer: coarse) {
