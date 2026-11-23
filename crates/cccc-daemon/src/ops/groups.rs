@@ -120,6 +120,10 @@ fn create(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 }
 
 fn list(home: &HomeLayout) -> OpResult {
+    crate::session_owner::read_scope(|| list_snapshot(home))
+}
+
+fn list_snapshot(home: &HomeLayout) -> OpResult {
     let store = store(home)?;
     let groups = store
         .list()
@@ -136,6 +140,10 @@ fn list(home: &HomeLayout) -> OpResult {
 }
 
 fn show(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    crate::session_owner::read_scope(|| show_snapshot(home, request))
+}
+
+fn show_snapshot(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
     let scope = actor_runtime::caller_scope(&group, &by)?;
@@ -633,7 +641,7 @@ fn set_state(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             )
             .map_err(OpError::io)?;
         }
-        actor_delivery::shutdown_group(&group.group_id);
+        actor_delivery::pause_group(&group.group_id);
         super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
         super::deepseek_runtime::stop_group(&group.group_id);
     }
@@ -663,12 +671,28 @@ fn running(home: &HomeLayout, request: &DaemonRequest, value: bool) -> OpResult 
         cccc_core::automation::reset_rule_timers_on_resume(home, &group.group_id)
             .map_err(OpError::io)?;
     }
+    // Each member's saved-conversation note before the start, to tell whom this start replaced.
+    let replaced_before: Vec<(String, Value)> = if value {
+        group
+            .actors
+            .iter()
+            .filter(|actor| actor.enabled)
+            .map(|actor| {
+                let at = super::runtime_session::replaced_at(home, &group.group_id, &actor.id);
+                (actor.id.clone(), at)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let runtimes = if value {
         // Scheduler requests also use by=user, so their source marker must retain
         // confirmation pauses. User controls may retry an Active or Stopped Group.
         if actor_runtime::user_confirmation_retry(request) {
             for actor in group.actors.iter().filter(|actor| actor.enabled) {
-                if !actor_runtime::actor_is_running(&group, actor) {
+                if !actor_runtime::actor_is_running(&group, actor)
+                    && !actor_runtime::hermes_setup_open(home, &group.group_id, actor)?
+                {
                     super::local_headless::retry_confirmation(&group.group_id, &actor.id)
                         .map_err(OpError::io)?;
                 }
@@ -703,9 +727,20 @@ fn running(home: &HomeLayout, request: &DaemonRequest, value: bool) -> OpResult 
     if value {
         actor_delivery::dispatch_group_unread(home, &updated);
     }
-    object(
-        json!({"group": group_runtime::group(home, updated), "running": value, "runtimes": runtimes}),
-    )
+    let mut result = json!({"group": group_runtime::group(home, updated), "running": value, "runtimes": runtimes});
+    let replaced: Vec<Value> = replaced_before
+        .iter()
+        .filter_map(|(actor_id, before)| {
+            let mut replaced =
+                super::runtime_session::replaced_since(home, &group.group_id, actor_id, before)?;
+            replaced["actor_id"] = json!(actor_id);
+            Some(replaced)
+        })
+        .collect();
+    if !replaced.is_empty() {
+        result["runtime_sessions_replaced"] = Value::Array(replaced);
+    }
+    object(result)
 }
 
 fn load(home: &HomeLayout, request: &DaemonRequest) -> Result<GroupDoc, OpError> {

@@ -37,6 +37,7 @@ const item = (media: "image" | "video"): MediaViewerItem => ({
     eventId: "event",
     index: 0,
     blobPath: `state/blobs/${media}`,
+    siblings: [],
   },
 });
 const dialog = () => document.querySelector<HTMLElement>("[data-media-viewer]");

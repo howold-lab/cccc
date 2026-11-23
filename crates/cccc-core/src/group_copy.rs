@@ -597,6 +597,7 @@ fn excluded(relative: &str, _is_dir: bool) -> bool {
         "headless",
         "hermes",
         "kiro",
+        "mcp-bindings",
         "playwright",
         "projections",
         "pty",
@@ -865,14 +866,12 @@ fn write_history_line(
     if identity.old_group != identity.new_group {
         edits.push((group, serde_json::to_vec(identity.new_group)?));
     }
-    if !identity.old_scope.is_empty() && identity.old_scope != identity.new_scope {
-        if let Some(scope) = parsed.scope_key {
-            if serde_json::from_str::<String>(scope.get()).ok().as_deref()
-                == Some(identity.old_scope)
-            {
-                edits.push((scope, serde_json::to_vec(identity.new_scope)?));
-            }
-        }
+    if !identity.old_scope.is_empty()
+        && identity.old_scope != identity.new_scope
+        && let Some(scope) = parsed.scope_key
+        && serde_json::from_str::<String>(scope.get()).ok().as_deref() == Some(identity.old_scope)
+    {
+        edits.push((scope, serde_json::to_vec(identity.new_scope)?));
     }
     if edits.is_empty() {
         return writer.write_all(line);
@@ -1478,6 +1477,7 @@ mod tests {
             "state/message_pinſ/pins.json",
             "state/paẞword/note.txt",
             "state/KIRO/session.txt",
+            "state/MCP-BINDINGS/instance.json",
         ] {
             assert!(excluded(name, false), "private alias {name}");
         }

@@ -129,11 +129,7 @@ export function GroupSidebar({
     [archivedSet, orderedGroups],
   );
   const sectionLayout = useSidebarSectionsStore((state) => state.layout);
-  const sectionsLoaded = useSidebarSectionsStore((state) => state.loaded);
   const foldedSections = useSidebarSectionsStore((state) => state.collapsed);
-  useEffect(() => {
-    if (!sectionsLoaded) void useSidebarSectionsStore.getState().load();
-  }, [sectionsLoaded]);
   const split = useMemo(
     () => splitIntoSections(workingGroups, sectionLayout),
     [sectionLayout, workingGroups],
@@ -368,8 +364,12 @@ export function GroupSidebar({
   const localSessionsEntry = (collapsed: boolean) =>
     !readOnly && canAccessLocalSessions ? (
       <LocalSessionsButton
+        initialTargetGroupId={selectedGroupId || undefined}
         collapsed={collapsed}
         isDark={isDark}
+        hubName={
+          connect?.ownInstance ? instanceName(connect.ownInstance, connect.instances) : undefined
+        }
         onSelectGroup={(groupId) => {
           onSelectGroup(groupId);
           if (window.matchMedia("(max-width: 767px)").matches) onClose();

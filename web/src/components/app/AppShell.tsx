@@ -5,7 +5,8 @@ import { useGroupActivityFeed } from "../../stores/useGroupActivityStore";
 import { QuickJump } from "../../features/overview/QuickJump";
 import { requestWorkspaceNavigation } from "../../stores/workspaceNavigation";
 import { WorkspaceNavigationDialog } from "../workspace/WorkspaceNavigationDialog";
-import { useCallback, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useSidebarSectionsStore } from "../../stores/useSidebarSectionsStore";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AppHeader } from "../layout/AppHeader";
 import { GroupConnectionsControl } from "../../features/connect/GroupConnectionsControl";
@@ -63,7 +64,7 @@ type AppShellProps = {
   isDark: boolean;
   isSmallScreen: boolean;
   webReadOnly: boolean;
-  selectedGroupRunning: boolean;
+  selectedGroupRunning: boolean | null;
   selectedGroupRuntimeStatus: GroupRuntimeStatus | null;
   selectedGroupActorsHydrating: boolean;
   selectedGroupActorStatusProvisional: boolean;
@@ -247,6 +248,12 @@ export function AppShell({
   const archivedSet = new Set(archivedGroupIds);
   const workingGroups = orderedGroups.filter((group) => !archivedSet.has(group.group_id));
   useGroupActivityFeed(workingGroups, !remoteWorkspace && !connectEmbedded);
+  // The sidebar's sections are shared by every device; read them once for this page.
+  const sectionsLoaded = useSidebarSectionsStore((state) => state.loaded);
+  useEffect(() => {
+    if (!sectionsLoaded && !remoteWorkspace && !connectEmbedded)
+      void useSidebarSectionsStore.getState().load();
+  }, [connectEmbedded, remoteWorkspace, sectionsLoaded]);
   const openPendingReplies = useCallback(
     (groupId: string) => {
       requestWorkspaceNavigation(() => {

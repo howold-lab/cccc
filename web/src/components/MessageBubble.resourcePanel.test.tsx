@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { useChatOutboxStore } from "../stores/chatOutboxStore";
+import { attachmentSetKey, useAttachmentPreviewStore } from "../stores/useAttachmentPreviewStore";
 import { useResourcePanelStore } from "../stores/useResourcePanelStore";
 import { useMediaViewerStore } from "../stores/useMediaViewerStore";
 import type { LedgerEvent } from "../types";
@@ -21,12 +22,15 @@ beforeEach(() => {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
+  // The panel is on screen beside the messages unless a test says otherwise.
+  useResourcePanelStore.setState({ shownGroupId: "displayed-group" });
 });
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
   useChatOutboxStore.getState().clearAll();
-  useResourcePanelStore.setState({ groups: {} });
+  useResourcePanelStore.setState({ groups: {}, shownGroupId: "" });
+  useAttachmentPreviewStore.setState({ sets: {}, viewing: null });
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -170,4 +174,69 @@ it("keeps attachments from different authors with the same client id in separate
     "event-a",
     "event-b",
   ]);
+});
+
+const mixedMessage = {
+  id: "event-mixed",
+  ts: "2026-11-19T10:00:00Z",
+  group_id: "blob-owner",
+  kind: "chat.message",
+  by: "agent-a",
+  data: {
+    attachments: [
+      { path: "state/blobs/chart", title: "chart.png", mime_type: "image/png" },
+      { path: "state/blobs/voice", title: "voice.mp3", mime_type: "audio/mpeg" },
+      { path: "state/blobs/report", title: "report.pdf", mime_type: "application/pdf" },
+      { path: "state/blobs/data", title: "data.zip", mime_type: "application/zip" },
+      { path: "state/blobs/photo", title: "photo.png", mime_type: "image/png" },
+    ],
+  },
+} as unknown as LedgerEvent;
+
+it("shows an image in the centered viewer without touching the panel", async () => {
+  useResourcePanelStore.setState({ shownGroupId: "" });
+  await renderMessage(mixedMessage);
+  // Images are drawn first: the chart, then the photo.
+  const photo = host.querySelectorAll<HTMLButtonElement>("[data-image-frame]")[1];
+  expect(photo).toBeDefined();
+  act(() => photo.click());
+
+  expect(useResourcePanelStore.getState().groups["displayed-group"]).toBeUndefined();
+  expect(useAttachmentPreviewStore.getState().viewing).toBeNull();
+  const item = useMediaViewerStore.getState().item!;
+  expect(item.media).toBe("image");
+  expect(item.resource).toMatchObject({ panelGroupId: "displayed-group", index: 4 });
+  // The message's previewable attachments, in its own order, travel with it to the panel.
+  expect(
+    item.resource.siblings.map((entry) => [
+      entry.resource.index,
+      entry.resource.media,
+      entry.title,
+    ]),
+  ).toEqual([
+    [0, "image", "chart.png"],
+    [2, "pdf", "report.pdf"],
+    [4, "image", "photo.png"],
+  ]);
+  act(() => useMediaViewerStore.getState().close());
+});
+
+it("opens in the panel only for the Group whose panel is on screen", async () => {
+  useResourcePanelStore.setState({ shownGroupId: "another-group" });
+  await renderMessage(mixedMessage);
+  const report = () => host.querySelector<HTMLButtonElement>('button[aria-label="previewFile"]')!;
+  act(() => report().click());
+  expect(useResourcePanelStore.getState().groups["displayed-group"]).toBeUndefined();
+  expect(useAttachmentPreviewStore.getState().viewing?.index).toBe(2);
+
+  act(() => useAttachmentPreviewStore.getState().close());
+  useResourcePanelStore.setState({ shownGroupId: "displayed-group" });
+  act(() => report().click());
+  const panel = useResourcePanelStore.getState().groups["displayed-group"];
+  expect(panel.tabs.map((tab) => tab.key)).toEqual(["attachment:event-mixed:2"]);
+  expect(useAttachmentPreviewStore.getState().viewing).toBeNull();
+  // The tab can step through the same message.
+  expect(
+    useAttachmentPreviewStore.getState().sets[attachmentSetKey("displayed-group", "event-mixed")],
+  ).toHaveLength(3);
 });

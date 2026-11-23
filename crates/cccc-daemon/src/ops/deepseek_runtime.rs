@@ -7,10 +7,13 @@ mod recovery;
 mod turn_failure;
 mod turn_timeout;
 
+pub use delivery::TurnDelivery;
 #[cfg(test)]
 pub use delivery::deliver;
-pub use delivery::{TurnDelivery, deliver_marked};
+pub(crate) use delivery::deliver_marked;
+pub(crate) use delivery::deliver_prepared;
 pub use lifecycle::apply;
+pub(crate) use lifecycle::check_replacement;
 
 use cccc_contracts::Actor;
 use cccc_core::{GroupDoc, HomeLayout};
@@ -53,7 +56,7 @@ pub fn start(
     start_with_private_values(home, group, actor, cwd, Vec::new())
 }
 
-fn start_with_private_values(
+pub(crate) fn start_with_private_values(
     home: &HomeLayout,
     group: &GroupDoc,
     actor: &Actor,
@@ -74,30 +77,27 @@ fn start_with_private_values(
     );
     env.insert("CCCC_GROUP_ID".into(), group.group_id.clone());
     env.insert("CCCC_ACTOR_ID".into(), actor.id.clone());
-    let session_root = home
+    let member_state = home
         .root()
         .join("groups")
         .join(&group.group_id)
         .join("state/deepseek")
-        .join(&actor.id)
-        .join("sessions");
-    std::fs::create_dir_all(&session_root)?;
-    env.insert(
-        "CCCC_DEEPSEEK_SESSION_ROOT".into(),
-        session_root.to_string_lossy().into_owned(),
-    );
+        .join(&actor.id);
     if let Some(key) = env.get("DEEPSEEK_API_KEY") {
         private_values.push(key.clone());
     }
     private_values.retain(|value| !value.is_empty());
     private_values.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
     private_values.dedup();
-    let command = launch_command::resolve(actor, &env)?;
+    let cccc = super::codex_mcp::resolve_cccc_executable();
+    let launch = launch_command::prepare(actor, &mut env, &member_state, &cwd, cccc.as_deref())?;
     let env = env.into_iter().collect::<Vec<_>>();
     supervisor
-        .start(&command, &cwd, &env)
+        .start(&launch.command, &launch.cwd, &env)
         .map_err(std::io::Error::other)?;
-    if let Err(error) = supervisor.handshake(&cwd, Duration::from_secs(5)) {
+    // The official profile can spend five seconds fetching its model catalog during initialize.
+    let handshake_timeout = Duration::from_secs(if launch.mcp_servers.is_empty() { 5 } else { 30 });
+    if let Err(error) = supervisor.handshake(&cwd, &launch.mcp_servers, handshake_timeout) {
         let _ = supervisor.stop();
         return Err(std::io::Error::other(format!(
             "deepseek ACP handshake failed: {error}"
@@ -145,10 +145,10 @@ fn start_with_private_values(
 
 pub fn stop(group_id: &str, actor_id: &str) {
     let key = (group_id.to_owned(), actor_id.to_owned());
-    if let Ok(flags) = cancel_flags().read() {
-        if let Some(flag) = flags.get(&key) {
-            flag.store(true, Ordering::Release);
-        }
+    if let Ok(flags) = cancel_flags().read()
+        && let Some(flag) = flags.get(&key)
+    {
+        flag.store(true, Ordering::Release);
     }
     if let Some(holder) = sessions().write().ok().and_then(|mut map| map.remove(&key)) {
         holder.running.store(false, Ordering::Release);
@@ -236,6 +236,19 @@ pub(super) fn cancellation_requested(group_id: &str, actor_id: &str) -> bool {
 }
 
 pub fn running(group_id: &str, actor_id: &str) -> bool {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => {
+            return snapshot.owner.is_some_and(|owner| {
+                matches!(
+                    owner.identity,
+                    super::actor_runtime::OwnerIdentity::DeepSeek { .. }
+                ) && owner.state == super::actor_runtime::OwnerState::Running
+            });
+        }
+        Err(_) => return false,
+        Ok(None) => {}
+    }
     let key = (group_id.to_owned(), actor_id.to_owned());
     sessions()
         .read()
@@ -244,10 +257,32 @@ pub fn running(group_id: &str, actor_id: &str) -> bool {
         .is_some_and(|holder| entry_running(&holder))
 }
 
-pub(super) fn registered_workspace(
+pub(crate) fn registered_workspace(
     group_id: &str,
     actor_id: &str,
 ) -> Option<(bool, super::actor_runtime::LaunchWorkspace)> {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => {
+            return snapshot.owner.and_then(|owner| {
+                if matches!(
+                    owner.identity,
+                    super::actor_runtime::OwnerIdentity::DeepSeek { .. }
+                ) {
+                    snapshot.workspace.map(|workspace| {
+                        (
+                            owner.state == super::actor_runtime::OwnerState::Running,
+                            workspace,
+                        )
+                    })
+                } else {
+                    None
+                }
+            });
+        }
+        Err(_) => return None,
+        Ok(None) => {}
+    }
     let holder = sessions()
         .read()
         .ok()?
@@ -257,7 +292,21 @@ pub(super) fn registered_workspace(
 }
 
 /// The registered session's generation, and whether it is running.
-pub(super) fn registered_generation(group_id: &str, actor_id: &str) -> Option<(String, bool)> {
+pub(crate) fn registered_generation(group_id: &str, actor_id: &str) -> Option<(String, bool)> {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => {
+            return snapshot.owner.and_then(|owner| match owner.identity {
+                super::actor_runtime::OwnerIdentity::DeepSeek { generation } => Some((
+                    generation,
+                    owner.state == super::actor_runtime::OwnerState::Running,
+                )),
+                _ => None,
+            });
+        }
+        Err(_) => return None,
+        Ok(None) => {}
+    }
     let holder = sessions()
         .read()
         .ok()?

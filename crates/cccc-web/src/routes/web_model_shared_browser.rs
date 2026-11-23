@@ -142,7 +142,9 @@ mod tests {
         {
             return;
         }
-        let _chrome = crate::browser_surface::chrome_test_guard().await;
+        let Some(_chrome) = crate::browser_surface::chrome_test_guard().await else {
+            return;
+        };
         let temp = tempfile::tempdir().expect("temp");
         let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
         let (_, _, _, state) = crate::app_with_shutdown(
@@ -176,7 +178,7 @@ mod tests {
             .expect("login");
         state
             .browser_surfaces
-            .ensure_open_shared_actor("actor", &profile, &url, (800, 600), "gen")
+            .ensure_open_shared_actor("actor", &profile, &url, (800, 600), "gen", "")
             .await
             .expect("actor");
         let page = state

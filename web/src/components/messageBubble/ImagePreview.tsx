@@ -5,6 +5,7 @@ import { MESSAGE_IMAGE_PREVIEW_HEIGHT_PX } from "./imageLayout";
 import { ImagePreviewFailure } from "./ImagePreviewFailure";
 import type { MessageAttachmentSource } from "../resourcePanel/openAttachmentResource";
 import { useMediaViewerStore } from "../../stores/useMediaViewerStore";
+import { resolveSvgImageSource } from "./svgImageSource";
 
 const IMAGE_LOAD_ERROR_CACHE = new Set<string>();
 // The transparency grid is drawn in the panel tones, and the picture shows as it is:
@@ -66,10 +67,15 @@ export function ImagePreview({
           throw new Error(`svg_fetch_failed:${resp.status}`);
         }
         const blob = await resp.blob();
+        const resolved = await resolveSvgImageSource(blob);
         // The source may have changed while the response body was loading.
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setResolvedHref(objectUrl);
+        if (resolved.kind === "raster") {
+          objectUrl = URL.createObjectURL(resolved.blob);
+          setResolvedHref(objectUrl);
+        } else {
+          setResolvedHref(resolved.src);
+        }
         setIsResolvingSvg(false);
       } catch {
         if (!cancelled) {
@@ -164,15 +170,17 @@ export function ImagePreview({
             : "border-[rgba(15,23,42,0.12)] bg-[rgb(238,241,245)] hover:bg-[rgb(232,236,241)]",
       )}
       onClick={() =>
-        useMediaViewerStore.getState().open({
-          media: "image",
-          src: displaySrc || resolvedHref || href,
-          title: alt,
-          downloadHref,
-          downloadName,
-          isSvg,
-          resource,
-        })
+        useMediaViewerStore
+          .getState()
+          .open({
+            media: "image",
+            src: displaySrc || resolvedHref || href,
+            title: alt,
+            downloadHref,
+            downloadName,
+            isSvg,
+            resource,
+          })
       }
       data-image-frame
       aria-label={t("openImagePreview", { name: alt })}

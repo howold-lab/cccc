@@ -14,7 +14,7 @@ Connect the Claude Code, Codex, Pi and OpenCode sessions you already run, or let
 One install command. No Rust toolchain, database server, message broker or Docker required.
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=232425)](https://pypi.org/project/cccc-pair/)
-[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
+[![Rust 1.91+](https://img.shields.io/badge/Rust-1.91%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-232425)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-online-232425)](https://chesterra.github.io/cccc/)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/m8wuB7VSJ)
@@ -47,17 +47,17 @@ When several coding agents share work, you need to know who owns a task, whether
 - **CCCC Connect** links Groups across machines and teams; each instance keeps its own state.
 - **Local-first.** Runtime state stays in `CCCC_HOME` (default `~/.cccc/`), outside your repository.
 
-## What's new in 0.4.54
+## What's new in 0.4.60
 
-- **A conversation that was not resumed leaves a record.** When an agent that CCCC starts comes back on a new conversation although an earlier one was saved, its page now shows a small information mark after the status, with the time and the compared settings that had changed, and CCCC attempts to write one notice to the user. Which conversation a start selects is unchanged.
-- **Rotated ledger segments are read in order.** History and the Inbox read a Group's rotated ledger segments in the order they were rotated, even when the system clock went backwards between two rotations. Before, history could show messages out of order and an Inbox read could skip Mail.
-- **Fewer redundant ledger checks on Linux.** CCCC Web no longer checks a Group's ledger again when a program only opens it for reading.
-- **Layout fixes.** On a phone-sized screen, the Edit button under a stopped agent's page no longer breaks its label over two lines. The Group menu is no longer much wider than its items, and three smaller layout defects are fixed.
-- **A removed agent leaves Agent State.** Agent State no longer shows a card for an agent that was removed from the Group.
+- **Let Chet act for you while you are away (Experimental).** Turn on **Unattended** in Chet's title bar (off by default) and each new message a member on this instance sends you with Send or Send + Reply also goes to Chet, which can reply, answer question cards for you, or flag a risk; it is instructed to leave to you what only you can do. You still get every message; a card Chet answered says so, and you can correct it by replying.
+- **Choose which messages notify you.** In **Settings > Notifications**, each browser can notify you for **All messages to me** or **Only when a reply is requested**, so a phone can stay quiet until someone needs your answer.
+- **See where a message went.** When CCCC has the evidence, the recipient list says whether a message was written to a member's terminal or accepted by its runtime, and it can show why a message is still waiting. For a plain message, open it from **Show recipient status** in the message's action menu.
+- **Recover missed deliveries.** Messages not yet handed to the runtime, or known not to have been submitted, during a short disconnection are delivered when the member is back. A partial terminal write stays unconfirmed and is not replayed automatically.
+- **One unresponsive session owner no longer holds up the others.** While CCCC is running, if one session owner stops responding, new messages can still reach running members whose healthy owner CCCC can verify. Those members can also be stopped individually.
 
-**Upgrade notes.** Before upgrading, let sends and recordings finish, restore or discard waiting sends, then send or copy every unsent draft and save unsaved edits in Files: all of these live only in the open page. Check whether a message already arrived before sending it again. Then restart the daemon and Web and reload open pages. Saved conversations are matched as before; a start that does not resume one now leaves a record, and CCCC attempts to write one notice. In a Group whose rotated ledger segments were already read in the wrong order, Mail that an Inbox read had passed over may not return to the Inbox; it remains in the Group's history.
+**Upgrade notes.** On Linux and native Apple Silicon Macs, a compatible update from 0.4.59 can keep agents running; Windows updates restart agents. A member kept running from 0.4.59 can still show **Sent to runtime** until it is restarted. Managed and DeepSeek members kept running from 0.4.59 need a restart of that member for the delivery and individual-stop fix above. If a session owner is already unresponsive when CCCC starts, startup can still fail; see the release notes for recovery.
 
-Details: [0.4.54 release notes](https://chesterra.github.io/cccc/release/v0.4.54_release_notes).
+Details: [0.4.60 release notes](https://chesterra.github.io/cccc/release/v0.4.60_release_notes).
 
 ## Quick start
 
@@ -164,6 +164,7 @@ Chet is one assistant for the whole CCCC instance, outside every Group's member 
 - **Runtime:** set it under **Settings → This instance → Voice → Chet → Runtime**. CCCC keeps Chet's history of inputs, transcripts and results on the machine running CCCC; what you send still goes to the model and voice providers you configure.
 - **Voice (experimental):** **Codex Voice** uses `codex login`; **Grok Voice** uses `grok login` and needs `grok` on CCCC's PATH. Neither needs an extra API key. Reported Grok Voice pitch and timbre drift is not confirmed fixed.
 - **In Groups:** members reach Chet by choosing `@chet` as the only recipient, with Send or Send + Reply but not Mail.
+- **Unattended (experimental):** while the switch in Chet's title bar is on, messages members send you with Send or Send + Reply also go to Chet, which can reply and answer question cards for you. See [Unattended mode](https://chesterra.github.io/cccc/guide/web-ui#unattended-mode).
 - **Limits:** messages from every Group enter Chet's one session, and keeping them apart is an instruction to the model, not isolation. Chet does not forward between Groups or send through CCCC Connect.
 
 **Voice Secretary**, under **Settings → This instance → Voice → Voice Secretary**, is a separate global service that turns recordings into documents, prompt drafts or answers for each Group; all Groups share its conversation. See [Chet](https://chesterra.github.io/cccc/guide/web-ui#chet-global-assistant-experimental) and the [Voice Secretary guide](https://chesterra.github.io/cccc/guide/voice-secretary).
@@ -200,8 +201,8 @@ Each agent can use a different runtime:
 
 | How CCCC runs it | Runtimes (`--runtime` id) |
 |---|---|
-| Native terminal plus a CCCC-managed session | Claude Code (`claude`), Codex CLI (`codex`), Grok Build (`grok`), OpenCode V2 2.1.4+ (`opencode`), Kilo Code (`kilo`) |
-| Native terminal or official ACP | GitHub Copilot (`copilot`), Cursor (`cursor`), Devin (`devin`), Kiro (`kiro`), Antigravity (`antigravity`), Droid (`droid`), Auggie (`auggie`), Hermes (`hermes`), Kimi Code (`kimi`) |
+| Native terminal plus a CCCC-managed session | Claude Code (`claude`), Codex CLI (`codex`), Grok Build (`grok`), OpenCode V2 2.1.4+ (`opencode`), Kilo Code (`kilo`), Hermes (`hermes`, or ACP only) |
+| Native terminal or official ACP | GitHub Copilot (`copilot`), Cursor (`cursor`), Devin (`devin`), Kiro (`kiro`), Antigravity (`antigravity`), Droid (`droid`), Auggie (`auggie`), Kimi Code (`kimi`) |
 | Native terminal | Cline (`cline`), Amp (`amp`) |
 | Structured, no terminal | Pi 1.1.0+ (`pi`), DeepSeek Harness (`deepseek`, developer preview) |
 | Web models | ChatGPT Web (`web_model`), ChatGPT Dots (`chatgpt_dots`), Grok Bot Web Model (`grok_web_model`) |
@@ -335,7 +336,7 @@ CCCC fits several agents sharing a codebase, mixed runtimes such as Claude + Cod
 
 **Upgrade** with `cccc update` for the website installer, or the pip command for pip. `cccc update --check` shows the latest release and the installation owner without changing anything. Before a pip upgrade, run `cccc daemon stop` and close foreground CCCC processes. To switch from pip to the website installer, run `python -m pip uninstall cccc-pair` first. If an older `cccc update` stays on 0.4.35, see the [upgrade FAQ](https://chesterra.github.io/cccc/guide/faq#why-does-an-older-cccc-update-stay-on-0-4-35); the [Operations Runbook](https://chesterra.github.io/cccc/guide/operations) has a full checklist.
 
-**From source**, with Rust 1.88+, Node.js 24 with npm, and Python 3.11+ for the archive helper only:
+**From source**, with Rust 1.91+, Node.js 24 with npm, and Python 3.11+ for the archive helper only:
 
 ```bash
 git clone https://github.com/ChesterRa/cccc

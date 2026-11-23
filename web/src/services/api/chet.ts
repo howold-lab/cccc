@@ -51,6 +51,8 @@ export type ChetGroupSource =
       has_attachments: boolean;
       /** The text stops at a size limit; the Group holds the rest. */
       truncated: boolean;
+      /** Sent to the user; Chet held it as an unattended copy. */
+      copy?: boolean;
       /** Chet's reply to the sender that this Group's ledger shows, if any. */
       reply_event_id: string | null;
     }
@@ -74,8 +76,25 @@ export type ChetRecord =
   | (Base & { kind: "group_dispatch"; input_id: string })
   | (Base & { kind: "receipt"; input_id: string; receipt: { generation: string; turn_id: string } })
   | (Base & { kind: "result"; input_ids: string[]; outcome: ChetOutcome })
-  | (Base & { kind: "not_started"; input_id: string; reason: string })
+  | (Base & {
+      kind: "not_started";
+      input_id: string;
+      reason: string;
+      /** A Group input whose wait for Chet expired: it was never sent. */
+      wait_expired?: boolean;
+    })
   | (Base & { kind: "transcript"; transcript: ChetTranscript });
+
+/** Claude Code refused to run Chet in a working folder it has not trusted. */
+export type ChetStartProblem = { code: "claude_workspace_untrusted"; workspace: string };
+
+function startProblem(value: unknown): ChetStartProblem | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (isObject(value) && value.code === "claude_workspace_untrusted" && isString(value.workspace)) {
+    return { code: value.code, workspace: value.workspace };
+  }
+  return undefined;
+}
 
 /** Live work the Web host can confirm right now; history holds everything else. */
 export type ChetStatus = {
@@ -84,6 +103,8 @@ export type ChetStatus = {
   queued: string[];
   working: string[];
   history_write_failed: boolean;
+  /** A recognized reason the last Chet start failed; null while Chet runs or none is known. */
+  start_problem: ChetStartProblem | null;
   /** The owner was busy, so only `preparing` is known; nothing else may be inferred. */
   owner_busy: boolean;
 };
@@ -141,6 +162,7 @@ function isGroupSource(value: unknown): value is ChetGroupSource {
     ["group_title", "sender_title", "text", "sent_at"].every((key) => isString(value[key])) &&
     typeof value.has_attachments === "boolean" &&
     typeof value.truncated === "boolean" &&
+    (value.copy === undefined || typeof value.copy === "boolean") &&
     (value.reply_event_id === null || isString(value.reply_event_id))
   );
 }
@@ -293,7 +315,8 @@ export async function fetchChetStatus(signal?: AbortSignal): Promise<ApiResponse
     !isStringArray(value.preparing) ||
     !isStringArray(value.queued) ||
     !isStringArray(value.working) ||
-    typeof value.history_write_failed !== "boolean"
+    typeof value.history_write_failed !== "boolean" ||
+    startProblem(value.start_problem) === undefined
   ) {
     return invalid("Chet status response is malformed");
   }
@@ -305,6 +328,7 @@ export async function fetchChetStatus(signal?: AbortSignal): Promise<ApiResponse
       queued: value.queued,
       working: value.working,
       history_write_failed: value.history_write_failed,
+      start_problem: startProblem(value.start_problem) ?? null,
       owner_busy: value.owner_busy === true,
     },
   };
@@ -352,3 +376,32 @@ export function chetSubmissionRefused(code: string): boolean {
 
 /** The ID already names a different request; the original must be reviewed, not replaced. */
 export const CHET_ID_CONFLICT = "chet_history_id_conflict";
+
+/** Unattended mode: while on, Group messages to the user are also given to Chet to handle. */
+export type ChetUnattended = { enabled: boolean; since: string | null };
+
+function unattended(result: unknown): ApiResponse<ChetUnattended> {
+  const value = isObject(result) ? result.unattended : undefined;
+  if (!isObject(value) || typeof value.enabled !== "boolean") {
+    return invalid("Unattended mode response is malformed");
+  }
+  return {
+    ok: true,
+    result: { enabled: value.enabled, since: isString(value.since) ? value.since : null },
+  };
+}
+
+export async function fetchChetUnattended(
+  signal?: AbortSignal,
+): Promise<ApiResponse<ChetUnattended>> {
+  const response = await apiJson<unknown>("/api/v1/chet/unattended", { signal });
+  return response.ok ? unattended(response.result) : response;
+}
+
+export async function updateChetUnattended(enabled: boolean): Promise<ApiResponse<ChetUnattended>> {
+  const response = await apiJson<unknown>("/api/v1/chet/unattended", {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+  return response.ok ? unattended(response.result) : response;
+}

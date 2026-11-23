@@ -27,10 +27,8 @@ import { getDelegationDisplayText, isDelegationSourceOutbound } from "./messageB
 import { MessageActions } from "./messageBubble/MessageActions";
 import { MessagePathContext, messagePathTarget } from "./messageBubble/messagePathContext";
 import {
-  QUICK_REPLY_EMOJI,
-  QUICK_REPLY_KINDS,
   sendQuickReply,
-  type QuickReplyKind,
+  type QuickReplySource,
   type QuickReplyTarget,
 } from "./messageBubble/quickReplies";
 import { MessageFooter } from "./messageBubble/MessageBubbleChrome";
@@ -53,9 +51,22 @@ import { MessageRoutingMetadata } from "./messageBubble/MessageRoutingMetadata";
 import { PendingReplySlot } from "./messageBubble/PendingReplySlot";
 import { PendingReplyStoreContext } from "../features/pendingReplies/store";
 import { useMessagePinned } from "../features/pins/pinStore";
+import {
+  loadQuickReplyTemplates,
+  useQuickReplyTemplateStore,
+} from "../features/quickReplies/templateStore";
+import { effectiveReplyTemplates } from "../features/quickReplies/effective";
 import { PinIcon } from "./Icons";
+import { messageBlobAttachments } from "./messageBubble/attachmentPreviewItems";
 import { useGroupStore, useUIStore } from "../stores";
-import { CHET_NAME, CHET_PRINCIPAL, chetGeneration, isChetMessage } from "../utils/chetIdentity";
+import {
+  CHET_NAME,
+  CHET_PRINCIPAL,
+  chetGeneration,
+  isChetAnswer,
+  isChetMessage,
+} from "../utils/chetIdentity";
+import { mergeObligationStatus, mergeUserRequestStatus } from "../utils/mergeLedgerEvents";
 import {
   localizedAnswerReceipt,
   pendingReplyView,
@@ -130,6 +141,7 @@ export const MessageBubble = memo(
     onOpenReplyTarget,
   }: MessageBubbleProps) {
     const isUserMessage = ev.by === "user";
+    const isChetAnswerMessage = isChetAnswer(ev);
     const isOptimistic = !!(ev.data as Record<string, unknown> | undefined)?._optimistic;
     const isStreaming = !!ev._streaming;
     // A filtered view's way into the whole conversation; a message still being sent or
@@ -156,17 +168,24 @@ export const MessageBubble = memo(
     const liveStatuses = useContext(LivePendingStatusContext);
     const liveEntry = ev.id && liveStatuses ? liveStatuses[ev.id] : undefined;
     const liveStatus = liveEntry?.status;
-    const replyEvent = useMemo(
-      () =>
-        liveEntry === undefined
-          ? ev
-          : {
-              ...ev,
-              _user_request: liveStatus?.user_request,
-              _obligation_status: liveStatus?.obligation_status,
-            },
-      [ev, liveEntry, liveStatus],
-    );
+    const replyEvent = useMemo(() => {
+      if (liveEntry === undefined) return ev;
+      if (!liveStatus && ev._user_request?.reply_event_id && ev._obligation_status?.user?.replied)
+        return ev;
+      return {
+        ...ev,
+        _user_request: liveStatus
+          ? mergeUserRequestStatus(
+              liveStatus.user_request,
+              liveStatus.obligation_status,
+              ev._user_request,
+            )
+          : undefined,
+        _obligation_status: liveStatus?.obligation_status
+          ? mergeObligationStatus(liveStatus.obligation_status, ev._obligation_status)
+          : undefined,
+      };
+    }, [ev, liveEntry, liveStatus]);
     // Whether this is a request to the user follows from the event alone, so it
     // holds while the reply store is not available yet.
     const userRequest = readOnly ? null : pendingReplyView(replyEvent);
@@ -229,7 +248,9 @@ export const MessageBubble = memo(
       state.groupDoc?.group_id === groupId ? chetGeneration(state.groupDoc) : "",
     );
     const senderSnapshotTitle = isChetMessage(ev, groupGeneration)
-      ? CHET_NAME
+      ? isChetAnswerMessage
+        ? t("pendingReply.chetAnswered")
+        : CHET_NAME
       : typeof msgData?.sender_title === "string"
         ? String(msgData.sender_title || "").trim()
         : "";
@@ -275,23 +296,7 @@ export const MessageBubble = memo(
       scopeKey: String(ev.scope_key || ""),
       foreign: !!srcGroupId || isRemoteSource,
     });
-    const blobAttachments = rawAttachments.flatMap((a, sourceIndex) => {
-      if (a == null || typeof a !== "object") return [];
-      const attachment = {
-        kind: String(a.kind || "file"),
-        path: String(a.path || ""),
-        title: String(a.title || ""),
-        bytes: Number(a.bytes || 0),
-        mime_type: String(a.mime_type || ""),
-        local_preview_url: "local_preview_url" in a ? String(a.local_preview_url || "") : "",
-        // Use the original message position even after unsupported entries are filtered out.
-        sourceIndex,
-      };
-      return attachment.path.startsWith("state/blobs/") ||
-        attachment.local_preview_url.startsWith("blob:")
-        ? [attachment]
-        : [];
-    });
+    const blobAttachments = messageBlobAttachments(rawAttachments);
     const displayMessageText = useMemo(() => {
       if (isRedundantWecomImagePlaceholder(messageText, blobAttachments, sourcePlatform)) {
         return "";
@@ -315,18 +320,20 @@ export const MessageBubble = memo(
           return recordedQuestionText(replyView.question, t("pendingReply.recommended"));
       }
       if (delegationSourceOutbound) return t("delegationOutboundStatus");
-      const receipt = isUserMessage
-        ? localizedAnswerReceipt(ev.data, displayMessageText, {
-            selected: (optionId) => t("answerReceiptSelected", { id: optionId }),
-            other: t("answerReceiptOther"),
-            note: t("answerReceiptNote"),
-          })
-        : null;
+      const receipt =
+        isUserMessage || isChetAnswerMessage
+          ? localizedAnswerReceipt(ev.data, displayMessageText, {
+              selected: (optionId) => t("answerReceiptSelected", { id: optionId }),
+              other: t("answerReceiptOther"),
+              note: t("answerReceiptNote"),
+            })
+          : null;
       return receipt ?? getDelegationDisplayText(displayMessageText);
     }, [
       delegationSourceOutbound,
       displayMessageText,
       ev.data,
+      isChetAnswerMessage,
       isUserMessage,
       replyView?.state,
       replyView?.question,
@@ -552,11 +559,29 @@ export const MessageBubble = memo(
       };
     }, [actors, ev, groupGeneration, groupId, isStreaming, msgData, senderActor, srcGroupId]);
     const showNotice = useUIStore((state) => state.showNotice);
+    const replyEntries = useQuickReplyTemplateStore((state) => state.replies);
+    const replyTemplatesLoaded = useQuickReplyTemplateStore((state) => state.loaded);
+    const replyTemplatesError = useQuickReplyTemplateStore((state) => state.loadError);
+    const onQuickReplyOpen = () => {
+      // Like the composer list, opening rereads saved changes; rendering a row never reads.
+      // A successful cache stays usable while the request is pending or if it fails.
+      if (quickReplyTarget) void loadQuickReplyTemplates();
+    };
     const quickReplies = useMemo(() => {
       if (!quickReplyTarget) return undefined;
-      const send = async (kind: QuickReplyKind) => {
-        const label = t(`quickReply.${kind}`);
-        const result = await sendQuickReply(quickReplyTarget, kind, t(`quickReply.${kind}Text`));
+      if (!replyTemplatesLoaded) {
+        return [
+          {
+            key: "quick-unavailable",
+            label: replyTemplatesError ? t("replyTemplates.unavailable") : t("common:loading"),
+            disabled: true,
+            run: (): void => undefined,
+          },
+        ];
+      }
+      // The text is fixed when the entry is clicked, so a retry sends what was first sent.
+      const send = async (kind: QuickReplySource, label: string, text: string) => {
+        const result = await sendQuickReply(quickReplyTarget, kind, text);
         if (result.status === "sent") {
           showNotice({ message: t("quickReply.sent", { name: senderDisplayName, label }) });
         } else if (result.status === "failed") {
@@ -567,17 +592,25 @@ export const MessageBubble = memo(
               ? t("quickReply.unknown")
               : t("quickReply.failed", { error: result.message }),
             actionLabel: t("quickReply.retry"),
-            onAction: () => void send(kind),
+            onAction: () => void send(kind, label, text),
           });
         }
       };
-      return QUICK_REPLY_KINDS.map((kind) => ({
-        key: `quick-${kind}`,
-        label: t(`quickReply.${kind}`),
-        emoji: QUICK_REPLY_EMOJI[kind],
-        run: () => void send(kind),
+      return effectiveReplyTemplates(t, replyEntries).map((template) => ({
+        key: `quick-${template.source}`,
+        label: template.name,
+        emoji: template.emoji,
+        run: () => void send(template.source, template.name, template.text),
       }));
-    }, [quickReplyTarget, senderDisplayName, showNotice, t]);
+    }, [
+      quickReplyTarget,
+      replyEntries,
+      replyTemplatesLoaded,
+      replyTemplatesError,
+      senderDisplayName,
+      showNotice,
+      t,
+    ]);
 
     const routingMetadata = (
       <MessageRoutingMetadata
@@ -682,6 +715,13 @@ export const MessageBubble = memo(
       />
     );
 
+    // Without a reply count or read receipts in the footer, the action menu opens the recipient
+    // list, so a plain Send's delivery and waiting state are always within reach. A final failure
+    // also keeps its footer mark: that one is a status, the menu item the steady way in.
+    const recipientStatusInMenu =
+      !obligationSummary &&
+      visibleReadStatusEntries.length === 0 &&
+      Object.keys(ev._obligation_status ?? {}).some((id) => id !== "user");
     const showAgentState = canShowAgentState && !collapseHeader;
     const messageActionProps = {
       readOnly,
@@ -695,8 +735,10 @@ export const MessageBubble = memo(
       eventId: typeof ev.id === "string" ? String(ev.id) : undefined,
       event: ev,
       quickReplies,
+      onQuickReplyOpen,
       pinned,
       onTogglePin: pinnableId && onTogglePin ? () => onTogglePin(pinnableId, !pinned) : undefined,
+      onShowRecipients: recipientStatusInMenu ? onShowRecipients : undefined,
     };
     return (
       <div

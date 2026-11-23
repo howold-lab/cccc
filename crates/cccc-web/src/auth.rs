@@ -157,21 +157,18 @@ pub async fn authorize(
             "group access denied",
         );
     }
-    if request.uri().path() == "/api/v1/debug/snapshot" && !principal.is_admin {
-        let Some(group_id) = group_from_query(&request) else {
-            return failure_text(
-                StatusCode::FORBIDDEN,
-                "permission_denied",
-                "group access denied",
-            );
-        };
-        if !principal.allows(&group_id) {
-            return failure_text(
-                StatusCode::FORBIDDEN,
-                "permission_denied",
-                "group access denied",
-            );
-        }
+    let query_group = group_from_query(&request);
+    if !principal.is_admin
+        && (query_group
+            .as_ref()
+            .is_some_and(|group_id| !principal.allows(group_id))
+            || (request.uri().path() == "/api/v1/debug/snapshot" && query_group.is_none()))
+    {
+        return failure_text(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "group access denied",
+        );
     }
     request.extensions_mut().insert(principal);
     with_bootstrap_cookie(next.run(request).await, bootstrap_cookie.as_deref())
@@ -240,7 +237,13 @@ fn decode_token(value: &str) -> String {
 }
 
 fn is_public(method: &Method, path: &str) -> bool {
-    (*method == Method::GET && path == "/api/v1/connect/identity")
+    // Legacy clients must receive the no-op retirement response before opening a browser.
+    (*method == Method::POST
+        && matches!(
+            path,
+            "/api/v1/session_nodes/join/requests" | "/api/v1/session_nodes/join/poll"
+        ))
+        || (*method == Method::GET && path == "/api/v1/connect/identity")
         || (*method == Method::POST && path == "/api/v1/connect/frame")
         || (*method == Method::POST && path == "/api/v1/connect/peer")
         || (*method == Method::POST && path == "/api/v1/connect/group-check")
@@ -265,7 +268,8 @@ fn accepts_local_principal(method: &Method, path: &str) -> bool {
 }
 
 fn requires_admin(method: &Method, path: &str) -> bool {
-    path.starts_with("/api/v1/local_sessions")
+    path.starts_with("/api/v1/session_nodes")
+        || path.starts_with("/api/v1/local_sessions")
         || path.starts_with("/api/v1/chet/")
         || path.starts_with("/api/v1/process-recovery/")
         || path.starts_with("/api/v1/voice/asr/providers")
@@ -289,10 +293,12 @@ fn requires_admin(method: &Method, path: &str) -> bool {
         || path.starts_with("/api/v1/connect/")
         || path.ends_with("/connect/catalog")
         || path.starts_with("/api/v1/remote_access")
+        || path.starts_with("/api/v1/update/")
         || path == "/api/v1/debug/tail_logs"
         || path == "/api/v1/debug/clear_logs"
         || path.starts_with("/api/v1/capabilities/allowlist")
         || path == "/api/v1/capabilities/block"
+        || path == "/api/v1/capabilities/update"
         || (path == "/api/v1/groups" && *method == Method::POST)
         || (*method == Method::DELETE && group_from_path(path).is_some())
         || path.ends_with("/reset")
@@ -303,7 +309,10 @@ fn is_codex_voice_path(path: &str) -> bool {
 }
 
 fn group_from_query(request: &Request) -> Option<String> {
-    if request.uri().path() != "/api/v1/debug/snapshot" {
+    if !matches!(
+        request.uri().path(),
+        "/api/v1/debug/snapshot" | "/api/v1/capabilities/overview"
+    ) {
         return None;
     }
     request

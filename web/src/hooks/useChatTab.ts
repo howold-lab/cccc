@@ -1,3 +1,4 @@
+import { chatSetupRequirements, projectScopeRoot } from "./chat/chatSetupRequirements";
 import { groupMessagesVisible } from "../stores/useUIStore";
 import { useMemo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVisiblePendingSummary } from "../features/pendingReplies/useVisiblePendingSummary";
@@ -82,7 +83,7 @@ import { useTaskReferenceIndex } from "./chat/useTaskReferenceIndex";
 import { useShallow } from "zustand/react/shallow";
 interface UseChatTabOptions {
   selectedGroupId: string;
-  selectedGroupRunning: boolean;
+  selectedGroupRunning: boolean | null;
   actors: Actor[];
   recipientActors: Actor[];
   showMentionMenu?: boolean;
@@ -457,24 +458,19 @@ export function useChatTab({
   ]);
 
   // Project root
-  const projectRoot = useMemo(() => {
-    if (!groupDoc) return "";
-    const key = String(groupDoc.active_scope_key || "");
-    if (!key) return "";
-    const scopes = Array.isArray(groupDoc.scopes) ? groupDoc.scopes : [];
-    const hit = scopes.find((s) => String(s.scope_key || "") === key);
-    return String(hit?.url || "");
-  }, [groupDoc]);
+  const projectRoot = useMemo(() => projectScopeRoot(groupDoc), [groupDoc]);
 
   // Has foreman
   const hasForeman = useMemo(() => actors.some((a) => a.role === "foreman"), [actors]);
 
   // Selected group running state
   // Setup checklist conditions
-  const needsScope = !!selectedGroupId && !projectRoot;
-  const needsActors = !!selectedGroupId && actors.length === 0;
-  const needsStart = !!selectedGroupId && actors.length > 0 && !selectedGroupRunning;
-  const showSetupCard = needsScope || needsActors || needsStart;
+  const { needsScope, needsActors, needsStart, showSetupCard } = chatSetupRequirements(
+    selectedGroupId,
+    projectRoot,
+    actors,
+    selectedGroupRunning,
+  );
   const dispatchSlashSkillMessage = useSlashSkillDispatch({
     selectedGroupId,
     toTokens,

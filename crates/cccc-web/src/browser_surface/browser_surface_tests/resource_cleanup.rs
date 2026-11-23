@@ -169,6 +169,7 @@ async fn closed_actor_windows_retire_with_their_generation() {
                 mode: BrowserMode::Headless,
                 shared_browser: true,
                 actor_identity: Some(&generation),
+                actor: None,
             })
             .await
             .expect("open actor");
@@ -267,7 +268,7 @@ async fn closed_actor_windows_retire_with_their_generation() {
             }
             "prefix" => {
                 manager
-                    .close_prefixes(&[key.clone()])
+                    .close_prefixes(std::slice::from_ref(&key))
                     .await
                     .expect("Web deletion cleanup");
             }
@@ -327,6 +328,7 @@ async fn legacy_actor_pairing_does_not_replace_or_reap_its_window() {
                 &url,
                 (800, 600),
                 &crate::browser_surface::actor_identity(actor),
+                "",
             )
             .await
             .expect("open Actor window");
@@ -364,6 +366,7 @@ async fn legacy_actor_pairing_does_not_replace_or_reap_its_window() {
             &url,
             (800, 600),
             &crate::browser_surface::actor_identity(&loaded.actors[0]),
+            "",
         )
         .await
         .expect("open viewer");

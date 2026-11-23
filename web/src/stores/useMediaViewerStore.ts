@@ -1,8 +1,7 @@
 import { create } from "zustand";
-import {
-  openAttachmentResource,
-  type MessageAttachmentSource,
-} from "../components/resourcePanel/openAttachmentResource";
+import type { MessageAttachmentSource } from "../components/resourcePanel/openAttachmentResource";
+import { useAttachmentPreviewStore } from "./useAttachmentPreviewStore";
+import { type AttachmentResource, useResourcePanelStore } from "./useResourcePanelStore";
 
 /** One image or video from a message, shown in the centered viewer. */
 export type MediaViewerItem = {
@@ -32,7 +31,16 @@ export const useMediaViewerStore = create<MediaViewerState>((set, get) => ({
   openInPanel: () => {
     const item = get().item;
     if (!item) return;
-    openAttachmentResource(item.resource, item.media, item.title, item.isSvg);
+    // Asked for the panel by name, so open it there even while the panel is hidden.
+    const { panelGroupId, siblings, ...attachment } = item.resource;
+    const resource: AttachmentResource = {
+      kind: "attachment",
+      ...attachment,
+      media: item.media,
+      isSvg: !!item.isSvg,
+    };
+    useResourcePanelStore.getState().open(panelGroupId, resource, item.title);
+    useAttachmentPreviewStore.getState().remember(panelGroupId, resource.messageKey, siblings);
     set({ item: null });
   },
 }));

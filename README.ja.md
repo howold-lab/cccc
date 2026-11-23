@@ -14,7 +14,7 @@
 インストールはコマンドひとつ。Rust ツールチェーン、データベースサーバー、メッセージブローカー、Docker は不要です。
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=232425)](https://pypi.org/project/cccc-pair/)
-[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
+[![Rust 1.91+](https://img.shields.io/badge/Rust-1.91%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-232425)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-online-232425)](https://chesterra.github.io/cccc/)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/m8wuB7VSJ)
@@ -47,17 +47,17 @@
 - **CCCC Connect**：マシンやチームをまたいでグループをつなぎます。状態はそれぞれのインスタンスが持ちます。
 - **ローカルファースト**：ランタイムの状態は、リポジトリの外の `CCCC_HOME`（既定は `~/.cccc/`）に置かれます。
 
-## 0.4.54 の主な変更
+## 0.4.60 の主な変更
 
-- **会話を再開しなかったときに記録が残る**：CCCC が起動するエージェントが、以前の会話が保存されているのに新しい会話で始まった場合、そのエージェントのページで状態の後ろに小さな情報マークが表示され、日時と、比較した設定のうち変わっていたものを確認できます。CCCC はユーザー宛ての通知 1 件の書き込みも試みます。起動時にどの会話を選ぶかは変わっていません。
-- **ローテーションした台帳セグメントを順番どおりに読む**：2 回のローテーションの間にシステム時計が戻っていても、履歴と受信箱はグループの台帳セグメントをローテーションした順に読みます。以前は履歴の順序が乱れたり、受信箱の読み取りで Mail が飛ばされたりすることがありました。
-- **Linux で重複する台帳チェックを減らした**：ほかのプログラムがグループの台帳を読み取り専用で開いただけでは、CCCC Web は台帳を再チェックしなくなりました。
-- **レイアウトの修正**：スマートフォン幅の画面で、停止中のエージェントのページ下部にある「編集」ボタンのラベルが 2 行に折り返されなくなりました。グループのメニューが項目よりも大幅に広く表示されることもなくなりました。ほか 3 件の小さなレイアウト不具合も修正しました。
-- **削除したエージェントが「エージェント状態」に残らない**：グループから削除したエージェントのカードが「エージェント状態」に表示されなくなりました。
+- **離席中は Chet が代わりに対応します（実験的）。** Chet のタイトルバーで「無人対応」（既定はオフ）をオンにすると、このインスタンスのメンバーが Send または Send + Reply であなたに送る新しいメッセージは Chet にも渡り、Chet が返信や選択カードへの回答、リスクの指摘をします。あなた本人にしかできないことは残すよう指示されています。メッセージはこれまでどおり届き、Chet が答えたカードにはその旨が表示され、返信すれば訂正できます。
+- **通知するメッセージを選べます。** **設定 > 通知** で、ブラウザーごとに「自分宛てのすべてのメッセージ」か「返信が必要なときのみ」を選べます。スマートフォンは、返事が必要なときだけ鳴らせます。
+- **メッセージがどこまで届いたか分かります。** 根拠がある場合、受信者一覧に、メンバーのターミナルに書き込まれたのか、Runtime に受け付けられたのかを表示し、まだ届いていないメッセージは何を待っているのかを表示できます。通常のメッセージは、メッセージの操作メニューの「受信者の状況を表示」から開けます。
+- **届かなかったメッセージを補います。** 短い切断の間にまだ Runtime に渡していない、または送信されていないと分かっているメッセージは、メンバーが戻ると届きます。ターミナルへの書き込みが途中で失敗した場合は未確認のままとし、自動で再送しません。
+- **応答しないセッション管理プロセスが、もう一方を止めなくなりました。** CCCC の実行中にセッションを管理するプロセスの一方が応答しなくなっても、CCCC が正常なプロセスに属すると確認できる実行中のメンバーは、新しいメッセージを受け取り、個別に停止できます。
 
-**アップグレード時の注意**：アップグレード前に、送信中のメッセージと録音が終わるのを待ち、復元待ちの送信を復元するか破棄してください。未送信の下書きは送信するか別に保存し、**ファイル** の未保存の編集も保存してください。これらは開いているページにしかありません。再送する前には、すでに届いていないか確認してください。そのあと daemon と Web を再起動し、開いているページを再読み込みしてください。保存された会話の照合方法は変わっていません。保存された会話を再開しなかった起動は、記録を残し、CCCC は通知 1 件の書き込みを試みるようになりました。ローテーションした台帳セグメントがすでに誤った順序で読まれていたグループでは、受信箱の読み取りが通り過ぎた Mail は受信箱に戻らないことがありますが、そのグループの履歴には残っています。
+**アップグレード時の注意。** Linux とネイティブの Apple Silicon Mac では、0.4.59 からの互換性のあるアップデートでエージェントを維持できます。Windows ではアップデート時にエージェントが再起動します。0.4.59 から維持したメンバーは、再起動するまで新しいメッセージに「Runtime に配信済み」と表示されることがあります。0.4.59 から維持した Managed と DeepSeek のメンバーは、そのメンバーを再起動すると上記の配信と個別停止の修正が適用されます。CCCC の起動時にすでに応答しないセッション管理プロセスがあると、起動が失敗することがあります。復旧手順はリリースノートを参照してください。
 
-詳しくは [0.4.54 のリリースノート](https://chesterra.github.io/cccc/release/v0.4.54_release_notes)。
+詳しくは [0.4.60 のリリースノート](https://chesterra.github.io/cccc/release/v0.4.60_release_notes)。
 
 ## クイックスタート
 
@@ -164,6 +164,7 @@ Chet は CCCC インスタンス全体で 1 つのアシスタントで、どの
 - **ランタイム**：**設定 → このインスタンス → 音声 → Chet → ランタイム** で設定します。Chet の入力、文字起こし、結果の履歴は、CCCC を動かしているマシンに保存されます。ただし、送った内容自体は、設定したモデルや音声のプロバイダーに渡ります。
 - **音声（実験的）**：**Codex Voice** は `codex login` を使います。**Grok Voice** は `grok login` を使い、CCCC の PATH に `grok` が必要です。どちらも追加の API キーは不要です。報告されている Grok Voice の音の高さや声質が変わる問題は、修正を確認できていません。
 - **グループ内**：メンバーは、宛先を `@chet` だけにして、Send または Send + Reply で Chet に連絡します。Mail は使えません。
+- **無人対応（実験的）**：Chet のタイトルバーのスイッチがオンの間、メンバーが Send または Send + Reply であなたに送ったメッセージは Chet にも渡り、Chet があなたの代わりに返信や選択カードへの回答をします。[Unattended mode](https://chesterra.github.io/cccc/guide/web-ui#unattended-mode) を参照してください。
 - **制限**：すべてのグループのメッセージが、Chet の 1 つのセッションに入ります。グループごとに分けて扱うのはモデルへの指示であり、分離ではありません。Chet はグループ間で転送せず、CCCC Connect でも送信しません。
 
 **音声秘書**（**設定 → このインスタンス → 音声 → 音声秘書**）は、録音を各グループ向けの文書、プロンプトの下書き、回答にまとめる、別のグローバルサービスです。会話はすべてのグループで共有されます。[Chet](https://chesterra.github.io/cccc/guide/web-ui#chet-global-assistant-experimental) と[音声秘書（Voice Secretary）のガイド](https://chesterra.github.io/cccc/guide/voice-secretary)を参照してください。
@@ -200,8 +201,8 @@ Chet は CCCC インスタンス全体で 1 つのアシスタントで、どの
 
 | CCCC での動かし方 | ランタイム（`--runtime` の ID） |
 |---|---|
-| ネイティブ端末 + CCCC が管理するセッション | Claude Code（`claude`）、Codex CLI（`codex`）、Grok Build（`grok`）、OpenCode V2 2.1.4 以降（`opencode`）、Kilo Code（`kilo`） |
-| ネイティブ端末または公式 ACP | GitHub Copilot（`copilot`）、Cursor（`cursor`）、Devin（`devin`）、Kiro（`kiro`）、Antigravity（`antigravity`）、Droid（`droid`）、Auggie（`auggie`）、Hermes（`hermes`）、Kimi Code（`kimi`） |
+| ネイティブ端末 + CCCC が管理するセッション | Claude Code（`claude`）、Codex CLI（`codex`）、Grok Build（`grok`）、OpenCode V2 2.1.4 以降（`opencode`）、Kilo Code（`kilo`）、Hermes（`hermes`、ACP のみも可） |
+| ネイティブ端末または公式 ACP | GitHub Copilot（`copilot`）、Cursor（`cursor`）、Devin（`devin`）、Kiro（`kiro`）、Antigravity（`antigravity`）、Droid（`droid`）、Auggie（`auggie`）、Kimi Code（`kimi`） |
 | ネイティブ端末 | Cline（`cline`）、Amp（`amp`） |
 | 構造化された接続（端末なし） | Pi 1.1.0 以降（`pi`）、DeepSeek Harness（`deepseek`、開発者プレビュー） |
 | Web モデル | ChatGPT Web（`web_model`）、ChatGPT Dots（`chatgpt_dots`）、Grok Bot Web Model（`grok_web_model`） |
@@ -335,7 +336,7 @@ CCCC が向いているのは、複数のエージェントが 1 つのコード
 
 **アップグレード**：Web サイトのインストーラーで入れた場合は `cccc update`、pip で入れた場合は pip のコマンドを使います。`cccc update --check` は、何も変更せずに最新のリリースとインストールの管理元を表示します。pip でアップグレードする前に、`cccc daemon stop` を実行し、フォアグラウンドの CCCC プロセスを終了してください。pip から Web サイトのインストーラーに切り替えるときは、先に `python -m pip uninstall cccc-pair` を実行します。古い `cccc update` が 0.4.35 のままの場合は[アップグレードの FAQ](https://chesterra.github.io/cccc/guide/faq#why-does-an-older-cccc-update-stay-on-0-4-35) を、完全なチェックリストは[運用ランブック](https://chesterra.github.io/cccc/guide/operations)をご覧ください。
 
-**ソースから**：Rust 1.88 以降、npm 付きの Node.js 24、Python 3.11 以降（アーカイブ作成の補助にのみ使用）が必要です：
+**ソースから**：Rust 1.91 以降、npm 付きの Node.js 24、Python 3.11 以降（アーカイブ作成の補助にのみ使用）が必要です：
 
 ```bash
 git clone https://github.com/ChesterRa/cccc

@@ -1,9 +1,11 @@
+#![cfg_attr(not(test), deny(clippy::disallowed_methods))]
 pub mod access_tokens;
 pub mod active;
 pub mod actors;
 #[cfg(test)]
 mod actors_tests;
 pub mod assistant_state;
+pub mod attended_update;
 pub mod automation;
 mod automation_render;
 mod automation_schedule;
@@ -17,6 +19,7 @@ mod capability_builtin;
 pub mod capability_legacy;
 #[cfg(test)]
 mod capability_legacy_tests;
+pub mod capability_recommendations;
 pub mod chet_history;
 pub mod cloudflared;
 pub mod codex_voice_settings;
@@ -44,13 +47,14 @@ pub mod instance_identity;
 pub mod integration_state;
 pub mod ledger;
 pub mod ledger_archive;
-mod ledger_index;
+pub mod ledger_index;
 pub mod local_network;
 pub mod local_sessions;
 pub mod mail_pending;
 pub mod membership;
 pub mod monitor_records;
 pub mod nomcp;
+pub mod owned_mcp;
 pub mod path_input;
 pub mod peer_insight;
 pub mod permissions;
@@ -60,9 +64,15 @@ pub mod registry;
 pub mod runtime_mcp;
 pub mod runtime_switches;
 pub mod scope;
+pub mod session_nodes;
 pub mod settings;
 pub mod space_credentials;
 pub mod system_prompt;
+pub mod unattended;
+#[cfg(unix)]
+pub mod unix_socket_path;
+pub mod update_capabilities;
+pub mod update_image;
 pub mod user_requests;
 pub mod voice_notifications;
 pub mod voice_recording_lease;
@@ -84,3 +94,5 @@ pub use capability_builtin::{
 pub use group::{GroupDoc, GroupStore, Scope};
 pub use home::{HomeError, HomeLayout};
 pub use registry::{GroupMeta, Registry};
+#[cfg(test)]
+cccc_runtime::process_watchdog_test_entry!();

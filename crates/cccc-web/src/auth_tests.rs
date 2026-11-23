@@ -40,12 +40,21 @@ fn process_recovery_requires_an_administrator_for_reads_and_changes() {
 }
 
 #[test]
+fn attended_update_requires_an_administrator() {
+    for method in [Method::GET, Method::POST] {
+        assert!(requires_admin(&method, "/api/v1/update/start"));
+        assert!(!is_public(&method, "/api/v1/update/start"));
+    }
+}
+
+#[test]
 fn chet_history_and_inputs_require_administrator_authority() {
-    for method in [Method::GET, Method::HEAD, Method::POST] {
+    for method in [Method::GET, Method::HEAD, Method::POST, Method::PUT] {
         for path in [
             "/api/v1/chet/history",
             "/api/v1/chet/status",
             "/api/v1/chet/inputs",
+            "/api/v1/chet/unattended",
         ] {
             assert!(requires_admin(&method, path));
             assert!(!is_public(&method, path));

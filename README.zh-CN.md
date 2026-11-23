@@ -13,7 +13,7 @@
 一条安装命令，无需 Rust 工具链、数据库服务器、消息队列或 Docker。
 
 [![PyPI](https://img.shields.io/pypi/v/cccc-pair?label=PyPI&color=232425)](https://pypi.org/project/cccc-pair/)
-[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
+[![Rust 1.91+](https://img.shields.io/badge/Rust-1.91%2B-232425?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-232425)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-online-232425)](https://chesterra.github.io/cccc/)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/m8wuB7VSJ)
@@ -46,17 +46,17 @@
 - **CCCC Connect** 跨机器、跨团队连接工作组，各实例保留自己的状态。
 - **本地优先**：运行时状态保存在 `CCCC_HOME`（默认 `~/.cccc/`）中，不在你的代码仓库里。
 
-## 0.4.54 更新内容
+## 0.4.60 更新内容
 
-- **没接上原对话会留下记录**：由 CCCC 启动的智能体明明保存过对话、这次启动却开了新对话时，它的页面会在状态后面显示一个小的信息符号，给出时间和哪些被比较的设置变了；CCCC 还会尝试给用户写一条通知。启动时选哪个对话的规则没有变。
-- **轮转后的账本分段按顺序读取**：即使两次轮转之间系统时钟发生回拨，历史和收件箱也按轮转的先后读取工作组的账本分段。以前历史可能乱序，收件箱读取可能漏掉邮件。
-- **Linux 上少做重复的账本检查**：别的程序只是以只读方式打开工作组的账本时，CCCC Web 不再重新检查它。
-- **版面修正**：在手机宽度的屏幕上，已停止智能体页面下方的“编辑”按钮不再把文字挤成两行。工作组菜单不再比菜单项宽出许多；另外修正了三处小的版面问题。
-- **移除的智能体不再留在“智能体状态”里**：从工作组移除的智能体，不再在“智能体状态”里留着一张卡片。
+- **离开时让 Chet 替你处理（实验性）。** 在 Chet 标题栏打开「无人值守」（默认关闭）后，本机成员用发送或发送 + 回复发给你的每条新消息也会交给 Chet：它可以回复、替你回答选择卡、指出风险；按给它的指令，只有你本人才能做的事会留给你。消息照常发给你；Chet 代答的卡会注明，回复它的代答就能更正。
+- **自己决定哪些消息要通知。** 在 **设置 > 通知** 里，每个浏览器可以选「所有发给我的消息」或「只在需要我回复时」：手机可以只在有人等你答复时才响。
+- **看清消息到了哪一步。** 有相应证据时，收件人列表会说明消息是已写入成员的终端，还是已被 Runtime 受理；还没送到的，可以显示在等什么。普通消息从消息动作菜单里的「查看收件人状态」打开。
+- **补上漏投的消息。** 短暂断线期间还没交给 Runtime、或已知没有提交的消息，成员恢复后会送达；写入终端只写了一部分时，保持未确认，不会自动重发。
+- **一个会话管理进程卡住，不再拖住另一个。** CCCC 运行期间，如果某个会话管理进程不响应，CCCC 能确认归属另一个健康进程、正在运行的成员，照常能收到新消息，也能单独停止。
 
-**升级须知**：升级前，请等正在进行的发送和录音结束，先恢复或丢弃待恢复的发送，再把所有没发出的草稿发出或另存，并保存 **文件** 里未保存的编辑：这些都只保存在当前打开的页面里。重新发送前，先确认消息是否已经送达。然后重启 daemon 和 Web，并刷新已打开的页面。已保存对话的匹配方式没有变；没有恢复已保存对话的启动，现在会留下一条记录，CCCC 并会尝试写一条通知。如果某个工作组轮转后的账本分段此前已被按错误的顺序读取，收件箱读取时已经越过的邮件可能不会回到收件箱，但仍在该工作组的历史里。
+**升级须知。** 在 Linux 和原生 Apple Silicon Mac 上，从 0.4.59 做兼容更新时可以保留智能体；Windows 上更新会重启智能体。从 0.4.59 保留下来的成员，在重启前新消息可能仍显示「已投递到 Runtime」。从 0.4.59 保留下来的 Managed 和 DeepSeek 成员，要重启该成员，才适用上面的投递和单独停止修复。CCCC 启动时如果某个会话管理进程已经不响应，启动仍可能失败，恢复步骤见发布说明。
 
-详见 [0.4.54 发布说明](https://chesterra.github.io/cccc/release/v0.4.54_release_notes)。
+详见 [0.4.60 发布说明](https://chesterra.github.io/cccc/release/v0.4.60_release_notes)。
 
 ## 快速上手
 
@@ -163,6 +163,7 @@ Chet 是整个 CCCC 实例共用的一个助手，不在任何工作组的成员
 - **运行环境**：在**设置 → 整个实例 → 语音 → Chet → 运行环境**中设置。CCCC 会把 Chet 的输入、转写和结果历史保存在运行 CCCC 的机器上；你发送的内容仍会发给你配置的模型和语音供应商。
 - **语音（实验性）**：**Codex 语音**使用 `codex login`；**Grok 语音**使用 `grok login`，并要求 CCCC 的 PATH 中能找到 `grok`。两者都不需要额外的 API key。已报告的 Grok 语音音调和音色漂移问题尚未确认修复。
 - **在工作组中**：成员要联系 Chet，须把 `@chet` 作为唯一收件人，并使用发送或发送 + 回复，不能用邮件。
+- **无人值守（实验性）**：Chet 标题栏的开关打开时，成员用发送或发送 + 回复发给你的消息也会交给 Chet，它可以替你回复、回答选择卡。见 [Unattended mode](https://chesterra.github.io/cccc/guide/web-ui#unattended-mode)。
 - **限制**：所有工作组的消息都进入 Chet 的同一个会话；让它区分各工作组只是给模型的指令，并不是隔离。Chet 不会在工作组之间转发，也不会通过 CCCC Connect 发送。
 
 **语音秘书**位于**设置 → 整个实例 → 语音 → 语音秘书**，是一项独立的全局服务，为各工作组把录音整理成文档、提示词草稿或回答；所有工作组共用它的对话。详见 [Chet](https://chesterra.github.io/cccc/guide/web-ui#chet-global-assistant-experimental) 和[语音秘书指南](https://chesterra.github.io/cccc/guide/voice-secretary)。
@@ -199,8 +200,8 @@ Chet 是整个 CCCC 实例共用的一个助手，不在任何工作组的成员
 
 | CCCC 的运行方式 | 运行时（`--runtime` id） |
 |---|---|
-| 原生终端 + CCCC 管理的会话 | Claude Code（`claude`）、Codex CLI（`codex`）、Grok Build（`grok`）、OpenCode V2 2.1.4+（`opencode`）、Kilo Code（`kilo`） |
-| 原生终端或官方 ACP | GitHub Copilot（`copilot`）、Cursor（`cursor`）、Devin（`devin`）、Kiro（`kiro`）、Antigravity（`antigravity`）、Droid（`droid`）、Auggie（`auggie`）、Hermes（`hermes`）、Kimi Code（`kimi`） |
+| 原生终端 + CCCC 管理的会话 | Claude Code（`claude`）、Codex CLI（`codex`）、Grok Build（`grok`）、OpenCode V2 2.1.4+（`opencode`）、Kilo Code（`kilo`）、Hermes（`hermes`，也可只用 ACP） |
+| 原生终端或官方 ACP | GitHub Copilot（`copilot`）、Cursor（`cursor`）、Devin（`devin`）、Kiro（`kiro`）、Antigravity（`antigravity`）、Droid（`droid`）、Auggie（`auggie`）、Kimi Code（`kimi`） |
 | 原生终端 | Cline（`cline`）、Amp（`amp`） |
 | 结构化协议，无终端 | Pi 1.1.0+（`pi`）、DeepSeek Harness（`deepseek`，开发者预览） |
 | Web 模型 | ChatGPT Web（`web_model`）、ChatGPT Dots（`chatgpt_dots`）、Grok Bot Web Model（`grok_web_model`） |
@@ -334,7 +335,7 @@ CCCC 适合这些场景：多个智能体共用一个代码库；混用多种运
 
 **升级**：官网安装脚本装的用 `cccc update`，pip 装的用上面的 pip 命令。`cccc update --check` 会显示最新版本和安装所有者，不做任何更改。用 pip 升级前，请先运行 `cccc daemon stop`，并关闭前台的 CCCC 进程。要从 pip 切换到官网安装脚本，请先运行 `python -m pip uninstall cccc-pair`。如果旧版 `cccc update` 一直停在 0.4.35，请看[升级 FAQ](https://chesterra.github.io/cccc/guide/faq#why-does-an-older-cccc-update-stay-on-0-4-35)；完整的检查清单见[运维手册](https://chesterra.github.io/cccc/guide/operations)。
 
-**从源码构建**需要 Rust 1.88+、带 npm 的 Node.js 24，以及仅供归档脚本使用的 Python 3.11+：
+**从源码构建**需要 Rust 1.91+、带 npm 的 Node.js 24，以及仅供归档脚本使用的 Python 3.11+：
 
 ```bash
 git clone https://github.com/ChesterRa/cccc

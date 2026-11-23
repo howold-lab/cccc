@@ -40,7 +40,7 @@ cd cccc
 ./target/release/cccc --version
 ```
 
-The source package helper requires Rust 1.88+, Node.js 24 with npm, and Python
+The source package helper requires Rust 1.91+, Node.js 24 with npm, and Python
 3.11+ for archive assembly only; the resulting CCCC executable has no Python
 runtime dependency.
 
@@ -293,6 +293,12 @@ CCCC supports snapshot/compaction. Large blobs are stored separately in the `blo
 3. Keep the daemon running (don't restart frequently)
 
 ## Troubleshooting
+
+### What does a daemon restart keep?
+
+Groups, messages and tasks are kept. Agents that CCCC started stop with the daemon, and CCCC tries
+to start a running Group's agents again, but a turn that was running does not continue. Sessions you
+started yourself keep running. See [What a daemon restart keeps](operations.md#what-a-daemon-restart-keeps).
 
 ### Why do git worktrees remain after an agent stops? {#why-do-git-worktrees-remain-after-an-actor-stops}
 
