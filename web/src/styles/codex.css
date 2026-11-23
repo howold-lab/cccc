@@ -375,6 +375,22 @@
   margin-bottom: 0.25rem;
 }
 
+/* Agents' messages: a light framed card under the author, so long replies read as one
+   block instead of loose text on the page. */
+:root[data-ui-style="lcd"] .lcd-row:not([data-lcd-user]) .lcd-row-body {
+  margin: 0.25rem 0 0.5rem calc(1.25rem + 0.75ch);
+  padding: 0.625rem 0.875rem;
+  border: 1px solid var(--lcd-rule-strong);
+  border-radius: 14px;
+  background: var(--lcd-raised);
+}
+
+@media (max-width: 767px) and (pointer: coarse) {
+  :root[data-ui-style="lcd"] .lcd-row:not([data-lcd-user]) .lcd-row-body {
+    margin-left: 0;
+  }
+}
+
 /* Message actions: quiet text keys without dividers. */
 :root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] > button {
   border-radius: var(--radius-sm);
