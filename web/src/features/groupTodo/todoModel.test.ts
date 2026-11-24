@@ -50,12 +50,15 @@ describe("todo model", () => {
   });
 
   it("spots an agent waiting on the user in plain text, until the user answers", () => {
+    const now = new Date("2026-11-24T05:00:00Z").getTime();
     const ask = chat("m1", "kb", "2026-11-24T01:00:00Z", "PDF 标了 4 题，你回个「改」我就上。");
-    expect(waitingWithoutCard([ask], new Set())?.id).toBe("m1");
-    expect(waitingWithoutCard([ask], new Set(["m1"]))).toBeNull();
+    expect(waitingWithoutCard([ask], new Set(), now)?.id).toBe("m1");
+    expect(waitingWithoutCard([ask], new Set(["m1"]), now)).toBeNull();
     const answered = chat("u1", "user", "2026-11-24T02:00:00Z", "改");
-    expect(waitingWithoutCard([ask, answered], new Set())).toBeNull();
+    expect(waitingWithoutCard([ask, answered], new Set(), now)).toBeNull();
     const report = chat("m2", "kb", "2026-11-24T03:00:00Z", "巡检报告：本时段 2 条弹幕。");
-    expect(waitingWithoutCard([report], new Set())).toBeNull();
+    expect(waitingWithoutCard([report], new Set(), now)).toBeNull();
+    const old = chat("m3", "kb", "2026-11-22T01:00:00Z", "你回个「改」我就上。");
+    expect(waitingWithoutCard([old], new Set(), now)).toBeNull();
   });
 });

@@ -38,6 +38,8 @@ export function batchTodos(items: OverviewPendingItem[]): TodoBatch[] {
   return batches;
 }
 
+const STRAY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 // Words an agent uses when it waits on the user in plain text instead of a question card.
 const WAITING =
   /回个|回一下|回复一下|你回|要不要|是否需要|需不需要|请确认|确认一下|你看看|你定|等你|行不行|可以吗|改吗|改不改|同意吗|拍板/;
@@ -49,6 +51,7 @@ const WAITING =
 export function waitingWithoutCard(
   events: LedgerEvent[],
   openCardIds: Set<string>,
+  now = Date.now(),
 ): LedgerEvent | null {
   const chats = events
     .filter((event) => event.kind === "chat.message")
@@ -61,6 +64,8 @@ export function waitingWithoutCard(
     if (!toUser || openCardIds.has(String(event.id ?? ""))) continue;
     if (data.message_mode === "request_reply") continue;
     const text = typeof data.text === "string" ? data.text : "";
+    // An ask older than a day is history, not a to-do; the user can still find it in the chat.
+    if (now - new Date(String(event.ts ?? "")).getTime() > STRAY_MAX_AGE_MS) return null;
     if (WAITING.test(text.slice(-400))) return event;
   }
   return null;
