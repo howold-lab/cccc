@@ -710,8 +710,8 @@
     "batchTakeAll": "Take this batch",
     "stray": "A message in the chat waits on you but is not in this list · show it",
     "handled": "Chose “{{choice}}”",
-    "undone": "Withdrew “{{choice}}”",
+    "undone": "Asked to undo “{{choice}}” · waiting for its reply",
     "undo": "Undo",
-    "undoText": "Choosing “{{choice}}” just now was a mistake. Please hold off until I confirm again."
+    "undoText": "Choosing “{{choice}}” just now was a mistake. Please undo it: if you have not acted yet, do not; if you already did (for example changed and published the knowledge base), put it back as it was and reply “restored” with what you restored."
   }
 }
