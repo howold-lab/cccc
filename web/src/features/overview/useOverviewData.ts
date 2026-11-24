@@ -61,6 +61,31 @@ const AGENT_INTERVAL_MS = 30_000;
 /** Chat messages read from the end of each Group's ledger to find its latest facts. */
 const ACTIVITY_TAIL = 40;
 
+/** One Group's open questions to the user, oldest last as the daemon pages them. */
+export async function readGroupPending(
+  groupId: string,
+  signal: AbortSignal,
+): Promise<OverviewPendingItem[]> {
+  const page = await fetchPendingReplies(groupId, undefined, { signal });
+  if (!page.ok) return [];
+  return page.result.events.flatMap((event): OverviewPendingItem[] => {
+    if (!event.id) return [];
+    const view = pendingReplyView(event, page.result.statuses[event.id]);
+    if (!view || view.state !== "pending") return [];
+    const data = (event.data ?? {}) as ChatMessageData;
+    return [
+      {
+        groupId,
+        event,
+        sender: String(event.by ?? ""),
+        ts: String(event.ts ?? ""),
+        question: view.question,
+        text: typeof data.text === "string" ? data.text : "",
+      },
+    ];
+  });
+}
+
 async function readPending(groupIds: string[], signal: AbortSignal) {
   const summary = await fetchPendingReplySummary({ signal });
   const counts: Record<string, number> = {};
@@ -72,28 +97,7 @@ async function readPending(groupIds: string[], signal: AbortSignal) {
     }
   }
   const wanted = groupIds.filter((id) => (counts[id] ?? 0) > 0);
-  const pages = await Promise.all(
-    wanted.map(async (groupId) => {
-      const page = await fetchPendingReplies(groupId, undefined, { signal });
-      if (!page.ok) return [];
-      return page.result.events.flatMap((event): OverviewPendingItem[] => {
-        if (!event.id) return [];
-        const view = pendingReplyView(event, page.result.statuses[event.id]);
-        if (!view || view.state !== "pending") return [];
-        const data = (event.data ?? {}) as ChatMessageData;
-        return [
-          {
-            groupId,
-            event,
-            sender: String(event.by ?? ""),
-            ts: String(event.ts ?? ""),
-            question: view.question,
-            text: typeof data.text === "string" ? data.text : "",
-          },
-        ];
-      });
-    }),
-  );
+  const pages = await Promise.all(wanted.map((groupId) => readGroupPending(groupId, signal)));
   const pending = pages.flat().sort((a, b) => b.ts.localeCompare(a.ts));
   return { pending, counts };
 }

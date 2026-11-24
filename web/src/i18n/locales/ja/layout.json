@@ -699,5 +699,19 @@
     "saveFailed": "セクションを保存できませんでした。しばらくしてからもう一度お試しください。",
     "waitingInside": "中にあなたの対応待ちがあります",
     "filterAll": "すべて"
+  },
+  "todo": {
+    "title": "やること",
+    "open": "やることを表示",
+    "close": "⇥ 閉じる",
+    "locate": "元のメッセージ",
+    "openInChat": "チャットで返信",
+    "batch": "{{tag}} · {{count}} 件",
+    "batchTakeAll": "この組を推奨で回答",
+    "stray": "チャットにあなたの返信待ちのメッセージがあります（一覧外）· 表示",
+    "handled": "「{{choice}}」を選択",
+    "undone": "「{{choice}}」を取り消し",
+    "undo": "取り消す",
+    "undoText": "先ほどの「{{choice}}」は誤りです。改めて確認するまで実行しないでください。"
   }
 }

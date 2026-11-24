@@ -699,5 +699,19 @@
     "saveFailed": "The sections were not saved. Try again shortly.",
     "waitingInside": "Something inside is waiting on you",
     "filterAll": "All"
+  },
+  "todo": {
+    "title": "To do",
+    "open": "Show to do",
+    "close": "⇥ Hide",
+    "locate": "Show in chat",
+    "openInChat": "Reply in chat",
+    "batch": "{{tag}} · {{count}}",
+    "batchTakeAll": "Take this batch",
+    "stray": "A message in the chat waits on you but is not in this list · show it",
+    "handled": "Chose “{{choice}}”",
+    "undone": "Withdrew “{{choice}}”",
+    "undo": "Undo",
+    "undoText": "Choosing “{{choice}}” just now was a mistake. Please hold off until I confirm again."
   }
 }

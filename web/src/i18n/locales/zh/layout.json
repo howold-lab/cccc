@@ -699,5 +699,19 @@
     "saveFailed": "分区没保存成功，请稍后再试。",
     "waitingInside": "里面有事等你",
     "filterAll": "全部"
+  },
+  "todo": {
+    "title": "待办",
+    "open": "展开待办",
+    "close": "⇥ 收起",
+    "locate": "定位原文",
+    "openInChat": "去聊天里回复",
+    "batch": "{{tag}} · {{count}} 件",
+    "batchTakeAll": "这批都按推荐",
+    "stray": "聊天里有 1 条消息在等你回复，但没进待办 · 点这里去看",
+    "handled": "已选「{{choice}}」",
+    "undone": "已撤回「{{choice}}」",
+    "undo": "撤回",
+    "undoText": "刚才选「{{choice}}」是点错了，先别按它执行，等我重新确认。"
   }
 }

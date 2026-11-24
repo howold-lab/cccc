@@ -1245,3 +1245,62 @@
 :root[data-ui-style="lcd"] [data-chet-act-change] {
   color: var(--lcd-accent);
 }
+
+/* A Group's to-do rail beside the chat: small cards on a quiet column, the count in the
+   waiting colour, and a slim tab when folded. */
+:root[data-ui-style="lcd"] [data-todo-rail],
+:root[data-ui-style="lcd"] [data-todo-rail-tab] {
+  border-color: var(--lcd-rule);
+  background: color-mix(in srgb, var(--lcd-ink) 2%, var(--lcd-bg));
+}
+:root[data-ui-style="lcd"] [data-todo-rail-tab] {
+  color: var(--color-text-secondary);
+}
+:root[data-ui-style="lcd"] [data-todo-rail-tab]:hover {
+  color: var(--color-text-primary);
+}
+:root[data-ui-style="lcd"] [data-todo-count] {
+  min-width: 18px;
+  border-radius: 999px;
+  padding: 0 6px;
+  background: var(--lcd-danger);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+:root[data-ui-style="lcd"] [data-todo-card] {
+  border: 1px solid var(--lcd-rule-strong);
+  background: var(--lcd-bg);
+}
+:root[data-ui-style="lcd"] [data-todo-card][data-todo-personal] {
+  border-color: color-mix(in srgb, var(--lcd-danger) 35%, var(--lcd-rule));
+}
+:root[data-ui-style="lcd"] [data-todo-tag] {
+  flex-shrink: 0;
+  border: 1px solid var(--lcd-rule-strong);
+  border-radius: 999px;
+  padding: 0 6px;
+  color: var(--color-text-secondary);
+}
+:root[data-ui-style="lcd"] [data-todo-stray] {
+  border: 1px dashed color-mix(in srgb, var(--lcd-wait, #e8a33a) 60%, var(--lcd-rule));
+  color: var(--color-text-secondary);
+}
+:root[data-ui-style="lcd"] [data-todo-stray]:hover {
+  color: var(--color-text-primary);
+}
+
+/* Option labels can be whole sentences: let them wrap inside the card instead of pushing it
+   wider than the rail. */
+:root[data-ui-style="lcd"] [data-todo-rail] [data-todo-card] {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+:root[data-ui-style="lcd"] [data-todo-rail] [data-todo-card] [data-need-action] {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.45;
+  padding-block: 4px;
+}

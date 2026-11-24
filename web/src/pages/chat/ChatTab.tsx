@@ -83,6 +83,7 @@ import type { WorkspaceOpenFileOptions } from "../../components/workspace/useWor
 import { ensurePresentation } from "../../utils/presentation";
 import { PresentationTrigger } from "../../components/presentation/PresentationTrigger";
 import { MobilePresentationSurface } from "../../components/presentation/MobilePresentationSurface";
+import { GroupTodoRail } from "../../features/groupTodo/GroupTodoRail";
 
 // The filter's 44px content row has a 1px bottom border.
 const MOBILE_READING_CHROME_HEIGHT_PX = MOBILE_APP_HEADER_HEIGHT_PX + 45;
@@ -1739,6 +1740,15 @@ export function ChatTab({
                 </>
               )}
             </section>
+          ) : null}
+
+          {!isSmallScreen && selectedGroupId && !(showSplitSurface && columnSurface) ? (
+            // The Group's open questions to the user, beside the chat while the column is free.
+            <GroupTodoRail
+              groupId={selectedGroupId}
+              readOnly={!!readOnly}
+              onLocate={locateMessageFromPanel}
+            />
           ) : null}
 
           {showSplitSurface && columnSurface ? (
