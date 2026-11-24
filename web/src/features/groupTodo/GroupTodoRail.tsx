@@ -11,6 +11,7 @@ import {
 import { oneLine } from "../overview/plainText";
 import { useAge } from "../overview/useAge";
 import type { OverviewPendingItem } from "../overview/useOverviewData";
+import type { AnsweredTodo } from "./answeredModel";
 import { batchTodos, promptOf, splitTag } from "./todoModel";
 import { useGroupTodo } from "./useGroupTodo";
 
@@ -160,7 +161,24 @@ export function GroupTodoRail({
   const items = todo.items.filter(
     (item) => !mine.some((entry) => entry.eventId === String(item.event.id ?? "")),
   );
-  if (!items.length && !todo.stray && !mine.length) return null;
+  // Answered this visit but not yet in the ledger read: shown as running until it arrives.
+  const pendingRecent: AnsweredTodo[] = mine
+    .filter((entry) => !todo.answered.some((item) => item.cardId === entry.eventId))
+    .map((entry) => ({
+      cardId: entry.eventId,
+      answerId: "",
+      by: "user",
+      tag: "",
+      summary: entry.summary,
+      choice: entry.choice,
+      answeredAt: new Date().toISOString(),
+      status: "running",
+      resultId: "",
+      resultText: "",
+    }));
+  const recent = [...pendingRecent, ...todo.answered];
+  const undone = new Set(mine.filter((entry) => entry.undone).map((entry) => entry.eventId));
+  if (!items.length && !todo.stray && !recent.length) return null;
 
   const remember = (item: OverviewPendingItem, choice: string) => {
     setHandled((list) => [
@@ -187,19 +205,33 @@ export function GroupTodoRail({
     setBulkBusy(false);
   };
 
-  const undo = async (entry: Handled) => {
+  const undo = async (entry: AnsweredTodo) => {
+    // Replying to the card reaches whoever asked it; its reply comes back as reverted.
     const response = await replyMessage(
-      entry.groupId,
+      groupId,
       t("todo.undoText", { choice: entry.choice }),
       [],
-      entry.eventId,
+      entry.cardId,
       undefined,
       newClientId(),
     ).catch(() => null);
     if (response?.ok) {
-      setHandled((list) =>
-        list.map((item) => (item.eventId === entry.eventId ? { ...item, undone: true } : item)),
-      );
+      setHandled((list) => {
+        const known = list.some((item) => item.eventId === entry.cardId);
+        return known
+          ? list.map((item) => (item.eventId === entry.cardId ? { ...item, undone: true } : item))
+          : [
+              {
+                groupId,
+                eventId: entry.cardId,
+                summary: entry.summary,
+                choice: entry.choice,
+                undone: true,
+              },
+              ...list,
+            ];
+      });
+      todo.refresh();
     }
   };
 
@@ -299,32 +331,56 @@ export function GroupTodoRail({
             {t("todo.stray")}
           </button>
         ) : null}
-        {mine.length ? (
-          <ul className="mt-2 grid gap-1 px-1" data-todo-handled>
-            {mine.slice(0, 5).map((entry) => (
-              <li
-                key={entry.eventId}
-                className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-[var(--color-text-tertiary)]"
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {entry.undone
-                    ? t("todo.undone", { choice: entry.choice })
-                    : t("todo.handled", { choice: entry.choice })}
-                  {" · "}
-                  {entry.summary}
-                </span>
-                {!entry.undone && !readOnly ? (
-                  <button
-                    type="button"
-                    onClick={() => void undo(entry)}
-                    className="shrink-0 text-[var(--lcd-accent)]"
+        {recent.length ? (
+          <section className="mt-3" data-todo-recent>
+            <p className="px-1 pb-1 text-[11.5px] font-medium text-[var(--color-text-secondary)]">
+              {t("todo.recentTitle")}
+            </p>
+            <ul className="grid min-w-0 grid-cols-1 gap-1.5">
+              {recent.slice(0, 6).map((entry) => {
+                const asked = undone.has(entry.cardId) && entry.status !== "reverted";
+                const status = asked ? "reverting" : entry.status;
+                return (
+                  <li
+                    key={entry.answerId || entry.cardId}
+                    className="min-w-0 overflow-hidden rounded-lg px-2.5 py-2 text-[12px]"
+                    data-todo-recent-item={status}
                   >
-                    {t("todo.undo")}
-                  </button>
-                ) : null}
-              </li>
-            ))}
-          </ul>
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="shrink-0" data-todo-status={status}>
+                        {t(`todo.status.${status}`)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onLocate(entry.resultId || entry.answerId || entry.cardId)}
+                        className="min-w-0 flex-1 truncate text-left text-[var(--color-text-primary)]"
+                        title={entry.summary}
+                      >
+                        {entry.by === "chet"
+                          ? t("todo.chetChose", { choice: entry.choice })
+                          : t("todo.handled", { choice: entry.choice })}
+                        {entry.summary ? ` · ${oneLine(entry.summary)}` : ""}
+                      </button>
+                      {!readOnly && entry.status !== "reverted" && !asked && entry.answerId ? (
+                        <button
+                          type="button"
+                          onClick={() => void undo(entry)}
+                          className="shrink-0 text-[var(--lcd-accent)]"
+                        >
+                          {t("todo.undo")}
+                        </button>
+                      ) : null}
+                    </div>
+                    {entry.resultText ? (
+                      <p className="mt-0.5 truncate text-[11.5px] text-[var(--color-text-tertiary)]">
+                        {oneLine(entry.resultText)}
+                      </p>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
         ) : null}
       </div>
     </aside>

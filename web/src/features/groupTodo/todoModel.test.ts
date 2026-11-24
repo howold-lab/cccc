@@ -58,6 +58,10 @@ describe("todo model", () => {
     expect(waitingWithoutCard([ask, answered], new Set(), now)).toBeNull();
     const report = chat("m2", "kb", "2026-11-24T03:00:00Z", "巡检报告：本时段 2 条弹幕。");
     expect(waitingWithoutCard([report], new Set(), now)).toBeNull();
+    const none = chat("m4", "kb", "2026-11-24T04:00:00Z", "都改好了，没有要你拍板的。");
+    expect(waitingWithoutCard([none], new Set(), now)).toBeNull();
+    const question = chat("m5", "kb", "2026-11-24T04:00:00Z", "要不要把旧窗口关掉？");
+    expect(waitingWithoutCard([question], new Set(), now)?.id).toBe("m5");
     const old = chat("m3", "kb", "2026-11-22T01:00:00Z", "你回个「改」我就上。");
     expect(waitingWithoutCard([old], new Set(), now)).toBeNull();
   });

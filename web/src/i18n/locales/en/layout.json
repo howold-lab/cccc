@@ -712,6 +712,15 @@
     "handled": "Chose “{{choice}}”",
     "undone": "Asked to undo “{{choice}}” · waiting for its reply",
     "undo": "Undo",
-    "undoText": "Choosing “{{choice}}” just now was a mistake. Please undo it: if you have not acted yet, do not; if you already did (for example changed and published the knowledge base), put it back as it was and reply “restored” with what you restored."
+    "undoText": "Choosing “{{choice}}” just now was a mistake. Please undo it: if you have not acted yet, do not; if you already did (for example changed and published the knowledge base), put it back as it was and reply “restored” with what you restored.",
+    "recentTitle": "Recently handled (last day)",
+    "chetChose": "Chet chose “{{choice}}”",
+    "status": {
+      "running": "In progress",
+      "done": "Done",
+      "failed": "Failed",
+      "reverted": "Restored",
+      "reverting": "Undoing"
+    }
   }
 }

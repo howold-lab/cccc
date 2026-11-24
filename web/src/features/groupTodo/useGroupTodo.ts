@@ -2,15 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchLedgerTail } from "../../services/api/messaging";
 import type { LedgerEvent } from "../../types";
 import { readGroupPending, type OverviewPendingItem } from "../overview/useOverviewData";
+import { answeredTodos, type AnsweredTodo } from "./answeredModel";
 import { waitingWithoutCard } from "./todoModel";
 
 const INTERVAL_MS = 30_000;
-const TAIL = 40;
+const TAIL = 120;
 
 export type GroupTodo = {
   items: OverviewPendingItem[];
   /** An agent's plain-text ask the user has not answered and that is not a card. */
   stray: LedgerEvent | null;
+  /** Cards answered in the last day and what came of them, newest first. */
+  answered: AnsweredTodo[];
   loaded: boolean;
   refresh: () => void;
 };
@@ -19,6 +22,7 @@ export type GroupTodo = {
 export function useGroupTodo(groupId: string, enabled: boolean): GroupTodo {
   const [items, setItems] = useState<OverviewPendingItem[]>([]);
   const [stray, setStray] = useState<LedgerEvent | null>(null);
+  const [answered, setAnswered] = useState<AnsweredTodo[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((value) => value + 1), []);
@@ -28,6 +32,7 @@ export function useGroupTodo(groupId: string, enabled: boolean): GroupTodo {
   useEffect(() => {
     setItems([]);
     setStray(null);
+    setAnswered([]);
     setLoaded(false);
   }, [groupId]);
 
@@ -44,6 +49,7 @@ export function useGroupTodo(groupId: string, enabled: boolean): GroupTodo {
         setItems(pending);
         const open = new Set(pending.map((item) => String(item.event.id ?? "")));
         setStray(tail.ok ? waitingWithoutCard(tail.result.events, open) : null);
+        if (tail.ok) setAnswered(answeredTodos(tail.result.events));
       } catch {
         // Keep what was shown; the next read tries again.
       } finally {
@@ -60,5 +66,5 @@ export function useGroupTodo(groupId: string, enabled: boolean): GroupTodo {
     };
   }, [enabled, groupId, tick]);
 
-  return { items, stray, loaded, refresh };
+  return { items, stray, answered, loaded, refresh };
 }

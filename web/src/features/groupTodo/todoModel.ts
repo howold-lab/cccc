@@ -43,6 +43,14 @@ const STRAY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // Words an agent uses when it waits on the user in plain text instead of a question card.
 const WAITING =
   /回个|回一下|回复一下|你回|要不要|是否需要|需不需要|请确认|确认一下|你看看|你定|等你|行不行|可以吗|改吗|改不改|同意吗|拍板/;
+// It must read as a question to the user: a question mark, or an explicit "reply with".
+const ASKING = /[？?]|回个|你回|回一下|回复「|回「/;
+
+/** Whether the end of a message asks the user something. */
+export function asksUser(text: string) {
+  const tail = text.slice(-160);
+  return WAITING.test(tail) && ASKING.test(tail) && !/没有(要|需要)你|不用你|无需你/.test(tail);
+}
 
 /**
  * The newest plain message an agent wrote to the user that reads like a question, when the
@@ -66,7 +74,7 @@ export function waitingWithoutCard(
     const text = typeof data.text === "string" ? data.text : "";
     // An ask older than a day is history, not a to-do; the user can still find it in the chat.
     if (now - new Date(String(event.ts ?? "")).getTime() > STRAY_MAX_AGE_MS) return null;
-    if (WAITING.test(text.slice(-400))) return event;
+    if (asksUser(text)) return event;
   }
   return null;
 }

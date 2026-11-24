@@ -1304,3 +1304,28 @@
   line-height: 1.45;
   padding-block: 4px;
 }
+
+/* Recently handled to-dos: a status pill per line, so "did it happen" is visible at a glance. */
+:root[data-ui-style="lcd"] [data-todo-recent-item] {
+  border: 1px solid var(--lcd-rule);
+  background: var(--lcd-bg);
+}
+:root[data-ui-style="lcd"] [data-todo-status] {
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 11px;
+  border: 1px solid currentColor;
+}
+:root[data-ui-style="lcd"] [data-todo-status="running"],
+:root[data-ui-style="lcd"] [data-todo-status="reverting"] {
+  color: #b7791f;
+}
+:root[data-ui-style="lcd"] [data-todo-status="done"] {
+  color: #2f855a;
+}
+:root[data-ui-style="lcd"] [data-todo-status="failed"] {
+  color: var(--lcd-danger);
+}
+:root[data-ui-style="lcd"] [data-todo-status="reverted"] {
+  color: var(--color-text-tertiary);
+}
