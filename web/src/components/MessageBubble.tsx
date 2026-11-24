@@ -40,7 +40,7 @@ import {
   buildToLabel,
   buildVisibleReadStatusEntries,
   computeObligationSummary,
-  getSenderDisplayName,
+  getSenderIdentity,
 } from "./messageBubble/model";
 import { ActorAvatar } from "./ActorAvatar";
 import { formatEventLine, mayContainMarkdown } from "./messageBubble/helpers";
@@ -456,8 +456,8 @@ export const MessageBubble = memo(
       return actorById.get(senderId) || null;
     }, [actorById, ev.by, isUserMessage]);
 
-    const senderDisplayName = useMemo(() => {
-      return getSenderDisplayName({
+    const senderIdentity = useMemo(() => {
+      return getSenderIdentity({
         senderId: String(ev.by || ""),
         senderActor,
         senderTitle: senderSnapshotTitle,
@@ -466,6 +466,7 @@ export const MessageBubble = memo(
           : remoteSourceName,
         groupLabelById,
         displayNameMap,
+        userLabel: t("senderUser"),
       });
     }, [
       displayNameMap,
@@ -478,6 +479,9 @@ export const MessageBubble = memo(
       senderSnapshotTitle,
       t,
     ]);
+    const senderDisplayName = senderIdentity.groupLabel
+      ? `${senderIdentity.name} · ${senderIdentity.groupLabel}`
+      : senderIdentity.name;
     const senderAvatarUrl = useMemo(() => {
       return (
         buildSenderAvatarUrl(blobGroupId, senderSnapshotAvatarPath) ||
@@ -518,6 +522,15 @@ export const MessageBubble = memo(
       msgData?.src_instance_id,
     ]);
     const remoteBadgeLabel = isRemoteSource ? t("remoteBadge", { defaultValue: "Remote" }) : "";
+    // The author's Group follows their name. When the message came from that same Group,
+    // the Group's name is also the way to its source, so no "From" chip repeats it.
+    const originLabel = senderIdentity.groupLabel || (isRemoteSource ? sourceLabel : "");
+    const sourceIsOrigin =
+      hasSource &&
+      (isRemoteSource
+        ? !!originLabel
+        : !!senderIdentity.groupId && srcGroupId === senderIdentity.groupId);
+    const originOpensSource = sourceIsOrigin && !isRemoteSource && !!onOpenSource;
 
     const readPreviewEntries = visibleReadStatusEntries.slice(0, 3);
     const readPreviewOverflow = Math.max(
@@ -583,7 +596,7 @@ export const MessageBubble = memo(
       <MessageRoutingMetadata
         toLabel={toLabel}
         isMail={isMail}
-        hasSource={hasSource}
+        hasSource={hasSource && !sourceIsOrigin}
         sourceLabel={sourceLabel}
         sourceTitle={sourceTitle}
         isRemoteSource={isRemoteSource}
@@ -735,16 +748,35 @@ export const MessageBubble = memo(
                 <ActorAvatar
                   avatarUrl={senderAvatarUrl || undefined}
                   runtime={senderRuntime || undefined}
-                  title={senderDisplayName}
+                  title={senderIdentity.name}
                   isDark={isDark}
                   sizeClassName="h-5 w-5"
                   textClassName="text-[0.6875rem]"
                   className="lcd-tile"
                 />
               )}
-              <span className="lcd-row-name">{lcdAuthorName}</span>
+              {/* Your side of the conversation already says the message is yours. */}
+              <span className={fromReader ? "lcd-row-name sr-only" : "lcd-row-name"}>
+                {isUserMessage ? lcdAuthorName : senderIdentity.name}
+              </span>
             </span>
           )}
+          {!collapseHeader && originLabel ? (
+            originOpensSource ? (
+              <button
+                type="button"
+                className="lcd-row-origin"
+                onClick={() => onOpenSource?.(srcGroupId, srcEventId)}
+                title={sourceTitle}
+              >
+                {originLabel}
+              </button>
+            ) : (
+              <span className="lcd-row-origin" title={sourceIsOrigin ? sourceTitle : undefined}>
+                {originLabel}
+              </span>
+            )
+          ) : null}
           {remoteBadgeLabel ? <span className="lcd-tag">{remoteBadgeLabel}</span> : null}
           <span className="lcd-row-route">
             {routingMetadata}

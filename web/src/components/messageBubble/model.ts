@@ -32,38 +32,59 @@ export function buildToLabel({
     .join(", ");
 }
 
-export function getSenderDisplayName({
-  senderId,
-  senderActor,
-  senderTitle,
-  remoteSourceName,
-  groupLabelById = {},
-  displayNameMap,
-}: {
+type SenderLabelInput = {
   senderId: string;
   senderActor: Actor | null;
   senderTitle?: string;
   remoteSourceName?: string;
   groupLabelById?: Record<string, string>;
   displayNameMap: Map<string, string>;
-}): string {
-  if (!senderId || senderId === "user") return senderId;
+  /** How another Group's user is named; their ID alone is `user`. */
+  userLabel?: string;
+};
+
+/**
+ * Who wrote a message, as the head shows it: the author's own name, and apart from it
+ * the Group they wrote in when that is another Group of this instance. A cross-group
+ * sender ID reads `<group id>::<actor id>`; neither half is meant for people.
+ */
+export function getSenderIdentity({
+  senderId,
+  senderActor,
+  senderTitle,
+  remoteSourceName,
+  groupLabelById = {},
+  displayNameMap,
+  userLabel,
+}: SenderLabelInput): { name: string; groupId: string; groupLabel: string } {
+  const none = { groupId: "", groupLabel: "" };
+  if (!senderId || senderId === "user") return { name: senderId, ...none };
   const sourceName = String(remoteSourceName || "").trim();
   if ((senderId.startsWith("group_bridge:") || senderId.startsWith("connect:")) && sourceName)
-    return sourceName;
+    return { name: sourceName, ...none };
   const [senderGroupId, senderActorId] = senderId.split("::", 2);
   const senderGroupLabel = String(groupLabelById[senderGroupId] || "").trim();
   if (senderGroupLabel && senderActorId) {
     const senderActorLabel =
-      String(senderTitle || "").trim() || String(senderActor?.title || "").trim() || senderActorId;
-    return `${senderGroupLabel}::${senderActorLabel}`;
+      String(senderTitle || "").trim() ||
+      String(senderActor?.title || "").trim() ||
+      (senderActorId === "user" && userLabel ? userLabel : senderActorId);
+    return { name: senderActorLabel, groupId: senderGroupId, groupLabel: senderGroupLabel };
   }
-  return (
-    String(senderTitle || "").trim() ||
-    String(senderActor?.title || "").trim() ||
-    displayNameMap.get(senderId) ||
-    senderId
-  );
+  return {
+    name:
+      String(senderTitle || "").trim() ||
+      String(senderActor?.title || "").trim() ||
+      displayNameMap.get(senderId) ||
+      senderId,
+    ...none,
+  };
+}
+
+/** The author in one line, for tips and notices: their name, then their Group. */
+export function getSenderDisplayName(input: SenderLabelInput): string {
+  const { name, groupLabel } = getSenderIdentity(input);
+  return groupLabel ? `${name} · ${groupLabel}` : name;
 }
 
 export function buildVisibleReadStatusEntries(

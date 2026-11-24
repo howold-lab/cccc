@@ -355,6 +355,36 @@
   font-weight: 600;
 }
 
+/* Who wrote a message is the brightest thing on its head: the name is set in ink,
+   not in a colour per author, and everything after it (their Group, to whom, when)
+   is muted. Set apart by weight and tone alone, the name is found at a glance. */
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent] .lcd-row-name {
+  color: var(--lcd-ink);
+}
+
+/* The author's Group, or the Group a message went to, follows a name in small muted
+   type, as one part of it rather than a chip of its own. */
+:root[data-ui-style="lcd"] .lcd-row-origin {
+  color: var(--lcd-muted);
+  font-size: 0.8125rem;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-head > .lcd-row-origin {
+  margin-left: -0.5ch;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-head > .lcd-row-origin::before {
+  content: "· ";
+}
+
+:root[data-ui-style="lcd"] button.lcd-row-origin:hover {
+  color: var(--lcd-ink);
+  text-decoration: underline;
+  text-underline-offset: 0.25em;
+}
+
 /* Your own messages: a tinted bubble on the right. The head (recipient and time) stays
    small above it; your name is implied by the side. */
 :root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .lcd-row-name {

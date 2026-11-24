@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildToLabel, computeObligationSummary, getSenderDisplayName } from "./model";
+import {
+  buildToLabel,
+  computeObligationSummary,
+  getSenderDisplayName,
+  getSenderIdentity,
+} from "./model";
 
 function labelFor(recipients: string[] | undefined): string {
   return buildToLabel({
@@ -48,7 +53,7 @@ describe("buildToLabel", () => {
 });
 
 describe("getSenderDisplayName", () => {
-  it("replaces a cross-group sender group id with its display name", () => {
+  it("names a cross-group sender first and its Group after", () => {
     expect(
       getSenderDisplayName({
         senderId: "g_source::master",
@@ -56,7 +61,7 @@ describe("getSenderDisplayName", () => {
         groupLabelById: { g_source: "wechat-agent" },
         displayNameMap: new Map(),
       }),
-    ).toBe("wechat-agent::master");
+    ).toBe("master · wechat-agent");
   });
 
   it("uses the sender snapshot title for the actor part", () => {
@@ -68,7 +73,19 @@ describe("getSenderDisplayName", () => {
         groupLabelById: { g_source: "wechat-agent" },
         displayNameMap: new Map(),
       }),
-    ).toBe("wechat-agent::主控");
+    ).toBe("主控 · wechat-agent");
+  });
+
+  it("keeps the author and the Group apart for the message head", () => {
+    expect(
+      getSenderIdentity({
+        senderId: "g_source::user",
+        senderActor: null,
+        groupLabelById: { g_source: "直播-胖虎" },
+        displayNameMap: new Map(),
+        userLabel: "用户",
+      }),
+    ).toEqual({ name: "用户", groupId: "g_source", groupLabel: "直播-胖虎" });
   });
 
   it("keeps the canonical sender id when the group name is unavailable", () => {

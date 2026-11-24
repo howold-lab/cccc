@@ -35,16 +35,31 @@ export function MessageRoutingMetadata({
   const recipients = toLabel.trim();
   const routeClass =
     "inline-flex min-w-0 max-w-full items-center gap-1 rounded-md px-1 py-0.5 text-xs text-[var(--color-text-secondary)]";
+  const chipKey = hasDestination ? destinationChipKey(messageText) : "sentTo";
+  const chipText = hasDestination
+    ? t(chipKey, { label: destinationLabel, to: dstTo.join(", ") })
+    : "";
+  // A plain message to another Group names its recipients and their Group in one place,
+  // the way an author is named: "→ name · Group". A delegation keeps its own chip, which
+  // says the work was handed over.
+  const destinationInRoute = hasDestination && chipKey === "sentTo" && !!destinationLabel;
+  const showRecipients = !!recipients || destinationInRoute;
   return (
     <>
-      {recipients && (
+      {showRecipients && (
         <span
-          className="min-w-0 max-w-[28ch] truncate text-[var(--color-text-tertiary)]"
-          title={recipients}
+          className="min-w-0 max-w-[36ch] truncate text-[var(--color-text-tertiary)]"
+          title={destinationInRoute ? chipText : recipients}
         >
           <span aria-hidden="true">→ </span>
           <span className="sr-only">{t("to")} </span>
           {recipients}
+          {destinationInRoute ? (
+            <span className="lcd-row-origin">
+              {recipients ? " · " : ""}
+              {destinationLabel}
+            </span>
+          ) : null}
         </span>
       )}
       {isMail && (
@@ -70,22 +85,12 @@ export function MessageRoutingMetadata({
           onClick={() => onOpenSource?.(srcGroupId, srcEventId)}
           title={sourceTitle}
         >
-          <span aria-hidden="true">↗</span>
           <span className="truncate">{t("relayedFrom", { label: sourceLabel })}</span>
         </button>
       )}
-      {hasDestination && (
-        <span
-          className={routeClass}
-          title={t(destinationChipKey(messageText), {
-            label: destinationLabel,
-            to: dstTo.join(", "),
-          })}
-        >
-          <span aria-hidden="true">↗</span>
-          <span className="truncate">
-            {t(destinationChipKey(messageText), { label: destinationLabel, to: dstTo.join(", ") })}
-          </span>
+      {hasDestination && !destinationInRoute && (
+        <span className={routeClass} title={chipText}>
+          <span className="truncate">{chipText}</span>
         </span>
       )}
     </>
