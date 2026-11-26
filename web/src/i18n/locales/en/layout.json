@@ -681,7 +681,8 @@
         "whoLabel": "Who:",
         "who": "Chet, on its own quota; the rules are instructions to a model and it can misjudge, so every line can be changed"
       }
-    }
+    },
+    "needsHint": "{{count}} waiting on you · {{group}} →"
   },
   "sections": {
     "title": "Sections",

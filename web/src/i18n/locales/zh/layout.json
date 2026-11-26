@@ -681,7 +681,8 @@
         "whoLabel": "谁来定：",
         "who": "Chet，用它自己的额度；规则是给模型的指令，可能判断错，所以每条都能改判"
       }
-    }
+    },
+    "needsHint": "有 {{count}} 件等你处理 · {{group}} →"
   },
   "sections": {
     "title": "分区",

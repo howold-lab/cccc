@@ -1329,3 +1329,17 @@
 :root[data-ui-style="lcd"] [data-todo-status="reverted"] {
   color: var(--color-text-tertiary);
 }
+
+/* The overview's single call for attention: a quiet pill that appears only while something
+   waits on the user. */
+:root[data-ui-style="lcd"] [data-overview-needs-hint] {
+  border: 1px solid color-mix(in srgb, var(--lcd-danger) 45%, var(--lcd-rule));
+  background: color-mix(in srgb, var(--lcd-danger) 8%, var(--lcd-bg));
+  color: var(--color-text-primary);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 13px;
+}
+:root[data-ui-style="lcd"] [data-overview-needs-hint]:hover {
+  background: color-mix(in srgb, var(--lcd-danger) 14%, var(--lcd-bg));
+}
