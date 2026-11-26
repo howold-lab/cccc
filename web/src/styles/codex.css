@@ -1353,8 +1353,270 @@
 }
 :root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask]:focus-within {
   border-color: color-mix(in srgb, var(--lcd-accent) 55%, var(--lcd-rule-strong));
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--lcd-accent) 12%, transparent), var(--lcd-shadow);
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--lcd-accent) 12%, transparent),
+    var(--lcd-shadow);
 }
 :root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-chip] {
   background: var(--lcd-raised);
+}
+
+/* ---- Overview home: greeting, ask box, three tiles ---- */
+
+/* A soft blue-violet glow behind the greeting, fading out before the tiles. */
+:root[data-ui-style="lcd"] [data-overview-glow] {
+  background: radial-gradient(
+    ellipse 640px 300px at 50% 0%,
+    color-mix(in srgb, var(--lcd-accent) 16%, transparent),
+    color-mix(in srgb, #9a6bff 7%, transparent) 50%,
+    transparent 80%
+  );
+}
+:root[data-ui-style="lcd"] [data-overview-greeting] {
+  color: var(--lcd-ink-strong);
+  letter-spacing: -0.01em;
+}
+:root[data-ui-style="lcd"] [data-overview-pulse] {
+  color: var(--lcd-dim);
+}
+:root[data-ui-style="lcd"]
+  [data-overview-pulse]
+  > span[aria-hidden="true"]:not([data-overview-pulse-dot]) {
+  color: var(--lcd-muted);
+}
+:root[data-ui-style="lcd"] [data-overview-pulse-dot] {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lcd-muted);
+}
+:root[data-ui-style="lcd"] [data-overview-pulse-dot="busy"] {
+  background: #3ecf8e;
+  box-shadow: 0 0 0 4px rgba(62, 207, 142, 0.16);
+}
+:root[data-ui-style="lcd"] [data-overview-calm] {
+  color: #2fa56f;
+}
+:root.dark[data-ui-style="lcd"] [data-overview-calm] {
+  color: #6fdca8;
+}
+:root[data-ui-style="lcd"] [data-overview-pulse] [data-overview-needs-hint] {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--lcd-danger);
+  font-weight: 600;
+}
+:root[data-ui-style="lcd"] [data-overview-pulse] [data-overview-needs-hint]:hover {
+  background: none;
+  text-decoration: underline;
+}
+
+/* The ask box: a gradient edge and a soft halo, so it reads as the page's one entry point. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask] {
+  border: 1px solid transparent;
+  border-radius: 24px;
+  padding: 16px 18px 14px;
+  background:
+    linear-gradient(var(--lcd-raised), var(--lcd-raised)) padding-box,
+    linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--lcd-accent) 70%, transparent),
+        color-mix(in srgb, #9a6bff 45%, transparent) 50%,
+        var(--lcd-rule)
+      )
+      border-box;
+  box-shadow:
+    0 0 0 6px color-mix(in srgb, var(--lcd-accent) 6%, transparent),
+    0 20px 50px -24px rgba(0, 0, 0, 0.45);
+}
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask]:focus-within {
+  border-color: transparent;
+  box-shadow:
+    0 0 0 6px color-mix(in srgb, var(--lcd-accent) 13%, transparent),
+    0 20px 50px -24px rgba(0, 0, 0, 0.45);
+}
+:root[data-ui-style="lcd"] [data-overview-ask-to] {
+  color: var(--lcd-muted);
+}
+:root[data-ui-style="lcd"] :is([data-overview-ask-group], [data-overview-ask-groups-more]) {
+  background: var(--lcd-panel-2);
+  color: var(--lcd-dim);
+  transition:
+    background 0.12s,
+    color 0.12s;
+}
+:root[data-ui-style="lcd"] :is([data-overview-ask-group], [data-overview-ask-groups-more]):hover {
+  color: var(--lcd-ink);
+}
+:root[data-ui-style="lcd"] [data-overview-ask-groups-more] {
+  color: var(--lcd-muted);
+}
+:root[data-ui-style="lcd"] [data-overview-ask-group][data-selected] {
+  background: color-mix(in srgb, var(--lcd-accent) 18%, transparent);
+  color: var(--lcd-ink-strong);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lcd-accent) 60%, transparent);
+}
+:root[data-ui-style="lcd"] [data-overview-ask-input]::placeholder {
+  color: var(--lcd-muted);
+}
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-chip] {
+  border-color: var(--lcd-rule-strong);
+  background: transparent;
+  color: var(--lcd-dim);
+}
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-chip]:hover:not(:disabled) {
+  background: var(--lcd-panel-2);
+  color: var(--lcd-ink);
+}
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-send] {
+  border: 0;
+  background: linear-gradient(135deg, var(--lcd-accent), #8b6dff);
+  color: #fff;
+  box-shadow: 0 6px 18px -6px color-mix(in srgb, var(--lcd-accent) 70%, transparent);
+}
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-send]:disabled {
+  opacity: 0.45;
+  box-shadow: none;
+}
+
+/* Tiles: quiet cards under the ask box. */
+:root[data-ui-style="lcd"] [data-overview-tile] {
+  border: 1px solid var(--lcd-rule);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--lcd-raised) 70%, var(--lcd-bg));
+  color: var(--lcd-ink);
+}
+:root[data-ui-style="lcd"] [data-overview-tile-title],
+:root[data-ui-style="lcd"] [data-overview-tile-aside],
+:root[data-ui-style="lcd"] [data-overview-tile-empty],
+:root[data-ui-style="lcd"]
+  :is(
+    [data-quota-reset],
+    [data-overview-agent-meta],
+    [data-unattended-desc],
+    [data-overview-avatars-more]
+  ) {
+  color: var(--lcd-muted);
+}
+:root[data-ui-style="lcd"] [data-overview-tile-title] {
+  color: var(--lcd-dim);
+}
+
+/* Quota rings: blue while fine, amber from 60%, red from 85%. */
+:root[data-ui-style="lcd"] [data-quota-ring-track] {
+  stroke: var(--lcd-panel-2);
+}
+:root[data-ui-style="lcd"] [data-quota-ring-fill] {
+  stroke: var(--lcd-accent);
+  transition: stroke-dasharray 0.4s ease;
+}
+:root[data-ui-style="lcd"] [data-quota-ring][data-tone="mid"] [data-quota-ring-fill] {
+  stroke: #e6a23c;
+}
+:root[data-ui-style="lcd"] [data-quota-ring][data-tone="hot"] [data-quota-ring-fill] {
+  stroke: var(--lcd-danger);
+}
+:root[data-ui-style="lcd"] [data-quota-center] {
+  fill: var(--lcd-ink-strong);
+  font-size: 17px;
+  font-weight: 600;
+}
+:root[data-ui-style="lcd"] [data-quota-label] {
+  color: var(--lcd-dim);
+}
+:root[data-ui-style="lcd"] [data-quota-used] {
+  margin-right: 6px;
+  color: var(--lcd-ink-strong);
+  font-size: 15px;
+  font-weight: 600;
+}
+:root[data-ui-style="lcd"] [data-quota-key] {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 2px;
+  background: var(--lcd-accent);
+}
+:root[data-ui-style="lcd"] [data-quota-window][data-tone="mid"] [data-quota-key] {
+  background: #e6a23c;
+}
+:root[data-ui-style="lcd"] [data-quota-window][data-tone="hot"] [data-quota-key] {
+  background: var(--lcd-danger);
+}
+:root[data-ui-style="lcd"] [data-overview-tile] [data-quota-account][data-stale] {
+  opacity: 0.5;
+}
+
+/* Agent badges overlap like a stack; busy ones glow, idle and stopped ones fade back. */
+:root[data-ui-style="lcd"] [data-overview-avatar] {
+  margin-left: -8px;
+  border: 2px solid color-mix(in srgb, var(--lcd-raised) 70%, var(--lcd-bg));
+  color: #fff;
+  transition:
+    transform 0.12s,
+    opacity 0.12s;
+}
+:root[data-ui-style="lcd"] [data-overview-avatar]:first-child {
+  margin-left: 0;
+}
+:root[data-ui-style="lcd"] [data-overview-avatar]:hover {
+  z-index: 1;
+  transform: translateY(-2px);
+  opacity: 1;
+  filter: none;
+}
+:root[data-ui-style="lcd"] :is([data-overview-avatar="working"], [data-overview-avatar="waiting"]) {
+  z-index: 1;
+  box-shadow:
+    0 0 0 2px var(--lcd-accent),
+    0 0 14px 2px color-mix(in srgb, var(--lcd-accent) 55%, transparent);
+}
+:root[data-ui-style="lcd"] [data-overview-avatar="stuck"] {
+  z-index: 1;
+  box-shadow: 0 0 0 2px var(--lcd-wait);
+}
+:root[data-ui-style="lcd"] :is([data-overview-avatar="idle"], [data-overview-avatar="stopped"]) {
+  opacity: 0.38;
+  filter: grayscale(0.6);
+}
+:root[data-ui-style="lcd"] [data-overview-agent-now] {
+  color: var(--lcd-ink);
+}
+:root[data-ui-style="lcd"] [data-overview-agent]:hover [data-overview-agent-now] {
+  color: var(--lcd-ink-strong);
+}
+:root[data-ui-style="lcd"] [data-overview-agent-dot] {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--lcd-accent);
+  vertical-align: 2px;
+}
+:root[data-ui-style="lcd"] [data-overview-agent="stuck"] [data-overview-agent-dot] {
+  background: var(--lcd-wait);
+}
+:root[data-ui-style="lcd"] [data-overview-agent-none] {
+  color: var(--lcd-dim);
+}
+
+/* The unattended tile's switch is a full-size toggle rather than the status-line pill. */
+:root[data-ui-style="lcd"] [data-overview-tile] [data-unattended-track] {
+  width: 48px;
+  height: 28px;
+}
+:root[data-ui-style="lcd"] [data-overview-tile] [data-unattended-knob] {
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+}
+:root[data-ui-style="lcd"] [data-overview-tile] [data-unattended="on"] [data-unattended-knob] {
+  transform: translateX(20px);
+}
+:root[data-ui-style="lcd"] [data-unattended-state] {
+  color: var(--lcd-ink);
 }

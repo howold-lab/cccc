@@ -614,9 +614,10 @@
       "noReply": "{{group}} から 2 分間返信がありません。メッセージが届いていない可能性があります（再起動直後など）。",
       "resend": "再送信",
       "check": "{{group}}を見る",
-      "title": "何を聞きますか？",
       "to": "宛先",
-      "enterHint": "Enter で送信 · Shift+Enter で改行"
+      "enterHint": "Enter で送信 · Shift+Enter で改行",
+      "moreGroups": "+{{count}}",
+      "fewerGroups": "閉じる"
     },
     "stripNeeds": "正式な回答待ち {{count}} 件",
     "stripNoNeeds": "正式な回答待ちなし",
@@ -685,7 +686,31 @@
         "who": "Chet（自身の利用枠）。ルールはモデルへの指示で誤ることがあるため、すべて変更できます"
       }
     },
-    "needsHint": "対応待ち {{count}} 件 · {{group}} →"
+    "needsHint": "対応待ち {{count}} 件 · {{group}} →",
+    "greeting": {
+      "morning": "おはようございます",
+      "noon": "こんにちは",
+      "afternoon": "こんにちは",
+      "evening": "こんばんは"
+    },
+    "pulse": {
+      "busy": "作業中の agent：{{count}}",
+      "quiet": "agent はすべて待機中",
+      "calm": "あなた待ちの件はありません"
+    },
+    "tiles": {
+      "fiveHour": "5 時間",
+      "sevenDay": "7 日",
+      "agents": "Agent",
+      "agentsAside": "作業中 {{busy}} · 待機 {{idle}}",
+      "noneBusy": "すべて待機中。いつでも依頼できます",
+      "noted": "{{age}}の記録",
+      "moreBusy": "ほか {{count}} 件作業中",
+      "on": "オン",
+      "off": "オフ",
+      "onDesc": "Chet が推奨どおりに返信・選択し、あとから変更できます",
+      "offDesc": "すべての選択はあなた待ち。オンにすると Chet が推奨を選び、あとで知らせます"
+    }
   },
   "sections": {
     "title": "セクション",

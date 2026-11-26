@@ -112,7 +112,11 @@ function render(readOnly = false) {
 
 it("asks the 调度层 Group by default and shows its agent's answer", async () => {
   render();
-  expect(host.querySelector<HTMLSelectElement>("[data-overview-ask-group]")!.value).toBe("ops");
+  expect(
+    host
+      .querySelector("[data-overview-ask-group][data-selected]")!
+      .getAttribute("data-overview-ask-group"),
+  ).toBe("ops");
 
   await act(async () => {
     host.querySelector<HTMLButtonElement>("[data-overview-ask-chip]")!.click();

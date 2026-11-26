@@ -6,6 +6,7 @@ import { sendMessage } from "../../services/api/context";
 import { fetchLedgerTail } from "../../services/api/messaging";
 import type { ChatMessageData, GroupMeta, LedgerEvent } from "../../types";
 import { newClientId } from "../../utils/clientId";
+import { groupColor, groupInitial, groupShortName } from "./groupBadge";
 import { answersTo, LAST_ASKED_KEY, NO_REPLY_AFTER_MS, type Asked } from "./askModel";
 import { useAge } from "./useAge";
 
@@ -16,6 +17,8 @@ const DEFAULT_TITLE = "调度层";
 /** Reads while waiting for the answer, then slower so a follow-up message still shows. */
 const WAITING_MS = 3_000;
 const SETTLED_MS = 15_000;
+/** Group chips shown before "+N"; the selected Group is always among them. */
+const GROUPS_SHOWN = 5;
 
 function read<T>(key: string): T | null {
   try {
@@ -72,6 +75,7 @@ export function OverviewAsk({
   const [answers, setAnswers] = useState<LedgerEvent[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [allGroups, setAllGroups] = useState(false);
 
   useEffect(() => {
     if (!groupId && groups.length) setGroupId(defaultGroup(groups));
@@ -139,6 +143,13 @@ export function OverviewAsk({
     setGroupId(id);
     write(GROUP_KEY, id);
   };
+  const selected = groups.find((group) => group.group_id === groupId);
+  const firstGroups = groups.slice(0, GROUPS_SHOWN);
+  const shownGroups = allGroups
+    ? groups
+    : selected && !firstGroups.includes(selected)
+      ? [...firstGroups.slice(0, GROUPS_SHOWN - 1), selected]
+      : firstGroups;
   const groupTitle = (id: string) => groups.find((group) => group.group_id === id)?.title || id;
   const quick = [
     t("overview.ask.quickConfirm"),
@@ -149,16 +160,57 @@ export function OverviewAsk({
 
   return (
     <div className="grid gap-3.5" data-overview-ask-area>
-      <h2
-        className="px-1 pt-2 text-[19px] font-semibold text-[var(--color-text-primary)]"
-        data-overview-ask-title
-      >
-        {t("overview.ask.title")}
-      </h2>
-      <div className="px-4 pb-3 pt-3.5" data-overview-ask>
+      <div className="px-[18px] pb-3.5 pt-4" data-overview-ask>
+        <div
+          className="flex flex-wrap items-center gap-1.5"
+          role="radiogroup"
+          aria-label={t("overview.ask.groupLabel")}
+          data-overview-ask-groups
+        >
+          <span className="mr-0.5 text-xs" data-overview-ask-to>
+            {t("overview.ask.to")}
+          </span>
+          {shownGroups.map((group) => (
+            <button
+              key={group.group_id}
+              type="button"
+              role="radio"
+              aria-checked={group.group_id === groupId}
+              title={group.title || group.group_id}
+              onClick={() => {
+                chooseGroup(group.group_id);
+                inputRef.current?.focus();
+              }}
+              className="inline-flex max-w-[11rem] items-center gap-1.5 rounded-full py-1 pl-1 pr-3 text-[12.5px]"
+              data-overview-ask-group={group.group_id}
+              data-selected={group.group_id === groupId ? "" : undefined}
+            >
+              <span
+                className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white"
+                style={{ backgroundColor: groupColor(group.group_id) }}
+                aria-hidden="true"
+              >
+                {groupInitial(group.title || group.group_id)}
+              </span>
+              <span className="truncate">{groupShortName(group.title || group.group_id)}</span>
+            </button>
+          ))}
+          {groups.length > GROUPS_SHOWN ? (
+            <button
+              type="button"
+              onClick={() => setAllGroups((value) => !value)}
+              className="rounded-full px-3 py-1 text-[12.5px]"
+              data-overview-ask-groups-more
+            >
+              {allGroups
+                ? t("overview.ask.fewerGroups")
+                : t("overview.ask.moreGroups", { count: groups.length - shownGroups.length })}
+            </button>
+          ) : null}
+        </div>
         <textarea
           ref={inputRef}
-          rows={3}
+          rows={2}
           value={text}
           disabled={readOnly}
           onChange={(event) => setText(event.target.value)}
@@ -170,34 +222,32 @@ export function OverviewAsk({
           }}
           placeholder={t("overview.ask.placeholder", { group: groupTitle(groupId) })}
           aria-label={t("overview.ask.placeholder", { group: groupTitle(groupId) })}
-          className="block min-h-[88px] w-full resize-none bg-transparent px-1 text-[15px] leading-7 outline-none"
+          className="mt-3 block min-h-[64px] w-full resize-none bg-transparent px-1 text-[16px] leading-7 outline-none"
           data-overview-ask-input
         />
-        <div className="mt-2 flex items-center gap-2">
-          <span className="text-xs text-[var(--color-text-tertiary)]">{t("overview.ask.to")}</span>
-          <select
-            value={groupId}
-            onChange={(event) => chooseGroup(event.target.value)}
-            aria-label={t("overview.ask.groupLabel")}
-            className="max-w-[12rem] shrink-0 truncate rounded-full border px-2.5 py-1 text-xs"
-            data-overview-ask-group
-          >
-            {groups.map((group) => (
-              <option key={group.group_id} value={group.group_id}>
-                {group.title || group.group_id}
-              </option>
+        <div className="mt-2 flex items-end gap-2">
+          <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+            {quick.map((question) => (
+              <button
+                key={question}
+                type="button"
+                disabled={readOnly || sending}
+                onClick={() => void ask(question)}
+                className="rounded-full border px-3 py-1 text-[12.5px]"
+                data-overview-ask-chip
+              >
+                {question}
+              </button>
             ))}
-          </select>
-          <span className="ml-auto hidden text-[11.5px] text-[var(--color-text-tertiary)] sm:inline">
-            {t("overview.ask.enterHint")}
-          </span>
+          </div>
           <Button
             type="button"
             size="sm"
             disabled={readOnly || sending || !text.trim()}
             onClick={() => void ask(text)}
-            className="h-9 w-9 shrink-0 rounded-full p-0"
+            className="h-10 w-10 shrink-0 rounded-full p-0 text-[17px]"
             aria-label={t("overview.send")}
+            title={t("overview.ask.enterHint")}
             data-overview-ask-send
           >
             ↑
@@ -208,20 +258,6 @@ export function OverviewAsk({
             {t("overview.sendFailed")}
           </p>
         ) : null}
-      </div>
-      <div className="flex flex-wrap gap-2 px-1">
-        {quick.map((question) => (
-          <button
-            key={question}
-            type="button"
-            disabled={readOnly || sending}
-            onClick={() => void ask(question)}
-            className="rounded-full border px-3 py-1 text-[12.5px]"
-            data-overview-ask-chip
-          >
-            {question}
-          </button>
-        ))}
       </div>
 
       {asked ? (

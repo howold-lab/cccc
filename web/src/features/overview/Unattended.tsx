@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { replyMessage } from "../../services/api/context";
 import { useUnattendedStore } from "../../stores/useUnattendedStore";
@@ -13,48 +13,6 @@ const SHOWN = 5;
 
 function clock(ts: string, locale: string) {
   return new Date(ts).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
-}
-
-/** The instance-wide unattended switch, where the overview's status line can show it. */
-export function UnattendedSwitch({ readOnly }: { readOnly: boolean }) {
-  const { t, i18n } = useTranslation("layout");
-  const unattended = useUnattendedStore((state) => state.unattended);
-  const saving = useUnattendedStore((state) => state.saving);
-  const error = useUnattendedStore((state) => state.error);
-  useEffect(() => {
-    void useUnattendedStore.getState().refresh();
-  }, []);
-  if (!unattended) return null;
-  const on = unattended.enabled;
-  return (
-    <span className="ml-auto inline-flex items-center gap-2" data-unattended={on ? "on" : "off"}>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={on}
-        disabled={readOnly || saving}
-        onClick={() => void useUnattendedStore.getState().setEnabled(!on)}
-        title={t("overview.unattended.hint")}
-        className="inline-flex items-center gap-2"
-        data-unattended-switch
-      >
-        <span data-unattended-track aria-hidden="true">
-          <span data-unattended-knob />
-        </span>
-        <span className="font-medium text-[var(--color-text-primary)]">
-          {t("overview.unattended.label")}
-        </span>
-      </button>
-      {on && unattended.since ? (
-        <span>
-          {t("overview.unattended.since", { time: clock(unattended.since, i18n.language) })}
-        </span>
-      ) : null}
-      {error ? (
-        <span className="text-[var(--color-accent-danger)]">{t("overview.unattended.failed")}</span>
-      ) : null}
-    </span>
-  );
 }
 
 function ChangeIt({ act, readOnly }: { act: ChetAct; readOnly: boolean }) {

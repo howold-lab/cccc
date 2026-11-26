@@ -1,30 +1,18 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { useAge } from "./useAge";
-import { ActorAvatar } from "../../components/ActorAvatar";
 import { MenuIcon } from "../../components/Icons";
 import { Button } from "../../components/ui/button";
 import { IconButton } from "../../components/ui/icon-button";
 import type { GroupMeta } from "../../types";
 import { OverviewAsk } from "./OverviewAsk";
-import { QuotaCard } from "./QuotaCard";
+import { isBusy } from "./agentModel";
+import { AgentsTile, QuotaTile, UnattendedTile } from "./OverviewTiles";
 import { useClaudeLimits } from "./useClaudeLimits";
-import { oneLine } from "./plainText";
-import { DecidedForYou, UnattendedRules, UnattendedSwitch } from "./Unattended";
-import { useOverviewData, type OverviewActivity, type OverviewAgent } from "./useOverviewData";
-
-type Tone = "working" | "waiting" | "stuck" | "idle" | "stopped";
+import { DecidedForYou, UnattendedRules } from "./Unattended";
+import { useOverviewData, type OverviewActivity } from "./useOverviewData";
 
 /** A user message counts as unanswered once it has waited this long. */
 const UNANSWERED_AFTER_MS = 2 * 60 * 60 * 1000;
-
-function agentTone(agent: OverviewAgent): Tone {
-  if (!agent.running) return "stopped";
-  if (agent.workingState === "working") return "working";
-  if (agent.workingState === "stuck" || agent.blockers.length) return "stuck";
-  if (agent.workingState === "waiting") return "waiting";
-  return "idle";
-}
 
 function formatTime(ts: string, locale: string) {
   const date = new Date(ts);
@@ -37,41 +25,17 @@ function formatTime(ts: string, locale: string) {
   });
 }
 
-function Card({
-  title,
-  count,
-  aside,
-  action,
-  children,
-}: {
-  title: string;
-  count?: number;
-  aside?: string;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section className="min-w-0 overflow-hidden" data-overview-card>
-      <header className="flex items-center gap-2 px-4 py-3" data-overview-card-head>
-        <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">{title}</h2>
-        {count ? (
-          <span className="rounded-full px-1.5 text-[11px] font-semibold" data-overview-count>
-            {count}
-          </span>
-        ) : null}
-        {aside ? (
-          <span className="ml-auto truncate text-xs text-[var(--color-text-tertiary)]">
-            {aside}
-          </span>
-        ) : null}
-        {action ? <span className={aside ? "shrink-0" : "ml-auto shrink-0"}>{action}</span> : null}
-      </header>
-      {children}
-    </section>
-  );
+function greetingKey(hour: number) {
+  if (hour >= 5 && hour < 11) return "morning";
+  if (hour >= 11 && hour < 13) return "noon";
+  if (hour >= 13 && hour < 18) return "afternoon";
+  return "evening";
 }
 
-/** The home across Groups: what waits on the user, how each project is doing and what agents do. */
+/**
+ * The home across Groups: a greeting that says whether anything waits, the ask box, and three
+ * small tiles for quota, agents and the unattended switch.
+ */
 export function OverviewPage({
   groups,
   readOnly,
@@ -90,7 +54,6 @@ export function OverviewPage({
   onOpenTasks?: () => void;
 }) {
   const { t, i18n } = useTranslation("layout");
-  const age = useAge();
   const data = useOverviewData(groups, true);
   const titles = useMemo(
     () =>
@@ -108,24 +71,28 @@ export function OverviewPage({
   const needsTotal = data.pending.length + unanswered.length;
   const firstNeedGroup = data.pending[0]?.groupId ?? unanswered[0]?.groupId ?? "";
   const chetActs = Object.values(data.activity).flatMap((activity) => activity.chetActs ?? []);
-  const agents = [...data.agents].sort((a, b) => {
-    const order: Tone[] = ["working", "stuck", "waiting", "idle", "stopped"];
-    const diff = order.indexOf(agentTone(a)) - order.indexOf(agentTone(b));
-    if (diff) return diff;
-    return (b.updatedAt || "").localeCompare(a.updatedAt || "");
-  });
-  const busyAgents = agents.filter((agent) =>
-    ["working", "stuck", "waiting"].includes(agentTone(agent)),
+  // Ask chips lead with the Groups that were active most recently.
+  const recentGroups = useMemo(
+    () =>
+      [...groups].sort((a, b) =>
+        (data.activity[b.group_id]?.lastTs || "").localeCompare(
+          data.activity[a.group_id]?.lastTs || "",
+        ),
+      ),
+    [groups, data.activity],
   );
-  const quietAgents = agents.filter((agent) => !busyAgents.includes(agent));
+  const busyCount = data.agents.filter(isBusy).length;
   const limits = useClaudeLimits();
   const isDark =
     typeof document !== "undefined" && document.documentElement.classList.contains("dark");
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[var(--color-chat-bg)]" data-overview-page>
+    <div
+      className="relative flex h-full min-h-0 flex-col bg-[var(--color-chat-bg)]"
+      data-overview-page
+    >
       <header
-        className="flex h-[48px] shrink-0 items-center gap-3 border-b border-[var(--color-border-secondary)] px-4"
+        className="relative z-[1] flex h-[48px] shrink-0 items-center gap-3 border-b border-[var(--color-border-secondary)] px-4"
         data-overview-header
       >
         {onOpenSidebar ? (
@@ -152,128 +119,66 @@ export function OverviewPage({
         </Button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8">
-        <div className="mx-auto grid w-full max-w-[1800px] gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="mx-auto grid w-full min-w-0 max-w-[880px] content-start gap-5 pt-4 sm:pt-8">
-            <OverviewAsk
-              groups={groups}
-              readOnly={readOnly}
-              isDark={isDark}
-              onOpenGroup={onOpenGroup}
-              onOpenTasks={() => onOpenTasks?.()}
-            />
-            {needsTotal > 0 ? (
-              // The only call for attention: one line while something waits, gone otherwise.
-              <button
-                type="button"
-                onClick={() => (firstNeedGroup ? onOpenPending(firstNeedGroup) : undefined)}
-                className="justify-self-center"
-                data-overview-needs-hint
-              >
-                {firstNeedGroup
-                  ? t("overview.needsHint", {
-                      count: needsTotal,
-                      group: titles[firstNeedGroup] ?? firstNeedGroup,
-                    })
-                  : t("overview.stripNeeds", { count: needsTotal })}
-              </button>
-            ) : null}
-            <DecidedForYou
-              acts={chetActs}
-              titles={titles}
-              readOnly={readOnly}
-              onOpenGroup={onOpenGroup}
-            />
+      <div className="relative min-h-0 flex-1 overflow-y-auto px-4 sm:px-8" data-overview-scroll>
+        <span
+          className="pointer-events-none absolute inset-x-0 top-0 h-[520px]"
+          data-overview-glow
+          aria-hidden="true"
+        />
+        <div className="relative mx-auto grid w-full max-w-[860px] content-start gap-5 pb-10 pt-8 sm:pt-12">
+          <div className="px-1">
+            <p className="text-[28px] font-semibold leading-tight" data-overview-greeting>
+              {t(`overview.greeting.${greetingKey(new Date().getHours())}`)}
+            </p>
+            <p className="mt-2 flex flex-wrap items-center gap-x-2 text-[15px]" data-overview-pulse>
+              <span aria-hidden="true" data-overview-pulse-dot={busyCount ? "busy" : "quiet"} />
+              <span>
+                {busyCount
+                  ? t("overview.pulse.busy", { count: busyCount })
+                  : t("overview.pulse.quiet")}
+              </span>
+              <span aria-hidden="true">·</span>
+              {needsTotal > 0 ? (
+                // The only call for attention: present while something waits, calm otherwise.
+                <button
+                  type="button"
+                  onClick={() => (firstNeedGroup ? onOpenPending(firstNeedGroup) : undefined)}
+                  data-overview-needs-hint
+                >
+                  {firstNeedGroup
+                    ? t("overview.needsHint", {
+                        count: needsTotal,
+                        group: titles[firstNeedGroup] ?? firstNeedGroup,
+                      })
+                    : t("overview.stripNeeds", { count: needsTotal })}
+                </button>
+              ) : (
+                <span data-overview-calm>{t("overview.pulse.calm")}</span>
+              )}
+            </p>
           </div>
 
-          <div className="grid min-w-0 content-start gap-5">
-            <div className="flex justify-end px-1 text-[13px] text-[var(--color-text-tertiary)]">
-              <UnattendedSwitch readOnly={readOnly} />
-            </div>
-            <UnattendedRules />
-            <QuotaCard limits={limits} />
-            <Card
-              title={t("overview.agentsTitle")}
-              aside={t("overview.agentsBusyAside", {
-                busy: busyAgents.length,
-                agents: agents.length,
-              })}
-            >
-              {agents.length === 0 ? (
-                <p className="px-4 py-4 text-sm text-[var(--color-text-tertiary)]">
-                  {t("overview.loading")}
-                </p>
-              ) : (
-                <ul data-overview-list>
-                  {busyAgents.map((agent) => {
-                    const tone = agentTone(agent);
-                    const detail = agent.blockers[0] || agent.focus;
-                    return (
-                      <li key={`${agent.groupId}:${agent.actorId}`}>
-                        <button
-                          type="button"
-                          onClick={() => onOpenGroup(agent.groupId)}
-                          className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left transition-colors"
-                          data-overview-agent={tone}
-                        >
-                          <span
-                            className="relative mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
-                            data-overview-ring={tone}
-                            aria-hidden="true"
-                          >
-                            <ActorAvatar
-                              avatarUrl={agent.avatarUrl || undefined}
-                              runtime={agent.runtime}
-                              title={agent.title}
-                              isDark={isDark}
-                              sizeClassName="h-7 w-7"
-                              textClassName="text-[0.625rem]"
-                              className="lcd-tile"
-                            />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="flex min-w-0 items-baseline gap-2">
-                              <span className="truncate text-sm font-medium text-[var(--color-text-primary)]">
-                                {agent.title}
-                              </span>
-                              <span className="truncate text-xs text-[var(--color-text-tertiary)]">
-                                {titles[agent.groupId]}
-                              </span>
-                              {agent.updatedAt ? (
-                                <span className="ml-auto shrink-0 text-xs text-[var(--color-text-tertiary)]">
-                                  {age(agent.updatedAt)}
-                                </span>
-                              ) : null}
-                            </span>
-                            <span className="mt-0.5 line-clamp-2 break-words text-[13px] leading-5 text-[var(--color-text-secondary)]">
-                              {t(`overview.state.${tone}`)}
-                              {detail ? ` · ${oneLine(detail)}` : ""}
-                            </span>
-                          </span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                  {busyAgents.length === 0 ? (
-                    <li className="px-4 py-3 text-[13px] text-[var(--color-text-tertiary)]">
-                      {t("overview.noBusyAgents")}
-                    </li>
-                  ) : null}
-                  {quietAgents.length > 0 ? (
-                    <li
-                      className="px-4 py-3 text-[13px] leading-5 text-[var(--color-text-tertiary)]"
-                      data-overview-quiet-agents
-                    >
-                      {t("overview.quietAgents", {
-                        count: quietAgents.length,
-                        names: quietAgents.map((agent) => agent.title).join("、"),
-                      })}
-                    </li>
-                  ) : null}
-                </ul>
-              )}
-            </Card>
+          <OverviewAsk
+            groups={recentGroups}
+            readOnly={readOnly}
+            isDark={isDark}
+            onOpenGroup={onOpenGroup}
+            onOpenTasks={() => onOpenTasks?.()}
+          />
+
+          <div className="grid gap-3.5 md:grid-cols-[1.15fr_1.15fr_0.9fr]" data-overview-tiles>
+            <QuotaTile limits={limits} />
+            <AgentsTile agents={data.agents} titles={titles} onOpenGroup={onOpenGroup} />
+            <UnattendedTile readOnly={readOnly} />
           </div>
+
+          <UnattendedRules />
+          <DecidedForYou
+            acts={chetActs}
+            titles={titles}
+            readOnly={readOnly}
+            onOpenGroup={onOpenGroup}
+          />
         </div>
       </div>
     </div>

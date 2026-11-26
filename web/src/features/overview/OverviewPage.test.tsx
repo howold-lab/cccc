@@ -157,7 +157,7 @@ async function render(props: Partial<Parameters<typeof OverviewPage>[0]> = {}) {
   return { onOpenGroup, onOpenPending };
 }
 
-it("keeps the overview to the ask box, with one line while something waits", async () => {
+it("keeps the overview to the ask box and tiles, saying in the greeting when something waits", async () => {
   const { onOpenPending } = await render();
 
   expect(host.querySelector("[data-overview-project]")).toBeNull();
@@ -195,8 +195,12 @@ it("shows what each agent is doing and opens its Group", async () => {
   const working = host.querySelector<HTMLButtonElement>('[data-overview-agent="working"]')!;
   expect(working.textContent).toContain("Maintainer");
   expect(working.textContent).toContain("Sorting 51 missed questions");
-  expect(host.querySelector('[data-overview-agent="stopped"]')).toBeNull();
-  expect(host.querySelector("[data-overview-quiet-agents]")!.textContent).toContain("watcher");
+  const avatars = [...host.querySelectorAll("[data-overview-avatar]")];
+  expect(avatars.map((item) => item.getAttribute("data-overview-avatar"))).toEqual([
+    "working",
+    "stopped",
+  ]);
+  expect(avatars[1].getAttribute("title")).toContain("watcher");
 
   act(() => working.click());
   expect(onOpenGroup).toHaveBeenCalledWith("kb");

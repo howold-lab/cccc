@@ -12,7 +12,7 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-import { QuotaCard, QuotaChip } from "./QuotaCard";
+import { QuotaTile } from "./OverviewTiles";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -61,32 +61,19 @@ const fresh = (): ClaudeLimits => ({
   ],
 });
 
-it("shows each window's usage and the remaining share in the chip", () => {
-  act(() =>
-    root.render(
-      <>
-        <QuotaChip limits={fresh()} />
-        <QuotaCard limits={fresh()} />
-      </>,
-    ),
-  );
+it("draws each window as a ring coloured by how much is used", () => {
+  act(() => root.render(<QuotaTile limits={fresh()} />));
 
   const windows = host.querySelectorAll("[data-quota-window]");
   expect([...windows].map((item) => item.getAttribute("data-tone"))).toEqual(["mid", "hot"]);
-  expect(host.querySelector("[data-quota-chip]")!.textContent).toContain('{"pct":38}');
-  expect(host.querySelector("[data-quota-chip]")!.textContent).toContain('{"pct":10}');
+  const rings = host.querySelectorAll("[data-quota-ring]");
+  expect([...rings].map((item) => item.getAttribute("data-tone"))).toEqual(["mid", "hot"]);
+  expect(host.querySelector("[data-quota-center]")!.textContent).toBe("62%");
 });
 
-it("explains why there is nothing yet, and hides the chip", () => {
-  act(() =>
-    root.render(
-      <>
-        <QuotaChip limits={{ installed: true, accounts: [] }} />
-        <QuotaCard limits={{ installed: true, accounts: [] }} />
-      </>,
-    ),
-  );
+it("explains why there is nothing yet", () => {
+  act(() => root.render(<QuotaTile limits={{ installed: true, accounts: [] }} />));
 
-  expect(host.querySelector("[data-quota-chip]")).toBeNull();
+  expect(host.querySelector("[data-quota-ring]")).toBeNull();
   expect(host.textContent).toContain("overview.quota.waiting");
 });

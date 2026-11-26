@@ -614,9 +614,10 @@
       "noReply": "No reply from {{group}} in two minutes; the message may not have arrived (for example right after a restart).",
       "resend": "Send again",
       "check": "Check {{group}}",
-      "title": "What would you like to know?",
       "to": "Ask",
-      "enterHint": "Enter to send · Shift+Enter for a new line"
+      "enterHint": "Enter to send · Shift+Enter for a new line",
+      "moreGroups": "+{{count}}",
+      "fewerGroups": "Fewer"
     },
     "stripNeeds": "{{count}} open questions",
     "stripNoNeeds": "No open questions",
@@ -685,7 +686,31 @@
         "who": "Chet, on its own quota; the rules are instructions to a model and it can misjudge, so every line can be changed"
       }
     },
-    "needsHint": "{{count}} waiting on you · {{group}} →"
+    "needsHint": "{{count}} waiting on you · {{group}} →",
+    "greeting": {
+      "morning": "Good morning",
+      "noon": "Good afternoon",
+      "afternoon": "Good afternoon",
+      "evening": "Good evening"
+    },
+    "pulse": {
+      "busy": "Agents at work: {{count}}",
+      "quiet": "Agents are standing by",
+      "calm": "nothing waits for you"
+    },
+    "tiles": {
+      "fiveHour": "5 hours",
+      "sevenDay": "7 days",
+      "agents": "Agents",
+      "agentsAside": "{{busy}} working · {{idle}} idle",
+      "noneBusy": "All idle, ready for work",
+      "noted": "noted {{age}}",
+      "moreBusy": "{{count}} more busy",
+      "on": "On",
+      "off": "Off",
+      "onDesc": "Chet replies and answers choices for you as recommended; you can overrule any of them",
+      "offDesc": "Every choice waits for you. Turn on to let Chet pick the recommended option and tell you after"
+    }
   },
   "sections": {
     "title": "Sections",

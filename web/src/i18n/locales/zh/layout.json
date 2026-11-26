@@ -614,9 +614,10 @@
       "noReply": "{{group}} 两分钟内没有回复，消息可能没送到（比如它刚重启）。",
       "resend": "重新发送",
       "check": "去{{group}}看看",
-      "title": "有什么想问的？",
       "to": "问",
-      "enterHint": "Enter 发送 · Shift+Enter 换行"
+      "enterHint": "Enter 发送 · Shift+Enter 换行",
+      "moreGroups": "+{{count}}",
+      "fewerGroups": "收起"
     },
     "stripNeeds": "{{count}} 件正式待答复",
     "stripNoNeeds": "没有正式待答复",
@@ -685,7 +686,31 @@
         "who": "Chet，用它自己的额度；规则是给模型的指令，可能判断错，所以每条都能改判"
       }
     },
-    "needsHint": "有 {{count}} 件等你处理 · {{group}} →"
+    "needsHint": "有 {{count}} 件等你处理 · {{group}} →",
+    "greeting": {
+      "morning": "早上好",
+      "noon": "中午好",
+      "afternoon": "下午好",
+      "evening": "晚上好"
+    },
+    "pulse": {
+      "busy": "{{count}} 个 agent 在干活",
+      "quiet": "agent 都在待命",
+      "calm": "没有事等你"
+    },
+    "tiles": {
+      "fiveHour": "5 小时",
+      "sevenDay": "7 天",
+      "agents": "Agent",
+      "agentsAside": "{{busy}} 在干活 · {{idle}} 空闲",
+      "noneBusy": "都空闲，随时可以派活",
+      "noted": "{{age}}记的",
+      "moreBusy": "还有 {{count}} 个在忙",
+      "on": "开着",
+      "off": "关着",
+      "onDesc": "Chet 按推荐替你回复和答选择卡，事后都能改判",
+      "offDesc": "所有选择都等你来定。打开后 Chet 按推荐替你选，事后告诉你"
+    }
   },
   "sections": {
     "title": "分区",
