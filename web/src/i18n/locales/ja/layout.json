@@ -613,7 +613,10 @@
       "close": "この回答を閉じる",
       "noReply": "{{group}} から 2 分間返信がありません。メッセージが届いていない可能性があります（再起動直後など）。",
       "resend": "再送信",
-      "check": "{{group}}を見る"
+      "check": "{{group}}を見る",
+      "title": "何を聞きますか？",
+      "to": "宛先",
+      "enterHint": "Enter で送信 · Shift+Enter で改行"
     },
     "stripNeeds": "正式な回答待ち {{count}} 件",
     "stripNoNeeds": "正式な回答待ちなし",

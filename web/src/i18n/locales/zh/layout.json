@@ -613,7 +613,10 @@
       "close": "关闭这条问答",
       "noReply": "{{group}} 两分钟内没有回复，消息可能没送到（比如它刚重启）。",
       "resend": "重新发送",
-      "check": "去{{group}}看看"
+      "check": "去{{group}}看看",
+      "title": "有什么想问的？",
+      "to": "问",
+      "enterHint": "Enter 发送 · Shift+Enter 换行"
     },
     "stripNeeds": "{{count}} 件正式待答复",
     "stripNoNeeds": "没有正式待答复",

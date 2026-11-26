@@ -154,7 +154,7 @@ export function OverviewPage({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8">
         <div className="mx-auto grid w-full max-w-[1800px] gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="grid min-w-0 content-start gap-4">
+          <div className="mx-auto grid w-full min-w-0 max-w-[880px] content-start gap-5 pt-4 sm:pt-8">
             <OverviewAsk
               groups={groups}
               readOnly={readOnly}

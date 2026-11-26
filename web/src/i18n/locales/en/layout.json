@@ -613,7 +613,10 @@
       "close": "Dismiss this answer",
       "noReply": "No reply from {{group}} in two minutes; the message may not have arrived (for example right after a restart).",
       "resend": "Send again",
-      "check": "Check {{group}}"
+      "check": "Check {{group}}",
+      "title": "What would you like to know?",
+      "to": "Ask",
+      "enterHint": "Enter to send · Shift+Enter for a new line"
     },
     "stripNeeds": "{{count}} open questions",
     "stripNoNeeds": "No open questions",

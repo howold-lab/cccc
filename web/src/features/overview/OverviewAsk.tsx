@@ -148,38 +148,38 @@ export function OverviewAsk({
   ];
 
   return (
-    <div className="grid gap-3" data-overview-ask-area>
+    <div className="grid gap-3.5" data-overview-ask-area>
+      <h2
+        className="px-1 pt-2 text-[19px] font-semibold text-[var(--color-text-primary)]"
+        data-overview-ask-title
+      >
+        {t("overview.ask.title")}
+      </h2>
       <div className="px-4 pb-3 pt-3.5" data-overview-ask>
-        <div className="flex items-center gap-2.5">
-          <span
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sm"
-            data-overview-ask-mark
-            aria-hidden="true"
-          >
-            ✦
-          </span>
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={text}
-            disabled={readOnly}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                void ask(text);
-              }
-            }}
-            placeholder={t("overview.ask.placeholder", { group: groupTitle(groupId) })}
-            aria-label={t("overview.ask.placeholder", { group: groupTitle(groupId) })}
-            className="min-w-0 flex-1 resize-none bg-transparent py-1 text-[14.5px] leading-6 outline-none"
-            data-overview-ask-input
-          />
+        <textarea
+          ref={inputRef}
+          rows={3}
+          value={text}
+          disabled={readOnly}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void ask(text);
+            }
+          }}
+          placeholder={t("overview.ask.placeholder", { group: groupTitle(groupId) })}
+          aria-label={t("overview.ask.placeholder", { group: groupTitle(groupId) })}
+          className="block min-h-[88px] w-full resize-none bg-transparent px-1 text-[15px] leading-7 outline-none"
+          data-overview-ask-input
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <span className="text-xs text-[var(--color-text-tertiary)]">{t("overview.ask.to")}</span>
           <select
             value={groupId}
             onChange={(event) => chooseGroup(event.target.value)}
             aria-label={t("overview.ask.groupLabel")}
-            className="max-w-[10rem] shrink-0 truncate rounded-full border px-2.5 py-1 text-xs"
+            className="max-w-[12rem] shrink-0 truncate rounded-full border px-2.5 py-1 text-xs"
             data-overview-ask-group
           >
             {groups.map((group) => (
@@ -188,37 +188,40 @@ export function OverviewAsk({
               </option>
             ))}
           </select>
+          <span className="ml-auto hidden text-[11.5px] text-[var(--color-text-tertiary)] sm:inline">
+            {t("overview.ask.enterHint")}
+          </span>
           <Button
             type="button"
             size="sm"
             disabled={readOnly || sending || !text.trim()}
             onClick={() => void ask(text)}
-            className="h-8 w-8 shrink-0 rounded-full p-0"
+            className="h-9 w-9 shrink-0 rounded-full p-0"
             aria-label={t("overview.send")}
             data-overview-ask-send
           >
             ↑
           </Button>
         </div>
-        <div className="mt-2.5 flex flex-wrap gap-2 pl-[38px]">
-          {quick.map((question) => (
-            <button
-              key={question}
-              type="button"
-              disabled={readOnly || sending}
-              onClick={() => void ask(question)}
-              className="rounded-full border px-3 py-0.5 text-[12.5px]"
-              data-overview-ask-chip
-            >
-              {question}
-            </button>
-          ))}
-        </div>
         {failed ? (
-          <p className="mt-2 pl-[38px] text-xs text-[var(--color-accent-danger)]">
+          <p className="mt-2 text-xs text-[var(--color-accent-danger)]">
             {t("overview.sendFailed")}
           </p>
         ) : null}
+      </div>
+      <div className="flex flex-wrap gap-2 px-1">
+        {quick.map((question) => (
+          <button
+            key={question}
+            type="button"
+            disabled={readOnly || sending}
+            onClick={() => void ask(question)}
+            className="rounded-full border px-3 py-1 text-[12.5px]"
+            data-overview-ask-chip
+          >
+            {question}
+          </button>
+        ))}
       </div>
 
       {asked ? (

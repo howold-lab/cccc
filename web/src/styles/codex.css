@@ -1343,3 +1343,18 @@
 :root[data-ui-style="lcd"] [data-overview-needs-hint]:hover {
   background: color-mix(in srgb, var(--lcd-danger) 14%, var(--lcd-bg));
 }
+
+/* The ask box is the overview's main surface: a roomy composer with a clear edge, its target
+   and send key on one quiet row underneath the text. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask] {
+  border-radius: 20px;
+  border-color: var(--lcd-rule-strong);
+  padding: 16px 18px 12px;
+}
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask]:focus-within {
+  border-color: color-mix(in srgb, var(--lcd-accent) 55%, var(--lcd-rule-strong));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--lcd-accent) 12%, transparent), var(--lcd-shadow);
+}
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-overview-ask-chip] {
+  background: var(--lcd-raised);
+}
